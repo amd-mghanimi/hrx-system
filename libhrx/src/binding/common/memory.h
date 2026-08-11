@@ -18,6 +18,8 @@ extern "C" {
 #endif
 
 typedef struct iree_hal_streaming_buffer_t iree_hal_streaming_buffer_t;
+typedef struct iree_hal_streaming_graph_memory_allocation_t
+    iree_hal_streaming_graph_memory_allocation_t;
 typedef struct iree_hal_streaming_context_t iree_hal_streaming_context_t;
 typedef struct iree_hal_streaming_retained_buffer_ref_t
     iree_hal_streaming_retained_buffer_ref_t;
@@ -169,6 +171,9 @@ typedef struct iree_hal_streaming_buffer_t {
 
   // Default coherency mode for this managed memory range.
   int32_t coherency_mode;
+
+  // Graph allocation record owning this reservation, if any. Borrowed.
+  iree_hal_streaming_graph_memory_allocation_t* graph_memory_allocation;
 } iree_hal_streaming_buffer_t;
 
 // A buffer and an offset into it resolved from a device pointer.
@@ -516,6 +521,15 @@ iree_status_t iree_hal_streaming_memcpy_device_to_device_2d(
 iree_status_t iree_hal_streaming_memory_wrap_virtual_reservation(
     iree_hal_streaming_context_t* context, hrx_buffer_t virtual_buffer,
     iree_hal_streaming_buffer_t** out_buffer);
+
+// Publishes or removes an existing wrapper in its context's pointer table.
+// These operations pair a wrapper's allocation-preparation admission state
+// with table visibility and are used when a stable virtual reservation becomes
+// live again across graph launches.
+iree_status_t iree_hal_streaming_memory_publish_wrapped_buffer(
+    iree_hal_streaming_buffer_t* buffer);
+iree_status_t iree_hal_streaming_memory_unpublish_wrapped_buffer(
+    iree_hal_streaming_buffer_t* buffer);
 
 // Removes and releases an externally owned buffer wrapper.
 void iree_hal_streaming_memory_release_wrapped_buffer(
