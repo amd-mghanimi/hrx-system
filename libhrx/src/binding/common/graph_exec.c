@@ -7,6 +7,7 @@
 #include "common/graph.h"
 #include "common/graph_memory.h"
 #include "common/internal.h"
+#include "common/occupancy.h"
 #include "common/stream.h"
 #include "iree/base/api.h"
 #include "iree/hal/utils/resource_set.h"
@@ -249,6 +250,9 @@ typedef struct iree_hal_streaming_graph_exec_t {
   // launch on a stream of any other context would have every one of its
   // records refused.
   bool records_events;
+  // True when |blocks|, or the blocks of a child-graph executable they launch,
+  // contain a cooperative dispatch requiring launch-time residency preflight.
+  bool has_cooperative_dispatches;
   // Number of graph nodes present when this executable was instantiated.
   iree_host_size_t instantiated_node_count;
   // Number of HIP-visible graph nodes present at instantiation/update time.
@@ -631,6 +635,7 @@ iree_status_t iree_hal_streaming_graph_exec_create(
   exec->blocks = NULL;
   exec->block_count = 0;
   exec->records_events = false;
+  exec->has_cooperative_dispatches = false;
   exec->instantiated_node_count = 0;
   exec->instantiated_visible_node_count = 0;
   exec->node_disabled_states = NULL;
@@ -746,6 +751,7 @@ static void iree_hal_streaming_graph_exec_initialize_compiled_state(
   exec->blocks = NULL;
   exec->block_count = 0;
   exec->records_events = false;
+  exec->has_cooperative_dispatches = false;
   exec->instantiated_node_count = 0;
   exec->instantiated_visible_node_count = 0;
   exec->semaphores = NULL;
@@ -766,6 +772,7 @@ static void iree_hal_streaming_graph_exec_deinitialize_compiled_state(
   exec->blocks = NULL;
   exec->block_count = 0;
   exec->records_events = false;
+  exec->has_cooperative_dispatches = false;
   exec->instantiated_node_count = 0;
   exec->instantiated_visible_node_count = 0;
   exec->semaphores = NULL;
@@ -781,6 +788,7 @@ static void iree_hal_streaming_graph_exec_move_compiled_state(
   target->blocks = source->blocks;
   target->block_count = source->block_count;
   target->records_events = source->records_events;
+  target->has_cooperative_dispatches = source->has_cooperative_dispatches;
   target->instantiated_node_count = source->instantiated_node_count;
   target->instantiated_visible_node_count =
       source->instantiated_visible_node_count;
@@ -794,6 +802,7 @@ static void iree_hal_streaming_graph_exec_move_compiled_state(
   source->blocks = NULL;
   source->block_count = 0;
   source->records_events = false;
+  source->has_cooperative_dispatches = false;
   source->instantiated_node_count = 0;
   source->instantiated_visible_node_count = 0;
   source->semaphores = NULL;
@@ -1586,6 +1595,9 @@ static iree_status_t iree_hal_streaming_graph_create_dispatch_block(
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_resource_set_insert(exec->resource_set, 1, &executable));
 
+  if (iree_any_bit_set(flags, IREE_HAL_DISPATCH_FLAG_COOPERATIVE)) {
+    exec->has_cooperative_dispatches = true;
+  }
   *out_block = block;
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -1669,6 +1681,7 @@ static iree_status_t iree_hal_streaming_graph_create_child_graph_block(
     // are records of this launch. The child instantiated above already carries
     // its own children's, which makes the property transitive.
     exec->records_events |= child_exec->records_events;
+    exec->has_cooperative_dispatches |= child_exec->has_cooperative_dispatches;
     *out_block = block;
   } else {
     iree_hal_streaming_graph_exec_release(child_exec);
@@ -2494,11 +2507,55 @@ static iree_status_t iree_hal_streaming_accepted_signal_list_drain(
 
 static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
     iree_hal_streaming_graph_exec_t* exec, iree_hal_streaming_stream_t* stream,
-    uint64_t launch_stream_tail_value,
+    iree_hal_queue_t* cooperative_queue, uint64_t launch_stream_tail_value,
     iree_hal_semaphore_list_t external_wait_semaphores,
     iree_hal_semaphore_list_t external_signal_semaphores,
     iree_hal_streaming_dropped_graph_list_t* dropped_graphs,
     iree_hal_streaming_accepted_signal_list_t* accepted_signals);
+
+// Checks every cooperative dispatch in |exec| and its child executable tree
+// against the queue selected for |stream|. The caller holds the root
+// executable mutex and the stream mutex, which keep the compiled block tree
+// and borrowed queue stable throughout the recursive walk.
+static iree_status_t
+iree_hal_streaming_graph_exec_preflight_cooperative_dispatches_locked(
+    iree_hal_streaming_graph_exec_t* exec, iree_hal_queue_t* cooperative_queue,
+    bool* out_exceeds_residency) {
+  for (uint32_t block_index = 0; block_index < exec->block_count;
+       ++block_index) {
+    iree_hal_streaming_graph_block_t* block = exec->blocks[block_index];
+    iree_hal_streaming_graph_block_ptrs_t ptrs;
+    iree_hal_streaming_graph_block_get_ptrs(block, &ptrs);
+    if (block->type == IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_CHILD_GRAPH) {
+      if (!ptrs.attrs->child_graph.exec->has_cooperative_dispatches) {
+        continue;
+      }
+      IREE_RETURN_IF_ERROR(
+          iree_hal_streaming_graph_exec_preflight_cooperative_dispatches_locked(
+              ptrs.attrs->child_graph.exec, cooperative_queue,
+              out_exceeds_residency));
+      if (*out_exceeds_residency) {
+        return iree_ok_status();
+      }
+      continue;
+    }
+    if (block->type != IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_DISPATCH ||
+        !iree_any_bit_set(ptrs.attrs->dispatch.flags,
+                          IREE_HAL_DISPATCH_FLAG_COOPERATIVE)) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(
+        iree_hal_streaming_check_cooperative_dispatch_residency(
+            cooperative_queue, ptrs.attrs->dispatch.executable,
+            iree_hal_executable_function_from_index(
+                (uint32_t)ptrs.attrs->dispatch.entry_point),
+            ptrs.attrs->dispatch.config, out_exceeds_residency));
+    if (*out_exceeds_residency) {
+      return iree_ok_status();
+    }
+  }
+  return iree_ok_status();
+}
 
 static iree_status_t iree_hal_streaming_graph_host_callback(
     void* user_data, const uint64_t args[4],
@@ -2524,7 +2581,8 @@ static iree_status_t iree_hal_streaming_graph_host_callback(
 static iree_status_t iree_hal_streaming_graph_submit_block(
     iree_hal_streaming_graph_block_t* block,
     const iree_hal_streaming_graph_block_ptrs_t* ptrs,
-    iree_hal_streaming_stream_t* stream, uint64_t launch_stream_tail_value,
+    iree_hal_streaming_stream_t* stream, iree_hal_queue_t* cooperative_queue,
+    uint64_t launch_stream_tail_value,
     iree_hal_semaphore_list_t wait_semaphores,
     iree_hal_semaphore_list_t signal_semaphores,
     iree_hal_streaming_recorded_point_t* record_point,
@@ -2538,8 +2596,8 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
     // the tail carries down unchanged. The shared accepted list includes every
     // actual child submission if a later child block rejects.
     return iree_hal_streaming_graph_exec_submit_blocks_locked(
-        child_exec, stream, launch_stream_tail_value, wait_semaphores,
-        signal_semaphores, dropped_graphs, accepted_signals);
+        child_exec, stream, cooperative_queue, launch_stream_tail_value,
+        wait_semaphores, signal_semaphores, dropped_graphs, accepted_signals);
   }
   if (IREE_UNLIKELY(signal_semaphores.count == 0)) {
     return iree_make_status(IREE_STATUS_INTERNAL,
@@ -2587,22 +2645,20 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
       iree_hal_queue_t* dispatch_queue = stream->queue;
       if (iree_any_bit_set(ptrs->attrs->dispatch.flags,
                            IREE_HAL_DISPATCH_FLAG_COOPERATIVE)) {
-        status = iree_hal_streaming_stream_select_cooperative_queue_locked(
-            stream, &dispatch_queue);
+        IREE_ASSERT(cooperative_queue);
+        dispatch_queue = cooperative_queue;
       }
-      if (iree_status_is_ok(status)) {
-        iree_hal_buffer_ref_list_t bindings_list = {
-            .count = ptrs->attrs->dispatch.bindings.count,
-            .values = ptrs->attrs->dispatch.bindings.values,
-        };
-        status = iree_hal_queue_dispatch(
-            dispatch_queue, wait_semaphores, signal_semaphores,
-            ptrs->attrs->dispatch.executable,
-            iree_hal_executable_function_from_index(
-                (uint32_t)ptrs->attrs->dispatch.entry_point),
-            ptrs->attrs->dispatch.config, ptrs->attrs->dispatch.constants,
-            bindings_list, ptrs->attrs->dispatch.flags);
-      }
+      iree_hal_buffer_ref_list_t bindings_list = {
+          .count = ptrs->attrs->dispatch.bindings.count,
+          .values = ptrs->attrs->dispatch.bindings.values,
+      };
+      status = iree_hal_queue_dispatch(
+          dispatch_queue, wait_semaphores, signal_semaphores,
+          ptrs->attrs->dispatch.executable,
+          iree_hal_executable_function_from_index(
+              (uint32_t)ptrs->attrs->dispatch.entry_point),
+          ptrs->attrs->dispatch.config, ptrs->attrs->dispatch.constants,
+          bindings_list, ptrs->attrs->dispatch.flags);
       break;
     }
     case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_EXECUTE:
@@ -2645,7 +2701,7 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
 // waits on every signal of the partition ahead of it, back to block 0.
 static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
     iree_hal_streaming_graph_exec_t* exec, iree_hal_streaming_stream_t* stream,
-    uint64_t launch_stream_tail_value,
+    iree_hal_queue_t* cooperative_queue, uint64_t launch_stream_tail_value,
     iree_hal_semaphore_list_t external_wait_semaphores,
     iree_hal_semaphore_list_t external_signal_semaphores,
     iree_hal_streaming_dropped_graph_list_t* dropped_graphs,
@@ -2881,8 +2937,9 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
       }
       if (iree_status_is_ok(status)) {
         status = iree_hal_streaming_graph_submit_block(
-            block, &ptrs, stream, launch_stream_tail_value, wait_semaphores,
-            signal_semaphores, &record_point, dropped_graphs, accepted_signals);
+            block, &ptrs, stream, cooperative_queue, launch_stream_tail_value,
+            wait_semaphores, signal_semaphores, &record_point, dropped_graphs,
+            accepted_signals);
         if (iree_status_is_ok(status)) {
           for (uint16_t i = 0; i < block->signal_semaphore_count; ++i) {
             const uint16_t semaphore_index = ptrs.signal_semaphore_indices[i];
@@ -2921,11 +2978,13 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
 }
 
 iree_status_t iree_hal_streaming_graph_exec_launch(
-    iree_hal_streaming_graph_exec_t* exec,
-    iree_hal_streaming_stream_t* stream) {
+    iree_hal_streaming_graph_exec_t* exec, iree_hal_streaming_stream_t* stream,
+    iree_hal_streaming_graph_exec_launch_result_t* out_result) {
   IREE_ASSERT_ARGUMENT(exec);
   IREE_ASSERT_ARGUMENT(stream);
+  IREE_ASSERT_ARGUMENT(out_result);
   IREE_TRACE_ZONE_BEGIN(z0);
+  *out_result = IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_ERROR;
 
   // Flush stream to ensure all prior operations are submitted.
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0,
@@ -2942,6 +3001,7 @@ iree_status_t iree_hal_streaming_graph_exec_launch(
   }
   // Handle empty graph - nothing to do.
   if (exec->block_count == 0) {
+    *out_result = IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_SUCCESS;
     iree_slim_mutex_unlock(&exec->mutex);
     IREE_TRACE_ZONE_END(z0);
     return iree_ok_status();
@@ -3069,6 +3129,37 @@ iree_status_t iree_hal_streaming_graph_exec_launch(
   iree_hal_streaming_accepted_signal_list_initialize(exec->host_allocator,
                                                      &accepted_signals);
 
+  iree_hal_queue_t* cooperative_queue = NULL;
+  bool cooperative_launch_too_large = false;
+  if (exec->has_cooperative_dispatches) {
+    status = iree_hal_streaming_stream_select_cooperative_queue_locked(
+        stream, &cooperative_queue);
+  }
+  if (iree_status_is_ok(status) && exec->has_cooperative_dispatches) {
+    status =
+        iree_hal_streaming_graph_exec_preflight_cooperative_dispatches_locked(
+            exec, cooperative_queue, &cooperative_launch_too_large);
+  }
+  if (iree_status_is_ok(status) && cooperative_launch_too_large) {
+    *out_result = IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_COOPERATIVE_TOO_LARGE;
+    status = iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "cooperative graph dispatch exceeds concurrent residency");
+  }
+  if (!iree_status_is_ok(status)) {
+    if (launch_point_inserted) {
+      iree_hal_streaming_graph_exec_rollback_launch_point_locked(exec,
+                                                                 launch_point);
+    }
+    iree_slim_mutex_unlock(&stream->mutex);
+    iree_allocator_free(exec->host_allocator, graph_memory_allocations);
+    iree_slim_mutex_unlock(&exec->mutex);
+    iree_hal_streaming_dropped_graph_list_deinitialize(&dropped_graphs);
+    iree_hal_streaming_accepted_signal_list_deinitialize(&accepted_signals);
+    IREE_TRACE_ZONE_END(z0);
+    return status;
+  }
+
   // Reserve the next stream timeline value while holding the stream lock so
   // concurrent host threads cannot submit same-stream work with the same wait
   // or signal value. The graph waits on the current stream tail, not the last
@@ -3096,8 +3187,8 @@ iree_status_t iree_hal_streaming_graph_exec_launch(
   };
   if (iree_status_is_ok(status)) {
     status = iree_hal_streaming_graph_exec_submit_blocks_locked(
-        exec, stream, stream_wait_value, wait_semaphores, signal_semaphores,
-        &dropped_graphs, &accepted_signals);
+        exec, stream, cooperative_queue, stream_wait_value, wait_semaphores,
+        signal_semaphores, &dropped_graphs, &accepted_signals);
   }
 
   if (!iree_status_is_ok(status)) {
@@ -3116,6 +3207,7 @@ iree_status_t iree_hal_streaming_graph_exec_launch(
   }
 
   if (iree_status_is_ok(status)) {
+    *out_result = IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_SUCCESS;
     stream->pending_value = stream_signal_value;
     launch_point->value = stream_signal_value;
     if (exec->uses_graph_memory_nodes) {
