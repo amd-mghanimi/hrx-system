@@ -1282,7 +1282,10 @@ static void iree_hip_context_release_stream_snapshot(
   iree_allocator_free(context->host_allocator, streams);
 }
 
-static hipError_t iree_hip_context_has_visible_capture(
+// Only blocking streams synchronize with the legacy stream, so only a blocking
+// capturer makes a legacy-stream query an implicit capture dependency.
+// Non-blocking capturers leave the legacy stream reporting None.
+static hipError_t iree_hip_context_has_visible_blocking_capture(
     iree_hal_streaming_context_t* context, bool* out_has_visible_capture) {
   IREE_ASSERT_ARGUMENT(context);
   IREE_ASSERT_ARGUMENT(out_has_visible_capture);
@@ -1299,6 +1302,11 @@ static hipError_t iree_hip_context_has_visible_capture(
 
   for (iree_host_size_t i = 0; i < stream_count; ++i) {
     iree_hal_streaming_stream_t* stream = streams[i];
+    if (stream == context->default_stream ||
+        iree_any_bit_set(stream->flags,
+                         IREE_HAL_STREAMING_STREAM_FLAG_NON_BLOCKING)) {
+      continue;
+    }
     iree_slim_mutex_lock(&stream->mutex);
     if (iree_hip_capture_is_visible_to_thread(stream, thread_id)) {
       *out_has_visible_capture = true;
@@ -1323,7 +1331,8 @@ static hipError_t iree_hip_capture_info_query_is_implicit(
   if (!context) {
     return hipSuccess;
   }
-  return iree_hip_context_has_visible_capture(context, out_is_implicit);
+  return iree_hip_context_has_visible_blocking_capture(context,
+                                                       out_is_implicit);
 }
 
 static bool iree_hip_status_to_capture_invalidation_failure(
@@ -1551,6 +1560,28 @@ static bool iree_hip_context_invalidate_capture_graph(
     iree_hal_streaming_graph_t* graph, unsigned long long capture_id) {
   return graph && capture_id != 0 &&
          iree_hal_streaming_capture_graph_invalidate(graph, capture_id);
+}
+
+// Invalidates the capture session |event| was last recorded into. Returns true
+// when that session was still active.
+static bool iree_hip_event_invalidate_active_capture(
+    iree_hal_streaming_event_t* event) {
+  iree_hal_streaming_graph_t* graph = NULL;
+  unsigned long long capture_id = 0;
+  iree_slim_mutex_lock(&event->mutex);
+  if (event->capture_graph) {
+    graph = event->capture_graph;
+    capture_id = event->capture_id;
+    iree_hal_streaming_graph_retain(graph);
+  }
+  iree_slim_mutex_unlock(&event->mutex);
+  if (!graph) {
+    return false;
+  }
+  const bool invalidated =
+      iree_hip_context_invalidate_capture_graph(graph, capture_id);
+  iree_hal_streaming_graph_release(graph);
+  return invalidated;
 }
 
 static iree_hal_streaming_graph_node_t*
@@ -12968,7 +12999,24 @@ HIPAPI hipError_t hipStreamSynchronize(hipStream_t stream) {
   }
 
   if (!stream || stream == hipStreamLegacy) {
-    if (iree_hip_context_invalidate_visible_captures(resolved_stream.context)) {
+    if (tls_stream_capture_mode == hipStreamCaptureModeRelaxed) {
+      // Relaxed mode permits the legacy sync unless it would wait on work a
+      // blocking stream is capturing.
+      bool is_implicit = false;
+      hipError_t implicit_result =
+          iree_hip_context_has_visible_blocking_capture(resolved_stream.context,
+                                                        &is_implicit);
+      if (implicit_result == hipSuccess && is_implicit) {
+        iree_hip_context_invalidate_visible_captures(resolved_stream.context);
+        implicit_result = hipErrorStreamCaptureImplicit;
+      }
+      if (implicit_result != hipSuccess) {
+        iree_hip_resolved_stream_release(&resolved_stream);
+        IREE_TRACE_ZONE_END(z0);
+        HIP_RETURN_ERROR(implicit_result);
+      }
+    } else if (iree_hip_context_invalidate_visible_captures(
+                   resolved_stream.context)) {
       iree_hip_resolved_stream_release(&resolved_stream);
       IREE_TRACE_ZONE_END(z0);
       HIP_RETURN_ERROR(hipErrorStreamCaptureUnsupported);
@@ -13123,6 +13171,18 @@ HIPAPI hipError_t hipStreamWaitEvent(hipStream_t stream, hipEvent_t event,
     iree_hal_streaming_event_release(event_object);
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(init_result);
+  }
+
+  // The legacy stream can never join a capture. Waiting on an event recorded
+  // inside an active capture would add it as a participant, so invalidate the
+  // capture instead.
+  if (resolved_stream.context &&
+      resolved_stream.stream == resolved_stream.context->default_stream &&
+      iree_hip_event_invalidate_active_capture(event_object)) {
+    iree_hip_resolved_stream_release(&resolved_stream);
+    iree_hal_streaming_event_release(event_object);
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorStreamCaptureImplicit);
   }
 
   iree_status_t status = iree_hal_streaming_stream_wait_event(
