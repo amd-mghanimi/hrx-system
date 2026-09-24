@@ -14218,6 +14218,42 @@ HIPAPI hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
   HIP_RETURN_ERROR(result);
 }
 
+// Records an event in a stream with capture flags.
+//
+// Parameters:
+//  - event: [IN] Event handle to record.
+//  - stream: [IN] Stream to record the event in (NULL = default stream).
+//  - flags: [IN] hipEventRecordDefault, or hipEventRecordExternal.
+//
+// Returns:
+//  - hipSuccess: Event recorded successfully.
+//  - hipErrorInvalidValue: flags is not a supported record flag.
+//  - Other results: Same as hipEventRecord.
+//
+// Synchronization: This operation is asynchronous.
+//
+// Flag behavior:
+// - hipEventRecordDefault (0): Identical to hipEventRecord.
+// - hipEventRecordExternal: When the stream is capturing, records the event
+//   as an explicit graph node (the record analogue of hipEventWaitExternal).
+//   When the stream is not capturing, the flag is ignored, matching CUDA.
+//
+// PyTorch's caching host allocator and torch.cuda.Event.record use this
+// entry point (not hipEventRecord) on ROCm 7.
+//
+// See also: hipEventRecord, hipStreamWaitEvent.
+HIPAPI hipError_t hipEventRecordWithFlags(hipEvent_t event, hipStream_t stream,
+                                          unsigned int flags) {
+  HIP_API_BEGIN();
+  if (flags != hipEventRecordDefault && flags != hipEventRecordExternal) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // Capture already treats a record on a capturing stream as a graph
+  // dependency frontier. hipEventRecordExternal is the same record for the
+  // non-capturing (eager / allocator) path PyTorch actually hits.
+  HIP_RETURN_ERROR(hipEventRecord(event, stream));
+}
+
 // Waits for an event to complete.
 //
 // Parameters:
