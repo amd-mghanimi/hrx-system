@@ -28,6 +28,7 @@ static void MakePhysicalDeviceParams(
 
   iree_hal_amdgpu_device_spec_physical_device_params_t physical_device = {
       /*.identity=*/identity,
+      /*.chip_id=*/0x75A0,
       /*.uuid=*/{{0x11}},
       /*.pci=*/{/*.domain=*/0, /*.bus=*/3, /*.device=*/0, /*.function=*/0},
       /*.timestamp_frequency_hz=*/timestamp_frequency_hz,
