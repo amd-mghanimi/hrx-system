@@ -122,6 +122,15 @@ typedef struct iree_hal_streaming_device_t {
       graph_memory_cached_physical_blocks;
   // Number of live graph-memory allocation records on this device.
   uint32_t graph_memory_allocation_count;
+
+  // Serializes queue-owned terminal-resource count transitions and drain
+  // checks.
+  iree_slim_mutex_t terminal_resource_mutex;
+  // Wakes global teardown after the last queue-owned terminal resource exits.
+  iree_notification_t terminal_resource_notification;
+  // Queue-owned resources whose terminal cleanup may touch context- or
+  // device-owned state.
+  iree_host_size_t pending_terminal_resource_count;
 } iree_hal_streaming_device_t;
 
 // Global device registry for multi-device management.
@@ -164,6 +173,16 @@ iree_status_t iree_hal_streaming_device_count(iree_host_size_t* out_count);
 // Synchronization: none (returns device entry).
 iree_hal_streaming_device_t* iree_hal_streaming_device_entry(
     iree_hal_streaming_device_ordinal_t ordinal);
+
+// Acquires/releases one queue-owned binding resource whose terminal cleanup
+// may touch a context or other device-owned state. The device entry remains
+// live through the matching global teardown drain.
+void iree_hal_streaming_device_terminal_resource_acquire(
+    iree_hal_streaming_device_t* device);
+void iree_hal_streaming_device_terminal_resource_release(
+    iree_hal_streaming_device_t* device);
+void iree_hal_streaming_device_terminal_resource_await_idle(
+    iree_hal_streaming_device_t* device);
 
 // Selects the borrowed provisioned queue defining the device's primary
 // compatibility execution domain. Dynamic domains acquire queues from the same
