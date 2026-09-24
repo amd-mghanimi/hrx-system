@@ -19100,6 +19100,22 @@ static bool iree_hip_graph_tree_matches_graph(iree_hal_streaming_graph_t* graph,
   return graph == user_data;
 }
 
+static bool iree_hip_graph_tree_contains_visible_node(
+    iree_hal_streaming_graph_t* graph, void* user_data) {
+  const iree_hal_streaming_graph_node_t* candidate =
+      (const iree_hal_streaming_graph_node_t*)user_data;
+  for (iree_hal_streaming_node_block_t* block = graph->node_blocks; block;
+       block = block->next) {
+    for (iree_host_size_t i = 0; i < block->count; ++i) {
+      iree_hal_streaming_graph_node_t* node = block->nodes[i];
+      if (node == candidate) {
+        return !iree_hip_graph_node_is_hidden(node);
+      }
+    }
+  }
+  return false;
+}
+
 // Child graph handles are visible while reachable from a public root, but do
 // not independently own the graph. Executable-only source graphs are excluded
 // because destroying the public root invalidates those handles.
@@ -19510,7 +19526,11 @@ HIPAPI hipError_t hipGraphExecDestroy(hipGraphExec_t graphExec) {
   }
   iree_hal_streaming_graph_exec_release(exec);
   if (!iree_status_is_ok(status)) {
-    result = iree_status_to_fixed_hip_result(status, hipErrorInvalidValue);
+    const iree_status_code_t status_code = iree_status_code(status);
+    result = iree_status_to_fixed_hip_result(
+        status, status_code == IREE_STATUS_RESOURCE_EXHAUSTED
+                    ? hipErrorOutOfMemory
+                    : hipErrorInvalidValue);
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(result);
   }
@@ -19685,6 +19705,10 @@ hipGraphExecUpdate(hipGraphExec_t hGraphExec, hipGraph_t hGraph,
   HIP_API_BEGIN();
   IREE_TRACE_ZONE_BEGIN(z0);
   if (!hGraphExec || !hGraph || !hErrorNode_out || !updateResult_out) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (!iree_hip_graph_handle_is_live(hGraph)) {
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
@@ -21531,6 +21555,10 @@ HIPAPI hipError_t hipGraphAddEmptyNode(hipGraphNode_t* pGraphNode,
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  if (!iree_hip_graph_handle_is_live(graph)) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
 
   iree_hal_streaming_graph_t* stream_graph = (iree_hal_streaming_graph_t*)graph;
 
@@ -21612,6 +21640,10 @@ HIPAPI hipError_t hipGraphGetNodes(hipGraph_t graph, hipGraphNode_t* pNodes,
   HIP_API_BEGIN();
   IREE_TRACE_ZONE_BEGIN(z0);
   if (!graph || !numNodes) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (!iree_hip_graph_handle_is_live(graph)) {
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
@@ -21745,6 +21777,10 @@ HIPAPI hipError_t hipGraphAddDependencies(hipGraph_t graph,
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  if (!iree_hip_graph_handle_is_live(graph)) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
   if (numDependencies == 0) {
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipSuccess);
@@ -21757,11 +21793,9 @@ HIPAPI hipError_t hipGraphAddDependencies(hipGraph_t graph,
   iree_hal_streaming_graph_t* stream_graph = (iree_hal_streaming_graph_t*)graph;
 
   HIP_RETURN_STATUS_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_hal_streaming_graph_add_dependencies(
-          stream_graph, (iree_hal_streaming_graph_node_t**)from,
-          (iree_hal_streaming_graph_node_t**)to, numDependencies),
-      hipErrorInvalidValue);
+      z0, iree_hal_streaming_graph_add_dependencies(
+              stream_graph, (iree_hal_streaming_graph_node_t**)from,
+              (iree_hal_streaming_graph_node_t**)to, numDependencies));
 
   IREE_TRACE_ZONE_END(z0);
   HIP_RETURN_ERROR(hipSuccess);
@@ -21821,6 +21855,9 @@ HIPAPI hipError_t hipGraphRemoveDependencies(hipGraph_t graph,
   if (!graph) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  if (!iree_hip_graph_handle_is_live(graph)) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
   if (numDependencies == 0) {
     HIP_RETURN_ERROR(hipSuccess);
   }
@@ -21834,8 +21871,9 @@ HIPAPI hipError_t hipGraphRemoveDependencies(hipGraph_t graph,
         (iree_hal_streaming_graph_node_t*)from[i];
     iree_hal_streaming_graph_node_t* to_node =
         (iree_hal_streaming_graph_node_t*)to[i];
-    if (!from_node || !to_node || from_node->graph != stream_graph ||
-        to_node->graph != stream_graph ||
+    if (!iree_hip_graph_node_is_active(from_node) ||
+        !iree_hip_graph_node_is_active(to_node) ||
+        from_node->graph != stream_graph || to_node->graph != stream_graph ||
         !iree_hip_graph_dependency_pair_exists(stream_graph, from_node,
                                                to_node)) {
       HIP_RETURN_ERROR(hipErrorInvalidValue);
@@ -21856,6 +21894,9 @@ HIPAPI hipError_t hipGraphGetEdges(hipGraph_t graph, hipGraphNode_t* from,
                                    hipGraphNode_t* to, size_t* numEdges) {
   HIP_API_BEGIN();
   if (!graph || !numEdges || (!from && to) || (from && !to)) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (!iree_hip_graph_handle_is_live(graph)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
 
@@ -21917,6 +21958,10 @@ HIPAPI hipError_t hipGraphGetRootNodes(hipGraph_t graph,
   HIP_API_BEGIN();
   IREE_TRACE_ZONE_BEGIN(z0);
   if (!graph || !pNumRootNodes) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (!iree_hip_graph_handle_is_live(graph)) {
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
@@ -22003,10 +22048,10 @@ HIPAPI hipError_t hipGraphNodeGetDependencies(hipGraphNode_t node,
 
   iree_hal_streaming_graph_node_t* stream_node =
       (iree_hal_streaming_graph_node_t*)node;
-  iree_hal_streaming_graph_t* graph = stream_node->graph;
-  if (!graph || iree_hip_graph_node_is_hidden(stream_node)) {
+  if (!iree_hip_graph_node_is_active(stream_node)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  iree_hal_streaming_graph_t* graph = stream_node->graph;
 
   const size_t capacity = pDependencies ? *pNumDependencies : 0;
   size_t dependency_count = 0;
@@ -22060,10 +22105,10 @@ HIPAPI hipError_t hipGraphNodeGetDependentNodes(hipGraphNode_t node,
 
   iree_hal_streaming_graph_node_t* stream_node =
       (iree_hal_streaming_graph_node_t*)node;
-  iree_hal_streaming_graph_t* graph = stream_node->graph;
-  if (!graph || iree_hip_graph_node_is_hidden(stream_node)) {
+  if (!iree_hip_graph_node_is_active(stream_node)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  iree_hal_streaming_graph_t* graph = stream_node->graph;
 
   const size_t capacity = pDependentNodes ? *pNumDependentNodes : 0;
   size_t dependent_count = 0;
@@ -22155,7 +22200,7 @@ HIPAPI hipError_t hipGraphNodeGetType(hipGraphNode_t node,
   }
   iree_hal_streaming_graph_node_t* stream_node =
       (iree_hal_streaming_graph_node_t*)node;
-  if (!stream_node->graph || iree_hip_graph_node_is_hidden(stream_node)) {
+  if (!iree_hip_graph_node_is_active(stream_node)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
   *pType = hip_graph_node_type_from_streaming_type(stream_node->type);
@@ -22165,6 +22210,9 @@ HIPAPI hipError_t hipGraphNodeGetType(hipGraphNode_t node,
 // Destroys a graph node.
 HIPAPI hipError_t hipGraphDestroyNode(hipGraphNode_t node) {
   HIP_API_BEGIN();
+  if (!iree_hip_graph_node_is_active((iree_hal_streaming_graph_node_t*)node)) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
   HIP_RETURN_STATUS(iree_hal_streaming_graph_destroy_node(
       (iree_hal_streaming_graph_node_t*)node));
   HIP_RETURN_ERROR(hipSuccess);
@@ -22221,7 +22269,7 @@ HIPAPI hipError_t hipGraphNodeFindInClone(hipGraphNode_t* pNode,
   }
   iree_hal_streaming_graph_node_t* source_node =
       (iree_hal_streaming_graph_node_t*)originalNode;
-  if (!source_node->graph) {
+  if (!iree_hip_graph_node_is_active(source_node)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
 
@@ -22460,12 +22508,10 @@ HIPAPI hipError_t hipGraphAddChildGraphNode(hipGraphNode_t* pGraphNode,
 
   iree_hal_streaming_graph_node_t* node = NULL;
   HIP_RETURN_STATUS_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_hal_streaming_graph_add_child_graph_node(
-          (iree_hal_streaming_graph_t*)graph,
-          (iree_hal_streaming_graph_node_t**)pDependencies, numDependencies,
-          (iree_hal_streaming_graph_t*)childGraph, &node),
-      hipErrorInvalidValue);
+      z0, iree_hal_streaming_graph_add_child_graph_node(
+              (iree_hal_streaming_graph_t*)graph,
+              (iree_hal_streaming_graph_node_t**)pDependencies, numDependencies,
+              (iree_hal_streaming_graph_t*)childGraph, &node));
   *pGraphNode = (hipGraphNode_t)node;
   IREE_TRACE_ZONE_END(z0);
   HIP_RETURN_ERROR(hipSuccess);
@@ -22653,9 +22699,11 @@ static hipError_t iree_hip_graph_add_prepared_mem_alloc_node(
 
 static void iree_hip_graph_abandon_prepared_mem_alloc(
     iree_hal_streaming_graph_memory_allocation_t* allocation) {
-  if (iree_hal_streaming_graph_memory_allocation_claim_unexecuted_pointer_reference(
-          allocation)) {
-    iree_hal_streaming_graph_memory_allocation_release(allocation);
+  iree_status_t status =
+      iree_hal_streaming_graph_memory_allocation_release_unexecuted_pointer_reference(
+          allocation);
+  if (!iree_status_is_ok(status)) {
+    iree_status_abort(status);
   }
 }
 
@@ -23127,7 +23175,7 @@ HIPAPI hipError_t hipGraphChildGraphNodeGetGraph(hipGraphNode_t node,
   }
   iree_hal_streaming_graph_node_t* stream_node =
       (iree_hal_streaming_graph_node_t*)node;
-  if (!stream_node->graph ||
+  if (!iree_hip_graph_node_is_active(stream_node) ||
       stream_node->type != IREE_HAL_STREAMING_GRAPH_NODE_TYPE_GRAPH ||
       !stream_node->attrs.child_graph.graph) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
@@ -23138,7 +23186,19 @@ HIPAPI hipError_t hipGraphChildGraphNodeGetGraph(hipGraphNode_t node,
 
 static bool iree_hip_graph_node_is_active(
     const iree_hal_streaming_graph_node_t* node) {
-  return node && node->graph && !iree_hip_graph_node_is_hidden(node);
+  if (!node) {
+    return false;
+  }
+  iree_hip_live_graph_lock();
+  bool found = false;
+  for (iree_hip_live_graph_entry_t* entry = iree_hip_live_graph_head;
+       entry && !found; entry = entry->next) {
+    found = iree_hip_visit_graph_tree_locked(
+        (iree_hal_streaming_graph_t*)entry->graph,
+        iree_hip_graph_tree_contains_visible_node, (void*)node);
+  }
+  iree_slim_mutex_unlock(&iree_hip_live_graph_mutex);
+  return found || iree_hal_streaming_capture_graph_contains_node(node);
 }
 
 static hipError_t iree_hip_graph_validate_memset_params(
@@ -24981,8 +25041,7 @@ HIPAPI hipError_t hipGraphExecChildGraphNodeSetParams(hipGraphExec_t graphExec,
       exec_node->attrs.child_graph.graph;
   iree_hal_streaming_graph_t* new_child_graph =
       (iree_hal_streaming_graph_t*)childGraph;
-  if (!old_child_graph ||
-      old_child_graph->node_count != new_child_graph->node_count) {
+  if (!old_child_graph) {
     iree_hal_streaming_graph_exec_end_node_update(exec);
     iree_hal_streaming_graph_exec_release(exec);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
@@ -24997,9 +25056,25 @@ HIPAPI hipError_t hipGraphExecChildGraphNodeSetParams(hipGraphExec_t graphExec,
   iree_status_t validate_status = iree_hal_streaming_graph_validate_child_graph(
       stream_node->graph, new_child_graph);
   if (!iree_status_is_ok(validate_status)) {
+    const iree_status_code_t status_code = iree_status_code(validate_status);
     iree_hal_streaming_graph_exec_end_node_update(exec);
     iree_hal_streaming_graph_exec_release(exec);
-    HIP_RETURN_STATUS(validate_status, hipErrorInvalidValue);
+    HIP_RETURN_STATUS(
+        validate_status,
+        status_code == IREE_STATUS_RESOURCE_EXHAUSTED ? hipErrorOutOfMemory
+        : status_code == IREE_STATUS_UNIMPLEMENTED    ? hipErrorNotSupported
+                                                      : hipErrorInvalidValue);
+  }
+  validate_status = iree_hal_streaming_graph_validate_compatible_topology(
+      old_child_graph, new_child_graph);
+  if (!iree_status_is_ok(validate_status)) {
+    const iree_status_code_t status_code = iree_status_code(validate_status);
+    iree_hal_streaming_graph_exec_end_node_update(exec);
+    iree_hal_streaming_graph_exec_release(exec);
+    HIP_RETURN_STATUS(validate_status,
+                      status_code == IREE_STATUS_RESOURCE_EXHAUSTED
+                          ? hipErrorOutOfMemory
+                          : hipErrorInvalidValue);
   }
   iree_hal_streaming_graph_retain(new_child_graph);
   exec_node->attrs.child_graph.graph = new_child_graph;
@@ -25011,7 +25086,11 @@ HIPAPI hipError_t hipGraphExecChildGraphNodeSetParams(hipGraphExec_t graphExec,
     iree_hal_streaming_graph_release(new_child_graph);
   }
   iree_hal_streaming_graph_exec_end_node_update(exec);
-  result = iree_status_to_fixed_hip_result(status, hipErrorInvalidValue);
+  const iree_status_code_t status_code = iree_status_code(status);
+  result = iree_status_to_fixed_hip_result(
+      status, status_code == IREE_STATUS_RESOURCE_EXHAUSTED
+                  ? hipErrorOutOfMemory
+                  : hipErrorInvalidValue);
   iree_hal_streaming_graph_exec_release(exec);
   HIP_RETURN_ERROR(result);
 }
@@ -26379,9 +26458,13 @@ HIPAPI hipError_t hipStreamBeginCaptureToGraph(
     const void* dependencyData, size_t numDependencies,
     hipStreamCaptureMode mode) {
   HIP_API_BEGIN();
-  (void)dependencyData;
   IREE_TRACE_ZONE_BEGIN(z0);
-  if (!stream || !graph || (numDependencies > 0 && !dependencies)) {
+  if (dependencyData) {
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorNotSupported);
+  }
+  if (!stream || !graph || (!dependencies && numDependencies != 0) ||
+      (dependencies && numDependencies == 0)) {
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
@@ -26424,7 +26507,8 @@ HIPAPI hipError_t hipStreamBeginCaptureToGraph(
   for (size_t i = 0; i < numDependencies; ++i) {
     iree_hal_streaming_graph_node_t* dependency =
         (iree_hal_streaming_graph_node_t*)dependencies[i];
-    if (!dependency || dependency->graph != stream_graph) {
+    if (!iree_hip_graph_node_is_active(dependency) ||
+        dependency->graph != stream_graph) {
       iree_hip_resolved_stream_release(&resolved_stream);
       IREE_TRACE_ZONE_END(z0);
       HIP_RETURN_ERROR(hipErrorInvalidValue);
@@ -26451,7 +26535,11 @@ HIPAPI hipError_t hipStreamBeginCaptureToGraph(
   status = iree_hal_streaming_begin_capture_to_graph(
       stream_obj, stream_graph, (iree_hal_streaming_graph_node_t**)dependencies,
       numDependencies, capture_mode);
-  hipError_t result = iree_status_to_fixed_hip_result(status, hipErrorUnknown);
+  const iree_status_code_t status_code = iree_status_code(status);
+  hipError_t result = iree_status_to_fixed_hip_result(
+      status, status_code == IREE_STATUS_RESOURCE_EXHAUSTED
+                  ? hipErrorOutOfMemory
+                  : hipErrorUnknown);
   iree_hip_resolved_stream_release(&resolved_stream);
   if (result != hipSuccess) {
     IREE_TRACE_ZONE_END(z0);
@@ -27058,9 +27146,10 @@ HIPAPI hipError_t hipStreamUpdateCaptureDependencies(
     iree_status_free(status);
     iree_hip_resolved_stream_release(&resolved_stream);
     IREE_TRACE_ZONE_END(z0);
-    HIP_RETURN_ERROR(status_code == IREE_STATUS_FAILED_PRECONDITION
-                         ? hipErrorIllegalState
-                         : hipErrorInvalidValue);
+    HIP_RETURN_ERROR(
+        status_code == IREE_STATUS_FAILED_PRECONDITION  ? hipErrorIllegalState
+        : status_code == IREE_STATUS_RESOURCE_EXHAUSTED ? hipErrorOutOfMemory
+                                                        : hipErrorInvalidValue);
   }
 
   iree_hip_resolved_stream_release(&resolved_stream);
