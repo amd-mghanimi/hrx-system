@@ -465,6 +465,50 @@ TEST(ExecutableMetadataHsacoTest, PopulatesElfOnlyCustomDirectExport) {
   iree_hal_amdgpu_executable_metadata_free(metadata);
 }
 
+TEST(ExecutableMetadataHsacoTest, ElfOnlyExportStartsAfterReflectedParameters) {
+  const iree_const_byte_span_t source_code_object_data = SourceCodeObjectData();
+  std::vector<uint8_t> loaded_code_object_storage = MakeLoadedCodeObjectData();
+  const iree_const_byte_span_t loaded_code_object_data =
+      LoadedCodeObjectData(loaded_code_object_storage);
+  std::vector<iree_hal_amdgpu_hsaco_metadata_arg_t> args = {
+      MakeArg(ViewFromCodeObjectData(source_code_object_data, "buffer"), 0, 8,
+              IREE_HAL_AMDGPU_HSACO_METADATA_ARG_KIND_GLOBAL_BUFFER,
+              ViewFromCodeObjectData(source_code_object_data, "global_buffer")),
+  };
+  iree_hal_amdgpu_hsaco_metadata_kernel_t kernel =
+      MakeKernel(ViewFromCodeObjectData(source_code_object_data, "test"),
+                 ViewFromCodeObjectData(source_code_object_data, "test.kd"),
+                 /*kernarg_segment_size=*/8, args);
+  iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t symbol = {
+      /*.name=*/ViewFromCodeObjectData(source_code_object_data, "direct"),
+      /*.symbol_name=*/
+      ViewFromCodeObjectData(source_code_object_data, "direct.kd"),
+  };
+  iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
+      /*.host_allocator=*/{},
+      /*.elf_data=*/source_code_object_data,
+      /*.message_pack_data=*/{},
+      /*.target=*/{},
+      /*.reflection_name_storage_size=*/{},
+      /*.arg_name_storage_size=*/{},
+      /*.kernel_count=*/1,
+      /*.kernels=*/&kernel,
+      /*.elf_kernel_symbol_count=*/1,
+      /*.elf_kernel_symbols=*/&symbol,
+  };
+
+  iree_hal_amdgpu_executable_metadata_t* metadata =
+      AllocateAndPopulate(&hsaco_metadata, loaded_code_object_data);
+  ASSERT_EQ(metadata->export_count, 2);
+  EXPECT_EQ(metadata->parameter_count, 1);
+  EXPECT_EQ(metadata->reflection[0].parameter_offset, 0);
+  EXPECT_EQ(metadata->reflection[0].parameter_count, 1);
+  EXPECT_EQ(metadata->reflection[1].parameter_offset, 1);
+  EXPECT_EQ(metadata->reflection[1].parameter_count, 0);
+
+  iree_hal_amdgpu_executable_metadata_free(metadata);
+}
+
 TEST(ExecutableMetadataHsacoTest, RejectsLoadedCodeObjectStringMismatch) {
   const iree_const_byte_span_t source_code_object_data = SourceCodeObjectData();
   std::vector<uint8_t> loaded_code_object_storage = MakeLoadedCodeObjectData();
