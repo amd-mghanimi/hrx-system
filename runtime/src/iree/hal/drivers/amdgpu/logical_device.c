@@ -1871,6 +1871,7 @@ static iree_status_t iree_hal_amdgpu_logical_device_create_device_spec(
         &physical_devices[i];
     physical_params->identity =
         physical_device->agent_target->primary_isa.identity;
+    physical_params->chip_id = physical_device->chip_id;
     if (physical_device->has_physical_device_uuid) {
       physical_params->flags |=
           IREE_HAL_AMDGPU_DEVICE_SPEC_PHYSICAL_DEVICE_FLAG_UUID;

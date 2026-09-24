@@ -23,6 +23,7 @@ static void CreateDeviceSpecForProcessor(
 
   iree_hal_amdgpu_device_spec_physical_device_params_t physical_device = {
       /*.identity=*/identity,
+      /*.chip_id=*/0x75A0,
       /*.uuid=*/{{0x11}},
       /*.pci=*/{/*.domain=*/0, /*.bus=*/3, /*.device=*/0, /*.function=*/0},
       /*.timestamp_frequency_hz=*/kAgentTimestampFrequencyHz,
@@ -72,6 +73,7 @@ TEST(DeviceSpecTest, CreatesSpecFromParams) {
   EXPECT_TRUE(iree_string_view_equal(identity->backend_id, IREE_SV("hsa")));
   ASSERT_EQ(identity->physical_device_count, 1);
   EXPECT_EQ(identity->physical_devices[0].physical_ordinal, 7);
+  EXPECT_EQ(identity->physical_devices[0].identity.device_id, 0x75A0u);
   EXPECT_TRUE(
       iree_all_bits_set(identity->physical_devices[0].identity.flags,
                         IREE_HAL_PHYSICAL_DEVICE_IDENTITY_FLAG_UUID |
@@ -192,6 +194,7 @@ TEST(DeviceSpecTest, AdvertisesTargetsPerPhysicalDevice) {
   iree_hal_amdgpu_device_spec_physical_device_params_t physical_devices[2] = {
       {
           /*.identity=*/identities[0],
+          /*.chip_id=*/0x1000,
           /*.uuid=*/{},
           /*.pci=*/{},
           /*.timestamp_frequency_hz=*/kAgentTimestampFrequencyHz,
@@ -208,6 +211,7 @@ TEST(DeviceSpecTest, AdvertisesTargetsPerPhysicalDevice) {
       },
       {
           /*.identity=*/identities[1],
+          /*.chip_id=*/0x2000,
           /*.uuid=*/{},
           /*.pci=*/{},
           /*.timestamp_frequency_hz=*/kAgentTimestampFrequencyHz,

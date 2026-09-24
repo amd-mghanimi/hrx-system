@@ -224,6 +224,8 @@ typedef struct iree_hal_amdgpu_physical_device_t {
   uint32_t pci_function;
   // True when the PCI identity fields contain HSA-provided values.
   uint32_t has_pci_identity : 1;
+  // PCI device/chip identifier reported by HSA_AMD_AGENT_INFO_CHIP_ID.
+  uint32_t chip_id;
   // Immutable system-owned target identity for |device_agent|.
   const iree_hal_amdgpu_agent_target_t* agent_target;
   // Stable physical device UUID bytes reported by HSA when available.

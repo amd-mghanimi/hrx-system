@@ -41,14 +41,27 @@
 // Preferred priority for pooled allocations in the default pool set.
 #define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_DEFAULT_POOL_PRIORITY_TLSF 10
 
-// Conservative maximum group-segment byte length supported by the AMDGPU
-// dispatch paths used here. HSA exposes executable group-segment requirements
-// but does not expose a portable per-agent LDS capacity property.
+// Conservative maximum group-segment byte length for targets without a known
+// architecture-specific capacity. HSA exposes executable group-segment
+// requirements but does not expose a portable per-agent LDS capacity property.
 #define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_DEFAULT \
   (64 * 1024)
+#define IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_CDNA4 \
+  (160 * 1024)
 static_assert(IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_DEFAULT !=
                   0,
               "group segment max size default must be non-zero");
+
+static uint32_t iree_hal_amdgpu_physical_device_group_segment_max_size(
+    iree_hal_amdgpu_gfxip_version_t version) {
+  // gfx950/CDNA4 increases per-workgroup LDS from 64 KiB to 160 KiB. Keep the
+  // fallback conservative for architectures whose capacity is not encoded
+  // here.
+  if (version.major == 9 && version.minor == 5) {
+    return IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_CDNA4;
+  }
+  return IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_DEFAULT;
+}
 
 static bool iree_hal_amdgpu_parse_hex_digit(char c, uint32_t* out_value) {
   if (c >= '0' && c <= '9') {
@@ -384,6 +397,10 @@ static iree_status_t iree_hal_amdgpu_physical_device_initialize_identity(
       iree_hsa_agent_get_info(IREE_LIBHSA(libhsa), device_agent,
                               (hsa_agent_info_t)HSA_AMD_AGENT_INFO_DRIVER_UID,
                               &out_physical_device->driver_uid));
+  IREE_RETURN_IF_ERROR(iree_hsa_agent_get_info(
+      IREE_LIBHSA(libhsa), device_agent,
+      (hsa_agent_info_t)HSA_AMD_AGENT_INFO_CHIP_ID,
+      &out_physical_device->chip_id));
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_query_agent_pci_identity(
       libhsa, device_agent, out_physical_device));
   bool has_physical_device_uuid = false;
@@ -879,7 +896,8 @@ iree_hal_amdgpu_physical_device_initialize_device_execution(
                                        "querying SIMD count per compute unit");
   }
   const uint32_t group_segment_max_size =
-      IREE_HAL_AMDGPU_PHYSICAL_DEVICE_GROUP_SEGMENT_MAX_SIZE_DEFAULT;
+      iree_hal_amdgpu_physical_device_group_segment_max_size(
+          out_physical_device->agent_target->primary_isa.identity.version);
 
   // Validate execution properties before publishing them or initializing
   // dependent execution machinery. A broken HSA bring-up must fail loud with

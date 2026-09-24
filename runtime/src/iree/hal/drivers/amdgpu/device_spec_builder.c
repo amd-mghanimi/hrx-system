@@ -110,6 +110,7 @@ static iree_status_t iree_hal_amdgpu_device_spec_populate_identity(
     iree_hal_physical_device_spec_t* physical_spec = &physical_devices[i];
     physical_spec->identity.display_name = physical_device->identity.processor;
     physical_spec->identity.backend_path = physical_device->identity.processor;
+    physical_spec->identity.device_id = physical_device->chip_id;
     if (iree_all_bits_set(
             physical_device->flags,
             IREE_HAL_AMDGPU_DEVICE_SPEC_PHYSICAL_DEVICE_FLAG_UUID)) {
