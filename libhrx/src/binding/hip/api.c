@@ -7668,17 +7668,6 @@ HIPAPI hipError_t hipMemcpyAsync(void* dst, const void* src, size_t sizeBytes,
       stream_capture_status == IREE_HAL_STREAMING_CAPTURE_STATUS_NONE &&
       iree_hip_memcpy_destination_is_pageable(context, dst, sizeBytes);
 
-  if (!stream || stream == hipStreamLegacy) {
-    iree_status_t order_status =
-        iree_hal_streaming_context_synchronize_legacy_default(context);
-    if (!iree_status_is_ok(order_status)) {
-      iree_hip_resolved_stream_release(&resolved_stream);
-      hipError_t result = iree_status_to_hip_result(order_status);
-      IREE_TRACE_ZONE_END(z0);
-      HIP_RETURN_ERROR(result);
-    }
-  }
-
   if (stream_capture_status == IREE_HAL_STREAMING_CAPTURE_STATUS_NONE) {
     bool handled = false;
     hipError_t special_result = hipSuccess;
