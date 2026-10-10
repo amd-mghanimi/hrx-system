@@ -3462,7 +3462,8 @@ iree_status_t iree_hal_streaming_memcpy_device_to_host(
     iree_hal_streaming_buffer_ref_t dst_ref;
     iree_status_t dst_status = iree_hal_streaming_memory_lookup(
         context, (iree_hal_streaming_deviceptr_t)dst, &dst_ref);
-    if (iree_status_is_ok(dst_status)) {
+    const bool dst_registered = iree_status_is_ok(dst_status);
+    if (dst_registered) {
       if (!(dst_ref.buffer->memory_type & IREE_HAL_MEMORY_TYPE_HOST_LOCAL)) {
         IREE_TRACE_ZONE_END(z0);
         return iree_make_status(
@@ -3471,6 +3472,20 @@ iree_status_t iree_hal_streaming_memcpy_device_to_host(
       }
     } else {
       iree_status_ignore(dst_status);
+    }
+
+    // HRX-allocated pinned memory is the same allocation type as the staging
+    // buffer below, so the queue can write it directly.
+    if (dst_registered && dst_ref.buffer->buffer &&
+        !dst_ref.buffer->imported_host_allocation) {
+      iree_status_t status =
+          iree_hal_streaming_buffer_ref_validate_range(&dst_ref, size);
+      if (iree_status_is_ok(status)) {
+        status = iree_hal_streaming_enqueue_buffer_copy(stream, src_ref,
+                                                        dst_ref, size);
+      }
+      IREE_TRACE_ZONE_END(z0);
+      return status;
     }
 
     // Host allocations do not necessarily provide the system-scope visibility
