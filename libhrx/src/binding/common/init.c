@@ -204,6 +204,13 @@ static iree_hal_profile_statistics_sink_t* hrx_profile_stats_sink = NULL;
 static iree_hal_device_t* hrx_profile_devices[64];
 static int hrx_profile_device_count = 0;
 
+iree_hal_command_buffer_mode_t iree_hal_streaming_profile_command_buffer_mode(
+    void) {
+  return hrx_profile_device_count > 0
+             ? IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA
+             : 0;
+}
+
 static void hrx_profile_stats_dump(void) {
   for (int i = 0; i < hrx_profile_device_count; ++i) {
     iree_status_t status =
