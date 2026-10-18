@@ -19299,6 +19299,44 @@ HIPAPI hipError_t hipUserObjectRetain(hipUserObject_t object,
   HIP_RETURN_ERROR(hipSuccess);
 }
 
+// Returns |graph| retained when it is the graph of an active stream capture in
+// the current context, else NULL. Captured graphs become live handles only when
+// the capture ends, but CUDA and CLR accept them in hipGraphRetainUserObject
+// during capture, and RCCL retains its per-graph resources that way.
+static iree_hal_streaming_graph_t* iree_hip_graph_retain_active_capture(
+    hipGraph_t graph) {
+  iree_hal_streaming_context_t* context = NULL;
+  if (!graph || iree_hip_ensure_context(&context) != hipSuccess) {
+    return NULL;
+  }
+  iree_hal_streaming_stream_t** streams = NULL;
+  iree_host_size_t stream_count = 0;
+  iree_status_t status =
+      iree_hip_context_snapshot_streams(context, &streams, &stream_count);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    return NULL;
+  }
+  iree_hal_streaming_graph_t* found = NULL;
+  for (iree_host_size_t i = 0; i < stream_count && !found; ++i) {
+    iree_slim_mutex_lock(&streams[i]->mutex);
+    if (streams[i]->capture_status ==
+            IREE_HAL_STREAMING_CAPTURE_STATUS_ACTIVE &&
+        streams[i]->capture_graph == (iree_hal_streaming_graph_t*)graph) {
+      found = streams[i]->capture_graph;
+      iree_hal_streaming_graph_retain(found);
+    }
+    iree_slim_mutex_unlock(&streams[i]->mutex);
+  }
+  iree_hip_context_release_stream_snapshot(context, streams, stream_count);
+  return found;
+}
+
+static hipError_t iree_hip_graph_retain_user_object_impl(hipGraph_t graph,
+                                                         hipUserObject_t object,
+                                                         unsigned int count,
+                                                         unsigned int flags);
+
 HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
                                            hipUserObject_t object,
                                            unsigned int count,
@@ -19308,9 +19346,24 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       (flags != 0 && flags != hipGraphUserObjectMove)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  iree_hal_streaming_graph_t* capture_graph = NULL;
   if (!iree_hip_graph_handle_is_live(graph)) {
-    HIP_RETURN_ERROR(hipErrorInvalidValue);
+    capture_graph = iree_hip_graph_retain_active_capture(graph);
+    if (!capture_graph) {
+      HIP_RETURN_ERROR(hipErrorInvalidValue);
+    }
   }
+  hipError_t result =
+      iree_hip_graph_retain_user_object_impl(graph, object, count, flags);
+  iree_hal_streaming_graph_release(capture_graph);
+  HIP_RETURN_ERROR(result);
+}
+
+// Attaches |count| references of |object| to the live or capturing |graph|.
+static hipError_t iree_hip_graph_retain_user_object_impl(hipGraph_t graph,
+                                                         hipUserObject_t object,
+                                                         unsigned int count,
+                                                         unsigned int flags) {
   const bool move_refs = flags == hipGraphUserObjectMove;
   iree_hal_streaming_graph_t* stream_graph = (iree_hal_streaming_graph_t*)graph;
   for (iree_hal_streaming_graph_user_object_ref_t* ref =
@@ -19318,7 +19371,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
        ref; ref = ref->next) {
     if (ref->object == object) {
       if (UINT64_MAX - ref->count < count) {
-        HIP_RETURN_ERROR(hipErrorInvalidValue);
+        return hipErrorInvalidValue;
       }
       const uint64_t new_graph_ref_count = ref->count + count;
       hipError_t retain_result = hipSuccess;
@@ -19329,16 +19382,16 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
         retain_result = iree_hip_user_object_retain_refs_checked(object, count);
       }
       if (retain_result != hipSuccess) {
-        HIP_RETURN_ERROR(retain_result);
+        return retain_result;
       }
       ref->count += count;
-      HIP_RETURN_ERROR(hipSuccess);
+      return hipSuccess;
     }
   }
 
   hipUserObject_t retained_object = NULL;
   if (!iree_hip_user_object_registry_lookup_retain(object, &retained_object)) {
-    HIP_RETURN_ERROR(hipSuccess);
+    return hipSuccess;
   }
   object = retained_object;
   hipError_t retain_result =
@@ -19346,7 +19399,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
                 : iree_hip_user_object_retain_refs_checked(object, count);
   if (retain_result != hipSuccess) {
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(retain_result);
+    return retain_result;
   }
   iree_hal_streaming_graph_user_object_ref_t* ref = NULL;
   iree_status_t status =
@@ -19357,7 +19410,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       iree_hip_user_object_release_refs(object, count);
     }
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(hipErrorOutOfMemory);
+    return hipErrorOutOfMemory;
   }
   hipError_t association_result =
       iree_hip_user_object_add_graph_association(object);
@@ -19366,7 +19419,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       (void)iree_hip_user_object_release_refs_checked(object, count);
     }
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(association_result);
+    return association_result;
   }
   ref->object = object;
   ref->count = count;
@@ -19375,7 +19428,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
   ref->next = stream_graph->user_object_refs;
   stream_graph->user_object_refs = ref;
   iree_hip_user_object_handle_release(retained_object);
-  HIP_RETURN_ERROR(hipSuccess);
+  return hipSuccess;
 }
 
 HIPAPI hipError_t hipGraphReleaseUserObject(hipGraph_t graph,
