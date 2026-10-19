@@ -15399,6 +15399,10 @@ HIPAPI hipError_t hipModuleGetFunction(hipFunction_t* function,
 
   hipError_t result = iree_status_to_hip_result(status);
   iree_hal_streaming_module_release(stream_module);
+  if (result == hipErrorNotFound) {
+    // Matches CLR: a missing name is not a sticky error.
+    HIP_RETURN_COMMAND_ERROR(result);
+  }
   HIP_RETURN_ERROR(result);
 }
 

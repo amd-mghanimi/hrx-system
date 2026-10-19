@@ -35,6 +35,14 @@ typedef struct iree_hip_error_state_token_t {
 hipError_t iree_hip_error_state_publish(iree_hip_error_state_token_t token,
                                         hipError_t result);
 
+// Like iree_hip_error_state_publish, but an ordinary (non-fatal) error only
+// becomes the thread's command result and leaves the last error unchanged.
+// CLR does this for exactly one case, a hipModuleGetFunction name that the
+// module lacks: libraries such as hipBLASLt probe modules for optional kernels
+// and must not leave a sticky error behind for the next hipGetLastError.
+hipError_t iree_hip_error_state_publish_command(
+    iree_hip_error_state_token_t token, hipError_t result);
+
 // Returns the process-wide fatal device result, or hipSuccess when none has
 // been observed. This does not modify the calling thread's last-error state.
 hipError_t iree_hip_error_state_fatal_result(void);
@@ -74,6 +82,14 @@ void iree_hip_error_state_reset(void);
 #define HIP_RETURN_ERROR(error)                                           \
   do {                                                                    \
     return iree_hip_error_state_publish(_hip_error_state_token, (error)); \
+  } while (0)
+
+// Completes a public HIP API call without updating the sticky last error. See
+// iree_hip_error_state_publish_command.
+#define HIP_RETURN_COMMAND_ERROR(error)                                   \
+  do {                                                                    \
+    return iree_hip_error_state_publish_command(_hip_error_state_token,   \
+                                                (error));                 \
   } while (0)
 
 // Captures publication identity for teardown and error-inspection entry points
