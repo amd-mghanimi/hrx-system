@@ -6,8 +6,12 @@
 
 #include "iree/hal/drivers/amdgpu/aql_block_processor.h"
 
+#include <inttypes.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "iree/hal/drivers/amdgpu/aql_atomic.h"
 #include "iree/hal/drivers/amdgpu/aql_buffer_ref.h"
@@ -116,16 +120,115 @@ static bool iree_hal_amdgpu_aql_block_processor_packet_has_barrier(
                                    IREE_HSA_FENCE_SCOPE_NONE);
 }
 
-// Opt-in: an in-order packet's agent acquire repeats the cache invalidation
-// already implied by its predecessor's agent release on the same queue. Only
-// valid when no other agent (peer GPU or IPC importer) writes the same memory.
-static bool iree_hal_amdgpu_aql_block_processor_elide_agent_acquire(void) {
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char* value = getenv("HRX_ELIDE_DISPATCH_ACQUIRE");
-    enabled = value && value[0] && value[0] != '0';
+//===----------------------------------------------------------------------===//
+// Interior agent-acquire elision
+//===----------------------------------------------------------------------===//
+
+static struct {
+  pthread_once_t once;
+  iree_hal_amdgpu_acquire_elision_mode_t mode;
+  bool report;
+  // Set once; PROCESS mode stops eliding after the first foreign writer.
+  int foreign_writer;
+  const char* foreign_writer_reason;
+  uint64_t elided_count;
+  uint64_t kept_count;
+} iree_hal_amdgpu_acquire_elision_state = {
+    .once = PTHREAD_ONCE_INIT,
+};
+
+static int iree_hal_amdgpu_acquire_elision_read_mtype_local(void) {
+  FILE* file = fopen("/sys/module/amdgpu/parameters/mtype_local", "r");
+  if (!file) return 0;
+  int value = 0;
+  if (fscanf(file, "%d", &value) != 1) value = 0;
+  fclose(file);
+  return value;
+}
+
+static void iree_hal_amdgpu_acquire_elision_print_report(void) {
+  fprintf(stderr,
+          "[hrx-elide] pid=%d mode=%d elided=%" PRIu64 " kept=%" PRIu64
+          " foreign_writer=%s\n",
+          (int)getpid(), (int)iree_hal_amdgpu_acquire_elision_state.mode,
+          __atomic_load_n(&iree_hal_amdgpu_acquire_elision_state.elided_count,
+                          __ATOMIC_RELAXED),
+          __atomic_load_n(&iree_hal_amdgpu_acquire_elision_state.kept_count,
+                          __ATOMIC_RELAXED),
+          iree_hal_amdgpu_acquire_elision_state.foreign_writer_reason
+              ? iree_hal_amdgpu_acquire_elision_state.foreign_writer_reason
+              : "none");
+}
+
+static void iree_hal_amdgpu_acquire_elision_initialize(void) {
+  const char* value = getenv("HRX_ELIDE_ACQUIRE");
+  if (!value || !value[0]) value = getenv("HRX_ELIDE_DISPATCH_ACQUIRE");
+  int mode = value && value[0] ? atoi(value) : 0;
+  if (mode < 0 || mode > IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_DISPATCH) {
+    mode = IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF;
   }
-  return enabled;
+  iree_hal_amdgpu_acquire_elision_state.mode =
+      (iree_hal_amdgpu_acquire_elision_mode_t)mode;
+  if (mode == IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF) return;
+  if (iree_hal_amdgpu_acquire_elision_read_mtype_local() != 0) {
+    // Local VRAM is NC or CC: every interior acquire may be load-bearing.
+    iree_hal_amdgpu_acquire_elision_state.mode =
+        IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF;
+    iree_hal_amdgpu_acquire_elision_state.foreign_writer_reason =
+        "amdgpu.mtype_local";
+  }
+  const char* report = getenv("HRX_ELIDE_ACQUIRE_REPORT");
+  iree_hal_amdgpu_acquire_elision_state.report =
+      report && report[0] && report[0] != '0';
+  if (iree_hal_amdgpu_acquire_elision_state.report) {
+    atexit(iree_hal_amdgpu_acquire_elision_print_report);
+  }
+}
+
+iree_hal_amdgpu_acquire_elision_mode_t iree_hal_amdgpu_acquire_elision_mode(
+    void) {
+  pthread_once(&iree_hal_amdgpu_acquire_elision_state.once,
+               iree_hal_amdgpu_acquire_elision_initialize);
+  return iree_hal_amdgpu_acquire_elision_state.mode;
+}
+
+void iree_hal_amdgpu_acquire_elision_note_foreign_writer(const char* reason) {
+  if (iree_hal_amdgpu_acquire_elision_mode() ==
+      IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF) {
+    return;
+  }
+  if (__atomic_exchange_n(&iree_hal_amdgpu_acquire_elision_state.foreign_writer,
+                          1, __ATOMIC_SEQ_CST) == 0) {
+    iree_hal_amdgpu_acquire_elision_state.foreign_writer_reason = reason;
+    if (iree_hal_amdgpu_acquire_elision_state.report) {
+      fprintf(stderr, "[hrx-elide] pid=%d foreign writer: %s\n", (int)getpid(),
+              reason);
+    }
+  }
+}
+
+// Returns true when an interior agent acquire may be dropped. Counts the
+// decision when elision is configured.
+static bool iree_hal_amdgpu_aql_block_processor_elide_agent_acquire(void) {
+  const iree_hal_amdgpu_acquire_elision_mode_t mode =
+      iree_hal_amdgpu_acquire_elision_mode();
+  if (mode == IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF) return false;
+  const bool elide =
+      mode == IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_DISPATCH ||
+      !__atomic_load_n(&iree_hal_amdgpu_acquire_elision_state.foreign_writer,
+                       __ATOMIC_ACQUIRE);
+  if (iree_hal_amdgpu_acquire_elision_state.report) {
+    const uint64_t count = __atomic_add_fetch(
+        elide ? &iree_hal_amdgpu_acquire_elision_state.elided_count
+              : &iree_hal_amdgpu_acquire_elision_state.kept_count,
+        1, __ATOMIC_RELAXED);
+    // Long-running servers rarely exit cleanly; log at 2^20, 2^24, ...
+    if (count >= (1ull << 20) && (count & (count - 1)) == 0 &&
+        (__builtin_ctzll(count) % 4) == 0) {
+      iree_hal_amdgpu_acquire_elision_print_report();
+    }
+  }
+  return elide;
 }
 
 static iree_hal_amdgpu_aql_packet_control_t
