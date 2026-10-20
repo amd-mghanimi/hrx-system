@@ -1651,6 +1651,10 @@ static iree_status_t iree_hal_streaming_record_dispatch_locked(
     *timing_begin_ns += hrx_launch_timing_now_ns() - timing_step_ns;
   }
   if (iree_status_is_ok(status)) {
+    status = iree_hal_streaming_record_nc_acquire_if_needed(
+        stream->command_buffer, constants, symbol->name);
+  }
+  if (iree_status_is_ok(status)) {
     status = iree_hal_command_buffer_dispatch(
         stream->command_buffer, symbol->executable,
         iree_hal_executable_function_from_index(symbol->export_ordinal), config,

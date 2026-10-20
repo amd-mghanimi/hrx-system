@@ -307,6 +307,26 @@ iree_status_t iree_hal_streaming_context_disable_peer_access(
     iree_hal_streaming_context_t* context,
     iree_hal_streaming_context_t* peer_context);
 
+//===----------------------------------------------------------------------===//
+// NC ledger (HRX_ELIDE_ACQUIRE=2)
+//===----------------------------------------------------------------------===//
+
+// Process-wide set of device address ranges that this process maps MTYPE_NC
+// and that another agent writes: IPC imports from other processes' GPUs.
+
+// Adds [|base|, |base| + |size|) to the ledger.
+void iree_hal_streaming_nc_ledger_add(uint64_t base, uint64_t size);
+
+// Removes the range starting at |base|.
+void iree_hal_streaming_nc_ledger_remove(uint64_t base);
+
+// Records a system-scope acquire ahead of the next dispatch in
+// |command_buffer| when HRX_ELIDE_ACQUIRE=2 and a naturally aligned 64-bit word
+// of |kernargs| points into the ledger. |kernel_name| is used for reporting.
+iree_status_t iree_hal_streaming_record_nc_acquire_if_needed(
+    iree_hal_command_buffer_t* command_buffer, iree_const_byte_span_t kernargs,
+    iree_string_view_t kernel_name);
+
 // Registers a stream and retains it for the context's stream list. Callers
 // must hold a reference to |context| across the call: context destruction
 // zeroes the count under the list mutex and then walks the emptied extent and
