@@ -738,6 +738,21 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
     }
   }
 
+  // Only the last block of a launch signals its external semaphores, so a
+  // final multi-stream partition joins its streams in a node-less barrier.
+  if (partition_count > 0 && partitions[partition_count - 1].stream_count > 1) {
+    const iree_hal_streaming_graph_partition_t* last =
+        &partitions[partition_count - 1];
+    partitions[partition_count] = (iree_hal_streaming_graph_partition_t){
+        .start_index = last->start_index + last->count - 1,
+        .count = 0,
+        .type = IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_EMPTY,
+        .stream_count = 1,
+    };
+    ++partition_count;
+    ++block_count;
+  }
+
   return (iree_uint32x2_t){{partition_count, block_count}};
 }
 
@@ -855,11 +870,12 @@ iree_status_t iree_hal_streaming_graph_schedule_nodes(
               &additional_dependency_index));
 
   // Allocate the worst-case partition table up front. A graph where every
-  // active node must be isolated needs one partition per node.
+  // active node must be isolated needs one partition per node, plus one for a
+  // final multi-stream join.
   iree_hal_streaming_graph_partition_t* partitions = NULL;
   iree_host_size_t partitions_size = 0;
   if (IREE_UNLIKELY(!iree_host_size_checked_mul(
-          actual_node_count, sizeof(*partitions), &partitions_size))) {
+          actual_node_count + 1, sizeof(*partitions), &partitions_size))) {
     IREE_TRACE_ZONE_END(z0);
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "graph partition allocation size overflow");

@@ -117,6 +117,43 @@ TEST(GraphTest, AddedDependenciesConstrainDetectedWorkstreams) {
   iree_arena_block_pool_deinitialize(&block_pool);
 }
 
+TEST(GraphTest, FinalMultiStreamPartitionGetsJoinBarrier) {
+  constexpr size_t kNodeCount = 64;
+  std::array<GraphNodeStorage, kNodeCount> node_storage;
+  GraphNodeBlockStorage<kNodeCount> node_block(node_storage);
+  for (uint32_t i = 0; i < kNodeCount; ++i) {
+    iree_hal_streaming_graph_node_t* node = node_storage[i].get();
+    node->node_index = i;
+    node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
+  }
+
+  iree_arena_block_pool_t block_pool;
+  iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool, &arena);
+  iree_hal_streaming_graph_schedule_t schedule = {};
+  IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
+      node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
+      /*disabled_node_count=*/0, /*additional_edges=*/nullptr, &arena,
+      &schedule));
+
+  // Independent nodes spread over several streams; only the last block of a
+  // launch signals its external semaphores, so a node-less barrier joins them.
+  ASSERT_EQ(schedule.partition_count, 2u);
+  const iree_hal_streaming_graph_partition_t& work = schedule.partitions[0];
+  EXPECT_EQ(work.type, IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE);
+  EXPECT_GT(work.stream_count, 1u);
+  const iree_hal_streaming_graph_partition_t& join = schedule.partitions[1];
+  EXPECT_EQ(join.type, IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_EMPTY);
+  EXPECT_EQ(join.count, 0u);
+  EXPECT_EQ(join.stream_count, 1u);
+  EXPECT_LT(join.start_index, kNodeCount);
+  EXPECT_EQ(schedule.block_count, work.stream_count + 1u);
+
+  iree_arena_deinitialize(&arena);
+  iree_arena_block_pool_deinitialize(&block_pool);
+}
+
 TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
   constexpr size_t kNodeCount = 64;
   std::array<GraphNodeStorage, kNodeCount> node_storage;
