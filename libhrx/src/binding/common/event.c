@@ -473,6 +473,42 @@ iree_status_t iree_hal_streaming_event_enqueue_record(
   return iree_ok_status();
 }
 
+// Records an event that captures no tick without a submission of its own.
+// Every stream submission waits on the previous stream timeline value and
+// signals the next, so once pending commands are flushed the stream's last
+// signaled value is reached exactly when all work before the record completes.
+// Repeated records with no work in between therefore share one timeline point,
+// and a record after work rides on the flush that submits that work.
+static iree_status_t iree_hal_streaming_event_record_untimed(
+    iree_hal_streaming_event_t* event, iree_hal_streaming_stream_t* stream) {
+  if (event->context != stream->context) {
+    return iree_make_status(
+        IREE_STATUS_INCOMPATIBLE,
+        "an event can only be recorded with the context that created it");
+  }
+
+  iree_slim_mutex_lock(&stream->mutex);
+  iree_status_t status = iree_hal_streaming_stream_flush_locked(stream);
+  iree_hal_streaming_graph_t* dropped_capture_graph = NULL;
+  if (iree_status_is_ok(status)) {
+    // On a stream with no submissions the point is value 0, which the
+    // timeline has already reached; it still names the timeline so the event
+    // reads as recorded.
+    iree_hal_streaming_recorded_point_t recorded_point = {
+        .semaphore = stream->timeline_semaphore,
+        .value = stream->pending_value,
+        .ordered_after_stream_id = stream->stream_id,
+        .ordered_after_stream_value = stream->pending_value,
+    };
+    iree_hal_semaphore_retain(recorded_point.semaphore);
+    dropped_capture_graph =
+        iree_hal_streaming_event_commit_recorded_point(event, recorded_point);
+  }
+  iree_slim_mutex_unlock(&stream->mutex);
+  iree_hal_streaming_graph_release(dropped_capture_graph);
+  return status;
+}
+
 iree_status_t iree_hal_streaming_event_record(
     iree_hal_streaming_event_t* event, iree_hal_streaming_stream_t* stream) {
   IREE_ASSERT_ARGUMENT(event);
@@ -488,6 +524,16 @@ iree_status_t iree_hal_streaming_event_record(
     // point alone and atomically replaces only the captured session frontier.
     IREE_TRACE_ZONE_END(z0);
     return iree_ok_status();
+  }
+
+  const bool captures_tick =
+      stream->context->timestamp_domain.frequency_hz != 0 &&
+      !(event->flags & IREE_HAL_STREAMING_EVENT_FLAG_DISABLE_TIMING);
+  if (!captures_tick) {
+    iree_status_t status =
+        iree_hal_streaming_event_record_untimed(event, stream);
+    IREE_TRACE_ZONE_END(z0);
+    return status;
   }
 
   // Flush the stream to ensure all prior operations are submitted.

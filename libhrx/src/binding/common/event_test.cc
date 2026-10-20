@@ -529,6 +529,74 @@ TEST_F(CpuStreamingContextTest, DirectRecordsOnAnUntimedDeviceGoUntimed) {
   iree_hal_streaming_stream_release(stream);
 }
 
+// Untimed records submit nothing of their own: each names the stream tail, so
+// records with no work in between share one point and leave the tail alone.
+TEST_F(CpuStreamingContextTest, UntimedRecordsShareTheStreamTail) {
+  iree_hal_streaming_stream_t* stream = nullptr;
+  iree_hal_streaming_event_t* event = nullptr;
+  ScopeExit cleanup([&] {
+    IREE_EXPECT_OK(ReleaseAllGates());
+    iree_hal_streaming_event_release(event);
+    iree_hal_streaming_stream_release(stream);
+  });
+
+  IREE_ASSERT_OK(CreateNonBlockingStream(context_, &stream));
+  iree_hal_semaphore_t* gate = nullptr;
+  IREE_ASSERT_OK(CreateGate(/*release_value=*/1, &gate));
+  uint64_t gate_value = 1;
+  const iree_hal_semaphore_list_t gate_wait = {
+      .count = 1,
+      .semaphores = &gate,
+      .payload_values = &gate_value,
+  };
+  IREE_ASSERT_OK(iree_hal_streaming_stream_wait_semaphores(stream, gate_wait));
+  const uint64_t tail = stream->pending_value;
+  ASSERT_GT(tail, 0u);
+
+  IREE_ASSERT_OK(iree_hal_streaming_event_create(
+      context_, IREE_HAL_STREAMING_EVENT_FLAG_DISABLE_TIMING,
+      iree_allocator_system(), &event));
+  for (int i = 0; i < 3; ++i) {
+    IREE_ASSERT_OK(iree_hal_streaming_event_record(event, stream));
+    EXPECT_EQ(tail, stream->pending_value);
+    EXPECT_EQ(stream->timeline_semaphore, event->recorded_point.semaphore);
+    EXPECT_EQ(tail, event->recorded_point.value);
+  }
+
+  int event_status = 0;
+  IREE_ASSERT_OK(iree_hal_streaming_event_query(event, &event_status));
+  EXPECT_EQ(1, event_status) << "the record completed before the gated work";
+  IREE_ASSERT_OK(SignalGate(gate, gate_value));
+  IREE_ASSERT_OK(iree_hal_streaming_event_synchronize(event));
+  IREE_ASSERT_OK(iree_hal_streaming_event_query(event, &event_status));
+  EXPECT_EQ(0, event_status);
+}
+
+// An untimed record on a stream that never submitted is reached at once but
+// still names the stream timeline, so the event reads as recorded.
+TEST_F(CpuStreamingContextTest, UntimedRecordOnAnIdleStreamIsReached) {
+  iree_hal_streaming_stream_t* stream = nullptr;
+  iree_hal_streaming_event_t* event = nullptr;
+  ScopeExit cleanup([&] {
+    iree_hal_streaming_event_release(event);
+    iree_hal_streaming_stream_release(stream);
+  });
+
+  IREE_ASSERT_OK(CreateNonBlockingStream(context_, &stream));
+  ASSERT_EQ(0u, stream->pending_value);
+  IREE_ASSERT_OK(iree_hal_streaming_event_create(
+      context_, IREE_HAL_STREAMING_EVENT_FLAG_DISABLE_TIMING,
+      iree_allocator_system(), &event));
+  IREE_ASSERT_OK(iree_hal_streaming_event_record(event, stream));
+  EXPECT_EQ(0u, stream->pending_value);
+  EXPECT_EQ(stream->timeline_semaphore, event->recorded_point.semaphore);
+
+  int event_status = 1;
+  IREE_ASSERT_OK(iree_hal_streaming_event_query(event, &event_status));
+  EXPECT_EQ(0, event_status);
+  IREE_ASSERT_OK(iree_hal_streaming_event_synchronize(event));
+}
+
 TEST_F(CpuStreamingContextTest, ContextRecordWaitsForEveryCurrentStream) {
   iree_hal_streaming_stream_t* first_stream = nullptr;
   iree_hal_streaming_stream_t* second_stream = nullptr;
