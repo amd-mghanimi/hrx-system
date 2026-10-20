@@ -34,6 +34,10 @@ typedef struct iree_hal_streaming_value_wait_submission_t
 
 typedef iree_host_size_t iree_hal_streaming_device_ordinal_t;
 
+// Upper bound on the hardware queues one context spreads ordinary streams
+// across. HRX_STREAM_QUEUE_COUNT selects the count within this bound.
+#define IREE_HAL_STREAMING_MAX_STREAM_QUEUE_COUNT 16
+
 //===----------------------------------------------------------------------===//
 // Context types
 //===----------------------------------------------------------------------===//
@@ -90,6 +94,17 @@ struct iree_hal_streaming_context_t {
   // Provisioned hardware queue used by streams in this context. Borrowed from
   // |device| and valid for the context lifetime.
   iree_hal_queue_t* queue;
+
+  // Hardware queues ordinary streams are assigned to round-robin so work on
+  // independent streams can execute concurrently. Slot 0 is |queue|; the other
+  // slots are acquired on first use and owned by the context. Guarded by
+  // |stream_queue_mutex|.
+  iree_hal_queue_t* stream_queues[IREE_HAL_STREAMING_MAX_STREAM_QUEUE_COUNT];
+  // Number of usable slots in |stream_queues|.
+  iree_host_size_t stream_queue_count;
+  // Slot assigned to the next ordinary stream.
+  iree_host_size_t next_stream_queue;
+  iree_slim_mutex_t stream_queue_mutex;
 
   // HAL resources.
   iree_hal_allocator_t* device_allocator;
@@ -256,6 +271,27 @@ void iree_hal_streaming_context_release(iree_hal_streaming_context_t* context);
 // release has begun. Returns false when the reference count has reached zero.
 bool iree_hal_streaming_context_try_retain(
     iree_hal_streaming_context_t* context);
+
+// Returns the hardware queue for the next ordinary stream created in
+// |context|, assigning streams round-robin across the context's stream queues.
+// The queue is borrowed and valid for the lifetime of |context|; streams retain
+// it. Queues that cannot be acquired fall back to |context->queue|.
+//
+// Synchronization: internal (|stream_queue_mutex|).
+iree_hal_queue_t* iree_hal_streaming_context_select_stream_queue(
+    iree_hal_streaming_context_t* context);
+
+// Returns the hardware queue that work in concurrent |lane| of a submission
+// ordered on |base_queue| executes on. Lane 0 is |base_queue|; other lanes
+// rotate through the context's stream queues starting after it. Queues outside
+// the stream queue set, such as priority and resource-partitioned queues, keep
+// every lane on |base_queue|. The queue is borrowed as for
+// iree_hal_streaming_context_select_stream_queue.
+//
+// Synchronization: internal (|stream_queue_mutex|).
+iree_hal_queue_t* iree_hal_streaming_context_select_lane_queue(
+    iree_hal_streaming_context_t* context, iree_hal_queue_t* base_queue,
+    iree_host_size_t lane);
 
 // Synchronization: none (queries flags).
 iree_hal_streaming_context_flags_t iree_hal_streaming_context_flags(

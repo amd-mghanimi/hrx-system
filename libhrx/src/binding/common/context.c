@@ -121,6 +121,21 @@ static bool iree_hal_streaming_nc_ledger_references(
   return false;
 }
 
+// Matches the HIP runtime's default GPU_MAX_HW_QUEUES.
+#define IREE_HAL_STREAMING_DEFAULT_STREAM_QUEUE_COUNT 4
+
+static iree_host_size_t iree_hal_streaming_stream_queue_count(void) {
+  const char* value = getenv("HRX_STREAM_QUEUE_COUNT");
+  const int count = value && value[0]
+                        ? atoi(value)
+                        : IREE_HAL_STREAMING_DEFAULT_STREAM_QUEUE_COUNT;
+  if (count < 1) return 1;
+  if (count > IREE_HAL_STREAMING_MAX_STREAM_QUEUE_COUNT) {
+    return IREE_HAL_STREAMING_MAX_STREAM_QUEUE_COUNT;
+  }
+  return (iree_host_size_t)count;
+}
+
 static void iree_hal_streaming_nc_ledger_report(iree_string_view_t name) {
   static int report = -1;
   if (report < 0) {
@@ -269,6 +284,10 @@ iree_status_t iree_hal_streaming_context_create(
   iree_atomic_store(&context->capture_stream_count, 0,
                     iree_memory_order_relaxed);
   context->host_allocator = host_allocator;
+  memset(context->stream_queues, 0, sizeof(context->stream_queues));
+  context->stream_queue_count = 0;
+  context->next_stream_queue = 1;
+  iree_slim_mutex_initialize(&context->stream_queue_mutex);
   iree_slim_mutex_initialize(&context->mutex);
   iree_slim_mutex_initialize(&context->pending_free_mutex);
   iree_hal_streaming_capture_admission_initialize(&context->capture_admission);
@@ -317,6 +336,10 @@ iree_status_t iree_hal_streaming_context_create(
   if (iree_status_is_ok(status)) {
     status = iree_hal_streaming_device_select_primary_queue(device_entry,
                                                             &context->queue);
+  }
+  if (iree_status_is_ok(status)) {
+    context->stream_queues[0] = context->queue;
+    context->stream_queue_count = iree_hal_streaming_stream_queue_count();
   }
 
   // Create the context-wide event record timeline. Resource-partitioned
@@ -491,6 +514,12 @@ static void iree_hal_streaming_context_destroy(
   iree_hal_streaming_capture_admission_deinitialize(
       &context->capture_admission);
 
+  // Slot 0 is the borrowed |queue|; streams retain the others they use.
+  for (iree_host_size_t i = 1; i < context->stream_queue_count; ++i) {
+    iree_hal_queue_release(context->stream_queues[i]);
+  }
+  iree_slim_mutex_deinitialize(&context->stream_queue_mutex);
+
   iree_status_ignore(context->loop_status);
   iree_hal_allocator_release(context->device_allocator);
   iree_hal_device_release(context->device);
@@ -531,6 +560,79 @@ void iree_hal_streaming_context_release(iree_hal_streaming_context_t* context) {
   if (context && iree_atomic_ref_count_dec(&context->ref_count) == 1) {
     iree_hal_streaming_context_destroy(context);
   }
+}
+
+// Returns the queue in |slot|, acquiring it on first use, or NULL when it
+// cannot be acquired.
+static iree_hal_queue_t* iree_hal_streaming_context_stream_queue_slot_locked(
+    iree_hal_streaming_context_t* context, iree_host_size_t slot) {
+  if (context->stream_queues[slot]) {
+    return context->stream_queues[slot];
+  }
+  iree_hal_queue_params_t queue_params;
+  iree_hal_queue_params_initialize(&queue_params);
+  queue_params.execution_resources =
+      iree_hal_queue_execution_resources(context->queue);
+  iree_status_t status =
+      iree_hal_queue_acquire(iree_hal_queue_family(context->queue),
+                             &queue_params, &context->stream_queues[slot]);
+  if (!iree_status_is_ok(status)) {
+    // Hardware queues are a finite device resource; stop growing the pool and
+    // keep sharing the queues already acquired.
+    iree_status_ignore(status);
+    context->stream_queues[slot] = NULL;
+    context->stream_queue_count = slot;
+    context->next_stream_queue = 1;
+    return NULL;
+  }
+  return context->stream_queues[slot];
+}
+
+iree_hal_queue_t* iree_hal_streaming_context_select_stream_queue(
+    iree_hal_streaming_context_t* context) {
+  IREE_ASSERT_ARGUMENT(context);
+  iree_slim_mutex_lock(&context->stream_queue_mutex);
+  iree_hal_queue_t* queue = context->queue;
+  if (context->stream_queue_count > 1) {
+    const iree_host_size_t slot =
+        context->next_stream_queue % context->stream_queue_count;
+    context->next_stream_queue = slot + 1;
+    iree_hal_queue_t* slot_queue =
+        iree_hal_streaming_context_stream_queue_slot_locked(context, slot);
+    if (slot_queue) {
+      queue = slot_queue;
+    }
+  }
+  iree_slim_mutex_unlock(&context->stream_queue_mutex);
+  return queue;
+}
+
+iree_hal_queue_t* iree_hal_streaming_context_select_lane_queue(
+    iree_hal_streaming_context_t* context, iree_hal_queue_t* base_queue,
+    iree_host_size_t lane) {
+  IREE_ASSERT_ARGUMENT(context);
+  IREE_ASSERT_ARGUMENT(base_queue);
+  if (lane == 0) {
+    return base_queue;
+  }
+  iree_slim_mutex_lock(&context->stream_queue_mutex);
+  iree_hal_queue_t* queue = base_queue;
+  iree_host_size_t base_slot = 0;
+  while (base_slot < context->stream_queue_count &&
+         context->stream_queues[base_slot] != base_queue) {
+    ++base_slot;
+  }
+  if (base_slot < context->stream_queue_count) {
+    const iree_host_size_t slot =
+        (base_slot + lane) % context->stream_queue_count;
+    iree_hal_queue_t* slot_queue =
+        iree_hal_streaming_context_stream_queue_slot_locked(context, slot);
+    if (slot_queue) {
+      queue = slot_queue;
+    }
+  }
+  iree_slim_mutex_unlock(&context->stream_queue_mutex);
+  return queue;
 }
 
 iree_hal_streaming_context_flags_t iree_hal_streaming_context_flags(
