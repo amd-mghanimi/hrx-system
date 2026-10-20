@@ -22,14 +22,8 @@ extern "C" {
 // Device types
 //===----------------------------------------------------------------------===//
 
-typedef struct iree_hal_streaming_graph_memory_size_entry_t {
-  // Next size class tracked in the device graph-memory accounting table.
-  struct iree_hal_streaming_graph_memory_size_entry_t* next;
-  // Exact allocation size represented by this reusable graph-memory class.
-  iree_device_size_t size;
-  // Number of live executable graphs actively using this reusable size class.
-  uint32_t reference_count;
-} iree_hal_streaming_graph_memory_size_entry_t;
+typedef struct iree_hal_streaming_graph_memory_physical_block_t
+    iree_hal_streaming_graph_memory_physical_block_t;
 
 // Maximum number of devices supported by the stream HAL.
 // This avoids dynamic enumeration overhead during initialization.
@@ -110,8 +104,11 @@ typedef struct iree_hal_streaming_device_t {
 
   // Guards graph-memory accounting fields.
   iree_slim_mutex_t graph_memory_mutex;
-  // Current graph-memory bytes visible via hipGraphMemAttrUsedMemCurrent.
-  uint64_t graph_memory_used_current;
+  // Serializes graph-memory cache trims through physical block release.
+  iree_slim_mutex_t graph_memory_trim_mutex;
+  // Currently mapped graph-memory bytes used to track the active high-water
+  // mark and hipGraphMemAttrUsedMemCurrent.
+  uint64_t graph_memory_mapped_current;
   // High-water graph-memory bytes visible via hipGraphMemAttrUsedMemHigh.
   uint64_t graph_memory_used_high;
   // Current graph-memory reservation visible via
@@ -120,9 +117,20 @@ typedef struct iree_hal_streaming_device_t {
   // High-water graph-memory reservation visible via
   // hipGraphMemAttrReservedMemHigh.
   uint64_t graph_memory_reserved_high;
-  // Reusable graph-memory size classes retained by this device graph pool.
-  iree_hal_streaming_graph_memory_size_entry_t*
-      graph_memory_reusable_size_entries;
+  // Unmapped physical graph-memory blocks available for a later reservation.
+  iree_hal_streaming_graph_memory_physical_block_t*
+      graph_memory_cached_physical_blocks;
+  // Number of live graph-memory allocation records on this device.
+  uint32_t graph_memory_allocation_count;
+
+  // Serializes queue-owned terminal-resource count transitions and drain
+  // checks.
+  iree_slim_mutex_t terminal_resource_mutex;
+  // Wakes global teardown after the last queue-owned terminal resource exits.
+  iree_notification_t terminal_resource_notification;
+  // Queue-owned resources whose terminal cleanup may touch context- or
+  // device-owned state.
+  iree_host_size_t pending_terminal_resource_count;
 } iree_hal_streaming_device_t;
 
 // Global device registry for multi-device management.
@@ -165,6 +173,16 @@ iree_status_t iree_hal_streaming_device_count(iree_host_size_t* out_count);
 // Synchronization: none (returns device entry).
 iree_hal_streaming_device_t* iree_hal_streaming_device_entry(
     iree_hal_streaming_device_ordinal_t ordinal);
+
+// Acquires/releases one queue-owned binding resource whose terminal cleanup
+// may touch a context or other device-owned state. The device entry remains
+// live through the matching global teardown drain.
+void iree_hal_streaming_device_terminal_resource_acquire(
+    iree_hal_streaming_device_t* device);
+void iree_hal_streaming_device_terminal_resource_release(
+    iree_hal_streaming_device_t* device);
+void iree_hal_streaming_device_terminal_resource_await_idle(
+    iree_hal_streaming_device_t* device);
 
 // Selects the borrowed provisioned queue defining the device's primary
 // compatibility execution domain. Dynamic domains acquire queues from the same
