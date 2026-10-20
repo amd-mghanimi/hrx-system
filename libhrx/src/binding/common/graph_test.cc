@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <thread>
+#include <utility>
 
 #include "common/context.h"
 #include "common/device.h"
@@ -154,6 +155,68 @@ TEST(GraphTest, FinalMultiStreamPartitionGetsJoinBarrier) {
   iree_arena_block_pool_deinitialize(&block_pool);
 }
 
+TEST(GraphTest, ForkAndJoinSplitPartitionsIntoWorkstreams) {
+  // Capture order of a fork after K2 and a join before K7:
+  //   K1 -> K2 -> K3 -> K4 -> K7 -> K8
+  //          \-> S1 -> S2 -> S3 -/
+  enum { K1, K2, S1, S2, S3, K3, K4, K7, K8, kNodeCount };
+  std::array<GraphNodeStorage, kNodeCount> node_storage;
+  GraphNodeBlockStorage<kNodeCount> node_block(node_storage);
+  for (uint32_t i = 0; i < kNodeCount; ++i) {
+    iree_hal_streaming_graph_node_t* node = node_storage[i].get();
+    node->node_index = i;
+    node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
+  }
+  const std::array<std::pair<int, int>, 9> dependencies = {{
+      {K1, K2},
+      {K2, S1},
+      {S1, S2},
+      {S2, S3},
+      {K2, K3},
+      {K3, K4},
+      {S3, K7},
+      {K4, K7},
+      {K7, K8},
+  }};
+  std::array<iree_hal_streaming_graph_edge_t, dependencies.size()> edges = {};
+  for (size_t i = 0; i < edges.size(); ++i) {
+    edges[i].from = node_storage[dependencies[i].first].get();
+    edges[i].to = node_storage[dependencies[i].second].get();
+    edges[i].next = i + 1 < edges.size() ? &edges[i + 1] : nullptr;
+  }
+
+  iree_arena_block_pool_t block_pool;
+  iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool, &arena);
+  iree_hal_streaming_graph_schedule_t schedule = {};
+  IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
+      node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
+      /*disabled_node_count=*/0, edges.data(), &arena, &schedule));
+
+  ASSERT_EQ(schedule.partition_count, 3u);
+  EXPECT_EQ(schedule.partitions[0].count, 2u);
+  EXPECT_EQ(schedule.partitions[0].stream_count, 1u);
+  EXPECT_EQ(schedule.partitions[1].count, 5u);
+  EXPECT_EQ(schedule.partitions[1].stream_count, 2u);
+  EXPECT_EQ(schedule.partitions[2].count, 2u);
+  EXPECT_EQ(schedule.partitions[2].stream_count, 1u);
+  EXPECT_EQ(schedule.block_count, 4u);
+
+  auto stream_of = [&](int node) {
+    return schedule.sorted_nodes[schedule.node_index_map[node]].stream_id;
+  };
+  // The larger branch stays on stream 0, the launch stream's queue.
+  EXPECT_EQ(stream_of(S1), 0u);
+  EXPECT_EQ(stream_of(S2), 0u);
+  EXPECT_EQ(stream_of(S3), 0u);
+  EXPECT_EQ(stream_of(K3), 1u);
+  EXPECT_EQ(stream_of(K4), 1u);
+
+  iree_arena_deinitialize(&arena);
+  iree_arena_block_pool_deinitialize(&block_pool);
+}
+
 TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
   constexpr size_t kNodeCount = 64;
   std::array<GraphNodeStorage, kNodeCount> node_storage;
@@ -164,9 +227,11 @@ TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
     node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
   }
 
+  // Only the first MAX_WORKSTREAMS independent nodes start workstreams, so the
+  // source must be one of them for its workstream index to be nonzero.
   iree_hal_streaming_graph_edge_t edge = {
       .next = nullptr,
-      .from = node_storage[17].get(),
+      .from = node_storage[3].get(),
       .to = node_storage[0].get(),
   };
 
@@ -179,10 +244,10 @@ TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
       node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
       /*disabled_node_count=*/0, &edge, &arena, &schedule));
 
-  const uint32_t source_index = schedule.node_index_map[17];
+  const uint32_t source_index = schedule.node_index_map[3];
   const uint32_t target_index = schedule.node_index_map[0];
   ASSERT_LT(source_index, target_index);
-  EXPECT_EQ(schedule.sorted_nodes[source_index].node, node_storage[17].get());
+  EXPECT_EQ(schedule.sorted_nodes[source_index].node, node_storage[3].get());
   EXPECT_EQ(schedule.sorted_nodes[target_index].node, node_storage[0].get());
   ASSERT_NE(schedule.sorted_nodes[source_index].stream_id, 0u);
   EXPECT_EQ(schedule.sorted_nodes[source_index].stream_id,

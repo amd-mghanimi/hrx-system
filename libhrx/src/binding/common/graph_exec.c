@@ -142,6 +142,10 @@ typedef struct iree_hal_streaming_graph_block_t {
   uint16_t wait_semaphore_count;
   uint16_t signal_semaphore_count;
 
+  // Workstream of a multi-stream partition this block records, which selects
+  // the hardware queue it executes on. 0 for all other blocks.
+  uint8_t queue_lane;
+
   // Type-specific attributes, stored inline so the compiler supplies the
   // pointer alignment the union requires and the block header ends on that
   // same boundary.
@@ -1144,6 +1148,7 @@ static iree_status_t iree_hal_streaming_graph_block_allocate(
   block->node_count = node_count;
   block->wait_semaphore_count = wait_semaphore_count;
   block->signal_semaphore_count = signal_semaphore_count;
+  block->queue_lane = 0;
 
   iree_hal_streaming_graph_block_get_ptrs(block, out_ptrs);
   *out_block = block;
@@ -1843,20 +1848,43 @@ iree_status_t iree_hal_streaming_graph_exec_instantiate_from_template(
     // Create the internal semaphores that carry values between partitions. The
     // resource set is their sole owner; exec->semaphores are borrowed pointers
     // and anything outliving the executable takes its own reference.
+    //
+    // Semaphores consumed only by device work are device-local so partition
+    // boundaries use agent-scope fences. Host calls and child graphs, which may
+    // contain host calls, must observe device writes and keep system scope.
     iree_status_t status = iree_ok_status();
-    for (uint32_t i = 0; i < exec->semaphore_count && iree_status_is_ok(status);
-         i++) {
-      iree_hal_semaphore_t* semaphore = NULL;
-      status = iree_hal_semaphore_create(
-          exec->context->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, 0ull,
-          IREE_HAL_SEMAPHORE_FLAG_NONE, &semaphore);
-      if (iree_status_is_ok(status)) {
-        status =
-            iree_hal_resource_set_insert(exec->resource_set, 1, &semaphore);
-        iree_hal_semaphore_release(semaphore);
+    uint32_t i = 0;
+    for (iree_host_size_t p = 0;
+         p + 1 < schedule.partition_count && iree_status_is_ok(status); ++p) {
+      const uint32_t partition_semaphore_count =
+          schedule.partitions[p].stream_count > 1
+              ? schedule.partitions[p].stream_count
+              : 1;
+      iree_hal_semaphore_flags_t flags = IREE_HAL_SEMAPHORE_FLAG_NONE;
+      switch (schedule.partitions[p + 1].type) {
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE:
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_DISPATCH:
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_EMPTY:
+          flags = IREE_HAL_SEMAPHORE_FLAG_DEVICE_LOCAL;
+          break;
+        default:
+          break;
       }
-      if (iree_status_is_ok(status)) {
-        exec->semaphores[i] = semaphore;
+      for (uint32_t s = 0;
+           s < partition_semaphore_count && iree_status_is_ok(status);
+           ++s, ++i) {
+        iree_hal_semaphore_t* semaphore = NULL;
+        status = iree_hal_semaphore_create(exec->context->device,
+                                           IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+                                           0ull, flags, &semaphore);
+        if (iree_status_is_ok(status)) {
+          status =
+              iree_hal_resource_set_insert(exec->resource_set, 1, &semaphore);
+          iree_hal_semaphore_release(semaphore);
+        }
+        if (iree_status_is_ok(status)) {
+          exec->semaphores[i] = semaphore;
+        }
       }
     }
     IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, status);
@@ -1921,6 +1949,7 @@ iree_status_t iree_hal_streaming_graph_exec_instantiate_from_template(
                     exec, partition->start_index, partition->count,
                     wait_semaphore_count, block_signal_count,
                     IREE_HAL_QUEUE_EXECUTE_FLAG_NONE, &block, &ptrs));
+        block->queue_lane = s;
 
         // Record nodes for this stream into the command buffer.
         // For single stream (s=0), records all nodes.
@@ -2412,13 +2441,19 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
           bindings_list, /*barriers=*/NULL, ptrs->attrs->dispatch.flags);
       break;
     }
-    case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_EXECUTE:
-      status = iree_hal_queue_execute(stream->queue, wait_semaphores,
+    case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_EXECUTE: {
+      iree_hal_queue_t* execute_queue =
+          stream->context && stream->queue
+              ? iree_hal_streaming_context_select_lane_queue(
+                    stream->context, stream->queue, block->queue_lane)
+              : stream->queue;
+      status = iree_hal_queue_execute(execute_queue, wait_semaphores,
                                       signal_semaphores,
                                       ptrs->attrs->execute.command_buffer,
                                       iree_hal_buffer_binding_table_empty(),
                                       IREE_HAL_QUEUE_EXECUTE_FLAG_NONE);
       break;
+    }
     case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_HOST_CALL:
       ptrs->attrs->host_call.args[0] = (uint64_t)ptrs->attrs->host_call.fn;
       ptrs->attrs->host_call.args[1] =
@@ -2444,11 +2479,11 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
 }
 
 // |launch_stream_tail_value| is the value on |stream|'s timeline that the whole
-// launch waits behind, or 0 when the stream had never submitted. Only block 0
-// carries the launch's external waits, and the extra workstream blocks of the
-// first partition wait on nothing, so a block is behind the tail only when it
-// chains back to block 0. An event record node is never recordable and so gets
-// a partition of its own holding a single block, which either is block 0 or
+// launch waits behind, or 0 when the stream had never submitted. Block 0 and
+// the extra workstream blocks of the first partition carry the launch's
+// external waits, and every later block chains back to them, so every block is
+// behind the tail. An event record node is never recordable and so gets a
+// partition of its own holding a single block, which either is block 0 or
 // waits on every signal of the partition ahead of it, back to block 0.
 static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
     iree_hal_streaming_graph_exec_t* exec, iree_hal_streaming_stream_t* stream,
@@ -2526,9 +2561,14 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
         block->type == IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_EVENT_WAIT;
     const bool block_records_event =
         block->type == IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_EVENT_RECORD;
+    // Workstream blocks of the first partition run on their own queues, so
+    // they cannot rely on queue order to stay behind the launch's waits.
+    const bool block_waits_launch =
+        block_index == 0 ||
+        (block->queue_lane != 0 && block->wait_semaphore_count == 0);
     const iree_host_size_t total_wait_count =
         block->wait_semaphore_count +
-        (block_index == 0 ? external_wait_semaphores.count : 0) +
+        (block_waits_launch ? external_wait_semaphores.count : 0) +
         (block_waits_event ? 1 : 0);
     const iree_host_size_t total_signal_count =
         block->signal_semaphore_count + (block_index == exec->block_count - 1
@@ -2590,7 +2630,7 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
     uint64_t* signal_vals = value_array ? value_array + total_wait_count : NULL;
 
     iree_host_size_t wait_count = 0;
-    if (block_index == 0) {
+    if (block_waits_launch) {
       for (iree_host_size_t i = 0; i < external_wait_semaphores.count; ++i) {
         wait_sems[wait_count] = external_wait_semaphores.semaphores[i];
         wait_vals[wait_count] = external_wait_semaphores.payload_values[i];

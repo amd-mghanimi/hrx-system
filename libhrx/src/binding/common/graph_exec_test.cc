@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 #include <utility>
@@ -505,6 +506,152 @@ TEST_F(GraphExecTest, BatchMemoryNodePreservesResolvedWriteSemantics) {
   EXPECT_EQ(IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_SUCCESS, launch_result);
   IREE_ASSERT_OK(iree_hal_streaming_stream_synchronize(stream_));
   EXPECT_EQ(47u, *reinterpret_cast<uint64_t*>(mapping.contents.data));
+}
+
+TEST_F(GraphExecTest, OrdinaryStreamsRotateAcrossStreamQueues) {
+  ASSERT_GE(context_->stream_queue_count, 1u);
+  EXPECT_EQ(context_->queue, context_->stream_queues[0]);
+
+  // Every slot is visited once per rotation, starting after the slot of the
+  // queue the context's default stream runs on.
+  const iree_host_size_t rotation = context_->stream_queue_count;
+  std::array<iree_hal_queue_t*, IREE_HAL_STREAMING_MAX_STREAM_QUEUE_COUNT>
+      selected = {};
+  for (iree_host_size_t i = 0; i < rotation; ++i) {
+    selected[i] = iree_hal_streaming_context_select_stream_queue(context_);
+    ASSERT_NE(nullptr, selected[i]);
+  }
+  // A slot that could not be acquired shrinks the set and falls back to the
+  // context queue; the queues handed out are always ones the context owns.
+  const iree_host_size_t usable = context_->stream_queue_count;
+  for (iree_host_size_t i = 0; i < rotation; ++i) {
+    bool owned = false;
+    for (iree_host_size_t slot = 0; slot < usable; ++slot) {
+      owned |= selected[i] == context_->stream_queues[slot];
+    }
+    EXPECT_TRUE(owned) << "selection " << i;
+  }
+  if (usable == rotation && rotation > 1) {
+    EXPECT_EQ(context_->stream_queues[1], selected[0]);
+    EXPECT_EQ(context_->queue, selected[rotation - 1]);
+  }
+
+  // Lanes rotate from the base queue's slot; lane 0 is always the base queue.
+  EXPECT_EQ(context_->queue, iree_hal_streaming_context_select_lane_queue(
+                                 context_, context_->queue, /*lane=*/0));
+  if (context_->stream_queue_count > 1) {
+    EXPECT_EQ(context_->stream_queues[1],
+              iree_hal_streaming_context_select_lane_queue(
+                  context_, context_->queue, /*lane=*/1));
+  }
+}
+
+// The extra workstream blocks of a launch's first partition run on queues of
+// their own, so they must wait for earlier stream work explicitly rather than
+// rely on the launching stream's queue order.
+TEST_F(GraphExecTest, MultiStreamLaunchStaysBehindEarlierStreamWork) {
+  static constexpr iree_host_size_t kNodeCount = 40;
+  iree_hal_pool_t* memory_pool = nullptr;
+  iree_hal_buffer_t* buffer = nullptr;
+  iree_hal_buffer_mapping_t mapping = {};
+  hrx_buffer_t owner = nullptr;
+  iree_hal_semaphore_t* hold = nullptr;
+  iree_hal_streaming_graph_t* graph = nullptr;
+  iree_hal_streaming_graph_exec_t* executable = nullptr;
+  ScopeExit release_handles([&] {
+    iree_hal_streaming_graph_exec_release(executable);
+    iree_hal_streaming_graph_release(graph);
+    iree_hal_semaphore_release(hold);
+    if (owner) hrx_buffer_release(owner);
+    if (mapping.contents.data) {
+      IREE_EXPECT_OK(iree_hal_buffer_unmap_range(&mapping));
+    }
+    iree_hal_buffer_release(buffer);
+    iree_hal_pool_release(memory_pool);
+  });
+
+  const hrx_memory_type_t memory_type =
+      HRX_MEMORY_TYPE_HOST_LOCAL | HRX_MEMORY_TYPE_DEVICE_VISIBLE;
+  const iree_device_size_t buffer_size = kNodeCount * sizeof(uint64_t);
+  IREE_ASSERT_OK(hrx_mem_pool_backing_retain_allocation_source(
+      device_entry_.hrx_device, memory_type, HRX_BUFFER_USAGE_DEFAULT,
+      &memory_pool));
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      memory_pool,
+      iree_hal_make_pool_reservation_request(buffer_size,
+                                             /*min_alignment=*/0),
+      iree_infinite_timeout(), &buffer));
+  IREE_ASSERT_OK(iree_hal_buffer_map_range(
+      buffer, IREE_HAL_MAPPING_MODE_PERSISTENT, IREE_HAL_MEMORY_ACCESS_ALL,
+      IREE_HAL_BUFFER_MAP_FLAG_NONE,
+      /*local_byte_offset=*/0, buffer_size, &mapping));
+  ASSERT_NE(mapping.contents.data, nullptr);
+  auto* slots = reinterpret_cast<volatile uint64_t*>(mapping.contents.data);
+  for (iree_host_size_t i = 0; i < kNodeCount; ++i) slots[i] = 0;
+  IREE_ASSERT_OK(hrx_buffer_create_from_hal(
+      buffer, device_entry_.hrx_device, memory_type, buffer_size,
+      mapping.contents.data, &owner));
+
+  // Independent nodes past the partitioner's workstream threshold each start a
+  // workstream of their own, so the single partition spans several blocks.
+  IREE_ASSERT_OK(iree_hal_streaming_graph_create(
+      context_, IREE_HAL_STREAMING_GRAPH_FLAG_NONE, iree_allocator_system(),
+      &graph));
+  for (iree_host_size_t i = 0; i < kNodeCount; ++i) {
+    iree_hal_streaming_value_operation_t operation = {
+        .kind = IREE_HAL_STREAMING_VALUE_OPERATION_STORE,
+        .target_buffer = buffer,
+        .target_offset = i * sizeof(uint64_t),
+    };
+    const iree_hal_atomic_store_params_t store_params = {
+        .value = 100 + i,
+        .flags =
+            IREE_HAL_ATOMIC_FLAG_RELEASE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
+        .width = IREE_HAL_ATOMIC_WIDTH_64,
+        .reserved = {},
+    };
+    operation.params.store = store_params;
+    const uint32_t public_params = 0;
+    const uint64_t public_operation = 0;
+    iree_hal_streaming_graph_node_t* node = nullptr;
+    IREE_ASSERT_OK(iree_hal_streaming_graph_add_batch_mem_op_node(
+        graph, /*dependencies=*/nullptr, /*dependency_count=*/0,
+        &public_params, sizeof(public_params), &public_operation,
+        sizeof(public_operation), &operation, &owner,
+        /*operation_count=*/1, &node));
+  }
+  IREE_ASSERT_OK(iree_hal_streaming_graph_instantiate(
+      graph, IREE_HAL_STREAMING_GRAPH_INSTANTIATE_FLAG_NONE, &executable));
+
+  IREE_ASSERT_OK(iree_hal_semaphore_create(
+      context_->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+      /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_NONE, &hold));
+  uint64_t hold_value = 1;
+  const iree_hal_semaphore_list_t hold_wait = {
+      .count = 1,
+      .semaphores = &hold,
+      .payload_values = &hold_value,
+  };
+  IREE_ASSERT_OK(iree_hal_streaming_stream_wait_semaphores(stream_, hold_wait));
+
+  iree_hal_streaming_graph_exec_launch_result_t launch_result =
+      IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_ERROR;
+  IREE_ASSERT_OK(iree_hal_streaming_graph_exec_launch(executable, stream_,
+                                                      &launch_result));
+  EXPECT_EQ(IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_SUCCESS, launch_result);
+
+  // Give any block that escaped the stream ordering time to run.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  for (iree_host_size_t i = 0; i < kNodeCount; ++i) {
+    EXPECT_EQ(0u, slots[i]) << "node " << i << " ran before earlier work";
+  }
+
+  IREE_ASSERT_OK(iree_hal_semaphore_signal(hold, hold_value,
+                                           /*frontier=*/nullptr));
+  IREE_ASSERT_OK(iree_hal_streaming_stream_synchronize(stream_));
+  for (iree_host_size_t i = 0; i < kNodeCount; ++i) {
+    EXPECT_EQ(100u + i, slots[i]) << "node " << i;
+  }
 }
 
 // A replayed event record ends its event's association with the graph a

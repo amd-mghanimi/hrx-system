@@ -11,10 +11,6 @@
 // Tuning Parameters and Heuristics
 //===----------------------------------------------------------------------===//
 
-// Minimum number of nodes in a partition to consider workstream detection.
-// Smaller partitions don't benefit from the overhead of multiple streams.
-#define IREE_HAL_STREAMING_GRAPH_MIN_PARTITION_SIZE_FOR_STREAMS 16
-
 // Maximum number of nodes in a single partition before forcing a split.
 // Prevents command buffers from growing too large.
 #define IREE_HAL_STREAMING_GRAPH_MAX_PARTITION_SIZE 2048
@@ -23,19 +19,8 @@
 // Hardware typically has limited concurrent execution contexts.
 #define IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS 8
 
-// Minimum nodes per workstream to justify creating separate streams.
-// Each stream has overhead, so ensure sufficient work.
-#define IREE_HAL_STREAMING_GRAPH_MIN_NODES_PER_STREAM 32
-
-// Maximum reachability mask bits for efficient workstream detection.
-// Beyond this, fall back to single stream for simplicity.
-#define IREE_HAL_STREAMING_GRAPH_MAX_REACHABILITY_BITS 64
-
 // Threshold for "small" graphs that use simplified algorithms.
 #define IREE_HAL_STREAMING_GRAPH_SMALL_GRAPH_THRESHOLD 32
-
-// Maximum dependency fan-in before considering a node a synchronization point.
-#define IREE_HAL_STREAMING_GRAPH_MAX_FAN_IN 8
 
 //===----------------------------------------------------------------------===//
 // DAG Scheduling Algorithm Overview
@@ -60,51 +45,55 @@
 // Node types: K=Kernel(recordable), M=Memcpy(recordable),
 // H=Host(non-recordable)
 //
-// After scheduling:
+// After scheduling (K2 fans out, so its partition ends before K3):
 // +-------------------------------------+
-// | Partition 0: RECORDABLE (2 streams) |
-// |  Stream 0: K1 -> K2 -> K3           |
+// | Partition 0: RECORDABLE (1 stream)  |
+// |  Stream 0: K1 -> K2                 |
+// +-------------------------------------+
+// +-------------------------------------+
+// | Partition 1: RECORDABLE (2 streams) |
+// |  Stream 0: K3                       |
 // |  Stream 1: M1                       |
 // +-------------------------------------+
 // +-------------------------------------+
-// | Partition 1: HOST (1 stream)        |
+// | Partition 2: HOST (1 stream)        |
 // |  Stream 0: H1                       |
 // +-------------------------------------+
 // +-------------------------------------+
-// | Partition 2: RECORDABLE (1 stream)  |
+// | Partition 3: RECORDABLE (1 stream)  |
 // |  Stream 0: K4 -> K5                 |
 // +-------------------------------------+
 //
 // Efficiency: O(N + E) where N=6 nodes, E=6 edges
-// Memory: 6 * 24 bytes (sort nodes) + 3 * 16 bytes (partitions) = 192 bytes
+// Memory: 6 * 24 bytes (sort nodes) + 4 * 16 bytes (partitions) = 208 bytes
 //
-// Example 2: Multiple Concurrent Streams
-// =======================================
-// Input DAG:
-//   K1 ---> K2 ---> K5 ---> H1 ---> K9
-//    |               \              ^
-//    +--> M1 --> M2 --> K6 ---------+
-//    |                              |
-//    +--> K3 --> K4 --> K7 --> K8 --+
+// Example 2: Fork and Join in a Stream-Captured Graph
+// ===================================================
+// Input DAG (a side stream forks after K2 and joins before K7):
+//   K1 ---> K2 ---> K3 ---> K4 ---------> K7 ---> K8
+//            \                          ^
+//             +--> S1 --> S2 --> S3 ---+
 //
 // After scheduling:
 // +-------------------------------------+
-// | Partition 0: RECORDABLE (3 streams) |
-// |  Stream 0: K1 -> K2 -> K5 -> K6     |
-// |  Stream 1: M1 -> M2                 |
-// |  Stream 2: K3 -> K4 -> K7 -> K8     |
+// | Partition 0: RECORDABLE (1 stream)  |
+// |  Stream 0: K1 -> K2                 |
 // +-------------------------------------+
 // +-------------------------------------+
-// | Partition 1: HOST (1 stream)        |
-// |  Stream 0: H1                       |
+// | Partition 1: RECORDABLE (2 streams) |
+// |  Stream 0: S1 -> S2 -> S3           |
+// |  Stream 1: K3 -> K4                 |
 // +-------------------------------------+
 // +-------------------------------------+
 // | Partition 2: RECORDABLE (1 stream)  |
-// |  Stream 0: K9                       |
+// |  Stream 0: K7 -> K8                 |
 // +-------------------------------------+
 //
-// Efficiency: O(N + E) where N=10 nodes, E=11 edges
-// Memory: 10 * 24 bytes (sort nodes) + 3 * 16 bytes (partitions) = 288 bytes
+// The larger workstream takes stream 0, which runs on the launch stream's
+// queue; the other runs on a separate hardware queue.
+//
+// Efficiency: O(N + E) where N=9 nodes, E=9 edges
+// Memory: 9 * 24 bytes (sort nodes) + 3 * 16 bytes (partitions) = 264 bytes
 //
 // Performance characteristics:
 // - Time Complexity: O(N + E) for all phases
@@ -404,14 +393,6 @@ static iree_status_t iree_hal_streaming_graph_topological_sort(
 // Phase 3: Partitioning with Workstream Detection
 //===----------------------------------------------------------------------===//
 
-// State for tracking independent workstreams during partitioning.
-typedef struct iree_hal_streaming_graph_stream_state_t {
-  // Nodes reachable in this stream.
-  uint64_t reachability_mask;
-  // Last node added to stream.
-  uint32_t last_node_index;
-} iree_hal_streaming_graph_stream_state_t;
-
 // One incoming dependency added after node creation, indexed by its dependent
 // node. Source indices refer to the final topological order.
 typedef struct iree_hal_streaming_graph_additional_dependency_t {
@@ -517,22 +498,58 @@ static bool iree_hal_streaming_graph_node_can_record(
          !sort_node->node->attrs.kernel.cooperative;
 }
 
+// Counts the active successors of each sorted node, saturating at UINT8_MAX.
+// Partitioning only needs to know whether a node fans out.
+static void iree_hal_streaming_graph_count_successors(
+    const iree_hal_streaming_graph_sort_node_t* nodes, uint32_t node_count,
+    const uint32_t* node_index_map, iree_host_size_t node_index_map_count,
+    const iree_hal_streaming_graph_additional_dependency_index_t*
+        additional_dependency_index,
+    uint8_t* out_successor_counts) {
+  memset(out_successor_counts, 0, node_count * sizeof(*out_successor_counts));
+  for (uint32_t i = 0; i < node_count; ++i) {
+    for (uint32_t j = 0; j < nodes[i].node->dependency_count; ++j) {
+      const uint32_t dep_index = iree_hal_streaming_graph_node_map_lookup(
+          node_index_map, node_index_map_count, nodes[i].node->dependencies[j]);
+      if (dep_index < node_count && out_successor_counts[dep_index] != 0xFF) {
+        ++out_successor_counts[dep_index];
+      }
+    }
+    if (!additional_dependency_index->incoming_heads) continue;
+    for (uint32_t dependency_index =
+             additional_dependency_index->incoming_heads[i];
+         dependency_index != UINT32_MAX;
+         dependency_index =
+             additional_dependency_index->dependencies[dependency_index]
+                 .next_index) {
+      const uint32_t dep_index =
+          additional_dependency_index->dependencies[dependency_index]
+              .source_index;
+      if (out_successor_counts[dep_index] != 0xFF) {
+        ++out_successor_counts[dep_index];
+      }
+    }
+  }
+}
+
 // Partitions sorted nodes into executable blocks and detects independent
 // workstreams within recordable partitions.
 //
 // Algorithm:
-// 1. Scan for recordable vs non-recordable boundaries
-// 2. Within recordable sections, detect independent workstreams
-// 3. Track reachability masks to determine stream assignment
-// 4. Merge streams when convergence detected
+// 1. Scan for recordable vs non-recordable boundaries.
+// 2. Within a recordable section, a node without dependencies in the current
+//    partition starts a new workstream and a node depending on one workstream
+//    extends it.
+// 3. A partition ends before a node that joins several workstreams and before
+//    a node whose in-partition dependency fans out. The branches of a fork
+//    then have no dependencies in the next partition and each start their own
+//    workstream, while every block of a partition waits on all blocks of the
+//    previous partition.
 //
 // Tuning heuristics:
-// - Partitions < MIN_PARTITION_SIZE_FOR_STREAMS (~16) use single stream
 // - Partitions limited to MAX_PARTITION_SIZE (~2048) nodes
-// - Maximum MAX_WORKSTREAMS (~8) concurrent streams per partition
-// - New streams require MIN_NODES_PER_STREAM (~32) nodes
-// - Reachability analysis limited to MAX_REACHABILITY_BITS (64) nodes
-// - High fan-in (> MAX_FAN_IN=~8) forces stream convergence
+// - Maximum MAX_WORKSTREAMS (~8) concurrent streams per partition; further
+//   independent nodes share stream 0
 //
 // Complexity: O(N + E) with up to MAX_WORKSTREAMS workstreams per partition
 //
@@ -542,13 +559,10 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
     uint32_t* node_index_map, iree_host_size_t node_index_map_count,
     const iree_hal_streaming_graph_additional_dependency_index_t*
         additional_dependency_index,
+    const uint8_t* successor_counts,
     iree_hal_streaming_graph_partition_t* partitions) {
   uint32_t partition_count = 0;
   uint32_t block_count = 0;
-
-  // State for tracking independent workstreams.
-  iree_hal_streaming_graph_stream_state_t
-      streams[IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS];
   uint8_t active_streams = 0;
 
   for (uint32_t i = 0; i < node_count;) {
@@ -589,7 +603,6 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
     } else {
       // Start recordable partition.
       uint32_t recordable_start = i;
-      memset(streams, 0, sizeof(streams));
       active_streams = 0;
 
       // Extend partition with compatible nodes up to size limit.
@@ -620,31 +633,18 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
           break;  // End this partition.
         }
 
-        // Only perform workstream detection for sufficiently large partitions.
-        const bool use_workstreams =
-            (i - recordable_start) >=
-            IREE_HAL_STREAMING_GRAPH_MIN_PARTITION_SIZE_FOR_STREAMS;
-
-        // Determine which stream this node belongs to.
-        uint8_t assigned_stream = 0;
-        uint8_t connected_streams = 0;
-        uint32_t effective_dependency_count = nodes[i].node->dependency_count;
-        bool is_sync_point = nodes[i].node->dependency_count >
-                             IREE_HAL_STREAMING_GRAPH_MAX_FAN_IN;
-
-        // Check dependencies within this partition.
+        // Collect the workstreams this node depends on within the partition.
+        uint32_t connected_streams = 0;
+        bool depends_on_fork = false;
         for (uint32_t j = 0; j < nodes[i].node->dependency_count; ++j) {
-          // Use the mapping for O(1) lookup.
-          uint32_t dep_index = iree_hal_streaming_graph_node_map_lookup(
+          const uint32_t dep_index = iree_hal_streaming_graph_node_map_lookup(
               node_index_map, node_index_map_count,
               nodes[i].node->dependencies[j]);
           if (dep_index >= recordable_start && dep_index < i) {
-            // Dependency is within this partition.
-            uint8_t dep_stream = nodes[dep_index].stream_id;
-            connected_streams |= (1 << dep_stream);
+            connected_streams |= 1u << nodes[dep_index].stream_id;
+            depends_on_fork |= successor_counts[dep_index] > 1;
           }
         }
-
         if (additional_dependency_index->incoming_heads) {
           for (uint32_t dependency_index =
                    additional_dependency_index->incoming_heads[i];
@@ -655,75 +655,54 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
             const uint32_t dep_index =
                 additional_dependency_index->dependencies[dependency_index]
                     .source_index;
-            if (!is_sync_point) {
-              is_sync_point = ++effective_dependency_count >
-                              IREE_HAL_STREAMING_GRAPH_MAX_FAN_IN;
-            }
             if (dep_index >= recordable_start && dep_index < i) {
-              const uint8_t dep_stream = nodes[dep_index].stream_id;
-              connected_streams |= (1 << dep_stream);
+              connected_streams |= 1u << nodes[dep_index].stream_id;
+              depends_on_fork |= successor_counts[dep_index] > 1;
             }
           }
         }
+        if (depends_on_fork ||
+            iree_math_count_ones_u32(connected_streams) > 1) {
+          break;  // End this partition at the fork or join.
+        }
 
-        if (use_workstreams && connected_streams == 0 &&
-            active_streams < IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS) {
-          // Check if enough nodes remain to justify a new stream.
-          uint32_t remaining_in_partition =
-              IREE_HAL_STREAMING_GRAPH_MAX_PARTITION_SIZE - partition_size;
-          if (remaining_in_partition >=
-              IREE_HAL_STREAMING_GRAPH_MIN_NODES_PER_STREAM) {
-            // No dependencies - new independent stream!
-            assigned_stream = active_streams++;
-            streams[assigned_stream].last_node_index = i;
-            if ((i - recordable_start) <
-                IREE_HAL_STREAMING_GRAPH_MAX_REACHABILITY_BITS) {
-              streams[assigned_stream].reachability_mask =
-                  1ULL << (i - recordable_start);
-            }
-          } else {
-            // Not enough nodes - use stream 0.
-            assigned_stream = 0;
-            if (active_streams == 0) {
-              active_streams = 1;
-            }
-          }
-        } else if (use_workstreams &&
-                   iree_math_count_ones_u32(connected_streams) == 1) {
-          // Depends on single stream.
+        uint8_t assigned_stream = 0;
+        if (connected_streams != 0) {
           assigned_stream =
-              iree_math_count_trailing_zeros_u32(connected_streams);
-          streams[assigned_stream].last_node_index = i;
-          if ((i - recordable_start) <
-              IREE_HAL_STREAMING_GRAPH_MAX_REACHABILITY_BITS) {
-            streams[assigned_stream].reachability_mask |=
-                1ULL << (i - recordable_start);
-          }
-        } else {
-          // Either: no workstreams, multiple dependencies, or merge point.
-          const uint32_t dep_count =
-              iree_math_count_ones_u32(connected_streams);
-          // Check for a high fan-in synchronization point.
-          if (!use_workstreams || dep_count > 1 || is_sync_point) {
-            // Collapse to single stream.
-            assigned_stream = 0;
-            for (uint32_t k = recordable_start; k < i; ++k) {
-              nodes[k].stream_id = 0;  // Reset all to stream 0.
-            }
-            active_streams = 1;
-          } else {
-            // Single dependency or first node - use stream 0.
-            assigned_stream = 0;
-            if (active_streams == 0) {
-              active_streams = 1;
-            }
-          }
+              (uint8_t)iree_math_count_trailing_zeros_u32(connected_streams);
+        } else if (active_streams < IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS) {
+          assigned_stream = active_streams++;
         }
 
         nodes[i].partition_id = partition_count;
         nodes[i].stream_id = assigned_stream;
         ++i;
         ++partition_size;
+      }
+
+      // Stream 0 executes on the launch stream's queue, where partition
+      // boundaries are cheaper than cross-queue waits. Give it the largest
+      // workstream, the one most likely to be on the critical path.
+      if (active_streams > 1) {
+        uint32_t stream_sizes[IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS] = {0};
+        for (uint32_t k = recordable_start; k < i; ++k) {
+          ++stream_sizes[nodes[k].stream_id];
+        }
+        uint8_t largest_stream = 0;
+        for (uint8_t s = 1; s < active_streams; ++s) {
+          if (stream_sizes[s] > stream_sizes[largest_stream]) {
+            largest_stream = s;
+          }
+        }
+        if (largest_stream != 0) {
+          for (uint32_t k = recordable_start; k < i; ++k) {
+            if (nodes[k].stream_id == 0) {
+              nodes[k].stream_id = largest_stream;
+            } else if (nodes[k].stream_id == largest_stream) {
+              nodes[k].stream_id = 0;
+            }
+          }
+        }
       }
 
       const uint32_t stream_count = active_streams > 0 ? active_streams : 1;
@@ -883,11 +862,22 @@ iree_status_t iree_hal_streaming_graph_schedule_nodes(
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_arena_allocate(arena, partitions_size, (void**)&partitions));
 
+  uint8_t* successor_counts = NULL;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_arena_allocate(arena,
+                              prepare_result.active_node_count *
+                                  sizeof(*successor_counts),
+                              (void**)&successor_counts));
+  iree_hal_streaming_graph_count_successors(
+      sorted_nodes, prepare_result.active_node_count, node_index_map,
+      node_index_map_count, &additional_dependency_index, successor_counts);
+
   // Phase 3: Partition - group into executable blocks.
   const iree_uint32x2_t partition_block_counts =
       iree_hal_streaming_graph_partition_with_streams(
           sorted_nodes, prepare_result.active_node_count, node_index_map,
-          node_index_map_count, &additional_dependency_index, partitions);
+          node_index_map_count, &additional_dependency_index, successor_counts,
+          partitions);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, partition_block_counts.values[0]);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, partition_block_counts.values[1]);
 

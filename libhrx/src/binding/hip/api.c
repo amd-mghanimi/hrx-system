@@ -12701,7 +12701,8 @@ HIPAPI hipError_t hipStreamCreate(hipStream_t* stream) {
   }
 
   iree_status_t status = iree_hip_stream_create(
-      context, context->queue, hipStreamDefault,
+      context, iree_hal_streaming_context_select_stream_queue(context),
+      hipStreamDefault,
       /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
 
   hipError_t result = iree_status_to_hip_result(status);
@@ -12770,7 +12771,7 @@ HIPAPI hipError_t hipStreamCreateWithFlags(hipStream_t* stream,
   }
 
   iree_status_t status = iree_hip_stream_create(
-      context, context->queue, flags,
+      context, iree_hal_streaming_context_select_stream_queue(context), flags,
       /*priority=*/0, iree_hal_semaphore_list_empty(), stream);
 
   hipError_t result = iree_status_to_hip_result(status);
@@ -12848,9 +12849,11 @@ HIPAPI hipError_t hipStreamCreateWithPriority(hipStream_t* stream,
       iree_hip_queue_family_select_priority(
           iree_hal_queue_family(context->queue), priority, &hip_priority);
   iree_hal_queue_t* acquired_queue = NULL;
-  iree_hal_queue_t* queue = context->queue;
+  iree_hal_queue_t* queue = NULL;
   iree_status_t status = iree_ok_status();
-  if (queue_priority != IREE_HAL_QUEUE_PRIORITY_NORMAL) {
+  if (queue_priority == IREE_HAL_QUEUE_PRIORITY_NORMAL) {
+    queue = iree_hal_streaming_context_select_stream_queue(context);
+  } else {
     iree_hal_queue_params_t queue_params;
     iree_hal_queue_params_initialize(&queue_params);
     queue_params.priority = queue_priority;

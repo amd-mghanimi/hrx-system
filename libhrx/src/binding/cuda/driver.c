@@ -2750,8 +2750,9 @@ CUDAAPI CUresult cuStreamCreateWithFlags(CUstream* phStream,
 
   iree_hal_streaming_stream_t* stream = NULL;
   iree_status_t status = iree_hal_streaming_stream_create(
-      context, context->queue, iree_cuda_stream_flags_to_internal(flags), 0,
-      iree_allocator_system(), &stream);
+      context, iree_hal_streaming_context_select_stream_queue(context),
+      iree_cuda_stream_flags_to_internal(flags), 0, iree_allocator_system(),
+      &stream);
 
   if (iree_status_is_ok(status)) {
     *phStream = (CUstream)stream;
@@ -2780,8 +2781,9 @@ CUDAAPI CUresult cuStreamCreate(CUstream* phStream, unsigned int Flags) {
 
   iree_hal_streaming_stream_t* stream = NULL;
   iree_status_t status = iree_hal_streaming_stream_create(
-      context, context->queue, iree_cuda_stream_flags_to_internal(Flags), 0,
-      context->host_allocator, &stream);
+      context, iree_hal_streaming_context_select_stream_queue(context),
+      iree_cuda_stream_flags_to_internal(Flags), 0, context->host_allocator,
+      &stream);
 
   if (iree_status_is_ok(status)) {
     *phStream = (CUstream)stream;
@@ -2808,8 +2810,9 @@ CUDAAPI CUresult cuStreamCreateWithPriority(CUstream* phStream,
 
   iree_hal_streaming_stream_t* stream = NULL;
   iree_status_t status = iree_hal_streaming_stream_create(
-      context, context->queue, iree_cuda_stream_flags_to_internal(flags),
-      priority, context->host_allocator, &stream);
+      context, iree_hal_streaming_context_select_stream_queue(context),
+      iree_cuda_stream_flags_to_internal(flags), priority,
+      context->host_allocator, &stream);
 
   if (iree_status_is_ok(status)) {
     *phStream = (CUstream)stream;
