@@ -562,12 +562,23 @@ void iree_hal_streaming_context_release(iree_hal_streaming_context_t* context) {
   }
 }
 
-// Returns the queue in |slot|, acquiring it on first use, or NULL when it
-// cannot be acquired.
+// Returns the queue in |slot|, resolving it on first use, or NULL when it
+// cannot be acquired. Slots prefer the device's provisioned queues: only those
+// publish their epoch signals, so waits between them resolve on the device
+// instead of through host deferral.
 static iree_hal_queue_t* iree_hal_streaming_context_stream_queue_slot_locked(
     iree_hal_streaming_context_t* context, iree_host_size_t slot) {
   if (context->stream_queues[slot]) {
     return context->stream_queues[slot];
+  }
+  iree_hal_queue_t* provisioned_queue = iree_hal_device_queue(
+      context->device,
+      iree_hal_queue_family_ordinal(iree_hal_queue_family(context->queue)),
+      (iree_hal_queue_ordinal_t)slot);
+  if (provisioned_queue) {
+    iree_hal_queue_retain(provisioned_queue);
+    context->stream_queues[slot] = provisioned_queue;
+    return provisioned_queue;
   }
   iree_hal_queue_params_t queue_params;
   iree_hal_queue_params_initialize(&queue_params);

@@ -1848,20 +1848,43 @@ iree_status_t iree_hal_streaming_graph_exec_instantiate_from_template(
     // Create the internal semaphores that carry values between partitions. The
     // resource set is their sole owner; exec->semaphores are borrowed pointers
     // and anything outliving the executable takes its own reference.
+    //
+    // Semaphores consumed only by device work are device-local so partition
+    // boundaries use agent-scope fences. Host calls and child graphs, which may
+    // contain host calls, must observe device writes and keep system scope.
     iree_status_t status = iree_ok_status();
-    for (uint32_t i = 0; i < exec->semaphore_count && iree_status_is_ok(status);
-         i++) {
-      iree_hal_semaphore_t* semaphore = NULL;
-      status = iree_hal_semaphore_create(
-          exec->context->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, 0ull,
-          IREE_HAL_SEMAPHORE_FLAG_NONE, &semaphore);
-      if (iree_status_is_ok(status)) {
-        status =
-            iree_hal_resource_set_insert(exec->resource_set, 1, &semaphore);
-        iree_hal_semaphore_release(semaphore);
+    uint32_t i = 0;
+    for (iree_host_size_t p = 0;
+         p + 1 < schedule.partition_count && iree_status_is_ok(status); ++p) {
+      const uint32_t partition_semaphore_count =
+          schedule.partitions[p].stream_count > 1
+              ? schedule.partitions[p].stream_count
+              : 1;
+      iree_hal_semaphore_flags_t flags = IREE_HAL_SEMAPHORE_FLAG_NONE;
+      switch (schedule.partitions[p + 1].type) {
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE:
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_DISPATCH:
+        case IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_EMPTY:
+          flags = IREE_HAL_SEMAPHORE_FLAG_DEVICE_LOCAL;
+          break;
+        default:
+          break;
       }
-      if (iree_status_is_ok(status)) {
-        exec->semaphores[i] = semaphore;
+      for (uint32_t s = 0;
+           s < partition_semaphore_count && iree_status_is_ok(status);
+           ++s, ++i) {
+        iree_hal_semaphore_t* semaphore = NULL;
+        status = iree_hal_semaphore_create(exec->context->device,
+                                           IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+                                           0ull, flags, &semaphore);
+        if (iree_status_is_ok(status)) {
+          status =
+              iree_hal_resource_set_insert(exec->resource_set, 1, &semaphore);
+          iree_hal_semaphore_release(semaphore);
+        }
+        if (iree_status_is_ok(status)) {
+          exec->semaphores[i] = semaphore;
+        }
       }
     }
     IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, status);

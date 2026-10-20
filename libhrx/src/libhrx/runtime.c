@@ -556,6 +556,17 @@ static const char* hrx_get_gpu_driver_name(void) {
   return (value && value[0]) ? value : "amdgpu";
 }
 
+// Matches the HIP runtime's default GPU_MAX_HW_QUEUES. Only provisioned queues
+// resolve cross-queue waits on the device, so independent streams need them.
+#define HRX_DEFAULT_GPU_QUEUE_COUNT "4"
+
+static iree_string_view_t hrx_get_gpu_queue_count(void) {
+  const char* value = getenv("HRX_GPU_QUEUE_COUNT");
+  return iree_make_cstring_view((value && value[0])
+                                    ? value
+                                    : HRX_DEFAULT_GPU_QUEUE_COUNT);
+}
+
 static bool hrx_getenv_enabled(const char* name) {
   const char* value = getenv(name);
   return value && value[0] && strcmp(value, "0") != 0;
@@ -1017,6 +1028,9 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
   iree_host_size_t device_info_indices[IREE_HAL_TOPOLOGY_MAX_DEVICE_COUNT] = {
       0};
   int created_device_count = 0;
+  const iree_string_pair_t device_params[] = {
+      {.key = IREE_SV("queue_count"), .value = hrx_get_gpu_queue_count()},
+  };
   for (iree_host_size_t info_index = 0;
        info_index < device_info_count && iree_status_is_ok(iree_status);
        ++info_index) {
@@ -1025,8 +1039,8 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
     }
 
     iree_status = iree_hal_driver_create_device_by_ordinal(
-        driver, IREE_SV("amdgpu"), info_index, /*param_count=*/0,
-        /*params=*/NULL, &create_params, alloc,
+        driver, IREE_SV("amdgpu"), info_index, IREE_ARRAYSIZE(device_params),
+        device_params, &create_params, alloc,
         &hal_devices[created_device_count]);
     hrx_debug_print_iree_status("create device by ordinal", iree_status);
     if (iree_status_is_ok(iree_status)) {
