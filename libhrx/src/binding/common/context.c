@@ -96,6 +96,8 @@ iree_status_t iree_hal_streaming_context_create(
   context->pending_free_head = NULL;
   context->pageable_h2d_staging_buffer = NULL;
   context->pageable_h2d_staging_size = 0;
+  context->pageable_d2h_staging_buffer = NULL;
+  context->pageable_d2h_staging_size = 0;
   iree_atomic_store(&context->capture_stream_count, 0,
                     iree_memory_order_relaxed);
   context->host_allocator = host_allocator;

@@ -133,6 +133,11 @@ struct iree_hal_streaming_context_t {
   iree_hal_streaming_buffer_t* pageable_h2d_staging_buffer;
   iree_device_size_t pageable_h2d_staging_size;
 
+  // Cached host-visible staging buffer for pageable D2H transfers.
+  // Guarded by |mutex| and released during context destruction.
+  iree_hal_streaming_buffer_t* pageable_d2h_staging_buffer;
+  iree_device_size_t pageable_d2h_staging_size;
+
   // Number of streams in this context with capture state other than NONE.
   iree_atomic_int32_t capture_stream_count;
   // Coordinates capture-state transitions with operations whose stream

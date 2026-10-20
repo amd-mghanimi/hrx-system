@@ -646,6 +646,13 @@ void iree_hal_streaming_memory_release_pageable_staging(
     hrx_buffer_table_remove(&context->buffer_table, buffer->device_ptr);
     iree_hal_streaming_buffer_free(buffer);
   }
+  if (context->pageable_d2h_staging_buffer) {
+    iree_hal_streaming_buffer_t* buffer = context->pageable_d2h_staging_buffer;
+    context->pageable_d2h_staging_buffer = NULL;
+    context->pageable_d2h_staging_size = 0;
+    hrx_buffer_table_remove(&context->buffer_table, buffer->device_ptr);
+    iree_hal_streaming_buffer_free(buffer);
+  }
 }
 
 static iree_status_t iree_hal_streaming_buffer_ref_validate_range(
@@ -2764,6 +2771,40 @@ static iree_status_t iree_hal_streaming_context_ensure_pageable_h2d_staging(
   return iree_ok_status();
 }
 
+static iree_status_t iree_hal_streaming_context_ensure_pageable_d2h_staging(
+    iree_hal_streaming_context_t* context, iree_device_size_t size,
+    iree_hal_streaming_buffer_t** out_staging) {
+  IREE_ASSERT_ARGUMENT(context);
+  IREE_ASSERT_ARGUMENT(out_staging);
+  *out_staging = NULL;
+
+  if (context->pageable_d2h_staging_buffer &&
+      context->pageable_d2h_staging_size >= size) {
+    *out_staging = context->pageable_d2h_staging_buffer;
+    return iree_ok_status();
+  }
+
+  if (context->pageable_d2h_staging_buffer) {
+    iree_hal_streaming_buffer_t* old = context->pageable_d2h_staging_buffer;
+    context->pageable_d2h_staging_buffer = NULL;
+    context->pageable_d2h_staging_size = 0;
+    hrx_buffer_table_remove(&context->buffer_table, old->device_ptr);
+    iree_hal_streaming_buffer_free(old);
+  }
+
+  iree_hal_streaming_buffer_t* staging = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_streaming_memory_allocate_host_with_context_mode(
+          context, size, IREE_HAL_STREAMING_HOST_REGISTER_FLAG_DEFAULT,
+          IREE_HAL_BUFFER_USAGE_TRANSFER,
+          /*min_alignment=*/64, IREE_HAL_STREAMING_BUFFER_CONTEXT_BORROWED,
+          &staging));
+  context->pageable_d2h_staging_buffer = staging;
+  context->pageable_d2h_staging_size = size;
+  *out_staging = staging;
+  return iree_ok_status();
+}
+
 iree_status_t iree_hal_streaming_memory_free_host(
     iree_hal_streaming_context_t* context, void* ptr) {
   if (!ptr) {
@@ -3762,7 +3803,8 @@ iree_status_t iree_hal_streaming_memcpy_device_to_host(
     iree_hal_streaming_buffer_ref_t dst_ref;
     iree_status_t dst_status = iree_hal_streaming_memory_lookup(
         context, (iree_hal_streaming_deviceptr_t)dst, &dst_ref);
-    if (iree_status_is_ok(dst_status)) {
+    const bool dst_registered = iree_status_is_ok(dst_status);
+    if (dst_registered) {
       if (!(dst_ref.buffer->memory_type & IREE_HAL_MEMORY_TYPE_HOST_LOCAL)) {
         IREE_TRACE_ZONE_END(z0);
         return iree_make_status(
@@ -3771,6 +3813,46 @@ iree_status_t iree_hal_streaming_memcpy_device_to_host(
       }
     } else {
       iree_status_ignore(dst_status);
+    }
+
+    // HRX-allocated pinned memory is the same allocation type as the staging
+    // buffer below, so the queue can write it directly.
+    if (dst_registered && dst_ref.buffer->buffer &&
+        !dst_ref.buffer->imported_host_allocation) {
+      iree_status_t status =
+          iree_hal_streaming_buffer_ref_validate_range(&dst_ref, size);
+      if (iree_status_is_ok(status)) {
+        status = iree_hal_streaming_enqueue_buffer_copy(stream, src_ref,
+                                                        dst_ref, size);
+      }
+      IREE_TRACE_ZONE_END(z0);
+      return status;
+    }
+    // Pageable D2H is host-synchronous, so reuse one staging buffer instead of
+    // allocating per copy and publishing through a host call.
+    if (!dst_registered) {
+      iree_slim_mutex_lock(&context->mutex);
+      iree_hal_streaming_buffer_t* staging = NULL;
+      iree_status_t status =
+          iree_hal_streaming_context_ensure_pageable_d2h_staging(context, size,
+                                                                 &staging);
+      if (iree_status_is_ok(status)) {
+        iree_hal_streaming_buffer_ref_t staging_ref = {
+            .buffer = staging,
+            .offset = 0,
+        };
+        status = iree_hal_streaming_enqueue_buffer_copy(stream, src_ref,
+                                                        staging_ref, size);
+      }
+      if (iree_status_is_ok(status)) {
+        status = iree_hal_streaming_stream_synchronize(stream);
+      }
+      if (iree_status_is_ok(status)) {
+        memcpy(dst, staging->host_ptr, size);
+      }
+      iree_slim_mutex_unlock(&context->mutex);
+      IREE_TRACE_ZONE_END(z0);
+      return status;
     }
 
     // Host allocations do not necessarily provide the system-scope visibility
