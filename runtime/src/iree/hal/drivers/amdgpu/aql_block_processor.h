@@ -133,6 +133,37 @@ iree_status_t iree_hal_amdgpu_aql_block_processor_invoke(
     const iree_hal_amdgpu_command_buffer_block_header_t* block,
     iree_hal_amdgpu_aql_block_processor_result_t* out_result);
 
+//===----------------------------------------------------------------------===//
+// Interior agent-acquire elision (HRX_ELIDE_ACQUIRE)
+//===----------------------------------------------------------------------===//
+
+// On gfx94x/gfx950 an agent-scope acquire invalidates L2 lines mapped
+// MTYPE_NC. The amdgpu driver maps local VRAM as amdgpu.mtype_local (RW by
+// default) and everything else that is neither uncached nor extended-coherent
+// (peer VRAM, other memory partitions, and on gfx950 system memory) as NC. An
+// interior packet of an in-order submission follows its predecessor's agent
+// release, so its agent acquire is redundant unless another agent can write NC
+// memory that this agent may have cached between the two packets.
+typedef enum iree_hal_amdgpu_acquire_elision_mode_e {
+  // Every recorded acquire is emitted.
+  IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_OFF = 0,
+  // Interior agent acquires are elided until the process gains a foreign
+  // writer (peer access or an IPC import) or local VRAM is not mapped RW.
+  IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_PROCESS = 1,
+  // Interior agent acquires are elided regardless of foreign writers. Callers
+  // must record a system-scope acquire on every dispatch that can observe
+  // foreign NC writes; system-scope acquires are never elided.
+  IREE_HAL_AMDGPU_ACQUIRE_ELISION_MODE_DISPATCH = 2,
+} iree_hal_amdgpu_acquire_elision_mode_t;
+
+// Returns the process-wide mode selected by HRX_ELIDE_ACQUIRE.
+iree_hal_amdgpu_acquire_elision_mode_t iree_hal_amdgpu_acquire_elision_mode(
+    void);
+
+// Records that another agent may now write memory this process maps NC.
+// Permanently disables PROCESS-mode elision. |reason| must be a literal.
+void iree_hal_amdgpu_acquire_elision_note_foreign_writer(const char* reason);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

@@ -16,6 +16,10 @@
 #include "common/stream_value.h"
 #include "libhrx/src/libhrx/mem_pool_backing.h"
 
+// Defined by the AMDGPU HAL driver when it is linked (aql_block_processor.h).
+__attribute__((weak)) void iree_hal_amdgpu_acquire_elision_note_foreign_writer(
+    const char* reason);
+
 //===----------------------------------------------------------------------===//
 // Global state
 //===----------------------------------------------------------------------===//
@@ -633,6 +637,9 @@ iree_status_t iree_hal_streaming_context_enable_peer_access(
   context->peer_contexts[context->peer_count++] = peer_context;
 
   iree_slim_mutex_unlock(&context->mutex);
+  if (iree_hal_amdgpu_acquire_elision_note_foreign_writer) {
+    iree_hal_amdgpu_acquire_elision_note_foreign_writer("peer access");
+  }
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
 }
