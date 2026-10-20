@@ -107,8 +107,9 @@ iree_hip_error_state_token_t iree_hip_error_state_begin(void) {
   return token;
 }
 
-hipError_t iree_hip_error_state_publish(iree_hip_error_state_token_t token,
-                                        hipError_t result) {
+static hipError_t iree_hip_error_state_publish_impl(
+    iree_hip_error_state_token_t token, hipError_t result,
+    bool update_last_error) {
   if (iree_hip_error_state_publish_hook) {
     iree_hip_error_state_publish_hook(
         &result, iree_hip_error_state_publish_hook_user_data);
@@ -147,10 +148,23 @@ hipError_t iree_hip_error_state_publish(iree_hip_error_state_token_t token,
     result = fatal_result;
   }
   iree_hip_thread_error_state.last_command_error = result;
-  if (result != hipSuccess && result != hipErrorNotReady) {
+  if ((update_last_error || fatal_result != hipSuccess) &&
+      result != hipSuccess && result != hipErrorNotReady) {
     iree_hip_thread_error_state.last_error = result;
   }
   return result;
+}
+
+hipError_t iree_hip_error_state_publish(iree_hip_error_state_token_t token,
+                                        hipError_t result) {
+  return iree_hip_error_state_publish_impl(token, result,
+                                           /*update_last_error=*/true);
+}
+
+hipError_t iree_hip_error_state_publish_command(
+    iree_hip_error_state_token_t token, hipError_t result) {
+  return iree_hip_error_state_publish_impl(token, result,
+                                           /*update_last_error=*/false);
 }
 
 hipError_t iree_hip_error_state_get_and_clear_last_error(void) {

@@ -161,6 +161,7 @@ iree_cc_library(
     iree::base::threading
     iree::hal
     iree::hal::utils::resource_set
+    iree::hal::utils::statistics_sink
     iree::io::file_handle
     iree::third_party::zstd
     libhrx::src::libhrx::hrx_static

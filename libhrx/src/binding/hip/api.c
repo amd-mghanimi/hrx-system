@@ -17,11 +17,13 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __linux__
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -1281,7 +1283,10 @@ static void iree_hip_context_release_stream_snapshot(
   iree_allocator_free(context->host_allocator, streams);
 }
 
-static hipError_t iree_hip_context_has_visible_capture(
+// Only blocking streams synchronize with the legacy stream, so only a blocking
+// capturer makes a legacy-stream query an implicit capture dependency.
+// Non-blocking capturers leave the legacy stream reporting None.
+static hipError_t iree_hip_context_has_visible_blocking_capture(
     iree_hal_streaming_context_t* context, bool* out_has_visible_capture) {
   IREE_ASSERT_ARGUMENT(context);
   IREE_ASSERT_ARGUMENT(out_has_visible_capture);
@@ -1298,6 +1303,11 @@ static hipError_t iree_hip_context_has_visible_capture(
 
   for (iree_host_size_t i = 0; i < stream_count; ++i) {
     iree_hal_streaming_stream_t* stream = streams[i];
+    if (stream == context->default_stream ||
+        iree_any_bit_set(stream->flags,
+                         IREE_HAL_STREAMING_STREAM_FLAG_NON_BLOCKING)) {
+      continue;
+    }
     iree_slim_mutex_lock(&stream->mutex);
     if (iree_hip_capture_is_visible_to_thread(stream, thread_id)) {
       *out_has_visible_capture = true;
@@ -1322,7 +1332,8 @@ static hipError_t iree_hip_capture_info_query_is_implicit(
   if (!context) {
     return hipSuccess;
   }
-  return iree_hip_context_has_visible_capture(context, out_is_implicit);
+  return iree_hip_context_has_visible_blocking_capture(context,
+                                                       out_is_implicit);
 }
 
 static bool iree_hip_status_to_capture_invalidation_failure(
@@ -1550,6 +1561,28 @@ static bool iree_hip_context_invalidate_capture_graph(
     iree_hal_streaming_graph_t* graph, unsigned long long capture_id) {
   return graph && capture_id != 0 &&
          iree_hal_streaming_capture_graph_invalidate(graph, capture_id);
+}
+
+// Invalidates the capture session |event| was last recorded into. Returns true
+// when that session was still active.
+static bool iree_hip_event_invalidate_active_capture(
+    iree_hal_streaming_event_t* event) {
+  iree_hal_streaming_graph_t* graph = NULL;
+  unsigned long long capture_id = 0;
+  iree_slim_mutex_lock(&event->mutex);
+  if (event->capture_graph) {
+    graph = event->capture_graph;
+    capture_id = event->capture_id;
+    iree_hal_streaming_graph_retain(graph);
+  }
+  iree_slim_mutex_unlock(&event->mutex);
+  if (!graph) {
+    return false;
+  }
+  const bool invalidated =
+      iree_hip_context_invalidate_capture_graph(graph, capture_id);
+  iree_hal_streaming_graph_release(graph);
+  return invalidated;
 }
 
 static iree_hal_streaming_graph_node_t*
@@ -7634,17 +7667,6 @@ HIPAPI hipError_t hipMemcpyAsync(void* dst, const void* src, size_t sizeBytes,
       stream_capture_status == IREE_HAL_STREAMING_CAPTURE_STATUS_NONE &&
       iree_hip_memcpy_destination_is_pageable(context, dst, sizeBytes);
 
-  if (!stream || stream == hipStreamLegacy) {
-    iree_status_t order_status =
-        iree_hal_streaming_context_synchronize_legacy_default(context);
-    if (!iree_status_is_ok(order_status)) {
-      iree_hip_resolved_stream_release(&resolved_stream);
-      hipError_t result = iree_status_to_hip_result(order_status);
-      IREE_TRACE_ZONE_END(z0);
-      HIP_RETURN_ERROR(result);
-    }
-  }
-
   if (stream_capture_status == IREE_HAL_STREAMING_CAPTURE_STATUS_NONE) {
     bool handled = false;
     hipError_t special_result = hipSuccess;
@@ -11357,11 +11379,268 @@ HIPAPI hipError_t hipGetChannelDesc(hipChannelFormatDesc* desc,
 }
 
 //===----------------------------------------------------------------------===//
-// IPC Memory Operations (not supported)
+// IPC Memory Operations
 //===----------------------------------------------------------------------===//
+//
+// Minimal ROCr-backed IPC memory: the exporter shares the whole ROCr
+// allocation containing the pointer's HIP allocation, and the importer
+// attaches it for every visible GPU agent and returns that HIP allocation's
+// base inside the mapping (as CUDA and CLR do). ROCr is
+// already loaded by the AMDGPU HAL driver; its IPC entry points are resolved
+// from that instance. Imported pointers are raw device addresses: kernels can
+// use them, but they are not HAL buffers. Event IPC stays unsupported.
+//
+// Handle layout (native ROCm): bytes 0-31 ROCr token, 32-39 allocation size,
+// 40-47 offset of the HIP allocation, 48-51 exporter pid, 52-55 exporter
+// device ordinal, 56-63 zero.
 
-// Gets an IPC memory handle for a device allocation.
-// Not supported - returns hipErrorNotSupported.
+#if defined(__linux__)
+
+typedef struct {
+  uint32_t handle[8];
+} iree_hip_hsa_ipc_token_t;
+typedef struct {
+  uint64_t handle;
+} iree_hip_hsa_agent_t;
+typedef struct {
+  uint32_t size;
+  uint32_t type;
+  void* agent_base_address;
+  void* host_base_address;
+  size_t size_in_bytes;
+  void* user_data;
+  iree_hip_hsa_agent_t agent_owner;
+  uint32_t global_flags;
+  bool registered;
+} iree_hip_hsa_pointer_info_t;
+
+enum {
+  IREE_HIP_HSA_STATUS_SUCCESS = 0,
+  IREE_HIP_HSA_AGENT_INFO_DEVICE = 17,
+  IREE_HIP_HSA_DEVICE_TYPE_GPU = 1,
+  IREE_HIP_HSA_EXT_POINTER_TYPE_HSA = 1,
+  IREE_HIP_IPC_MAX_AGENTS = 64,
+};
+
+typedef struct {
+  int (*pointer_info)(const void*, iree_hip_hsa_pointer_info_t*,
+                      void* (*)(size_t), uint32_t*, iree_hip_hsa_agent_t**);
+  int (*ipc_create)(void*, size_t, iree_hip_hsa_ipc_token_t*);
+  int (*ipc_attach)(const iree_hip_hsa_ipc_token_t*, size_t, uint32_t,
+                    const iree_hip_hsa_agent_t*, void**);
+  int (*ipc_detach)(void*);
+  int (*iterate_agents)(int (*)(iree_hip_hsa_agent_t, void*), void*);
+  int (*agent_get_info)(iree_hip_hsa_agent_t, int, void*);
+  uint32_t gpu_agent_count;
+  iree_hip_hsa_agent_t gpu_agents[IREE_HIP_IPC_MAX_AGENTS];
+  bool loaded;
+} iree_hip_ipc_rocr_t;
+
+typedef struct {
+  iree_hip_hsa_ipc_token_t token;
+  uint64_t allocation_size;
+  uint64_t offset;
+  uint32_t pid;
+  int32_t device;
+  uint64_t reserved;
+} iree_hip_ipc_mem_wire_t;
+_Static_assert(sizeof(iree_hip_ipc_mem_wire_t) == 64,
+               "IPC wire layout must fill hipIpcMemHandle_t");
+
+// hipIpcMemLazyEnablePeerAccess; the binding header does not define it.
+#define IREE_HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS 0x1u
+
+typedef struct {
+  void* user_ptr;
+  void* mapped_base;
+} iree_hip_ipc_import_t;
+
+static iree_hip_ipc_rocr_t iree_hip_ipc_rocr;
+static pthread_once_t iree_hip_ipc_rocr_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t iree_hip_ipc_imports_mutex = PTHREAD_MUTEX_INITIALIZER;
+static iree_hip_ipc_import_t* iree_hip_ipc_imports = NULL;
+static size_t iree_hip_ipc_import_count = 0;
+static size_t iree_hip_ipc_import_capacity = 0;
+
+static int iree_hip_ipc_collect_gpu_agent(iree_hip_hsa_agent_t agent,
+                                          void* user_data) {
+  iree_hip_ipc_rocr_t* rocr = (iree_hip_ipc_rocr_t*)user_data;
+  int device_type = 0;
+  if (rocr->agent_get_info(agent, IREE_HIP_HSA_AGENT_INFO_DEVICE,
+                           &device_type) == IREE_HIP_HSA_STATUS_SUCCESS &&
+      device_type == IREE_HIP_HSA_DEVICE_TYPE_GPU &&
+      rocr->gpu_agent_count < IREE_HIP_IPC_MAX_AGENTS) {
+    rocr->gpu_agents[rocr->gpu_agent_count++] = agent;
+  }
+  return IREE_HIP_HSA_STATUS_SUCCESS;
+}
+
+static void iree_hip_ipc_rocr_load(void) {
+  void* library = dlopen("libhsa-runtime64.so.1", RTLD_NOW | RTLD_NOLOAD);
+  if (!library) return;
+  iree_hip_ipc_rocr_t* rocr = &iree_hip_ipc_rocr;
+  *(void**)&rocr->pointer_info = dlsym(library, "hsa_amd_pointer_info");
+  *(void**)&rocr->ipc_create = dlsym(library, "hsa_amd_ipc_memory_create");
+  *(void**)&rocr->ipc_attach = dlsym(library, "hsa_amd_ipc_memory_attach");
+  *(void**)&rocr->ipc_detach = dlsym(library, "hsa_amd_ipc_memory_detach");
+  *(void**)&rocr->iterate_agents = dlsym(library, "hsa_iterate_agents");
+  *(void**)&rocr->agent_get_info = dlsym(library, "hsa_agent_get_info");
+  if (!rocr->pointer_info || !rocr->ipc_create || !rocr->ipc_attach ||
+      !rocr->ipc_detach || !rocr->iterate_agents || !rocr->agent_get_info) {
+    return;
+  }
+  rocr->iterate_agents(iree_hip_ipc_collect_gpu_agent, rocr);
+  rocr->loaded = rocr->gpu_agent_count > 0;
+}
+
+// Initializes the runtime (which loads ROCr) and resolves the IPC entry points.
+static hipError_t iree_hip_ipc_rocr_get(const iree_hip_ipc_rocr_t** out_rocr) {
+  iree_hal_streaming_context_t* context = NULL;
+  hipError_t result = iree_hip_ensure_context(&context);
+  if (result != hipSuccess) return result;
+  pthread_once(&iree_hip_ipc_rocr_once, iree_hip_ipc_rocr_load);
+  if (!iree_hip_ipc_rocr.loaded) return hipErrorNotSupported;
+  *out_rocr = &iree_hip_ipc_rocr;
+  return hipSuccess;
+}
+
+// Gets an IPC memory handle for the device allocation containing devPtr.
+HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
+  HIP_API_BEGIN();
+  if (!handle || !devPtr) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  iree_hip_hsa_pointer_info_t info;
+  memset(&info, 0, sizeof(info));
+  info.size = sizeof(info);
+  if (rocr->pointer_info(devPtr, &info, NULL, NULL, NULL) !=
+          IREE_HIP_HSA_STATUS_SUCCESS ||
+      info.type != IREE_HIP_HSA_EXT_POINTER_TYPE_HSA ||
+      !info.agent_base_address || info.size_in_bytes == 0) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // As on CUDA and CLR the handle names the HIP allocation containing devPtr,
+  // and the importer gets that allocation's base. HIP allocations can be
+  // suballocated from a larger ROCr allocation, hence the separate offset.
+  void* allocation_base = devPtr;
+  size_t allocation_size = 0;
+  if (hipMemGetAddressRange(&allocation_base, &allocation_size, devPtr) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    allocation_base = devPtr;
+  }
+  const uintptr_t base = (uintptr_t)info.agent_base_address;
+  const uintptr_t ptr = (uintptr_t)allocation_base;
+  if (ptr < base || ptr - base >= info.size_in_bytes) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  iree_hip_ipc_mem_wire_t wire;
+  memset(&wire, 0, sizeof(wire));
+  if (rocr->ipc_create(info.agent_base_address, info.size_in_bytes,
+                       &wire.token) != IREE_HIP_HSA_STATUS_SUCCESS) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  wire.allocation_size = info.size_in_bytes;
+  wire.offset = ptr - base;
+  wire.pid = (uint32_t)getpid();
+  int device = 0;
+  (void)hipGetDevice(&device);
+  wire.device = device;
+  memcpy(handle, &wire, sizeof(wire));
+  HIP_RETURN_ERROR(hipSuccess);
+}
+
+// Opens an IPC memory handle exported from another process.
+HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
+                                      unsigned int flags) {
+  HIP_API_BEGIN();
+  if (!devPtr || (flags & ~IREE_HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS) != 0) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  *devPtr = NULL;
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  iree_hip_ipc_mem_wire_t wire;
+  memcpy(&wire, &handle, sizeof(wire));
+  if (wire.allocation_size == 0 || wire.offset >= wire.allocation_size) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (wire.pid == (uint32_t)getpid()) {
+    HIP_RETURN_ERROR(hipErrorInvalidContext);
+  }
+  void* mapped = NULL;
+  if (rocr->ipc_attach(&wire.token, (size_t)wire.allocation_size,
+                       rocr->gpu_agent_count, rocr->gpu_agents,
+                       &mapped) != IREE_HIP_HSA_STATUS_SUCCESS ||
+      !mapped) {
+    HIP_RETURN_ERROR(hipErrorInvalidHandle);
+  }
+  void* user_ptr = (uint8_t*)mapped + wire.offset;
+  pthread_mutex_lock(&iree_hip_ipc_imports_mutex);
+  if (iree_hip_ipc_import_count == iree_hip_ipc_import_capacity) {
+    size_t capacity =
+        iree_hip_ipc_import_capacity ? iree_hip_ipc_import_capacity * 2 : 16;
+    iree_hip_ipc_import_t* grown = (iree_hip_ipc_import_t*)realloc(
+        iree_hip_ipc_imports, capacity * sizeof(*grown));
+    if (!grown) {
+      pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+      rocr->ipc_detach(mapped);
+      HIP_RETURN_ERROR(hipErrorOutOfMemory);
+    }
+    iree_hip_ipc_imports = grown;
+    iree_hip_ipc_import_capacity = capacity;
+  }
+  iree_hip_ipc_imports[iree_hip_ipc_import_count++] =
+      (iree_hip_ipc_import_t){user_ptr, mapped};
+  pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+  *devPtr = user_ptr;
+  HIP_RETURN_ERROR(hipSuccess);
+}
+
+// Closes an IPC memory handle opened by hipIpcOpenMemHandle.
+HIPAPI hipError_t hipIpcCloseMemHandle(void* devPtr) {
+  HIP_API_BEGIN();
+  if (!devPtr) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  void* mapped = NULL;
+  pthread_mutex_lock(&iree_hip_ipc_imports_mutex);
+  for (size_t i = 0; i < iree_hip_ipc_import_count; ++i) {
+    if (iree_hip_ipc_imports[i].user_ptr == devPtr) {
+      mapped = iree_hip_ipc_imports[i].mapped_base;
+      iree_hip_ipc_imports[i] =
+          iree_hip_ipc_imports[--iree_hip_ipc_import_count];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+  if (!mapped) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // Work that reads the mapping may still be in flight.
+  result = hipDeviceSynchronize();
+  if (rocr->ipc_detach(mapped) != IREE_HIP_HSA_STATUS_SUCCESS &&
+      result == hipSuccess) {
+    result = hipErrorInvalidValue;
+  }
+  HIP_RETURN_ERROR(result);
+}
+
+#else
+
 HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
   HIP_API_BEGIN();
   (void)handle;
@@ -11369,8 +11648,6 @@ HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
 
-// Opens an IPC memory handle exported from another process.
-// Not supported - returns hipErrorNotSupported.
 HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
                                       unsigned int flags) {
   HIP_API_BEGIN();
@@ -11380,13 +11657,13 @@ HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
 
-// Closes an IPC memory handle.
-// Not supported - returns hipErrorNotSupported.
 HIPAPI hipError_t hipIpcCloseMemHandle(void* devPtr) {
   HIP_API_BEGIN();
   (void)devPtr;
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
+
+#endif  // __linux__
 
 // Gets an IPC event handle for an event.
 // Not supported - returns hipErrorNotSupported.
@@ -12967,7 +13244,24 @@ HIPAPI hipError_t hipStreamSynchronize(hipStream_t stream) {
   }
 
   if (!stream || stream == hipStreamLegacy) {
-    if (iree_hip_context_invalidate_visible_captures(resolved_stream.context)) {
+    if (tls_stream_capture_mode == hipStreamCaptureModeRelaxed) {
+      // Relaxed mode permits the legacy sync unless it would wait on work a
+      // blocking stream is capturing.
+      bool is_implicit = false;
+      hipError_t implicit_result =
+          iree_hip_context_has_visible_blocking_capture(resolved_stream.context,
+                                                        &is_implicit);
+      if (implicit_result == hipSuccess && is_implicit) {
+        iree_hip_context_invalidate_visible_captures(resolved_stream.context);
+        implicit_result = hipErrorStreamCaptureImplicit;
+      }
+      if (implicit_result != hipSuccess) {
+        iree_hip_resolved_stream_release(&resolved_stream);
+        IREE_TRACE_ZONE_END(z0);
+        HIP_RETURN_ERROR(implicit_result);
+      }
+    } else if (iree_hip_context_invalidate_visible_captures(
+                   resolved_stream.context)) {
       iree_hip_resolved_stream_release(&resolved_stream);
       IREE_TRACE_ZONE_END(z0);
       HIP_RETURN_ERROR(hipErrorStreamCaptureUnsupported);
@@ -13122,6 +13416,18 @@ HIPAPI hipError_t hipStreamWaitEvent(hipStream_t stream, hipEvent_t event,
     iree_hal_streaming_event_release(event_object);
     IREE_TRACE_ZONE_END(z0);
     HIP_RETURN_ERROR(init_result);
+  }
+
+  // The legacy stream can never join a capture. Waiting on an event recorded
+  // inside an active capture would add it as a participant, so invalidate the
+  // capture instead.
+  if (resolved_stream.context &&
+      resolved_stream.stream == resolved_stream.context->default_stream &&
+      iree_hip_event_invalidate_active_capture(event_object)) {
+    iree_hip_resolved_stream_release(&resolved_stream);
+    iree_hal_streaming_event_release(event_object);
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(hipErrorStreamCaptureImplicit);
   }
 
   iree_status_t status = iree_hal_streaming_stream_wait_event(
@@ -14220,6 +14526,42 @@ HIPAPI hipError_t hipEventRecord(hipEvent_t event, hipStream_t stream) {
   HIP_RETURN_ERROR(result);
 }
 
+// Records an event in a stream with capture flags.
+//
+// Parameters:
+//  - event: [IN] Event handle to record.
+//  - stream: [IN] Stream to record the event in (NULL = default stream).
+//  - flags: [IN] hipEventRecordDefault, or hipEventRecordExternal.
+//
+// Returns:
+//  - hipSuccess: Event recorded successfully.
+//  - hipErrorInvalidValue: flags is not a supported record flag.
+//  - Other results: Same as hipEventRecord.
+//
+// Synchronization: This operation is asynchronous.
+//
+// Flag behavior:
+// - hipEventRecordDefault (0): Identical to hipEventRecord.
+// - hipEventRecordExternal: When the stream is capturing, records the event
+//   as an explicit graph node (the record analogue of hipEventWaitExternal).
+//   When the stream is not capturing, the flag is ignored, matching CUDA.
+//
+// PyTorch's caching host allocator and torch.cuda.Event.record use this
+// entry point (not hipEventRecord) on ROCm 7.
+//
+// See also: hipEventRecord, hipStreamWaitEvent.
+HIPAPI hipError_t hipEventRecordWithFlags(hipEvent_t event, hipStream_t stream,
+                                          unsigned int flags) {
+  HIP_API_BEGIN();
+  if (flags != hipEventRecordDefault && flags != hipEventRecordExternal) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // Capture already treats a record on a capturing stream as a graph
+  // dependency frontier. hipEventRecordExternal is the same record for the
+  // non-capturing (eager / allocator) path PyTorch actually hits.
+  HIP_RETURN_ERROR(hipEventRecord(event, stream));
+}
+
 // Waits for an event to complete.
 //
 // Parameters:
@@ -15057,6 +15399,10 @@ HIPAPI hipError_t hipModuleGetFunction(hipFunction_t* function,
 
   hipError_t result = iree_status_to_hip_result(status);
   iree_hal_streaming_module_release(stream_module);
+  if (result == hipErrorNotFound) {
+    // Matches CLR: a missing name is not a sticky error.
+    HIP_RETURN_COMMAND_ERROR(result);
+  }
   HIP_RETURN_ERROR(result);
 }
 
@@ -15375,7 +15721,7 @@ HIPAPI hipError_t hipFuncGetAttribute(int* pi, hipFuncAttribute_t attrib,
 //
 // Attribute structure fields:
 // - sharedSizeBytes: Static shared memory in bytes.
-// - constSizeBytes: Constant memory in bytes.
+// - constSizeBytes: Always SIZE_MAX (unknown), matching CLR.
 // - localSizeBytes: Local memory per thread in bytes.
 // - maxThreadsPerBlock: Maximum threads per block.
 // - numRegs: Registers per thread.
@@ -15412,11 +15758,50 @@ HIPAPI hipError_t hipFuncGetAttributes(hipFuncAttributes* attr,
   if (result != hipSuccess) {
     HIP_RETURN_ERROR(result);
   }
-  // The aggregate API cannot represent an unknown field separately. Leave the
-  // caller's structure untouched rather than returning a plausible but false
-  // constant-memory size.
+  // Fill a local copy so a failure leaves the caller's structure untouched.
+  static const struct {
+    hipFuncAttribute_t attribute;
+    size_t offset;
+    bool is_size;
+  } kFields[] = {
+      {hipFuncAttributeBinaryVersion,
+       offsetof(hipFuncAttributes, binaryVersion), false},
+      {hipFuncAttributeCacheModeCA, offsetof(hipFuncAttributes, cacheModeCA),
+       false},
+      {hipFuncAttributeLocalSizeBytes,
+       offsetof(hipFuncAttributes, localSizeBytes), true},
+      {hipFuncAttributeMaxDynamicSharedSizeBytes,
+       offsetof(hipFuncAttributes, maxDynamicSharedSizeBytes), false},
+      {hipFuncAttributeMaxThreadsPerBlock,
+       offsetof(hipFuncAttributes, maxThreadsPerBlock), false},
+      {hipFuncAttributeNumRegs, offsetof(hipFuncAttributes, numRegs), false},
+      {hipFuncAttributePreferredSharedMemoryCarveout,
+       offsetof(hipFuncAttributes, preferredShmemCarveout), false},
+      {hipFuncAttributePtxVersion, offsetof(hipFuncAttributes, ptxVersion),
+       false},
+      {hipFuncAttributeSharedSizeBytes,
+       offsetof(hipFuncAttributes, sharedSizeBytes), true},
+  };
+  hipFuncAttributes value;
+  memset(&value, 0, sizeof(value));
+  for (size_t i = 0; i < IREE_ARRAYSIZE(kFields) && result == hipSuccess; ++i) {
+    int field = 0;
+    result = iree_hip_function_attribute(symbol, kFields[i].attribute, &field);
+    if (kFields[i].is_size) {
+      *(size_t*)((uint8_t*)&value + kFields[i].offset) = (size_t)field;
+    } else {
+      *(int*)((uint8_t*)&value + kFields[i].offset) = field;
+    }
+  }
+  // Code objects carry no separate constant-memory size. Report it as unknown
+  // with SIZE_MAX, which is what CLR returns for every kernel, instead of
+  // failing the whole query: RCCL calls this during communicator init.
+  value.constSizeBytes = SIZE_MAX;
   iree_hal_streaming_module_release(module);
-  HIP_RETURN_ERROR(hipErrorNotSupported);
+  if (result == hipSuccess) {
+    *attr = value;
+  }
+  HIP_RETURN_ERROR(result);
 }
 
 // Sets a specific attribute of a kernel function.
@@ -18918,6 +19303,44 @@ HIPAPI hipError_t hipUserObjectRetain(hipUserObject_t object,
   HIP_RETURN_ERROR(hipSuccess);
 }
 
+// Returns |graph| retained when it is the graph of an active stream capture in
+// the current context, else NULL. Captured graphs become live handles only when
+// the capture ends, but CUDA and CLR accept them in hipGraphRetainUserObject
+// during capture, and RCCL retains its per-graph resources that way.
+static iree_hal_streaming_graph_t* iree_hip_graph_retain_active_capture(
+    hipGraph_t graph) {
+  iree_hal_streaming_context_t* context = NULL;
+  if (!graph || iree_hip_ensure_context(&context) != hipSuccess) {
+    return NULL;
+  }
+  iree_hal_streaming_stream_t** streams = NULL;
+  iree_host_size_t stream_count = 0;
+  iree_status_t status =
+      iree_hip_context_snapshot_streams(context, &streams, &stream_count);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    return NULL;
+  }
+  iree_hal_streaming_graph_t* found = NULL;
+  for (iree_host_size_t i = 0; i < stream_count && !found; ++i) {
+    iree_slim_mutex_lock(&streams[i]->mutex);
+    if (streams[i]->capture_status ==
+            IREE_HAL_STREAMING_CAPTURE_STATUS_ACTIVE &&
+        streams[i]->capture_graph == (iree_hal_streaming_graph_t*)graph) {
+      found = streams[i]->capture_graph;
+      iree_hal_streaming_graph_retain(found);
+    }
+    iree_slim_mutex_unlock(&streams[i]->mutex);
+  }
+  iree_hip_context_release_stream_snapshot(context, streams, stream_count);
+  return found;
+}
+
+static hipError_t iree_hip_graph_retain_user_object_impl(hipGraph_t graph,
+                                                         hipUserObject_t object,
+                                                         unsigned int count,
+                                                         unsigned int flags);
+
 HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
                                            hipUserObject_t object,
                                            unsigned int count,
@@ -18927,9 +19350,24 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       (flags != 0 && flags != hipGraphUserObjectMove)) {
     HIP_RETURN_ERROR(hipErrorInvalidValue);
   }
+  iree_hal_streaming_graph_t* capture_graph = NULL;
   if (!iree_hip_graph_handle_is_live(graph)) {
-    HIP_RETURN_ERROR(hipErrorInvalidValue);
+    capture_graph = iree_hip_graph_retain_active_capture(graph);
+    if (!capture_graph) {
+      HIP_RETURN_ERROR(hipErrorInvalidValue);
+    }
   }
+  hipError_t result =
+      iree_hip_graph_retain_user_object_impl(graph, object, count, flags);
+  iree_hal_streaming_graph_release(capture_graph);
+  HIP_RETURN_ERROR(result);
+}
+
+// Attaches |count| references of |object| to the live or capturing |graph|.
+static hipError_t iree_hip_graph_retain_user_object_impl(hipGraph_t graph,
+                                                         hipUserObject_t object,
+                                                         unsigned int count,
+                                                         unsigned int flags) {
   const bool move_refs = flags == hipGraphUserObjectMove;
   iree_hal_streaming_graph_t* stream_graph = (iree_hal_streaming_graph_t*)graph;
   for (iree_hal_streaming_graph_user_object_ref_t* ref =
@@ -18937,7 +19375,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
        ref; ref = ref->next) {
     if (ref->object == object) {
       if (UINT64_MAX - ref->count < count) {
-        HIP_RETURN_ERROR(hipErrorInvalidValue);
+        return hipErrorInvalidValue;
       }
       const uint64_t new_graph_ref_count = ref->count + count;
       hipError_t retain_result = hipSuccess;
@@ -18948,16 +19386,16 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
         retain_result = iree_hip_user_object_retain_refs_checked(object, count);
       }
       if (retain_result != hipSuccess) {
-        HIP_RETURN_ERROR(retain_result);
+        return retain_result;
       }
       ref->count += count;
-      HIP_RETURN_ERROR(hipSuccess);
+      return hipSuccess;
     }
   }
 
   hipUserObject_t retained_object = NULL;
   if (!iree_hip_user_object_registry_lookup_retain(object, &retained_object)) {
-    HIP_RETURN_ERROR(hipSuccess);
+    return hipSuccess;
   }
   object = retained_object;
   hipError_t retain_result =
@@ -18965,7 +19403,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
                 : iree_hip_user_object_retain_refs_checked(object, count);
   if (retain_result != hipSuccess) {
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(retain_result);
+    return retain_result;
   }
   iree_hal_streaming_graph_user_object_ref_t* ref = NULL;
   iree_status_t status =
@@ -18976,7 +19414,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       iree_hip_user_object_release_refs(object, count);
     }
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(hipErrorOutOfMemory);
+    return hipErrorOutOfMemory;
   }
   hipError_t association_result =
       iree_hip_user_object_add_graph_association(object);
@@ -18985,7 +19423,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
       (void)iree_hip_user_object_release_refs_checked(object, count);
     }
     iree_hip_user_object_handle_release(retained_object);
-    HIP_RETURN_ERROR(association_result);
+    return association_result;
   }
   ref->object = object;
   ref->count = count;
@@ -18994,7 +19432,7 @@ HIPAPI hipError_t hipGraphRetainUserObject(hipGraph_t graph,
   ref->next = stream_graph->user_object_refs;
   stream_graph->user_object_refs = ref;
   iree_hip_user_object_handle_release(retained_object);
-  HIP_RETURN_ERROR(hipSuccess);
+  return hipSuccess;
 }
 
 HIPAPI hipError_t hipGraphReleaseUserObject(hipGraph_t graph,

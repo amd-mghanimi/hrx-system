@@ -35,7 +35,7 @@ typedef struct loom_serve_finite_component_configuration_t {
 typedef struct loom_serve_text_configuration_t {
   // Owned checkpoint file path.
   iree_string_view_t weights;
-  // Owned tokenizer JSON file path.
+  // Owned tokenizer JSON file path; empty for known-token sequence models.
   iree_string_view_t tokenizer;
   // Optional finite image component, prepared by media demand or explicit
   // component activation, independently of primary text preparation.
@@ -100,8 +100,9 @@ typedef struct loom_serve_model_configuration_t {
   loom_serve_sources_t sources;
   // Owned JSON object interpreted by the source prepare program.
   iree_string_view_t options;
-  // Bounded host request credit. Text/image/speech/recognition exclude active
-  // model requests; finite vector services include the active cohort.
+  // Bounded host request credit. Text/speech/recognition exclude active model
+  // requests; finite vector services include the active cohort. Image service
+  // shares this credit plus its first request across queued and active items.
   iree_host_size_t pending_requests;
   // Retained execution choices, including original/pending/failed attempts.
   // Zero disables reconfiguration independently of modality admission.
@@ -113,7 +114,7 @@ typedef struct loom_serve_model_configuration_t {
   bool start_drained;
   // Only the member selected by kind is initialized and owned.
   union {
-    // Autoregressive text deployment capacity and checkpoint inputs.
+    // Retained text or known-token sequence capacity and checkpoint inputs.
     loom_serve_text_configuration_t text;
     // Finite image deployment geometry and checkpoint inputs.
     loom_serve_image_configuration_t image;

@@ -6,6 +6,7 @@
 
 #include "iree/hal/drivers/amdgpu/aql_block_processor.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "iree/hal/drivers/amdgpu/aql_atomic.h"
@@ -115,6 +116,18 @@ static bool iree_hal_amdgpu_aql_block_processor_packet_has_barrier(
                                    IREE_HSA_FENCE_SCOPE_NONE);
 }
 
+// Opt-in: an in-order packet's agent acquire repeats the cache invalidation
+// already implied by its predecessor's agent release on the same queue. Only
+// valid when no other agent (peer GPU or IPC importer) writes the same memory.
+static bool iree_hal_amdgpu_aql_block_processor_elide_agent_acquire(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char* value = getenv("HRX_ELIDE_DISPATCH_ACQUIRE");
+    enabled = value && value[0] && value[0] != '0';
+  }
+  return enabled;
+}
+
 static iree_hal_amdgpu_aql_packet_control_t
 iree_hal_amdgpu_aql_block_processor_packet_control(
     const iree_hal_amdgpu_aql_block_processor_t* processor,
@@ -135,12 +148,17 @@ iree_hal_amdgpu_aql_block_processor_packet_control(
   const iree_hsa_fence_scope_t execution_release_scope =
       iree_hal_amdgpu_aql_block_processor_packet_flags_release_scope(
           packet_flags);
-  const iree_hsa_fence_scope_t acquire_scope =
+  iree_hsa_fence_scope_t acquire_scope =
       logical_packet_index == 0
           ? iree_hal_amdgpu_aql_block_processor_max_scope(
                 execution_acquire_scope,
                 processor->submission.inline_acquire_scope)
           : execution_acquire_scope;
+  if (logical_packet_index != 0 &&
+      acquire_scope == IREE_HSA_FENCE_SCOPE_AGENT &&
+      iree_hal_amdgpu_aql_block_processor_elide_agent_acquire()) {
+    acquire_scope = IREE_HSA_FENCE_SCOPE_NONE;
+  }
   const iree_hsa_fence_scope_t effective_acquire_scope =
       iree_hal_amdgpu_aql_block_processor_max_scope(acquire_scope,
                                                     minimum_acquire_scope);
@@ -701,10 +719,9 @@ iree_hal_amdgpu_aql_block_processor_replay_fill_packet_body(
       fill_command->target_offset, fill_command->length,
       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET, IREE_HAL_MEMORY_ACCESS_WRITE,
       &target_ref, &target_ptr));
-  (void)target_ref;
   if (IREE_UNLIKELY(!iree_hal_amdgpu_device_buffer_fill_emplace(
           processor->transfer_context, &packet->dispatch, target_ptr,
-          fill_command->length, fill_command->pattern,
+          target_ref.length, fill_command->pattern,
           fill_command->pattern_length, kernarg_block->data, out_setup))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "unsupported command-buffer fill dispatch shape");
@@ -737,6 +754,11 @@ iree_hal_amdgpu_aql_block_processor_replay_copy_packet_body(
       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET, IREE_HAL_MEMORY_ACCESS_WRITE,
       &target_ref, &target_ptr));
 
+  if (IREE_UNLIKELY(copy_command->length == IREE_HAL_WHOLE_BUFFER &&
+                    source_ref.length != target_ref.length)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "recorded copy remaining ranges differ");
+  }
   if (IREE_UNLIKELY(
           iree_hal_buffer_test_overlap(source_ref.buffer, source_ref.offset,
                                        source_ref.length, target_ref.buffer,
@@ -748,7 +770,7 @@ iree_hal_amdgpu_aql_block_processor_replay_copy_packet_body(
   }
   if (IREE_UNLIKELY(!iree_hal_amdgpu_device_buffer_copy_emplace(
           processor->transfer_context, &packet->dispatch, source_ptr,
-          target_ptr, copy_command->length, kernarg_block->data, out_setup))) {
+          target_ptr, target_ref.length, kernarg_block->data, out_setup))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "unsupported command-buffer copy dispatch shape");
   }

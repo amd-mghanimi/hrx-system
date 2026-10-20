@@ -118,6 +118,23 @@ TEST_F(HipErrorStateTest, CommandAndOrdinaryResultsHaveDistinctSemantics) {
   EXPECT_EQ(hipSuccess, iree_hip_error_state_peek_last_error());
 }
 
+TEST_F(HipErrorStateTest, CommandOnlyPublicationLeavesLastErrorUnchanged) {
+  EXPECT_EQ(hipErrorNotFound,
+            iree_hip_error_state_publish_command(
+                iree_hip_error_state_capture(), hipErrorNotFound));
+  EXPECT_EQ(hipSuccess, iree_hip_error_state_peek_last_error());
+  EXPECT_EQ(hipErrorNotFound,
+            iree_hip_error_state_get_and_clear_command_error());
+
+  // An earlier sticky error survives a later command-only error.
+  EXPECT_EQ(hipErrorInvalidValue, Publish(hipErrorInvalidValue));
+  EXPECT_EQ(hipErrorNotFound,
+            iree_hip_error_state_publish_command(
+                iree_hip_error_state_capture(), hipErrorNotFound));
+  EXPECT_EQ(hipErrorInvalidValue,
+            iree_hip_error_state_get_and_clear_last_error());
+}
+
 TEST_F(HipErrorStateTest, IllegalAddressIsProcessSharedAndSticky) {
   std::thread observer([] {
     EXPECT_EQ(hipErrorIllegalAddress, Publish(hipErrorIllegalAddress));

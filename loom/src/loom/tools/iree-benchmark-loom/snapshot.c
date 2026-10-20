@@ -30,6 +30,10 @@ typedef struct iree_benchmark_loom_snapshot_state_t {
   char* run_id_storage;
   // Copied run identifier.
   iree_string_view_t run_id;
+  // Owned storage backing |mode|.
+  char* mode_storage;
+  // Copied execution mode.
+  iree_string_view_t mode;
   // Owned storage backing |source|.
   char* source_storage;
   // Copied input source path.
@@ -182,6 +186,8 @@ static iree_status_t iree_benchmark_loom_snapshot_append_run(
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_snapshot_copy_string(
       state, event->run->run_id, &state->run_id_storage, &state->run_id));
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_snapshot_copy_string(
+      state, event->run->mode, &state->mode_storage, &state->mode));
+  IREE_RETURN_IF_ERROR(iree_benchmark_loom_snapshot_copy_string(
       state, event->run->source, &state->source_storage, &state->source));
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_snapshot_copy_string(
       state, event->run->results_path, &state->results_path_storage,
@@ -237,6 +243,14 @@ static iree_status_t iree_benchmark_loom_snapshot_append_summary(
       iree_benchmark_loom_artifact_bundle_file_count(
           event->artifact_bundle,
           IREE_BENCHMARK_LOOM_BUNDLE_FILE_COMPILE_REPORT);
+  state->summary.compile_request_count =
+      iree_benchmark_loom_artifact_bundle_file_count(
+          event->artifact_bundle,
+          IREE_BENCHMARK_LOOM_BUNDLE_FILE_COMPILE_REQUEST);
+  state->summary.compile_request_manifest_count =
+      iree_benchmark_loom_artifact_bundle_file_count(
+          event->artifact_bundle,
+          IREE_BENCHMARK_LOOM_BUNDLE_FILE_COMPILE_REQUEST_MANIFEST);
   state->summary.artifact_manifest_count =
       iree_benchmark_loom_artifact_bundle_file_count(
           event->artifact_bundle,
@@ -300,6 +314,23 @@ static iree_status_t iree_benchmark_loom_snapshot_append_sample(
       loom_json_object_begin_field(&object, IREE_SV("sample_result")));
   IREE_RETURN_IF_ERROR(loom_testbench_case_sample_result_write_json(
       event->sample_result, &stream));
+  return loom_json_object_end(&object);
+}
+
+static iree_status_t iree_benchmark_loom_snapshot_append_scenario_sample(
+    iree_benchmark_loom_snapshot_state_t* state,
+    const iree_benchmark_loom_scenario_sample_event_t* event) {
+  if (event->result->passed) {
+    return iree_ok_status();
+  }
+  loom_output_stream_t stream;
+  IREE_RETURN_IF_ERROR(
+      loom_json_value_list_begin_value(&state->failed_samples, &stream));
+  loom_json_object_writer_t object;
+  IREE_RETURN_IF_ERROR(loom_json_object_begin(&stream, &object));
+  IREE_RETURN_IF_ERROR(iree_benchmark_loom_write_scenario_sample_fields_json(
+      event->selection, event->work_item_index, event->benchmark_sample_ordinal,
+      event->result, &object));
   return loom_json_object_end(&object);
 }
 
@@ -690,6 +721,9 @@ static iree_status_t iree_benchmark_loom_snapshot_emit_event(
       return iree_ok_status();
     case IREE_BENCHMARK_LOOM_EVENT_SAMPLE:
       return iree_benchmark_loom_snapshot_append_sample(state, &event->sample);
+    case IREE_BENCHMARK_LOOM_EVENT_SCENARIO_SAMPLE:
+      return iree_benchmark_loom_snapshot_append_scenario_sample(
+          state, &event->scenario_sample);
     case IREE_BENCHMARK_LOOM_EVENT_BENCHMARK_RESULT:
       return iree_benchmark_loom_snapshot_append_benchmark(
           state, &event->benchmark_result);
@@ -762,6 +796,7 @@ void iree_benchmark_loom_snapshot_sink_deinitialize(
   iree_allocator_free(state->host_allocator, state->file_output_dir_storage);
   iree_allocator_free(state->host_allocator, state->results_path_storage);
   iree_allocator_free(state->host_allocator, state->source_storage);
+  iree_allocator_free(state->host_allocator, state->mode_storage);
   iree_allocator_free(state->host_allocator, state->run_id_storage);
   iree_allocator_t host_allocator = state->host_allocator;
   iree_allocator_free(host_allocator, state);
@@ -786,6 +821,8 @@ static iree_status_t iree_benchmark_loom_snapshot_append_run_json(
       object, IREE_SV("tool"), IREE_SV("iree-benchmark-loom")));
   IREE_RETURN_IF_ERROR(loom_json_object_write_string_field(
       object, IREE_SV("run_id"), state->run_id));
+  IREE_RETURN_IF_ERROR(loom_json_object_write_string_field_if_nonempty(
+      object, IREE_SV("mode"), state->mode));
   IREE_RETURN_IF_ERROR(loom_json_object_write_string_field(
       object, IREE_SV("source"), state->source));
   IREE_RETURN_IF_ERROR(loom_json_object_write_string_field(

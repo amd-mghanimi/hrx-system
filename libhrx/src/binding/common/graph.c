@@ -2970,14 +2970,10 @@ bool iree_hal_streaming_capture_unregister_stream(
                 context, graph, capture_id,
                 /*preserve_owned_stream=*/NULL);
       } else {
-        const int32_t capture_state =
-            iree_atomic_load(&graph->capture_state, iree_memory_order_acquire);
-        if (exact_session &&
-            capture_state == IREE_HAL_STREAMING_GRAPH_CAPTURE_STATE_ACTIVE) {
-          iree_atomic_store(&graph->capture_state,
-                            IREE_HAL_STREAMING_GRAPH_CAPTURE_STATE_INVALIDATED,
-                            iree_memory_order_release);
-        }
+        // A joined stream leaves the session without invalidating it, as on
+        // CUDA and CLR: its captured nodes stay in the graph. RCCL relies on
+        // this; under capture it forks onto a temporary stream, joins back
+        // and destroys that stream before the origin ends the capture.
         iree_slim_mutex_lock(&stream->mutex);
         if (iree_hal_streaming_clear_capture_stream_locked(stream, graph,
                                                            capture_id)) {

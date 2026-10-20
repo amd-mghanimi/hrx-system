@@ -16,7 +16,11 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
-exports_files(["testdata/requirements.loom"])
+exports_files([
+    "testdata/benchmark_device_events.loom",
+    "testdata/benchmark_scenarios.loom",
+    "testdata/requirements.loom",
+])
 
 loom_cc_library(
     name = "api",
@@ -48,6 +52,26 @@ loom_cc_library(
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/tooling/testbench/scenario:plan",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "case_command_program",
+    srcs = ["case_command_program.c"],
+    hdrs = ["case_command_program.h"],
+    deps = [
+        ":api",
+        ":testbench",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/buffer",
+        "//loom/src/loom/ops/command",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/rewrite:remap",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
     ],
@@ -212,6 +236,27 @@ loom_cc_test(
         "//loom/src/loom/ops/pipeline",
         "//loom/src/loom/ops/test",
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "case_command_program_test",
+    srcs = ["case_command_program_test.cc"],
+    deps = [
+        ":case_command_program",
+        ":testbench",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/buffer",
+        "//loom/src/loom/ops/check",
+        "//loom/src/loom/ops/command",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/verify",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
