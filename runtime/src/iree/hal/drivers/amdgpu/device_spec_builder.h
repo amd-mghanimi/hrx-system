@@ -33,6 +33,8 @@ typedef enum iree_hal_amdgpu_device_spec_physical_device_flag_bits_e {
 typedef struct iree_hal_amdgpu_device_spec_physical_device_params_t {
   // Parsed target identity for this physical device.
   iree_hal_amdgpu_target_identity_t identity;
+  // PCI device/chip identifier reported by HSA_AMD_AGENT_INFO_CHIP_ID.
+  uint32_t chip_id;
   // Stable physical device UUID bytes.
   iree_hal_uuid_t uuid;
   // PCI address.
