@@ -7,6 +7,7 @@
 #include "common/graph_memory.h"
 
 #include "common/device.h"
+#include "common/hrx_bridge.h"
 #include "common/memory.h"
 
 // Each graph allocation owns a stable virtual address. Physical backing moves
