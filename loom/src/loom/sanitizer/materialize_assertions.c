@@ -7,6 +7,7 @@
 #include "loom/sanitizer/materialize_assertions.h"
 
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
@@ -55,7 +56,7 @@ static bool loom_sanitizer_integer_comparison_is_unsigned(loom_type_t type) {
          scalar_type == LOOM_SCALAR_TYPE_I1;
 }
 
-static iree_status_t loom_sanitizer_build_integer_constant(
+static iree_status_t loom_sanitizer_build_numeric_constant(
     loom_sanitizer_predicate_materializer_t* materializer, loom_type_t type,
     int64_t value, loom_value_id_t* out_value) {
   loom_op_t* constant_op = NULL;
@@ -65,10 +66,11 @@ static iree_status_t loom_sanitizer_build_integer_constant(
                                   type, materializer->location, &constant_op));
     *out_value = loom_index_constant_result(constant_op);
   } else {
+    const loom_scalar_type_t scalar_type = loom_type_element_type(type);
     const loom_attribute_t attribute =
-        loom_type_element_type(type) == LOOM_SCALAR_TYPE_I1
-            ? loom_attr_bool(value != 0)
-            : loom_attr_i64(value);
+        loom_scalar_type_is_float(scalar_type) ? loom_attr_f64((double)value)
+        : scalar_type == LOOM_SCALAR_TYPE_I1   ? loom_attr_bool(value != 0)
+                                               : loom_attr_i64(value);
     IREE_RETURN_IF_ERROR(
         loom_scalar_constant_build(materializer->builder, attribute, type,
                                    materializer->location, &constant_op));
@@ -86,7 +88,7 @@ static iree_status_t loom_sanitizer_materialize_predicate_argument(
     return iree_ok_status();
   }
   IREE_ASSERT(predicate->arg_tags[argument_index] == LOOM_PRED_ARG_CONST);
-  return loom_sanitizer_build_integer_constant(
+  return loom_sanitizer_build_numeric_constant(
       materializer, type, predicate->args[argument_index], out_value);
 }
 
@@ -144,8 +146,28 @@ static iree_status_t loom_sanitizer_build_integer_comparison(
     loom_sanitizer_predicate_materializer_t* materializer, loom_type_t type,
     loom_predicate_kind_t kind, loom_value_id_t lhs, loom_value_id_t rhs,
     loom_value_id_t* out_condition) {
-  const bool unsigned_comparison =
+  bool unsigned_comparison =
       loom_sanitizer_integer_comparison_is_unsigned(type);
+  switch (kind) {
+    case LOOM_PREDICATE_ULT:
+      kind = LOOM_PREDICATE_LT;
+      unsigned_comparison = true;
+      break;
+    case LOOM_PREDICATE_ULE:
+      kind = LOOM_PREDICATE_LE;
+      unsigned_comparison = true;
+      break;
+    case LOOM_PREDICATE_UGT:
+      kind = LOOM_PREDICATE_GT;
+      unsigned_comparison = true;
+      break;
+    case LOOM_PREDICATE_UGE:
+      kind = LOOM_PREDICATE_GE;
+      unsigned_comparison = true;
+      break;
+    default:
+      break;
+  }
   loom_op_t* comparison_op = NULL;
   if (loom_sanitizer_is_address_scalar(type)) {
     IREE_RETURN_IF_ERROR(loom_index_cmp_build(
@@ -160,6 +182,25 @@ static iree_status_t loom_sanitizer_build_integer_comparison(
         lhs, rhs, materializer->location, &comparison_op));
     *out_condition = loom_scalar_cmpi_result(comparison_op);
   }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_sanitizer_build_numeric_comparison(
+    loom_sanitizer_predicate_materializer_t* materializer, loom_type_t type,
+    loom_predicate_kind_t kind, loom_value_id_t lhs, loom_value_id_t rhs,
+    loom_value_id_t* out_condition) {
+  if (!loom_scalar_type_is_float(loom_type_element_type(type))) {
+    return loom_sanitizer_build_integer_comparison(materializer, type, kind,
+                                                   lhs, rhs, out_condition);
+  }
+  IREE_ASSERT(kind == LOOM_PREDICATE_EQ || kind == LOOM_PREDICATE_NE);
+  loom_op_t* comparison_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_scalar_cmpf_build(
+      materializer->builder, /*instance_flags=*/0,
+      kind == LOOM_PREDICATE_EQ ? LOOM_SCALAR_CMPF_PREDICATE_OEQ
+                                : LOOM_SCALAR_CMPF_PREDICATE_UNE,
+      lhs, rhs, materializer->location, &comparison_op));
+  *out_condition = loom_scalar_cmpf_result(comparison_op);
   return iree_ok_status();
 }
 
@@ -179,7 +220,7 @@ static iree_status_t loom_sanitizer_build_negation(
     loom_value_id_t value, loom_value_id_t* out_condition) {
   const loom_type_t i1_type = loom_type_scalar(LOOM_SCALAR_TYPE_I1);
   loom_value_id_t true_value = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+  IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
       materializer, i1_type, 1, &true_value));
   loom_op_t* negation_op = NULL;
   IREE_RETURN_IF_ERROR(
@@ -189,7 +230,7 @@ static iree_status_t loom_sanitizer_build_negation(
   return iree_ok_status();
 }
 
-static iree_status_t loom_sanitizer_materialize_integer_relation(
+static iree_status_t loom_sanitizer_materialize_numeric_relation(
     loom_sanitizer_predicate_materializer_t* materializer,
     const loom_predicate_t* predicate, loom_type_t type,
     loom_predicate_kind_t relation_kind, uint8_t lhs_argument_index,
@@ -200,7 +241,7 @@ static iree_status_t loom_sanitizer_materialize_integer_relation(
       materializer, predicate, lhs_argument_index, type, &lhs));
   IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_predicate_argument(
       materializer, predicate, rhs_argument_index, type, &rhs));
-  return loom_sanitizer_build_integer_comparison(
+  return loom_sanitizer_build_numeric_comparison(
       materializer, type, relation_kind, lhs, rhs, out_condition);
 }
 
@@ -210,7 +251,7 @@ static iree_status_t loom_sanitizer_materialize_multiple_predicate(
     loom_value_id_t* out_condition) {
   const loom_scalar_type_t scalar_type = loom_type_element_type(type);
   if (scalar_type == LOOM_SCALAR_TYPE_I1) {
-    return loom_sanitizer_build_integer_constant(materializer, type, 1,
+    return loom_sanitizer_build_numeric_constant(materializer, type, 1,
                                                  out_condition);
   }
 
@@ -226,7 +267,7 @@ static iree_status_t loom_sanitizer_materialize_multiple_predicate(
         materializer->builder, subject, type, arithmetic_type,
         materializer->location, &cast_op));
     subject = loom_index_cast_result(cast_op);
-    IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+    IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
         materializer, arithmetic_type, predicate->args[1], &divisor));
   } else {
     IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_predicate_argument(
@@ -238,7 +279,7 @@ static iree_status_t loom_sanitizer_materialize_multiple_predicate(
       materializer->builder, subject, divisor, arithmetic_type,
       materializer->location, &remainder_op));
   loom_value_id_t zero = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+  IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
       materializer, arithmetic_type, 0, &zero));
   return loom_sanitizer_build_integer_comparison(
       materializer, arithmetic_type, LOOM_PREDICATE_EQ,
@@ -270,9 +311,9 @@ static iree_status_t loom_sanitizer_materialize_power_of_two_predicate(
 
   loom_value_id_t zero = LOOM_VALUE_ID_INVALID;
   loom_value_id_t one = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+  IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
       materializer, arithmetic_type, 0, &zero));
-  IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+  IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
       materializer, arithmetic_type, 1, &one));
 
   loom_value_id_t positive = LOOM_VALUE_ID_INVALID;
@@ -350,30 +391,26 @@ static iree_status_t loom_sanitizer_materialize_predicate(
     case LOOM_PREDICATE_LE:
     case LOOM_PREDICATE_GT:
     case LOOM_PREDICATE_GE:
-      return loom_sanitizer_materialize_integer_relation(
+    case LOOM_PREDICATE_ULT:
+    case LOOM_PREDICATE_ULE:
+    case LOOM_PREDICATE_UGT:
+    case LOOM_PREDICATE_UGE:
+      return loom_sanitizer_materialize_numeric_relation(
           materializer, predicate, type, (loom_predicate_kind_t)predicate->kind,
           0, 1, out_condition);
-    case LOOM_PREDICATE_MUL:
+    case LOOM_PREDICATE_MULTIPLE_OF:
       return loom_sanitizer_materialize_multiple_predicate(
           materializer, predicate, type, out_condition);
-    case LOOM_PREDICATE_MIN:
-      return loom_sanitizer_materialize_integer_relation(
-          materializer, predicate, type, LOOM_PREDICATE_GE, 0, 1,
-          out_condition);
-    case LOOM_PREDICATE_MAX:
-      return loom_sanitizer_materialize_integer_relation(
-          materializer, predicate, type, LOOM_PREDICATE_LE, 0, 1,
-          out_condition);
-    case LOOM_PREDICATE_POW2:
+    case LOOM_PREDICATE_POWER_OF_TWO:
       return loom_sanitizer_materialize_power_of_two_predicate(
           materializer, predicate, type, out_condition);
     case LOOM_PREDICATE_RANGE: {
       loom_value_id_t lower_bound = LOOM_VALUE_ID_INVALID;
       loom_value_id_t upper_bound = LOOM_VALUE_ID_INVALID;
-      IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_integer_relation(
+      IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_numeric_relation(
           materializer, predicate, type, LOOM_PREDICATE_GE, 0, 1,
           &lower_bound));
-      IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_integer_relation(
+      IREE_RETURN_IF_ERROR(loom_sanitizer_materialize_numeric_relation(
           materializer, predicate, type, LOOM_PREDICATE_LE, 0, 2,
           &upper_bound));
       return loom_sanitizer_build_conjunction(materializer, lower_bound,
@@ -650,14 +687,14 @@ static iree_status_t loom_sanitizer_materialize_layout_assertion(
     if (source_dynamic) {
       source_dimension = loom_type_dim_value_id_at(source_type, axis);
     } else {
-      IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+      IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
           &materializer, index_type,
           loom_type_dim_static_size_at(source_type, axis), &source_dimension));
     }
     if (result_dynamic) {
       result_dimension = loom_type_dim_value_id_at(result_type, axis);
     } else {
-      IREE_RETURN_IF_ERROR(loom_sanitizer_build_integer_constant(
+      IREE_RETURN_IF_ERROR(loom_sanitizer_build_numeric_constant(
           &materializer, index_type,
           loom_type_dim_static_size_at(result_type, axis), &result_dimension));
     }

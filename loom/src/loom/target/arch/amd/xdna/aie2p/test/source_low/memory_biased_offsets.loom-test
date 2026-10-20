@@ -1,0 +1,98 @@
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
+
+func.def @exchange_biased_word(%buffer: buffer, %position: index, %replacement: i32) -> (i32) {
+  %signed_position = index.assume %position [range(%position, -4, 4)] : index
+  %center = index.constant 4 : index
+  %element = index.add %signed_position, %center : index
+  %base = index.constant 0 : offset
+  %view = buffer.view %buffer[%base] : buffer -> view<9xi32>
+  %previous = view.load %view[%element] : view<9xi32> -> i32
+  view.store %replacement, %view[%element] : i32, view<9xi32>
+  func.return %previous : i32
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @exchange_biased_word(%signed_position: reg<aie2p.er>, %replacement: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %view = resource<native_pointer> {index = 0, source_type = buffer} : reg<aie2p.ep>
+  %14 = mov.i32 2
+  %15 = lshl %signed_position, %14
+  %16 = add.address-index.immediate %15, 16
+  %previous = lda.i32.index %view, %16
+  st.i32.index %replacement, %view, %16
+  return %previous
+}
+
+// ====
+
+func.def @exchange_nonnegative_word(%buffer: buffer, %position: index, %replacement: i32) -> (i32) {
+  %bounded_position = index.assume %position [range(%position, 0, 4)] : index
+  %center = index.constant 4 : index
+  %element = index.add %bounded_position, %center : index
+  %base = index.constant 0 : offset
+  %view = buffer.view %buffer[%base] : buffer -> view<9xi32>
+  %previous = view.load %view[%element] : view<9xi32> -> i32
+  view.store %replacement, %view[%element] : i32, view<9xi32>
+  func.return %previous : i32
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @exchange_nonnegative_word(%bounded_position: reg<aie2p.er>, %replacement: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %view = resource<native_pointer> {index = 0, source_type = buffer} : reg<aie2p.ep>
+  %14 = mov.i32 2
+  %15 = lshl %bounded_position, %14
+  %16 = add.address-index.immediate %15, 16
+  %previous = lda.i32.index %view, %16
+  st.i32.index %replacement, %view, %16
+  return %previous
+}
+
+// ====
+
+func.def @copy_biased_vector(%source: buffer, %destination: buffer, %position: index) {
+  %signed_position = index.assume %position [range(%position, -4, 4)] : index
+  %center = index.constant 4 : index
+  %element = index.add %signed_position, %center : index
+  %base = index.constant 0 : offset
+  %source_view = buffer.view %source[%base] : buffer -> view<12xi32>
+  %destination_view = buffer.view %destination[%base] : buffer -> view<12xi32>
+  %values = vector.load %source_view[%element] : view<12xi32> -> vector<4xi32>
+  vector.store %values, %destination_view[%element] : vector<4xi32>, view<12xi32>
+  func.return
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @copy_biased_vector(%signed_position: reg<aie2p.er>) asm {
+  %source_view = resource<native_pointer> {index = 0, source_type = buffer} : reg<aie2p.ep>
+  %destination_view = resource<native_pointer> {index = 1, source_type = buffer} : reg<aie2p.ep>
+  %46 = mov.i32 2
+  %47 = lshl %signed_position, %46
+  %48 = add.address-index.immediate %47, 16
+  %49 = lda.i32.index %source_view, %48
+  %50 = add.address-index.immediate %47, 20
+  %51 = lda.i32.index %source_view, %50
+  %52 = add.address-index.immediate %47, 24
+  %53 = lda.i32.index %source_view, %52
+  %54 = add.address-index.immediate %47, 28
+  %55 = lda.i32.index %source_view, %54
+  st.i32.index %49, %destination_view, %48
+  st.i32.index %51, %destination_view, %50
+  st.i32.index %53, %destination_view, %52
+  st.i32.index %55, %destination_view, %54
+  return
+}
+
+// ====
+
+// The static contribution fits U32 but has its sign bit set in an i32 carrier.
+func.def @exchange_large_bias_word(%buffer: buffer, %position: index, %replacement: i32) -> (i32) {
+  %signed_position = index.assume %position [range(%position, -1073741820, -1073741812)] : index
+  %center = index.constant 1073741820 : index
+  %element = index.add %signed_position, %center : index
+  %base = index.constant 0 : offset
+  %view = buffer.view %buffer[%base] : buffer -> view<9xi32>
+  // ERROR@+1: TARGET/003 {constraint_key="source_memory.static_offset"}
+  %previous = view.load %view[%element] : view<9xi32> -> i32
+  // ERROR@+1: TARGET/003 {constraint_key="source_memory.static_offset"}
+  view.store %replacement, %view[%element] : i32, view<9xi32>
+  func.return %previous : i32
+}

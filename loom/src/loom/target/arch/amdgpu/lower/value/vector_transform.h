@@ -28,6 +28,11 @@ iree_status_t loom_amdgpu_select_vector_transform_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_vector_transform_plan_t* out_plan, bool* out_selected);
 
+// Publishes the selected arithmetic carrier or identity source carrier.
+iree_status_t loom_amdgpu_finalize_vector_transform_plan(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_vector_transform_plan_t* plan);
+
 // Lowers an AMDGPU vector-transform plan.
 iree_status_t loom_amdgpu_lower_vector_transform(
     loom_low_lower_context_t* context, const loom_op_t* source_op,

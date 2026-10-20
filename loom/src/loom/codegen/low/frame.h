@@ -23,6 +23,8 @@
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/allocation.h"
 #include "loom/codegen/low/allocation_materialization.h"
+#include "loom/codegen/low/loop_execution.h"
+#include "loom/codegen/low/loop_placement.h"
 #include "loom/codegen/low/memory_access.h"
 #include "loom/codegen/low/planning_statistics.h"
 #include "loom/codegen/low/schedule/types.h"
@@ -35,20 +37,39 @@
 extern "C" {
 #endif
 
+// Computes the immutable residency view for one target-bound function snapshot.
+// Called once after target resolution and storage inventory, before scheduling.
+// Frame construction rejects a targetless function before calling the query.
+// The target interprets retained facts only; it does not inspect IR or retain
+// pass state. The returned model is borrowed and must outlive the frame.
+typedef loom_target_residency_view_t (
+    *loom_low_emission_frame_residency_query_fn_t)(
+    const loom_low_resolved_target_t* target,
+    const loom_low_storage_layout_space_sizes_t* storage_sizes);
+
 // Options controlling emission frame construction for one low function.
 typedef struct loom_low_emission_frame_options_t {
   // Descriptor registry available to scheduling and allocation.
   const loom_low_descriptor_registry_t* descriptor_registry;
+  // Optional already resolved function target. This carries producer-owned
+  // descriptor/profile facts directly into the model without resolving them a
+  // second time. When present, |function_target_facts| is ignored.
+  const loom_low_resolved_target_t* resolved_target;
   // Optional borrowed invocation-refined facts for the function. These facts
   // already include the function contract and remain immutable for the build.
   // When omitted, frame construction resolves the target from authored IR.
   const loom_target_facts_t* function_target_facts;
   // Optional analysis-derived memory summaries for the scheduled low function.
-  loom_low_memory_access_table_t memory_access_table;
-  // Optional immutable target residency policy.
-  const loom_target_residency_model_t* residency_model;
+  const loom_low_memory_access_map_t* memory_accesses;
+  // Optional producer-proven execution counts for natural Low loops.
+  const loom_low_loop_execution_map_t* loop_execution;
+  // Optional target query for the function-local residency view. Its presence
+  // requires concrete target facts for the function.
+  loom_low_emission_frame_residency_query_fn_t residency_query;
   // Optional target-provided descriptor pair-affinity table.
   loom_low_schedule_pair_affinity_list_t schedule_pair_affinities;
+  // Immutable instruction preferences for the selected representation contract.
+  loom_low_placement_instruction_preferences_t instruction_preferences;
   // Optional target-provided implicit state reads for structural low
   // materializations that emit target packets without descriptor rows.
   loom_low_schedule_structural_state_read_list_t
@@ -62,6 +83,8 @@ typedef struct loom_low_emission_frame_options_t {
   loom_low_schedule_diagnostic_flags_t schedule_diagnostic_flags;
   // Schedule retention requested by the final instruction emitter.
   loom_low_schedule_flags_t schedule_flags;
+  // Allocation retention requested by downstream target planning.
+  loom_low_allocation_flags_t allocation_flags;
   // Explicit per-class register budgets passed to scheduling and allocation.
   const loom_low_allocation_budget_t* allocation_budgets;
   // Number of entries in |allocation_budgets|.
@@ -70,6 +93,21 @@ typedef struct loom_low_emission_frame_options_t {
   const loom_low_allocation_fixed_value_t* allocation_fixed_values;
   // Number of entries in |allocation_fixed_values|.
   iree_host_size_t allocation_fixed_value_count;
+  // Borrowed incoming locations indexed by formal argument, passed unchanged
+  // through allocation repair. These constrain entry, not SSA lifetimes.
+  const loom_low_allocation_abi_location_t* allocation_entry_locations;
+  // Number of entries in |allocation_entry_locations|.
+  iree_host_size_t allocation_entry_location_count;
+  // Borrowed outgoing locations indexed by function result, passed unchanged
+  // through allocation repair. These constrain exits, not SSA lifetimes.
+  const loom_low_allocation_abi_location_t* allocation_exit_locations;
+  // Number of entries in |allocation_exit_locations|.
+  iree_host_size_t allocation_exit_location_count;
+  // Callee convention facts consumed before allocation in every repair round.
+  loom_low_call_contract_provider_t call_contracts;
+  // Storage spaces supported by synchronous final transport in this emitter.
+  // This does not authorize hiding asynchronous target instructions in moves.
+  loom_low_storage_space_set_t synchronous_storage_spaces;
   // Whole-function target-owned location ranges passed to allocation.
   const loom_low_allocation_reserved_range_t* allocation_reserved_ranges;
   // Number of entries in |allocation_reserved_ranges|.
@@ -95,6 +133,8 @@ typedef struct loom_low_emission_frame_t {
   const loom_op_t* function_op;
   // Resolved target context shared by the nested schedule/allocation tables.
   loom_low_resolved_target_t target;
+  // Residency policy and fixed ceiling used by this frame and its comparisons.
+  loom_target_residency_view_t residency;
   // Schedule table for the prepared function.
   loom_low_schedule_table_t schedule;
   // Allocation table for the prepared function.
@@ -103,6 +143,8 @@ typedef struct loom_low_emission_frame_t {
   uint64_t materialized_spill_storage_count;
   // Cumulative materialized spill storage byte size.
   uint64_t materialized_spill_storage_bytes;
+  // Strongest byte alignment required by materialized spill storage.
+  uint64_t materialized_spill_storage_minimum_alignment;
   // Cumulative low.spill stores materialized while reaching this frame.
   uint64_t materialized_spill_store_count;
   // Cumulative materialized low.spill store byte traffic.
@@ -119,15 +161,38 @@ typedef struct loom_low_emission_frame_t {
 typedef struct loom_low_emission_frame_lower_spill_traffic_result_t {
   // Number of user-facing diagnostics emitted while lowering spill traffic.
   uint32_t error_count;
-  // Scratch-arena-owned value IDs that the lowered traffic requires in
-  // registers during subsequent allocation rounds.
+  // Scratch-arena-owned helper value IDs created by target lowering that
+  // require registers during subsequent allocation rounds.
+  // The frame retains the original spill-plan values independently.
   const loom_value_id_t* required_register_value_ids;
   // Number of entries in |required_register_value_ids|.
   iree_host_size_t required_register_value_count;
+  // Scratch-arena-owned IDs for fresh register values whose definitions write
+  // physical storage outside their semantic execution domain. The frame
+  // retains these facts across repair rounds.
+  const loom_value_id_t* expanded_execution_value_ids;
+  // Number of entries in |expanded_execution_value_ids|.
+  iree_host_size_t expanded_execution_value_count;
+  // Scratch-arena-owned IDs for target-created, single-result definitions
+  // private to one consumer setup chain. The frame retains their per-user
+  // placement across subsequent scheduling rounds.
+  const loom_value_id_t* per_user_placement_value_ids;
+  // Number of entries in |per_user_placement_value_ids|.
+  iree_host_size_t per_user_placement_value_count;
 } loom_low_emission_frame_lower_spill_traffic_result_t;
 
 // Target callback that rewrites structural low.spill/low.reload traffic into
 // target packets before the next emission-frame scheduling/allocation round.
+// Its facts replace the generic materializer's facts for that traffic. Every
+// register value created by the rewrite must be returned as a required-register
+// value so target spill helpers cannot recursively spill. Existing store
+// payloads remain independently spillable; the frame separately retains values
+// whose own spill plans have already been materialized.
+// Definitions reported in |expanded_execution_value_ids| must acquire fresh
+// storage at their own definition point. Values reported in
+// |per_user_placement_value_ids| must also appear in
+// |required_register_value_ids|, be the sole results of their definitions, and
+// be private to one consumer setup chain.
 typedef iree_status_t (*loom_low_emission_frame_lower_spill_traffic_fn_t)(
     void* user_data, loom_module_t* module, loom_op_t* low_func_op,
     iree_diagnostic_emitter_t emitter, iree_arena_allocator_t* arena,
@@ -137,7 +202,7 @@ typedef iree_status_t (*loom_low_emission_frame_lower_spill_traffic_fn_t)(
 // target-independent packet addressability has already been checked.
 typedef iree_status_t (*loom_low_emission_frame_validate_fn_t)(
     void* user_data, const loom_low_emission_frame_t* frame,
-    iree_arena_allocator_t* arena);
+    iree_arena_allocator_t* arena, bool* out_accepted);
 
 // Options controlling final spill-free emission frame construction.
 typedef struct loom_low_emission_frame_spill_free_options_t {
@@ -147,6 +212,10 @@ typedef struct loom_low_emission_frame_spill_free_options_t {
   loom_low_emission_frame_lower_spill_traffic_fn_t lower_spill_traffic;
   // Caller-owned data passed to |lower_spill_traffic|.
   void* lower_spill_traffic_user_data;
+  // Optional target cost query used by reversible loop placement.
+  loom_low_loop_placement_cost_query_fn_t loop_placement_cost_query;
+  // Caller-owned data passed to |loop_placement_cost_query|.
+  void* loop_placement_cost_query_user_data;
   // Optional final target validation callback.
   loom_low_emission_frame_validate_fn_t validate_frame;
   // Caller-owned data passed to |validate_frame|.
@@ -154,34 +223,48 @@ typedef struct loom_low_emission_frame_spill_free_options_t {
 } loom_low_emission_frame_spill_free_options_t;
 
 // Schedules, allocates, and validates one target-low function for target
-// emitters. |arena| must outlive |out_frame|. Schedule or allocation
-// diagnostics may return a partial frame with the corresponding table
-// |error_count| set; later emission stages have not consumed that frame.
+// emitters. This path synthesizes a physical allocation and therefore admits
+// only functions with an absent or virtual allocation mode. Assigned or fixed
+// modes emit a semantic diagnostic and return OK with |out_accepted| false;
+// a caller accepting those modes must carry their retained allocation table.
+// |arena| must outlive |out_frame|. Schedule or allocation diagnostics return a
+// partial frame with the corresponding table |error_count| set and
+// |out_accepted| false; later emission stages have not consumed that frame.
+// Infrastructure failures return a status and also leave |out_accepted| false.
 iree_status_t loom_low_emission_frame_build(
     loom_module_t* module, loom_op_t* low_func_op,
     const loom_low_emission_frame_options_t* options,
-    iree_arena_allocator_t* arena, loom_low_emission_frame_t* out_frame);
+    iree_arena_allocator_t* arena, loom_low_emission_frame_t* out_frame,
+    bool* out_accepted);
 
 // Builds an emission frame and greedily materializes target-lowerable spill
 // traffic until the final frame contains no spill assignments or spill plans.
 // Static storage reservations first move to the entry prefix in declaration
 // order. Repair appends new reservations so target-lowered offsets stay stable.
 // Each iteration materializes the accepted allocation snapshot as a batch.
+// Materialized plan values enter a monotonic required-register set, and target
+// lowering extends that set with its traffic values. Each batch therefore
+// retires distinct spillable program values; an unsatisfiable required set is
+// reported by allocation instead of by an arbitrary iteration ceiling.
 // Individual plan traffic is recomputed from the current IR while consuming
 // that batch because earlier spill rewrites can make later allocation-time
 // traffic predictions stale.
-// Materialization, final addressability, and final-frame validation
-// diagnostics follow the normal target-entry convention: if an error diagnostic
-// is emitted, the function returns OK and the caller must check its diagnostic
-// emitter before consuming the frame. Allocation diagnostics may return a
+//
+// Like loom_low_emission_frame_build, this path synthesizes allocation and
+// admits only absent or virtual allocation modes. It rejects assigned or fixed
+// modes before spill lowering or other IR mutation.
+// Materialization, final addressability, and final-frame validation diagnostics
+// return OK with |out_accepted| false. Allocation diagnostics may return a
 // partial frame containing the schedule and allocation failure table for
-// reporting; later emission stages have not validated that frame.
-// |frame_options->emitter| must be initialized.
+// reporting; later emission stages have not validated that frame. A diagnostic
+// emitter is optional and does not control the semantic result. Both option
+// structures are required compiler-owned inputs.
 iree_status_t loom_low_emission_frame_build_spill_free(
     loom_module_t* module, loom_op_t* low_func_op,
     const loom_low_emission_frame_options_t* frame_options,
     const loom_low_emission_frame_spill_free_options_t* spill_free_options,
-    iree_arena_allocator_t* arena, loom_low_emission_frame_t* out_frame);
+    iree_arena_allocator_t* arena, loom_low_emission_frame_t* out_frame,
+    bool* out_accepted);
 
 #ifdef __cplusplus
 }  // extern "C"

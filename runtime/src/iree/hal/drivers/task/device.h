@@ -49,7 +49,10 @@ void iree_hal_task_device_params_initialize(
 // the device context. The loaders are retained for the lifetime of the device.
 //
 // |create_params| provides the proactor pool for async I/O operations. The pool
-// is retained for the lifetime of the device.
+// is retained for the lifetime of the device. Each executor uses a service on
+// its physical NUMA node, or an explicitly unplaced entry if one is provided.
+// Creation fails if a known executor node has neither. Executors with unknown
+// or mixed placement use the first entry without a locality constraint.
 iree_status_t iree_hal_task_device_create(
     iree_string_view_t identifier, const iree_hal_task_device_params_t* params,
     iree_host_size_t queue_count, iree_task_executor_t* const* queue_executors,

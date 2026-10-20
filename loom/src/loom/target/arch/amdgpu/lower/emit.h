@@ -49,6 +49,14 @@ iree_status_t loom_amdgpu_emit_sgpr_byte_offset_term(
     const loom_low_source_memory_dynamic_term_t* term,
     loom_value_id_t* out_low_offset);
 
+// Emits an SGPR byte offset from one proven subgroup-uniform source memory
+// dynamic term. Canonical VGPR inputs are projected without changing their
+// source-value mappings.
+iree_status_t loom_amdgpu_emit_uniform_sgpr_byte_offset_term(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_low_source_memory_dynamic_term_t* term,
+    loom_value_id_t* out_low_offset);
+
 // Maps a source result to the low register type already selected by the active
 // lowering policy and verifies that it is a register payload.
 iree_status_t loom_amdgpu_low_result_type(loom_low_lower_context_t* context,
@@ -70,7 +78,10 @@ iree_status_t loom_amdgpu_extract_low_register_unit(
     uint32_t register_offset, loom_type_t unit_type,
     loom_value_id_t* out_register_unit);
 
-// Binds a source result to one or more already-emitted low register units.
+// Binds a source result to already-emitted register pieces. Multiple pieces
+// must be untyped registers in one bank; the result preserves their physical
+// units, including multiword masks and conversion results. A singleton retains
+// its exact incoming type. No source-value mapping is required.
 iree_status_t loom_amdgpu_bind_low_register_range(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_value_id_t source_result, const loom_value_id_t* low_registers,
@@ -201,10 +212,11 @@ iree_status_t loom_amdgpu_emit_resolved_vgpr_ternary(
     loom_value_id_t* out_value);
 
 // Materializes distinct SGPR sources beyond the active target's VOP3 scalar
-// bus limit. Repeated source IDs share the same legalized value.
+// bus limit across at most three operands. Repeated source IDs share the same
+// legalized value.
 iree_status_t loom_amdgpu_legalize_vop3_scalar_sources(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
-    loom_value_id_t sources[3]);
+    loom_value_id_t* sources, iree_host_size_t source_count);
 
 // Emits one resolved VGPR descriptor op with one VGPR operand and one imm32
 // immediate attribute.
@@ -219,6 +231,11 @@ iree_status_t loom_amdgpu_emit_vgpr_b32_copy(loom_low_lower_context_t* context,
                                              const loom_op_t* source_op,
                                              loom_value_id_t low_source,
                                              loom_value_id_t* out_value);
+
+// Returns true when |low_value| is an SGPR or VGPR value whose defining
+// descriptor writes only the low 16-bit register part.
+bool loom_amdgpu_low_value_defines_register_low16(
+    loom_low_lower_context_t* context, loom_value_id_t low_value);
 
 // Returns true when |low_value| is a VGPR value whose defining descriptor
 // writes only the low 16-bit register part.
@@ -256,6 +273,13 @@ iree_status_t loom_amdgpu_emit_sgpr_binary_immediate(
     loom_amdgpu_descriptor_ref_t descriptor_ref, loom_value_id_t value,
     uint32_t immediate, loom_type_t lane_type, loom_value_id_t* out_value);
 
+// Emits an exact unsigned quotient of |value| by the nonzero constant
+// |divisor| into a one-unit SGPR.
+iree_status_t loom_amdgpu_emit_sgpr_divide_u32_constant(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    loom_value_id_t value, uint32_t divisor, loom_type_t lane_type,
+    loom_value_id_t* out_value);
+
 // Emits |value| scaled by an unsigned 32-bit constant into a one-unit SGPR.
 iree_status_t loom_amdgpu_emit_sgpr_scale_u32(loom_low_lower_context_t* context,
                                               const loom_op_t* source_op,
@@ -281,6 +305,22 @@ iree_status_t loom_amdgpu_emit_sgpr64_constant_u64(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     uint64_t value, loom_value_id_t* out_low_wide_value);
 
+// Emits a VGPR x2 unsigned integer constant.
+iree_status_t loom_amdgpu_emit_vgpr64_constant_u64(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    uint64_t value, loom_value_id_t* out_low_wide_value);
+
+// Materializes an SCC predicate as a one-word SGPR containing zero or one.
+iree_status_t loom_amdgpu_emit_scc_word(loom_low_lower_context_t* context,
+                                        const loom_op_t* source_op,
+                                        loom_value_id_t low_scc,
+                                        loom_value_id_t* out_low_word);
+
+// Compares one scalar register word against zero and returns its SCC truth.
+iree_status_t loom_amdgpu_emit_sgpr32_nonzero_scc(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    loom_value_id_t low_value, loom_value_id_t* out_low_scc);
+
 // Emits SCC true when any bit in an EXEC-width SGPRx2 lane mask is set.
 //
 // Wave64 compares the full SGPR pair. Wave32 VOPC producers define the low
@@ -300,11 +340,12 @@ iree_status_t loom_amdgpu_emit_lane_mask_equal_scc(
     loom_value_id_t low_lhs, loom_value_id_t low_rhs, uint32_t wavefront_size,
     loom_value_id_t* out_low_scc);
 
-// Emits an SGPR x2 base plus one-unit SGPR unsigned byte offset.
+// Emits an SGPR x2 base plus one-unit SGPR unsigned byte offset as low/high
+// scalar words. The caller assembles the final pointer or descriptor tuple.
 iree_status_t loom_amdgpu_emit_sgpr64_add_u32_offset(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_value_id_t low_base, loom_value_id_t low_offset,
-    loom_value_id_t* out_low_sum);
+    loom_value_id_t out_low_words[2]);
 
 // Emits one unary VGPR descriptor op.
 iree_status_t loom_amdgpu_emit_vgpr_unary(
@@ -416,6 +457,8 @@ typedef enum loom_amdgpu_vgpr_bfe_extract_flag_bits_e {
   LOOM_AMDGPU_VGPR_BFE_EXTRACT_FLAG_NONE = 0u,
   // Selects the signed bitfield extraction form.
   LOOM_AMDGPU_VGPR_BFE_EXTRACT_FLAG_SIGN_EXTEND = 1u << 0,
+  // The source defines only the low 16-bit register part.
+  LOOM_AMDGPU_VGPR_BFE_EXTRACT_FLAG_SOURCE_LOW16 = 1u << 1,
 } loom_amdgpu_vgpr_bfe_extract_flag_bits_t;
 typedef uint32_t loom_amdgpu_vgpr_bfe_extract_flags_t;
 
@@ -457,6 +500,12 @@ iree_status_t loom_amdgpu_emit_m0_u32(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_low_lower_resolved_descriptor_t* consumer_descriptor,
     uint32_t value, loom_value_id_t* out_value_id);
+
+// Moves one SGPR value into M0 for special-register packet operands.
+iree_status_t loom_amdgpu_emit_m0_sgpr(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_low_lower_resolved_descriptor_t* consumer_descriptor,
+    loom_value_id_t value, loom_value_id_t* out_value_id);
 
 #ifdef __cplusplus
 }  // extern "C"

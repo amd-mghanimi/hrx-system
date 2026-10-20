@@ -280,7 +280,7 @@ def loom_target_table_cc_library(
         paths.
       inputs: Source/vendor data labels consumed by the generator.
       deps: Runtime C library dependencies.
-      tags: Additional Bazel tags for the internal generator action.
+      tags: Additional Bazel tags for the generator action and runtime library.
       testonly: Passed through to the runtime C library.
       visibility: Passed through to the generator action and runtime library.
       **kwargs: Additional arguments passed through to loom_cc_library.
@@ -395,6 +395,7 @@ def loom_target_contract_table_cc_libraries(
         generator,
         args = [],
         index_output = None,
+        shared_strings = None,
         inputs = [],
         contract_deps = [],
         lower_rule_deps = [],
@@ -413,6 +414,8 @@ def loom_target_contract_table_cc_libraries(
       generator: Python executable that writes both C/H output pairs.
       args: Generator arguments before the four output flags.
       index_output: Optional private index include emitted by the same action.
+      shared_strings: Optional output stem for a shared byte bank's C/H and
+        JSON layout. Its public header and symbol are supplied in args.
       inputs: Source data labels consumed by the generator.
       contract_deps: Runtime dependencies of the contract C library.
       lower_rule_deps: Runtime dependencies of the lower-rule C library.
@@ -446,6 +449,9 @@ def loom_target_contract_table_cc_libraries(
     if index_output:
         outputs.append(index_output)
         output_flags.append("--index-output")
+    if shared_strings:
+        outputs.extend([shared_strings + ".h", shared_strings + ".c", shared_strings + ".json"])
+        output_flags.extend(["--shared-strings-header", "--shared-strings-source", "--shared-strings-layout"])
     iree_generated_files(
         name = name + "_gen",
         srcs = inputs,
@@ -471,6 +477,7 @@ def loom_target_contract_file_family(
         fragments,
         args = [],
         index_output = None,
+        shared_strings = None,
         inputs = [],
         tags = [],
         target_compatible_with = None,
@@ -488,6 +495,8 @@ def loom_target_contract_file_family(
       fragments: Mapping from output file stem to contract fragment key.
       args: Common generator arguments before fragment and output arguments.
       index_output: Optional private index include emitted by the same action.
+      shared_strings: Optional output stem for a shared byte bank's C/H and
+        JSON layout. Its public header and symbol are supplied in args.
       inputs: Source data labels consumed by the generator.
       tags: Additional Bazel tags for the generator action.
       target_compatible_with: Optional target compatibility constraints.
@@ -519,6 +528,9 @@ def loom_target_contract_file_family(
     if index_output:
         outputs.append(index_output)
         output_flags.append("--index-output")
+    if shared_strings:
+        outputs.extend([shared_strings + ".h", shared_strings + ".c", shared_strings + ".json"])
+        output_flags.extend(["--shared-strings-header", "--shared-strings-source", "--shared-strings-layout"])
 
     _loom_generated_files(
         name = name,
@@ -577,7 +589,7 @@ def loom_generated_cc_library(
       extra_output_flags: Generator flags paired with extra_outputs.
       extra_outputs: Additional generated files produced by the action.
       deps: Runtime C library dependencies.
-      tags: Additional Bazel tags for the internal generator action.
+      tags: Additional Bazel tags for the generator action and runtime library.
       testonly: Passed through to the runtime C library.
       visibility: Passed through to the generator action and runtime library.
       **kwargs: Additional arguments passed through to loom_cc_library.
@@ -637,6 +649,7 @@ def loom_generated_cc_library(
         hdrs = hdrs + generated_headers,
         textual_hdrs = textual_hdrs,
         deps = deps,
+        tags = tags,
         testonly = testonly,
         visibility = visibility,
         **kwargs

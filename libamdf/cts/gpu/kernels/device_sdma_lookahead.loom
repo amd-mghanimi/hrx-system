@@ -1,0 +1,133 @@
+// One finite AQL stream owns SDMA publication. A separate stream reads each
+// uploaded slot. Native dependency packets join all readers before slot reuse;
+// no shader waits for another shader to become resident. Reader observations
+// record interleaving without participating in the progress protocol.
+template.decl @sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64)
+
+kernel.def export("device_sdma_upload") @device_sdma_upload() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %state: buffer, %selection: buffer, %request: buffer, %previous_readers: buffer, %lengths: buffer, %source_address: i64, %input_address: i64, %completion_address: i64, %capacity: offset, %slot_byte_length: offset, %slot: i32, %generation: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) {
+  %origin = index.constant 0 : offset
+  %frontier_word = buffer.view %state[%origin] : buffer -> view<1xi64>
+  %record = buffer.view %selection[%origin] : buffer -> view<16xi32>
+  %token = buffer.view %request[%origin] : buffer -> view<1xi32>
+  %sizes = buffer.view %lengths[%origin] : buffer -> view<4xi32>
+  %first_start_offset = index.constant 192 : offset
+  %second_start_offset = index.constant 256 : offset
+  %first_signal_offset = index.constant 72 : offset
+  %second_signal_offset = index.constant 136 : offset
+  %first_start = buffer.view %previous_readers[%first_start_offset] : buffer -> view<1xi32>
+  %second_start = buffer.view %previous_readers[%second_start_offset] : buffer -> view<1xi32>
+  %first_signal = buffer.view %previous_readers[%first_signal_offset] : buffer -> view<1xi64>
+  %second_signal = buffer.view %previous_readers[%second_signal_offset] : buffer -> view<1xi64>
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %two = scalar.constant 2 : i32
+  %three = scalar.constant 3 : i32
+  %seven = scalar.constant 7 : i32
+  %eight = scalar.constant 8 : i32
+  %thirteen = scalar.constant 13 : i32
+  %mix = scalar.constant -1640531535 : i32
+  %zero64 = scalar.constant 0 : i64
+  %prefix = scalar.constant 64 : i64
+  %high_shift = scalar.constant 32 : i64
+  %request_value = view.load %token[0] : view<1xi32> -> i32
+  %salt = scalar.muli %generation, %mix : i32
+  %request_high = scalar.shrui %request_value, %thirteen : i32
+  %request_mixed = scalar.xori %request_value, %request_high : i32
+  %hash = scalar.xori %request_mixed, %salt : i32
+  %page = scalar.andi %hash, %seven : i32
+  %length_bits = scalar.shrui %hash, %eight : i32
+  %length_index32 = scalar.andi %length_bits, %three : i32
+  %length_index = index.cast %length_index32 : i32 to index
+  %word_count = view.load %sizes[%length_index] : view<4xi32> -> i32
+  %page64 = scalar.extui %page : i32 to i64
+  %stride = index.cast %slot_byte_length : offset to i64
+  %page_offset = scalar.muli %page64, %stride : i64
+  %payload_offset = scalar.addi %page_offset, %prefix : i64
+  %source = scalar.addi %source_address, %payload_offset : i64
+  %target = scalar.addi %input_address, %prefix : i64
+  %frontier = view.load %frontier_word[0] : view<1xi64> -> i64
+  %started0 = view.atomic.load %first_start[0] {ordering = acquire, scope = system} : view<1xi32> -> i32
+  %started1 = view.atomic.load %second_start[0] {ordering = acquire, scope = system} : view<1xi32> -> i32
+  %started1_bit = scalar.shli %started1, %one : i32
+  %started = scalar.ori %started0, %started1_bit : i32
+  %next_frontier = template.apply<@sdma_copy>(%ring, %read_index, %write_index, %notification, %completion, %source, %target, %completion_address, %capacity, %frontier, %generation, %word_count, %copy_control, %fence_header, %cache_flags) : (buffer, buffer, buffer, buffer, buffer, i64, i64, i64, offset, i64, i32, i32, i32, i32, i32) -> (i64)
+  %signal0 = view.atomic.load %first_signal[0] {ordering = acquire, scope = system} : view<1xi64> -> i64
+  %signal1 = view.atomic.load %second_signal[0] {ordering = acquire, scope = system} : view<1xi64> -> i64
+  %pending0 = scalar.cmpi ne, %signal0, %zero64 : i64
+  %pending1 = scalar.cmpi ne, %signal1, %zero64 : i64
+  %pending0_bit = scf.select %pending0, %one, %zero : i32
+  %pending1_bit = scf.select %pending1, %two, %zero : i32
+  %pending = scalar.ori %pending0_bit, %pending1_bit : i32
+  %frontier_low = scalar.trunci %next_frontier : i64 to i32
+  %frontier_high64 = scalar.shrui %next_frontier, %high_shift : i64
+  %frontier_high = scalar.trunci %frontier_high64 : i64 to i32
+  view.store %page, %record[0] : i32, view<16xi32>
+  view.store %slot, %record[1] : i32, view<16xi32>
+  view.store %word_count, %record[2] : i32, view<16xi32>
+  view.store %hash, %record[3] : i32, view<16xi32>
+  view.store %frontier_low, %record[4] : i32, view<16xi32>
+  view.store %frontier_high, %record[5] : i32, view<16xi32>
+  view.store %started, %record[6] : i32, view<16xi32>
+  view.store %pending, %record[7] : i32, view<16xi32>
+  view.store %next_frontier, %frontier_word[0] : i64, view<1xi64>
+  kernel.return
+}
+
+kernel.def export("device_sdma_reader") @device_sdma_reader(%groups_x: index) {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%groups_x, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %selection: buffer, %started: buffer, %round_count: i32, %reader: i32) {
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %width = kernel.workgroup.size<x> : index
+  %position = index.madd %group, %width, %lane : index
+  %first = index.constant 0 : index
+  %origin = index.constant 0 : offset
+  %record = buffer.view %selection[%origin] : buffer -> view<16xi32>
+  %marker = buffer.view %started[%origin] : buffer -> view<1xi32>
+  %count = view.load %record[2] : view<16xi32> -> i32
+  %hash = view.load %record[3] : view<16xi32> -> i32
+  %length_input = index.cast %count : i32 to index
+  %length = index.assume %length_input [range(%length_input, 1, 18432)] : index
+  %source = buffer.view %input[%origin] : buffer -> view<[%length]xi32>
+  %target = buffer.view %output[%origin] : buffer -> view<[%length]xi32>
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %shift = scalar.constant 13 : i32
+  %multiplier = scalar.constant 1664525 : i32
+  %salt = scalar.constant 1013904223 : i32
+  %is_first = index.cmp eq, %position, %first : index
+  scf.if %is_first {
+    view.atomic.store %one, %marker[0] {ordering = release, scope = system} : i32, view<1xi32>
+  }
+  %in_bounds = index.cmp ult, %position, %length : index
+  scf.if %in_bounds {
+    %initial = scalar.xori %hash, %reader : i32
+    %cursor = index.cast %position : index to i32
+    %final_round, %final_cursor, %result = scf.while(%round = %zero : i32, %word = %cursor : i32, %value = %initial : i32) -> (i32, i32, i32) {
+      %more = scalar.cmpi ult, %round, %round_count : i32
+      scf.condition %more, %round, %word, %value : i1, i32, i32, i32
+    } do(%round: i32, %word: i32, %value: i32) {
+      %word_index_input = index.cast %word : i32 to index
+      // The initial cursor is guarded; increment wraps exactly at count.
+      %word_index = index.assume %word_index_input [range(%word_index_input, 0, 18431), lt(%word_index_input, %length)] : index
+      %loaded = view.load %source[%word_index] : view<[%length]xi32> -> i32
+      %combined = scalar.addi %value, %loaded : i32
+      %shifted = scalar.shrui %combined, %shift : i32
+      %mixed = scalar.xori %combined, %shifted : i32
+      %product = scalar.muli %mixed, %multiplier : i32
+      %next_value = scalar.addi %product, %salt : i32
+      %increment = scalar.addi %word, %one : i32
+      %wrap = scalar.cmpi eq, %increment, %count : i32
+      %next_word = scf.select %wrap, %zero, %increment : i32
+      %next_round = scalar.addi %round, %one : i32
+      scf.yield %next_round, %next_word, %next_value : i32, i32, i32
+    }
+    view.store %result, %target[%position] : i32, view<[%length]xi32>
+  }
+  kernel.return
+}

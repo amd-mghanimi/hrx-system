@@ -21,6 +21,7 @@ loom_cc_library(
     loom::analysis::ownership_lifetime
     loom::ir
     loom::ops::op_defs
+    loom::ops::type_registry
     loom::pass::types
   PUBLIC
 )

@@ -22,7 +22,7 @@ static amdf_cache_transition_t amdf_memory_host_transition(
 
 amdf_memory_site_description_t amdf_memory_describe_host_site(
     const amdf_memory_host_description_t* host, amdf_memory_map_flags_t access,
-    bool coherent) {
+    bool coherent, const amdf_memory_site_description_t* device_peer) {
   amdf_memory_site_description_t description = {0};
   if ((access & AMDF_MEMORY_MAP_FLAG_READ) != 0) {
     description.capabilities |= AMDF_MEMORY_SITE_CAPABILITY_READ;
@@ -39,6 +39,37 @@ amdf_memory_site_description_t amdf_memory_describe_host_site(
   }
   if (description.acquire.kind == AMDF_CACHE_TRANSITION_KIND_NONE) {
     description.capabilities |= AMDF_MEMORY_SITE_CAPABILITY_ACQUIRE_COST_KNOWN;
+  }
+  if (host->cacheability == AMDF_HOST_CACHEABILITY_WRITE_BACK &&
+      device_peer != NULL &&
+      amdf_memory_compatibility_domain_is_valid(&device_peer->atomic_domain)) {
+    if (device_peer->atomic_reach.scope_32 == AMDF_ATOMIC_SCOPE_SYSTEM) {
+      description.atomic_reach.scope_32 = AMDF_ATOMIC_SCOPE_SYSTEM;
+    }
+    if (device_peer->atomic_reach.scope_64 == AMDF_ATOMIC_SCOPE_SYSTEM) {
+      description.atomic_reach.scope_64 = AMDF_ATOMIC_SCOPE_SYSTEM;
+    }
+    if (description.atomic_reach.scope_32 != AMDF_ATOMIC_SCOPE_NONE ||
+        description.atomic_reach.scope_64 != AMDF_ATOMIC_SCOPE_NONE) {
+      description.atomic_domain = device_peer->atomic_domain;
+    }
+  }
+  return description;
+}
+
+amdf_memory_site_description_t amdf_memory_describe_file_site(
+    amdf_memory_map_flags_t access) {
+  amdf_memory_site_description_t description = {
+      .capabilities = AMDF_MEMORY_SITE_CAPABILITY_RELEASE_COST_KNOWN |
+                      AMDF_MEMORY_SITE_CAPABILITY_ACQUIRE_COST_KNOWN,
+      .release = {.kind = AMDF_CACHE_TRANSITION_KIND_NONE},
+      .acquire = {.kind = AMDF_CACHE_TRANSITION_KIND_NONE},
+  };
+  if ((access & AMDF_MEMORY_MAP_FLAG_READ) != 0) {
+    description.capabilities |= AMDF_MEMORY_SITE_CAPABILITY_READ;
+  }
+  if ((access & AMDF_MEMORY_MAP_FLAG_WRITE) != 0) {
+    description.capabilities |= AMDF_MEMORY_SITE_CAPABILITY_WRITE;
   }
   return description;
 }

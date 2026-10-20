@@ -19,129 +19,14 @@ iree_cc_library(
     amdf::headers
     iree::third_party::google_test
     libamdf::cts::gpu::gpu_device_fixture
-    libamdf::cts::gpu::pm4_commands
+    libamdf::cts::gpu::pm4::encoding::commands
+    libamdf::cts::util::wait
   TESTONLY
   ALWAYSLINK
   LINKOPTS
     "d3d12.lib"
     "dxgi.lib"
   PUBLIC
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-amdf_cts_binary(
-  NAME
-    memory_static_bin
-  DEPS
-    ::memory_cases
-    amdf::headers
-    libamdf::cts::util::static_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-iree_native_test(
-  NAME
-    "memory_static"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::memory_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-    "iree-build-requirement=libamdf.gpu"
-    "iree-build-requirement=d3d12.api"
-    "iree-run-requirement=libamdf.resource.amd_gpu"
-    "runtime-resource=amd-gpu"
-    "iree-run-requirement=d3d12.resource.device"
-    "runtime-resource=d3d12-device"
-  RESOURCE_GROUP
-    gpu-device
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-iree_native_test(
-  NAME
-    "memory_static_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::memory_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-    "iree-build-requirement=libamdf.gpu"
-    "iree-build-requirement=d3d12.api"
-    "iree-run-requirement=libamdf.resource.amd_gpu"
-    "runtime-resource=amd-gpu"
-    "iree-run-requirement=d3d12.resource.device"
-    "runtime-resource=d3d12-device"
-  RESOURCE_GROUP
-    gpu-device
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-amdf_cts_binary(
-  NAME
-    memory_shared_bin
-  DATA
-    amdf::amdf
-  DEPS
-    ::memory_cases
-    amdf::headers
-    libamdf::cts::util::shared_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-iree_native_test(
-  NAME
-    "memory_shared"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::memory_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-    "iree-build-requirement=libamdf.gpu"
-    "iree-build-requirement=d3d12.api"
-    "iree-run-requirement=libamdf.resource.amd_gpu"
-    "runtime-resource=amd-gpu"
-    "iree-run-requirement=d3d12.resource.device"
-    "runtime-resource=d3d12-device"
-  RESOURCE_GROUP
-    gpu-device
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-iree_native_test(
-  NAME
-    "memory_shared_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::memory_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-    "iree-build-requirement=libamdf.gpu"
-    "iree-build-requirement=d3d12.api"
-    "iree-run-requirement=libamdf.resource.amd_gpu"
-    "runtime-resource=amd-gpu"
-    "iree-run-requirement=d3d12.resource.device"
-    "runtime-resource=d3d12-device"
-  RESOURCE_GROUP
-    gpu-device
 )
 endif()
 
@@ -166,30 +51,6 @@ iree_native_test(
     "memory_dynamic"
   ARGS
     "--amdf_native_lifetime=process"
-    "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
-  SRC
-    ::memory_dynamic_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-    "iree-build-requirement=libamdf.gpu"
-    "iree-build-requirement=d3d12.api"
-    "iree-run-requirement=libamdf.resource.amd_gpu"
-    "runtime-resource=amd-gpu"
-    "iree-run-requirement=d3d12.resource.device"
-    "runtime-resource=d3d12-device"
-  RESOURCE_GROUP
-    gpu-device
-)
-endif()
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND IREE_D3D12_AVAILABLE)
-iree_native_test(
-  NAME
-    "memory_dynamic_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
     "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
   SRC
     ::memory_dynamic_bin

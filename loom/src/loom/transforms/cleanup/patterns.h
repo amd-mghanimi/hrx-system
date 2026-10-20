@@ -22,6 +22,7 @@
 
 #include "iree/base/api.h"
 #include "loom/rewrite/pattern_registry.h"
+#include "loom/transforms/cleanup/fact_refinement_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,8 @@ typedef struct loom_cleanup_pattern_provider_set_t {
   loom_rewrite_pattern_provider_list_t source_combine;
   // Dialect-backed special-value recognition and builders, or NULL.
   const loom_cleanup_special_value_policy_t* special_value_policy;
+  // Dialect-backed SSA fact and carrier refinement builders, or NULL.
+  const loom_fact_refinement_policy_t* fact_refinement_policy;
 } loom_cleanup_pattern_provider_set_t;
 
 // Indexed pattern registries prepared for one compiler invocation.
@@ -63,6 +66,8 @@ typedef struct loom_cleanup_pattern_registry_t {
   const loom_rewrite_pattern_registry_t* source_combine;
   // Dialect-backed special-value recognition and builders, or NULL.
   const loom_cleanup_special_value_policy_t* special_value_policy;
+  // Dialect-backed SSA fact and carrier refinement builders, or NULL.
+  const loom_fact_refinement_policy_t* fact_refinement_policy;
 } loom_cleanup_pattern_registry_t;
 
 // Owned storage for the four indexed cleanup pattern registries. Provider

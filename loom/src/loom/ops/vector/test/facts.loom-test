@@ -1,5 +1,63 @@
 // RUN: pass canonicalize
 
+// Shape refinement preserves producer facts while changing only the dynamic
+// SSA identities used to spell the vector type.
+func.def @refine_preserves_iota(%m: index, %n: index) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %source = vector.iota %c0 step %c1 : vector<[%m]xindex>
+  %refined = vector.refine %source : vector<[%m]xindex> -> vector<[%n]xindex>
+  %is_iota = test.fact_is_vector_iota %refined : vector<[%n]xindex> -> i1
+  func.return %is_iota : i1
+}
+// ----
+func.def @refine_preserves_iota(%m: index, %n: index) -> (i1) {
+  %is_iota = scalar.constant true : i1
+  func.return %is_iota : i1
+}
+
+// ====
+
+// An unknown fixed-width source still gives every offset lane the scalar
+// zero-extension domain. This is a per-lane summary, not an equality claim.
+func.def @index_cast_unknown_i8_to_offset(%source: vector<4xi8>) -> (i64, i64) {
+  %offsets = vector.index_cast %source : vector<4xi8> to vector<4xoffset>
+  %lane = vector.extract %offsets[2] : vector<4xoffset> -> offset
+  %lo = test.fact_range_lo %lane : offset -> i64
+  %hi = test.fact_range_hi %lane : offset -> i64
+  func.return %lo, %hi : i64, i64
+}
+// ----
+func.def @index_cast_unknown_i8_to_offset(%source: vector<4xi8>) -> (i64, i64) {
+  %lo = scalar.constant 0 : i64
+  %hi = scalar.constant 255 : i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ====
+
+// Small static lane facts retain each lane independently through the shared
+// scalar address conversion.
+func.def @index_cast_small_lanes_to_index() -> (i64, i64) {
+  %negative = scalar.constant -2 : i16
+  %positive = scalar.constant 7 : i16
+  %source = vector.from_elements %negative, %positive : vector<2xi16>
+  %indices = vector.index_cast %source : vector<2xi16> to vector<2xindex>
+  %lane0 = vector.extract %indices[0] : vector<2xindex> -> index
+  %lane1 = vector.extract %indices[1] : vector<2xindex> -> index
+  %value0 = test.fact_range_lo %lane0 : index -> i64
+  %value1 = test.fact_range_hi %lane1 : index -> i64
+  func.return %value0, %value1 : i64, i64
+}
+// ----
+func.def @index_cast_small_lanes_to_index() -> (i64, i64) {
+  %value0 = scalar.constant -2 : i64
+  %value1 = scalar.constant 7 : i64
+  func.return %value0, %value1 : i64, i64
+}
+
+// ====
+
 // Per-lane FMA facts preserve the exact side of a narrow rounding midpoint.
 func.def @fmaf_bf16_single_rounding() -> (bf16, bf16) {
   %a0 = scalar.constant 1.0078125 : bf16
@@ -53,6 +111,25 @@ func.def @extsi_uniform_i1(%x: i1) -> (i64, i64) {
 func.def @extsi_uniform_i1(%x: i1) -> (i64, i64) {
   %lo = scalar.constant -1 : i64
   %hi = scalar.constant 0 : i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ====
+
+// Unsigned extension describes every lane even when the input vector has no
+// aggregate lane summary. This is the dynamic byte-index domain used by
+// memory-backed lookup tables.
+func.def @extui_unknown_i8_vector(%x: vector<4xi8>) -> (i64, i64) {
+  %wide = vector.extui %x : vector<4xi8> to vector<4xi32>
+  %lane = vector.extract %wide[2] : vector<4xi32> -> i32
+  %lo = test.fact_range_lo %lane : i32 -> i64
+  %hi = test.fact_range_hi %lane : i32 -> i64
+  func.return %lo, %hi : i64, i64
+}
+// ----
+func.def @extui_unknown_i8_vector(%x: vector<4xi8>) -> (i64, i64) {
+  %lo = scalar.constant 0 : i64
+  %hi = scalar.constant 255 : i64
   func.return %lo, %hi : i64, i64
 }
 
@@ -451,8 +528,7 @@ func.def @transpose_small_static_lanes() -> (i32, i32) {
 
 // ====
 
-// Bitcast facts reinterpret exact same-width lanes without handling wider
-// byte-pack reshapes.
+// Bitcast facts reinterpret exact same-width lanes.
 func.def @bitcast_same_lane_raw_bits() -> (f32, i32) {
   %lhs_bits = scalar.constant 1065353216 : i32
   %rhs_bits = scalar.constant 1073741824 : i32
@@ -471,6 +547,109 @@ func.def @bitcast_same_lane_raw_bits() -> (f32, i32) {
   %r0 = scalar.constant 1.0 : f32
   %r1 = scalar.constant 1073741824 : i32
   func.return %r0, %r1 : f32, i32
+}
+
+// ====
+
+// Integer bitcasts preserve every exact lane while splitting wider elements.
+// The signed results also prove that the retained raw bits are interpreted in
+// the destination element domain.
+func.def @bitcast_split_integer_lanes() -> (i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8) {
+  %a = scalar.constant 50462976 : i32
+  %b = scalar.constant 117835012 : i32
+  %c = scalar.constant 185207048 : i32
+  %d = scalar.constant -2130739456 : i32
+  %packed = vector.from_elements %a, %b, %c, %d : vector<4xi32>
+  %bytes = vector.bitcast %packed : vector<4xi32> to vector<16xi8>
+  %r0 = vector.extract %bytes[0] : vector<16xi8> -> i8
+  %r1 = vector.extract %bytes[1] : vector<16xi8> -> i8
+  %r2 = vector.extract %bytes[2] : vector<16xi8> -> i8
+  %r3 = vector.extract %bytes[3] : vector<16xi8> -> i8
+  %r4 = vector.extract %bytes[4] : vector<16xi8> -> i8
+  %r5 = vector.extract %bytes[5] : vector<16xi8> -> i8
+  %r6 = vector.extract %bytes[6] : vector<16xi8> -> i8
+  %r7 = vector.extract %bytes[7] : vector<16xi8> -> i8
+  %r8 = vector.extract %bytes[8] : vector<16xi8> -> i8
+  %r9 = vector.extract %bytes[9] : vector<16xi8> -> i8
+  %r10 = vector.extract %bytes[10] : vector<16xi8> -> i8
+  %r11 = vector.extract %bytes[11] : vector<16xi8> -> i8
+  %r12 = vector.extract %bytes[12] : vector<16xi8> -> i8
+  %r13 = vector.extract %bytes[13] : vector<16xi8> -> i8
+  %r14 = vector.extract %bytes[14] : vector<16xi8> -> i8
+  %r15 = vector.extract %bytes[15] : vector<16xi8> -> i8
+  func.return %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15 : i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8
+}
+
+// ----
+func.def @bitcast_split_integer_lanes() -> (i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8) {
+  %r0 = scalar.constant 0 : i8
+  %r1 = scalar.constant 1 : i8
+  %r2 = scalar.constant 2 : i8
+  %r3 = scalar.constant 3 : i8
+  %r4 = scalar.constant 4 : i8
+  %r5 = scalar.constant 5 : i8
+  %r6 = scalar.constant 6 : i8
+  %r7 = scalar.constant 7 : i8
+  %r8 = scalar.constant 8 : i8
+  %r9 = scalar.constant 9 : i8
+  %r10 = scalar.constant 10 : i8
+  %r11 = scalar.constant 11 : i8
+  %r12 = scalar.constant 0 : i8
+  %r13 = scalar.constant 127 : i8
+  %r14 = scalar.constant -1 : i8
+  %r15 = scalar.constant -128 : i8
+  func.return %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15 : i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8, i8
+}
+
+// ====
+
+// Joining narrow exact lanes uses the same low-lane-first bit order.
+func.def @bitcast_join_integer_lanes() -> (i32, i32, i32, i32) {
+  %c0 = scalar.constant 0 : i8
+  %c1 = scalar.constant 1 : i8
+  %c2 = scalar.constant 2 : i8
+  %c3 = scalar.constant 3 : i8
+  %c4 = scalar.constant 4 : i8
+  %c5 = scalar.constant 5 : i8
+  %c6 = scalar.constant 6 : i8
+  %c7 = scalar.constant 7 : i8
+  %c8 = scalar.constant 8 : i8
+  %c9 = scalar.constant 9 : i8
+  %c10 = scalar.constant 10 : i8
+  %c11 = scalar.constant 11 : i8
+  %c12 = scalar.constant 12 : i8
+  %c13 = scalar.constant 13 : i8
+  %c14 = scalar.constant 14 : i8
+  %c15 = scalar.constant 15 : i8
+  %bytes = vector.from_elements %c0, %c1, %c2, %c3, %c4, %c5, %c6, %c7, %c8, %c9, %c10, %c11, %c12, %c13, %c14, %c15 : vector<16xi8>
+  %packed = vector.bitcast %bytes : vector<16xi8> to vector<4xi32>
+  %r0 = vector.extract %packed[0] : vector<4xi32> -> i32
+  %r1 = vector.extract %packed[1] : vector<4xi32> -> i32
+  %r2 = vector.extract %packed[2] : vector<4xi32> -> i32
+  %r3 = vector.extract %packed[3] : vector<4xi32> -> i32
+  func.return %r0, %r1, %r2, %r3 : i32, i32, i32, i32
+}
+
+// ----
+func.def @bitcast_join_integer_lanes() -> (i32, i32, i32, i32) {
+  %r0 = scalar.constant 50462976 : i32
+  %r1 = scalar.constant 117835012 : i32
+  %r2 = scalar.constant 185207048 : i32
+  %r3 = scalar.constant 252579084 : i32
+  func.return %r0, %r1, %r2, %r3 : i32, i32, i32, i32
+}
+
+// ====
+
+// One unknown source lane prevents facts from inventing any packed result.
+func.def @bitcast_join_requires_exact_lanes(%dynamic: i8) -> (i32) {
+  %c0 = scalar.constant 0 : i8
+  %c1 = scalar.constant 1 : i8
+  %c2 = scalar.constant 2 : i8
+  %bytes = vector.from_elements %c0, %c1, %c2, %dynamic : vector<4xi8>
+  %packed = vector.bitcast %bytes : vector<4xi8> to vector<1xi32>
+  %result = vector.extract %packed[0] : vector<1xi32> -> i32
+  func.return %result : i32
 }
 
 // ====
@@ -548,6 +727,33 @@ func.def @wave2_bit_count_small_lanes() -> (i32, i32, i32) {
   %r1 = scalar.constant 3 : i32
   %r2 = scalar.constant 32 : i32
   func.return %r0, %r1, %r2 : i32, i32, i32
+}
+
+// ====
+
+// Rotate facts reduce each signed lane amount modulo the declared lane width.
+func.def @wave2_rotate_small_lanes() -> (i8, i8, i8, i8) {
+  %v0 = scalar.constant -127 : i8
+  %v1 = scalar.constant 1 : i8
+  %a0 = scalar.constant 9 : i8
+  %a1 = scalar.constant -1 : i8
+  %values = vector.from_elements %v0, %v1 : vector<2xi8>
+  %amounts = vector.from_elements %a0, %a1 : vector<2xi8>
+  %left = vector.rotli %values, %amounts : vector<2xi8>
+  %right = vector.rotri %values, %amounts : vector<2xi8>
+  %l0 = vector.extract %left[0] : vector<2xi8> -> i8
+  %l1 = vector.extract %left[1] : vector<2xi8> -> i8
+  %r0 = vector.extract %right[0] : vector<2xi8> -> i8
+  %r1 = vector.extract %right[1] : vector<2xi8> -> i8
+  func.return %l0, %l1, %r0, %r1 : i8, i8, i8, i8
+}
+// ----
+func.def @wave2_rotate_small_lanes() -> (i8, i8, i8, i8) {
+  %l0 = scalar.constant 3 : i8
+  %l1 = scalar.constant -128 : i8
+  %r0 = scalar.constant -64 : i8
+  %r1 = scalar.constant 2 : i8
+  func.return %l0, %l1, %r0, %r1 : i8, i8, i8, i8
 }
 
 // ====
@@ -1325,6 +1531,25 @@ func.def @oversized_repeated_from_elements_preserves_uniform_fact() -> (i64) {
 
 // ====
 
+// Equal exact lane facts preserve a bounded uniform summary even when distinct
+// SSA values exceed the small static lane representation.
+func.def @oversized_equal_from_elements_preserves_uniform_fact() -> (i64) {
+  %c0 = scalar.constant 0 : i32
+  %c7a = scalar.constant 7 : i32
+  %c7b = scalar.constant 7 : i32
+  %v = vector.from_elements %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a, %c7b, %c7a : vector<17xi32>
+  %r = vector.reduce<addi> %v, %c0 : vector<17xi32>, i32
+  %lo = test.fact_range_lo %r : i32 -> i64
+  func.return %lo : i64
+}
+// ----
+func.def @oversized_equal_from_elements_preserves_uniform_fact() -> (i64) {
+  %lo = scalar.constant 119 : i64
+  func.return %lo : i64
+}
+
+// ====
+
 // Structural summaries for vector.iota remain queryable on dynamic vectors.
 func.def @iota_summary_fact(%n: index) -> (i1) {
   %c0 = index.constant 0 : index
@@ -2010,4 +2235,66 @@ func.def @finite_numeric_format_vector_decode_content(%payload: vector<1xi32>) -
   %fp6_finite = scalar.constant true : i1
   %bf6_finite = scalar.constant true : i1
   func.return %fp4_finite, %fp6_finite, %bf6_finite : i1, i1, i1
+}
+
+// ====
+
+// Native grouped arithmetic may differ under cancellation. Compile-time
+// evaluation retains the target-independent ordered f32 reference.
+func.def @dot2f_f16_reference_cancellation() -> (f32, f32) {
+  %a0 = scalar.constant 1.0 : f16
+  %a1 = scalar.constant 2.0 : f16
+  %a2 = scalar.constant -3.0 : f16
+  %a3 = scalar.constant 4.0 : f16
+  %b0 = scalar.constant 5.0 : f16
+  %b1 = scalar.constant -6.0 : f16
+  %b2 = scalar.constant 7.0 : f16
+  %b3 = scalar.constant 8.0 : f16
+  %seed0 = scalar.constant 9.0 : f32
+  %seed1 = scalar.constant -10.0 : f32
+  %lhs = vector.from_elements %a0, %a1, %a2, %a3 : vector<4xf16>
+  %rhs = vector.from_elements %b0, %b1, %b2, %b3 : vector<4xf16>
+  %seed = vector.from_elements %seed0, %seed1 : vector<2xf32>
+  %result = vector.dot2f %lhs, %rhs, %seed : vector<4xf16>, vector<4xf16>, vector<2xf32>
+  %first = vector.extract %result[0] : vector<2xf32> -> f32
+  %second = vector.extract %result[1] : vector<2xf32> -> f32
+  func.return %first, %second : f32, f32
+}
+
+// ----
+func.def @dot2f_f16_reference_cancellation() -> (f32, f32) {
+  %first = scalar.constant 2.0 : f32
+  %second = scalar.constant 1.0 : f32
+  func.return %first, %second : f32, f32
+}
+
+// ====
+
+// Native grouped arithmetic may differ under cancellation. Compile-time
+// evaluation retains the target-independent ordered f32 reference.
+func.def @dot2f_bf16_reference_cancellation() -> (f32, f32) {
+  %a0 = scalar.constant 1.0 : bf16
+  %a1 = scalar.constant 2.0 : bf16
+  %a2 = scalar.constant -3.0 : bf16
+  %a3 = scalar.constant 4.0 : bf16
+  %b0 = scalar.constant 5.0 : bf16
+  %b1 = scalar.constant -6.0 : bf16
+  %b2 = scalar.constant 7.0 : bf16
+  %b3 = scalar.constant 8.0 : bf16
+  %seed0 = scalar.constant 9.0 : f32
+  %seed1 = scalar.constant -10.0 : f32
+  %lhs = vector.from_elements %a0, %a1, %a2, %a3 : vector<4xbf16>
+  %rhs = vector.from_elements %b0, %b1, %b2, %b3 : vector<4xbf16>
+  %seed = vector.from_elements %seed0, %seed1 : vector<2xf32>
+  %result = vector.dot2f %lhs, %rhs, %seed : vector<4xbf16>, vector<4xbf16>, vector<2xf32>
+  %first = vector.extract %result[0] : vector<2xf32> -> f32
+  %second = vector.extract %result[1] : vector<2xf32> -> f32
+  func.return %first, %second : f32, f32
+}
+
+// ----
+func.def @dot2f_bf16_reference_cancellation() -> (f32, f32) {
+  %first = scalar.constant 2.0 : f32
+  %second = scalar.constant 1.0 : f32
+  func.return %first, %second : f32, f32
 }

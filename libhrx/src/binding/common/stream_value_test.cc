@@ -11,9 +11,13 @@
 #include <thread>
 #include <utility>
 
-#include "common/internal.h"
+#include "common/context.h"
+#include "common/hrx_bridge.h"
+#include "common/stream.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+#include "libhrx/src/libhrx/device.h"
+#include "libhrx/src/libhrx/mem_pool_backing.h"
 
 namespace {
 
@@ -32,10 +36,11 @@ template <typename Cleanup>
 ScopeExit(Cleanup) -> ScopeExit<Cleanup>;
 
 iree_hal_queue_family_spec_t MakeValueWaitFamily(uint32_t queue_count = 1) {
-  iree_hal_queue_family_spec_t family = {};
-  family.provisioned_queue_count = queue_count;
-  family.physical_device_affinity = UINT64_C(1) << 0;
-  family.role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC;
+  iree_hal_queue_family_spec_t family = {
+      .provisioned_queue_count = queue_count,
+      .physical_device_affinity = UINT64_C(1) << 0,
+      .role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC,
+  };
   family.zero_compute_atomic_capabilities.operations.device_scope_32 =
       IREE_HAL_ATOMIC_OPERATION_FLAG_WAIT;
   family.zero_compute_atomic_capabilities.operations.device_scope_64 =
@@ -121,8 +126,9 @@ TEST(StreamQueueCapabilitiesTest, RejectsMissingFamilySpecification) {
 }
 
 TEST(StreamValueTimelineTest, OverflowDoesNotReserveDuplicateValue) {
-  iree_hal_streaming_stream_t stream = {};
-  stream.pending_value = IREE_HAL_SEMAPHORE_MAX_VALUE;
+  iree_hal_streaming_stream_t stream = {
+      .pending_value = IREE_HAL_SEMAPHORE_MAX_VALUE,
+  };
   uint64_t wait_value = 17;
   uint64_t signal_value = 23;
   IREE_EXPECT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED,
@@ -137,21 +143,24 @@ TEST(StreamValueWaitLaneTest, TerminalHoleDoesNotRetireBlockedLane) {
   iree_hal_streaming_context_t context = {};
   iree_slim_mutex_initialize(&context.value_wait_lane_mutex);
 
-  iree_hal_streaming_value_wait_lane_t lane = {};
-  lane.list_state = IREE_HAL_STREAMING_VALUE_WAIT_LANE_LIST_STATE_PENDING;
-  iree_hal_streaming_value_wait_submission_t pending = {};
-  pending.state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED;
-  pending.lane = &lane;
-  iree_hal_streaming_value_wait_submission_t failed_hole = {};
-  failed_hole.state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED;
-  failed_hole.lane = &lane;
-  failed_hole.is_terminal = true;
-  failed_hole.has_failed = true;
-  iree_hal_streaming_value_wait_submission_t completed_hole = {};
-  completed_hole.state =
-      IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED;
-  completed_hole.lane = &lane;
-  completed_hole.is_terminal = true;
+  iree_hal_streaming_value_wait_lane_t lane = {
+      .list_state = IREE_HAL_STREAMING_VALUE_WAIT_LANE_LIST_STATE_PENDING,
+  };
+  iree_hal_streaming_value_wait_submission_t pending = {
+      .lane = &lane,
+      .state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED,
+  };
+  iree_hal_streaming_value_wait_submission_t failed_hole = {
+      .lane = &lane,
+      .state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED,
+      .is_terminal = true,
+      .has_failed = true,
+  };
+  iree_hal_streaming_value_wait_submission_t completed_hole = {
+      .lane = &lane,
+      .state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED,
+      .is_terminal = true,
+  };
   pending.next = &failed_hole;
   failed_hole.prev = &pending;
   failed_hole.next = &completed_hole;
@@ -614,6 +623,7 @@ TEST(StreamValueWaitLaneTest,
      OwnerFailureDoesNotRetireBlockedAcceptedSubmission) {
   IREE_ASSERT_OK(HRX_CALL(hrx_cpu_initialize(/*flags=*/0)));
   iree_hal_queue_t* wait_queue = nullptr;
+  iree_hal_pool_t* memory_pool = nullptr;
   iree_hal_buffer_t* target_buffer = nullptr;
   iree_hal_buffer_mapping_t target_mapping = {};
   iree_hal_semaphore_t* owner_timeline = nullptr;
@@ -629,9 +639,9 @@ TEST(StreamValueWaitLaneTest,
       iree_atomic_store(
           reinterpret_cast<iree_atomic_int32_t*>(target_mapping.contents.data),
           1, iree_memory_order_release);
-      iree_status_ignore(iree_hal_semaphore_wait(lane_completion, /*value=*/1,
-                                                 iree_infinite_timeout(),
-                                                 IREE_ASYNC_WAIT_FLAG_NONE));
+      IREE_EXPECT_OK(iree_hal_semaphore_wait(lane_completion, /*value=*/1,
+                                             iree_infinite_timeout(),
+                                             IREE_ASYNC_WAIT_FLAG_NONE));
     }
     if (target_mapping.contents.data) {
       IREE_EXPECT_OK(iree_hal_buffer_unmap_range(&target_mapping));
@@ -640,6 +650,7 @@ TEST(StreamValueWaitLaneTest,
     iree_hal_semaphore_release(lane_completion);
     iree_hal_semaphore_release(owner_timeline);
     iree_hal_buffer_release(target_buffer);
+    iree_hal_pool_release(memory_pool);
     iree_hal_queue_release(wait_queue);
     if (lane_mutex_initialized) {
       iree_slim_mutex_deinitialize(&lane.submission_mutex);
@@ -663,20 +674,18 @@ TEST(StreamValueWaitLaneTest,
   IREE_ASSERT_OK(iree_hal_queue_acquire(family, &queue_params, &wait_queue));
   ASSERT_NE(foreign_queue, wait_queue);
 
-  const iree_hal_buffer_params_t buffer_params = {
-      /*.usage=*/IREE_HAL_BUFFER_USAGE_STORAGE |
-          IREE_HAL_BUFFER_USAGE_MAPPING_PERSISTENT,
-      /*.access=*/IREE_HAL_MEMORY_ACCESS_ALL,
-      /*.type=*/IREE_HAL_MEMORY_TYPE_HOST_LOCAL |
-          IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE,
-  };
-  IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(
-      iree_hal_device_allocator(device), buffer_params, sizeof(uint32_t),
-      &target_buffer));
+  IREE_ASSERT_OK(hrx_mem_pool_backing_retain_allocation_source(
+      hrx_device, HRX_MEMORY_TYPE_HOST_LOCAL | HRX_MEMORY_TYPE_DEVICE_VISIBLE,
+      HRX_BUFFER_USAGE_DEFAULT, &memory_pool));
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      memory_pool,
+      iree_hal_make_pool_reservation_request(sizeof(uint32_t),
+                                             /*min_alignment=*/0),
+      iree_infinite_timeout(), &target_buffer));
   IREE_ASSERT_OK(iree_hal_buffer_map_range(
       target_buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-      IREE_HAL_MEMORY_ACCESS_ALL, /*local_byte_offset=*/0, sizeof(uint32_t),
-      &target_mapping));
+      IREE_HAL_MEMORY_ACCESS_ALL, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+      /*local_byte_offset=*/0, sizeof(uint32_t), &target_mapping));
   ASSERT_NE(nullptr, target_mapping.contents.data);
   iree_atomic_store(
       reinterpret_cast<iree_atomic_int32_t*>(target_mapping.contents.data), 0,
@@ -703,14 +712,15 @@ TEST(StreamValueWaitLaneTest,
   IREE_ASSERT_OK(iree_hal_queue_atomic_wait(
       wait_queue, iree_hal_semaphore_list_empty(), wait_signal_list,
       target_buffer, /*target_offset=*/0,
-      (iree_hal_atomic_wait_params_t){
-          /*.value=*/1,
-          /*.mask=*/UINT32_MAX,
-          /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE |
-              IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
-          /*.width=*/IREE_HAL_ATOMIC_WIDTH_32,
-          /*.condition=*/IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
-      }));
+      iree_hal_atomic_wait_params_t{
+          .value = 1,
+          .mask = UINT32_MAX,
+          .flags =
+              IREE_HAL_ATOMIC_FLAG_ACQUIRE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
+          .width = IREE_HAL_ATOMIC_WIDTH_32,
+          .condition = IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
+      },
+      /*barriers=*/NULL));
   wait_submission_accepted = true;
 
   uint64_t value = UINT64_MAX;
@@ -720,9 +730,10 @@ TEST(StreamValueWaitLaneTest,
       owner_timeline,
       iree_make_status(IREE_STATUS_ABORTED, "independent owner failure"));
 
-  iree_hal_streaming_value_wait_submission_t submission = {};
-  submission.completion_semaphore = lane_completion;
-  submission.state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED;
+  iree_hal_streaming_value_wait_submission_t submission = {
+      .completion_semaphore = lane_completion,
+      .state = IREE_HAL_STREAMING_VALUE_WAIT_SUBMISSION_STATE_PUBLISHED,
+  };
   lane.queue = wait_queue;
   lane.list_state = IREE_HAL_STREAMING_VALUE_WAIT_LANE_LIST_STATE_PENDING;
   lane.submission_head = &submission;
@@ -756,7 +767,7 @@ TEST(StreamValueWaitLaneTest,
       foreign_signal_values};
   IREE_EXPECT_OK(iree_hal_queue_barrier(
       foreign_queue, iree_hal_semaphore_list_empty(), foreign_signal_list,
-      IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
   IREE_EXPECT_OK(iree_hal_semaphore_wait(foreign_completion, /*value=*/1,
                                          iree_infinite_timeout(),
                                          IREE_ASYNC_WAIT_FLAG_NONE));

@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Compiler-owned command root and dependency-unit preparation.
+// Compiler-owned command root and dependency-unit planning.
 
 #ifndef LOOM_TARGET_ARCH_CMD_LOWER_PROGRAM_PLAN_H_
 #define LOOM_TARGET_ARCH_CMD_LOWER_PROGRAM_PLAN_H_
@@ -37,21 +37,39 @@ typedef struct loom_cmd_entry_requirement_t {
   const loom_op_t* declaration_op;
 } loom_cmd_entry_requirement_t;
 
+// Source representation behind one command-plan kernel request.
+typedef enum loom_cmd_program_kernel_request_kind_e {
+  // Indexed source specialized through the ordinary kernel request producer.
+  LOOM_CMD_PROGRAM_KERNEL_REQUEST_KIND_INDEXED = 0,
+
+  // Already closed compiler-generated source product.
+  LOOM_CMD_PROGRAM_KERNEL_REQUEST_KIND_GENERATED = 1,
+} loom_cmd_program_kernel_request_kind_t;
+
 // One borrowed source request bound to a command-plan entry requirement.
 typedef struct loom_cmd_program_kernel_request_t {
   // Plan-wide logical executable-entry requirement for this request.
   uint32_t entry_requirement_index;
 
-  // Callback-lived class request supporting resolution before materialization.
-  const loom_kernel_request_t* kernel_request;
+  // Source representation selecting the active request union member.
+  loom_cmd_program_kernel_request_kind_t kind;
+
+  union {
+    // Callback-lived class request supporting resolution before
+    // materialization.
+    const loom_kernel_request_t* indexed;
+
+    // Callback-lived independently closed generated source product.
+    const loom_kernel_class_product_t* generated;
+  } source;
 } loom_cmd_program_kernel_request_t;
 
 // Visits one command-plan kernel request before source materialization.
 //
-// |request| and |request.kernel_request| remain valid only for the callback.
-// The callback may resolve an existing product from the class identity or
-// materialize an independently owned source product on a miss. A non-OK status
-// terminates command-plan preparation.
+// |request| and its active source remain valid only for the callback. The
+// callback may resolve an indexed product from its class identity or call
+// loom_cmd_program_kernel_request_materialize() for an independently owned
+// source product. A non-OK status terminates command-plan construction.
 typedef iree_status_t (*loom_cmd_program_kernel_request_publish_fn_t)(
     void* user_data, const loom_cmd_program_kernel_request_t* request);
 
@@ -64,32 +82,44 @@ typedef struct loom_cmd_program_kernel_request_sink_t {
   void* user_data;
 } loom_cmd_program_kernel_request_sink_t;
 
-// Optional indexed source environment for command-plan preparation.
+// Materializes an independently owned source product for |request|.
+//
+// Indexed requests delegate to their ordinary class materializer. Generated
+// requests exactly clone their already closed source product. The returned
+// product retains no callback-lived state and must be released with
+// loom_kernel_class_product_deinitialize().
+iree_status_t loom_cmd_program_kernel_request_materialize(
+    const loom_cmd_program_kernel_request_t* request,
+    iree_arena_block_pool_t* block_pool, iree_allocator_t allocator,
+    loom_kernel_class_product_t* out_product);
+
+// Optional kernel source environment for command-plan construction.
 typedef struct loom_cmd_program_kernel_source_t {
-  // Invocation-local index-backed request producer.
+  // Invocation-local indexed request producer, or NULL when the selected
+  // roots reach only generated sources.
   loom_kernel_request_producer_t* producer;
 
   // Invocation environment providing diagnostics and specialization.
   const loom_link_plan_materialization_environment_t* environment;
 
   // Exact indexed source-definition ordinal by linked-module symbol ID.
-  // Caller preparation may append symbols while preserving this stable prefix.
+  // Command planning may append symbols while preserving this stable prefix.
   struct {
     // Borrowed dense projection storage.
     const iree_host_size_t* values;
 
-    // Number of linked-module symbol slots before caller preparation.
+    // Number of linked-module symbol slots immediately after linking.
     iree_host_size_t count;
   } source_definitions;
 
   // Bounded semantic class collection policy.
   loom_kernel_class_collection_options_t collection_options;
 
-  // Sink visiting every live source class before materialization.
+  // Sink visiting every live indexed class and generated source.
   loom_cmd_program_kernel_request_sink_t sink;
 } loom_cmd_program_kernel_source_t;
 
-// One prepared command root within a program plan.
+// One planned command root within a program plan.
 //
 // The lowered command function addresses root-local executable and entry slots.
 // |entry_requirement_indices| maps each slot to one atomic plan-wide binding
@@ -122,11 +152,11 @@ typedef struct loom_cmd_program_root_t {
 //
 // The root module contains every selected command symbol lowered to the
 // portable cmd low ISA together with the configured entry declarations they
-// require. Body-blind command preparation never materializes a kernel
-// implementation or manufactures a host launch-count program. When an indexed
-// kernel source is supplied, its sink visits each live class before optional
-// materialization and only logical entry requirements remain in the returned
-// plan.
+// require. Exact launch counts remain command metadata. Storage-backed launch
+// arithmetic is extracted into target-matched device producers that batch
+// compatible transient indirect-count tuples; their independently closed
+// source products are published through the same request sink as indexed
+// kernels. Only logical entry requirements remain in the returned plan.
 typedef struct loom_cmd_program_plan_t {
   // Owned module containing all lowered command roots.
   loom_module_t* root_module;
@@ -147,22 +177,22 @@ typedef struct loom_cmd_program_plan_t {
   iree_allocator_t host_allocator;
 } loom_cmd_program_plan_t;
 
-// Prepares command-program roots for independent compilation.
+// Builds a command-program plan from a sealed selective-link materialization.
 //
 // |materialization| is a sealed selective-link product containing command
 // implementations, logical-kernel contracts and configuration functions, and
 // executable-entry declarations without kernel implementation facets.
 // |program_refs| names command roots in caller order and may repeat the same
-// root. Preparation takes ownership of the module and resets |materialization|
-// immediately; all dense projections are borrowed for the duration of this
-// call.
+// root. Plan construction takes ownership of the module and resets
+// |materialization| immediately; all dense projections are borrowed for the
+// duration of this call.
 //
-// Preparation flattens command-program composition,
+// Plan construction flattens command-program composition,
 // resolves root-local control flow and explicit unroll policies, converts
 // logical launches to configured dispatches at their original CFG sites,
 // retains configured entry declarations, assigns root-local atomic entry
 // slots, and lowers every command root. Kernel implementations retain their
-// independent compilation path. The prepared module becomes the returned
+// independent compilation path. The lowered module becomes the returned
 // plan's root module and remains owned by that plan.
 //
 // |pass_registry| and |cleanup_pattern_provider_set| provide the standard
@@ -170,20 +200,21 @@ typedef struct loom_cmd_program_plan_t {
 // source structure. They are compiler-owned resources rather than part of the
 // authored program contract.
 //
-// |kernel_source| optionally visits the semantic classes reached by all
-// selected roots before source materialization. Publication is complete before
-// this function returns; the returned plan retains no request, source product,
-// or kernel implementation state. The terminal status and |out_valid| commit
-// the publication as a complete parent product. A caller that receives a
-// non-OK status or false validity must cancel work accepted earlier in the
-// call.
+// |kernel_source| optionally visits indexed semantic classes and generated
+// sources reached by all selected roots before source materialization. A sink
+// is required when storage-backed launch arithmetic requires a generated
+// producer. Publication is complete before this function returns; the returned
+// plan retains no request, source product, or kernel implementation state. The
+// terminal status and |out_valid| commit the publication as a complete parent
+// product. A caller that receives a non-OK status or false validity must cancel
+// work accepted earlier in the call.
 //
 // Unsupported portable mappings and infrastructure failures return a non-OK
 // status. Source contract violations emit diagnostics, set |out_valid| to
 // false, leave |out_plan| empty, and return OK. A valid plan sets |out_valid|
 // to true and transfers all referenced modules to |out_plan|, which must be
 // deinitialized by the caller.
-iree_status_t loom_cmd_program_plan_prepare_materialization(
+iree_status_t loom_cmd_program_plan_build_from_materialization(
     loom_link_plan_materialization_t* materialization,
     const loom_symbol_ref_t* program_refs, iree_host_size_t program_count,
     const loom_cmd_program_kernel_source_t* kernel_source,

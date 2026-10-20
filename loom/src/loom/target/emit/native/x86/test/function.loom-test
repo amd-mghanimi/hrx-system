@@ -1,0 +1,415 @@
+// The fixed result tests frame preservation independently of allocation policy.
+// RUN: emit x86-frame @saved fixed=%value:physical_register:3:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @saved() -> (reg<x86.gpr64>) asm {
+  %value = mov.imm64 42
+  return %value
+}
+
+// ----
+callee-preserved: rbx
+
+// ====
+
+// A caller-saved destination needs no preservation envelope.
+// RUN: emit x86-frame @unsaved fixed=%value:physical_register:0:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @unsaved() -> (reg<x86.gpr64>) asm {
+  %value = mov.imm64 42
+  return %value
+}
+
+// ----
+callee-preserved: none
+
+// ====
+
+// Two live YMM values occupy the complete test budget. Swapping them across
+// the backedge forces the shared move sequencer to use a 32-byte cycle cell.
+// RUN: emit x86-frame @saturated_vector_cycle x86.ymm=2
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) @saturated_vector_cycle(%left: reg<x86.ymm>, %right: reg<x86.ymm>, %iterations: reg<x86.gpr32>, %output: reg<x86.gpr64>) asm {
+  low.br ^header(%left: reg<x86.ymm>, %right: reg<x86.ymm>, %iterations: reg<x86.gpr32>)
+^header(%first: reg<x86.ymm>, %second: reg<x86.ymm>, %remaining: reg<x86.gpr32>):
+  low.cond_br %remaining, ^body, ^exit : reg<x86.gpr32>
+^body:
+  %next = sub.imm.gpr32 %remaining {imm32 = 1}
+  low.br ^header(%second: reg<x86.ymm>, %first: reg<x86.ymm>, %next: reg<x86.gpr32>)
+^exit:
+  vmovdqu32.store.ymm %first, %output {disp32 = 0}
+  vmovdqu32.store.ymm %second, %output {disp32 = 32}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 64 bytes, alignment 32
+realignment: r11, saved RSP at +32
+upper-state-cleanup: vzeroupper
+
+// ====
+
+// Explicit storage traffic accepts the complete SIMD width family at
+// unaligned offsets. Fixed high registers exercise VEX3 and EVEX transport.
+// RUN: emit x86-frame @xmm_storage fixed=%loaded:physical_register:9:1 fixed=%restored:physical_register:10:1
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) @xmm_storage(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 1, byte_length = 16} : low.storage<stack>
+  %loaded = vmovdqu32.load.xmm %input {disp32 = 0}
+  low.spill %loaded, %slot : reg<x86.xmm>, low.storage<stack>
+  %restored = low.reload %slot : low.storage<stack> -> reg<x86.xmm>
+  vmovdqu32.store.xmm %restored, %output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 16 bytes, alignment 8
+
+// ====
+
+// RUN: emit x86-frame @ymm_storage fixed=%loaded:physical_register:9:1 fixed=%restored:physical_register:10:1
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) @ymm_storage(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 1, byte_length = 32} : low.storage<stack>
+  %loaded = vmovdqu32.load.ymm %input {disp32 = 0}
+  low.spill %loaded, %slot : reg<x86.ymm>, low.storage<stack>
+  %restored = low.reload %slot : low.storage<stack> -> reg<x86.ymm>
+  vmovdqu32.store.ymm %restored, %output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 32 bytes, alignment 8
+upper-state-cleanup: vzeroupper
+
+// ====
+
+// RUN: emit x86-frame @zmm_storage fixed=%loaded:physical_register:17:1 fixed=%restored:physical_register:18:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @zmm_storage(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 1, byte_length = 64} : low.storage<stack>
+  %loaded = vmovdqu32.load %input {disp32 = 0}
+  low.spill %loaded, %slot : reg<x86.zmm>, low.storage<stack>
+  %restored = low.reload %slot : low.storage<stack> -> reg<x86.zmm>
+  vmovdqu32.store %restored, %output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 64 bytes, alignment 8
+
+// ====
+
+// K spill/reload applies the same abstract K1--K7,K0 rotation as ordinary
+// descriptor operands. Both K0 and K1 remain legal for K-only transport.
+// RUN: emit x86-frame @k_storage fixed=%mask:physical_register:7:1 fixed=%restored:physical_register:0:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @k_storage(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 1, byte_length = 8} : low.storage<stack>
+  %mask = avx512.kmovq.k.gpr64 %input
+  low.spill %mask, %slot : reg<x86.k>, low.storage<stack>
+  %restored = low.reload %slot : low.storage<stack> -> reg<x86.k>
+  %word = avx512.kmovq.gpr64.k %restored
+  mov.store.gpr64 %word, %output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 8 bytes, alignment 8
+
+// ====
+
+// Synchronous call transport keeps a stored argument out of the allocatable
+// register set even when pure setup remains between its reload and the call.
+// RUN: emit x86-frame @stored_call strategy=pressure x86.gpr64=1
+x86.target<scalar> @target
+
+low.func.decl pure target<x86.scalar.core>(@target) @consume_stored(%value: reg<x86.gpr64>, %setup: reg<x86.gpr32>)
+
+low.func.def target<x86.scalar.core>(@target) @stored_call(%input: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
+  %slot = storage {byte_alignment = 8, byte_length = 8} : low.storage<stack>
+  low.spill %input, %slot : reg<x86.gpr64>, low.storage<stack>
+  %loaded = low.reload %slot : low.storage<stack> -> reg<x86.gpr64>
+  %constant = mov.imm32 1
+  low.func.call pure @consume_stored(%loaded, %constant) : (reg<x86.gpr64>, reg<x86.gpr32>)
+  return %constant
+}
+
+// ----
+callee-preserved: none
+stack: 8 bytes, alignment 16
+
+// ====
+
+// Every SysV SIMD and mask register is volatile. The profile-wide ZMM range
+// aliases this live YMM value, while the K range includes the rotated K0 slot.
+// Both values therefore require retained stack storage across the call.
+// RUN: emit x86-frame @vector_call_clobbers
+x86.target<avx512> @target
+
+low.func.decl target<x86.avx512.core>(@target) @volatile_callee(%output: reg<x86.gpr64>) -> (reg<x86.gpr64>)
+
+low.func.def target<x86.avx512.core>(@target) @vector_call_clobbers(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %vector = vmovdqu32.load.ymm %input {disp32 = 0}
+  %returned_output = low.func.call @volatile_callee(%output) : (reg<x86.gpr64>) -> (reg<x86.gpr64>)
+  vmovdqu32.store.ymm %vector, %returned_output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+stack: 40 bytes, alignment 16
+upper-state-call-cleanups: 1
+upper-state-cleanup: vzeroupper
+
+// ====
+
+// Allocation-authored copies use the same class-pair selector as cycle and
+// edge transport. Fixed locations force one real copy at every SIMD width.
+// RUN: emit x86-frame @vector_copies fixed=%xmm:physical_register:9:1 fixed=%xmm_copy:physical_register:10:1 fixed=%ymm:physical_register:11:1 fixed=%ymm_copy:physical_register:12:1 fixed=%zmm:physical_register:17:1 fixed=%zmm_copy:physical_register:18:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @vector_copies(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %xmm = vmovdqu32.load.xmm %input {disp32 = 0}
+  %xmm_copy = copy %xmm : reg<x86.xmm> -> reg<x86.xmm>
+  vmovdqu32.store.xmm %xmm_copy, %output {disp32 = 0}
+  %ymm = vmovdqu32.load.ymm %input {disp32 = 0}
+  %ymm_copy = copy %ymm : reg<x86.ymm> -> reg<x86.ymm>
+  vmovdqu32.store.ymm %ymm_copy, %output {disp32 = 0}
+  %zmm = vmovdqu32.load %input {disp32 = 0}
+  %zmm_copy = copy %zmm : reg<x86.zmm> -> reg<x86.zmm>
+  vmovdqu32.store %zmm_copy, %output {disp32 = 0}
+  %mask = avx512.kmovq.k.gpr64 %input
+  %mask_copy = copy %mask : reg<x86.k> -> reg<x86.k>
+  %word = avx512.kmovq.gpr64.k %mask_copy
+  mov.store.gpr64 %word, %output {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+upper-state-cleanup: vzeroupper
+
+// ====
+
+// A half-precision value crosses the platform boundary in XMM while its Low
+// carrier occupies four-byte GPR storage. With no physical GPR32 capacity, the
+// entry and return both exercise direct cross-class storage transport.
+// RUN: emit x86-frame @stored_half x86.gpr32=0
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) abi_layout({signature = (f16) -> (f16)}) @stored_half(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+// ----
+callee-preserved: none
+stack: 8 bytes, alignment 8
+
+// ====
+
+// The common frame preserves the union of registers written on both exits.
+// RUN: emit x86-frame @two_returns fixed=%condition:physical_register:0:1 fixed=%left:physical_register:3:1 fixed=%right:physical_register:12:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @two_returns() -> (reg<x86.gpr64>) asm {
+  %condition = mov.imm32 1
+  low.cond_br %condition, ^left, ^right : reg<x86.gpr32>
+^left:
+  %left = mov.imm64 42
+  return %left
+^right:
+  %right = mov.imm64 43
+  return %right
+}
+
+// ----
+callee-preserved: rbx, r12
+
+// ====
+
+// Equal descriptor-branch successors collapse to their shared fallthrough
+// without materializing the comparison or a conditional transfer.
+// RUN: emit x86-native-bytes @same_descriptor_successor fixed=%lhs:physical_register:7:1 fixed=%rhs:physical_register:6:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @same_descriptor_successor(%lhs: reg<x86.gpr32>, %rhs: reg<x86.gpr32>) asm {
+  low.op.cond_br<x86.scalar.cmp.branch.gpr32>(%lhs, %rhs) {predicate = 2}, ^exit, ^exit : (reg<x86.gpr32>, reg<x86.gpr32>)
+^exit:
+  return
+}
+
+// ----
+code: c3
+
+// ====
+
+// Equal structural-branch successors outside the fallthrough position collapse
+// to one unconditional transfer without reading the condition.
+// RUN: emit x86-native-bytes @same_structural_successor fixed=%condition:physical_register:7:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @same_structural_successor(%condition: reg<x86.gpr32>) asm {
+  low.br ^loop
+^loop:
+  low.br ^condition_block
+^condition_block:
+  low.cond_br %condition, ^loop, ^loop : reg<x86.gpr32>
+}
+
+// ----
+code: e9 fb ff ff ff c3
+
+// ====
+
+// A coalesced SysV RDI entry needs no transport write. Return transport writes
+// the caller-saved RAX instead.
+// RUN: emit x86-frame @read_only fixed=%input:physical_register:7:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @read_only(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  return %input
+}
+
+// ----
+callee-preserved: none
+
+// ====
+
+// An allocation-generated move writes R12 even though no target instruction
+// defines it. Frame preparation must include transport writes.
+// RUN: emit x86-frame @transport fixed=%input:physical_register:7:1 fixed=%copy:physical_register:12:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @transport(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %copy = copy %input : reg<x86.gpr64> -> reg<x86.gpr64>
+  return %copy
+}
+
+// ----
+callee-preserved: r12
+
+// ====
+
+// A write to EBX changes the full RBX value, so its 64-bit contents are saved.
+// RUN: emit x86-frame @narrow_write fixed=%value:physical_register:3:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @narrow_write() -> (reg<x86.gpr32>) asm {
+  %value = mov.imm32 42
+  return %value
+}
+
+// ----
+callee-preserved: rbx
+
+// ====
+
+// The return address contributes eight bytes to the incoming stack residue.
+// RUN: emit x86-frame @aligned_caller_saved fixed=%value:physical_register:0:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @aligned_caller_saved(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 16, byte_length = 8} : low.storage<stack>
+  low.spill %input, %slot : reg<x86.gpr64>, low.storage<stack>
+  %value = low.reload %slot : low.storage<stack> -> reg<x86.gpr64>
+  return %value
+}
+
+// ----
+callee-preserved: none
+stack: 8 bytes, alignment 16
+
+// ====
+
+// A callee-save push changes the padding needed for the same local slot.
+// RUN: emit x86-frame @aligned_callee_saved fixed=%value:physical_register:3:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @aligned_callee_saved(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 16, byte_length = 8} : low.storage<stack>
+  low.spill %input, %slot : reg<x86.gpr64>, low.storage<stack>
+  %loaded = low.reload %slot : low.storage<stack> -> reg<x86.gpr64>
+  %value = xor.gpr64 %loaded, %input
+  return %value
+}
+
+// ----
+callee-preserved: rbx
+stack: 16 bytes, alignment 16
+
+// ====
+
+// Stronger alignment records an explicit restoration slot and entry scratch.
+// RUN: emit x86-frame @realigned_callee_saved fixed=%value:physical_register:3:1
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @realigned_callee_saved(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 64, byte_length = 8} : low.storage<stack>
+  low.spill %input, %slot : reg<x86.gpr64>, low.storage<stack>
+  %loaded = low.reload %slot : low.storage<stack> -> reg<x86.gpr64>
+  %value = xor.gpr64 %loaded, %input
+  return %value
+}
+
+// ----
+callee-preserved: rbx
+stack: 64 bytes, alignment 64
+realignment: r11, saved RSP at +8
+
+// ====
+
+// The highest VEX register feeds the highest EVEX register without truncating
+// either operand's encoded register number.
+// RUN: emit x86-native-bytes @vex_load_evex_broadcast fixed=%pointer:physical_register:7:1 fixed=%output:physical_register:6:1 fixed=%scalar:physical_register:15:1 fixed=%packet:physical_register:31:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @vex_load_evex_broadcast(%pointer: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %scalar = vmovss.load.xmm %pointer {disp32 = 4}
+  %packet = vbroadcastss %scalar
+  vmovdqu32.store %packet, %output {disp32 = 0}
+  return
+}
+
+// ----
+code: c5 7a 10 7f 04 62 42 7d 48 18 ff 62 61 7e 48 7f 3e c3
+
+// ====
+
+// Vector register ordinals never enter the callee-preserved GPR mask.
+// RUN: emit x86-frame @vector_load fixed=%value:physical_register:15:1
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) @vector_load(%pointer: reg<x86.gpr64>) asm {
+  %value = vmovdqu32.load.xmm %pointer {disp32 = 0}
+  return
+}
+
+// ----
+callee-preserved: none
+
+// ====
+
+// Native copies transport vector values without treating their ordinals as
+// callee-preserved GPRs.
+// RUN: emit x86-frame @vector_move fixed=%input:physical_register:0:1 fixed=%copy:physical_register:1:1
+x86.target<avx2> @target
+
+low.func.def target<x86.avx2.core>(@target) @vector_move(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %copy = copy %input : reg<x86.xmm> -> reg<x86.xmm>
+  return %copy
+}
+
+// ----
+callee-preserved: none

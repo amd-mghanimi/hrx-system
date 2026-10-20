@@ -80,8 +80,8 @@ static void iree_hal_webgpu_driver_destroy(iree_hal_driver_t* base_driver) {
 }
 
 static iree_status_t iree_hal_webgpu_driver_query_available_devices(
-    iree_hal_driver_t* base_driver, iree_allocator_t host_allocator,
-    iree_host_size_t* out_device_info_count,
+    iree_hal_driver_t* base_driver, iree_string_view_t driver_name,
+    iree_allocator_t host_allocator, iree_host_size_t* out_device_info_count,
     iree_hal_device_info_t** out_device_infos) {
   // WebGPU exposes a single "default" device. The actual adapter/device
   // request happens asynchronously during device creation via bridge imports.
@@ -240,7 +240,8 @@ static iree_status_t iree_hal_webgpu_driver_create_device_async(
   IREE_TRACE_ZONE_BEGIN(z0);
 
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_device_create_params_verify(create_params));
+      z0, iree_hal_device_create_params_verify_runtime_features(
+              create_params, IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_NONE));
 
   // Async device creation requires blocking waits (Atomics.wait), which are
   // only available on Web Workers. On the main thread, callers must obtain

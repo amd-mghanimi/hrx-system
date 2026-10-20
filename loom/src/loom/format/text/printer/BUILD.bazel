@@ -16,7 +16,6 @@ loom_cc_library(
     name = "printer_impl",
     srcs = [
         "atoms.c",
-        "block_order.c",
         "context.c",
         "format.c",
         "format_regions.c",
@@ -30,7 +29,6 @@ loom_cc_library(
     ],
     hdrs = [
         "atoms.h",
-        "block_order.h",
         "context.h",
         "format.h",
         "format_regions.h",
@@ -44,31 +42,16 @@ loom_cc_library(
     ],
     visibility = ["//loom/src/loom/format/text:__pkg__"],
     deps = [
+        "//loom/src/loom/format:block_order",
         "//loom/src/loom/format/text:low_asm",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops:type_registry",
         "//loom/src/loom/target:registers",
-        "//loom/src/loom/util:cfg_dominance",
-        "//loom/src/loom/util:cfg_graph",
         "//loom/src/loom/util:stream",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/base/internal:unicode",
-    ],
-)
-
-loom_cc_test(
-    name = "block_order_test",
-    srcs = ["block_order_test.cc"],
-    deps = [
-        ":printer_impl",
-        "//loom/src/loom/ir",
-        "//loom/src/loom/ops/cfg",
-        "//loom/src/loom/ops/test",
-        "//runtime/src/iree/base/internal:arena",
-        "//runtime/src/iree/testing:gtest",
-        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 

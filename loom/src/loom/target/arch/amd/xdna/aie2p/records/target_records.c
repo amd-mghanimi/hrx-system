@@ -84,10 +84,23 @@ const loom_target_bundle_t loom_aie2p_array_target_bundle = {
     .config = &kAie2pArrayConfig,
 };
 
+static const loom_target_config_t kAie2pConfigurationConfig = {
+    .name = IREE_SVL("amd.xdna.aie2p.configuration"),
+    .contract_set_key = IREE_SVL("amd.xdna.aie2p.configuration"),
+};
+
+const loom_target_bundle_t loom_aie2p_configuration_target_bundle = {
+    .name = IREE_SVL("aie2p-configuration"),
+    .snapshot = &kAie2pArraySnapshot,
+    .export_plan = &kAie2pArrayExportPlan,
+    .config = &kAie2pConfigurationConfig,
+};
+
 static const loom_target_bundle_t* const kAie2pTargetBundleValues[] = {
     NULL,
     &loom_aie2p_core_target_bundle,
     &loom_aie2p_array_target_bundle,
+    &loom_aie2p_configuration_target_bundle,
 };
 
 const loom_target_bundle_table_t loom_aie2p_target_bundles = {

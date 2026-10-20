@@ -240,24 +240,36 @@ class CliTest(unittest.TestCase):
         self.assertIn("--//runtime/config/hal:drivers=amdgpu", description)
         self.assertIn("--repo_env=IREE_ROCM_PATH=/opt/rocm", description)
 
-    def test_bazel_build_defaults_to_project_targets(self):
-        args = cli.parse_arguments(["bazel", "build"])
+    def test_bazel_build_and_test_default_to_project_targets(self):
+        for command in ("build", "test"):
+            prefix = [command] + (["--config=presubmit"] if command == "test" else [])
+            for options in (
+                [],
+                ["--config=asan"],
+                ["--test_arg=--target_pattern_file=nested.txt"],
+            ):
+                with self.subTest(command=command, options=options):
+                    self.assertEqual(
+                        self.planned_argv(["bazel", command, *options])[1:],
+                        [*prefix, *options, *cli.DEFAULT_BAZEL_TARGETS],
+                    )
 
-        plan = args.handler(args)
-        description = plan.describe()
-
-        self.assertIn("//runtime/...", description)
-        self.assertIn("//libhrx/...", description)
-
-    def test_bazel_build_with_only_options_still_uses_default_targets(self):
-        args = cli.parse_arguments(["bazel", "build", "--config=asan"])
-
-        plan = args.handler(args)
-        description = plan.describe()
-
-        self.assertIn("--config=asan", description)
-        self.assertIn("//runtime/...", description)
-        self.assertIn("//libhrx/...", description)
+    def test_bazel_target_pattern_files_suppress_default_targets(self):
+        for command in ("build", "test"):
+            prefix = [command] + (["--config=presubmit"] if command == "test" else [])
+            for options in (
+                ["--target_pattern_file=targets.txt"],
+                ["--target_pattern_file", "targets with spaces.txt"],
+                ["--target_pattern_file=-", "--skip_incompatible_explicit_targets"],
+                ["--target_pattern_file=targets.txt", "//loom/..."],
+            ):
+                with self.subTest(command=command, options=options):
+                    self.assertEqual(
+                        self.planned_argv(
+                            ["bazel", command, "--config=asan", *options]
+                        )[1:],
+                        [*prefix, "--config=asan", *options],
+                    )
 
     def test_bazel_test_importer_environment_adds_config_and_pythonpath(self):
         with self.importer_manifest_patch():
@@ -342,12 +354,11 @@ class CliTest(unittest.TestCase):
             ],
         )
 
-    def test_bazel_test_ordinary_run_has_no_template_root(self):
+    def test_bazel_test_ordinary_run_uses_default_test_runner_strategy(self):
         argv = self.planned_argv(
             ["bazel", "test", "//loom/src/loom/transforms/vector/test:test"]
         )
         self.assertNotIn("--strategy=TestRunner=standalone", argv)
-        self.assertFalse(any("--template-root=" in arg for arg in argv))
 
     def test_bazel_test_update_uses_standalone_test_runner_strategy(self):
         argv = self.planned_argv(
@@ -360,7 +371,6 @@ class CliTest(unittest.TestCase):
         )
 
         self.assertIn("--strategy=TestRunner=standalone", argv)
-        self.assertIn(f"--test_arg=--template-root={cli.REPO_ROOT}", argv)
 
     def test_bazel_test_update_split_arg_uses_standalone_test_runner_strategy(self):
         argv = self.planned_argv(
@@ -374,7 +384,6 @@ class CliTest(unittest.TestCase):
         )
 
         self.assertIn("--strategy=TestRunner=standalone", argv)
-        self.assertIn(f"--test_arg=--template-root={cli.REPO_ROOT}", argv)
 
     def test_bazel_query_preserves_negative_target_separator(self):
         argv = self.planned_argv(
@@ -637,6 +646,29 @@ class CliTest(unittest.TestCase):
         )
         self.assertIsNone(bazel_dev.header_path_for_include("stdio.h"))
 
+    def test_bazel_try_finds_generated_header_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "generated"
+            package.mkdir()
+            (package / "BUILD.bazel").write_text("")
+            query = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="//generated:descriptor_ids\n", stderr=""
+            )
+            with (
+                mock.patch.object(bazel_dev, "REPO_ROOT", root),
+                mock.patch.object(
+                    bazel_dev, "run_captured", return_value=query
+                ) as run_captured,
+            ):
+                dep = bazel_dev.infer_dep_for_header_path(
+                    "bazel", package / "descriptors.h", env=None
+                )
+
+            self.assertEqual(dep, "//generated:descriptor_ids")
+            run_captured.assert_called_once()
+            self.assertIn("//generated:*", run_captured.call_args.args[0][2])
+
     def test_bazel_try_finds_exported_header_owner_in_subpackage(self):
         direct_query = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
@@ -650,17 +682,20 @@ class CliTest(unittest.TestCase):
         with mock.patch.object(
             bazel_dev,
             "run_captured",
-            side_effect=(direct_query, recursive_query),
+            side_effect=(direct_query, direct_query, recursive_query),
         ) as run_captured:
             dep = bazel_dev.infer_dep_for_header(
                 "bazel", "loomc/target/amdgpu.h", env=None
             )
 
         self.assertEqual(dep, "//loom/binding/c/target/amdgpu:amdgpu")
-        self.assertEqual(run_captured.call_count, 2)
+        self.assertEqual(run_captured.call_count, 3)
         direct_expression = run_captured.call_args_list[0].args[0][2]
-        recursive_expression = run_captured.call_args_list[1].args[0][2]
+        private_expression = run_captured.call_args_list[1].args[0][2]
+        recursive_expression = run_captured.call_args_list[2].args[0][2]
         self.assertIn("//loom/binding/c:*", direct_expression)
+        self.assertIn('attr("srcs",', private_expression)
+        self.assertIn("//loom/binding/c:*", private_expression)
         self.assertIn("//loom/binding/c/...", recursive_expression)
 
     def test_bazel_fuzz_builds_with_fuzzer_config_before_running_binary(self):
@@ -1036,6 +1071,46 @@ class CliTest(unittest.TestCase):
                 wrapper_lines = (wrapper_directory / name).read_text().splitlines()
                 self.assertEqual(wrapper_lines[-1], invocation)
 
+    def test_generated_posix_wrapper_selects_calling_worktree(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            installed_root = root / "installed"
+            calling_root = root / "calling"
+            installed_root.mkdir()
+            calling_root.mkdir()
+            (installed_root / "dev.py").write_text("")
+            (calling_root / "dev.py").write_text("")
+            subprocess.run(
+                ["git", "init", "--quiet", str(calling_root)],
+                check=True,
+            )
+            caller_directory = calling_root / "nested"
+            caller_directory.mkdir()
+            recorded_arguments = root / "arguments"
+            interpreter = root / "python"
+            interpreter.write_text(
+                '#!/usr/bin/env sh\nprintf "%s\\n" "$@" > "$RECORDED_ARGUMENTS"\n'
+            )
+            interpreter.chmod(0o755)
+            wrapper = root / "iree-bazel-test"
+            with mock.patch.object(aliases, "REPO_ROOT", installed_root):
+                wrapper.write_text(
+                    aliases.posix_alias_content(str(interpreter), ["bazel", "test"])
+                )
+            wrapper.chmod(0o755)
+
+            subprocess.run(
+                [str(wrapper), "//runtime:all"],
+                cwd=caller_directory,
+                env={**os.environ, "RECORDED_ARGUMENTS": str(recorded_arguments)},
+                check=True,
+            )
+
+            self.assertEqual(
+                recorded_arguments.read_text().splitlines(),
+                [str(calling_root / "dev.py"), "bazel", "test", "//runtime:all"],
+            )
+
     def test_root_verbose_survives_nested_command_parser(self):
         args = cli.parse_arguments(["--verbose", "bazel", "build"])
 
@@ -1292,6 +1367,27 @@ class CliTest(unittest.TestCase):
         self.assertIn("--lane bazel", description)
         self.assertIn("--profile paranoid", description)
 
+    def test_bazel_precommit_exports_selected_configs(self):
+        args = cli.parse_arguments(
+            [
+                "bazel",
+                "precommit",
+                "--staged",
+                "--bazel-config=remote-execution",
+                "--bazel-config",
+                "local-tests",
+            ]
+        )
+
+        plan = args.handler(args)
+
+        self.assertEqual(len(plan.steps), 2)
+        for step in plan.steps:
+            self.assertEqual(
+                json.loads(step.env["IREE_PRESUBMIT_BAZEL_CONFIGS"]),
+                ["remote-execution", "local-tests"],
+            )
+
     def test_precommit_profile_can_be_selected(self):
         args = cli.parse_arguments(["bazel", "precommit", "--profile", "default"])
 
@@ -1474,6 +1570,23 @@ class CliTest(unittest.TestCase):
             "bazel precommit --profile ci --staged --verbose",
             step.content,
         )
+
+    def test_hook_persists_selected_bazel_configs(self):
+        args = cli.parse_arguments(
+            [
+                "bazel",
+                "hook",
+                "--bazel-config=remote-execution",
+                "--bazel-config=local-tests",
+            ]
+        )
+
+        plan = args.handler(args)
+        step = plan.steps[0]
+
+        self.assertIsInstance(step, WriteFileStep)
+        self.assertIn("--bazel-config=remote-execution", step.content)
+        self.assertIn("--bazel-config=local-tests", step.content)
 
     def test_hook_verify_uses_supported_lefthook_file_option(self):
         args = cli.parse_arguments(["bazel", "hook", "--verify"])

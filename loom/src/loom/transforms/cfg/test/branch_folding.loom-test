@@ -1,7 +1,6 @@
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
-// Exact true/false conditions and equal destinations share one structural edit.
-// The remaining iterations remove the dead block, fuse the chain, and confirm.
+// Constant conditions and equal destinations preserve the live side effects.
 func.def @constant_batch(%condition: i1, %input: i32) -> (i32) {
   %true = scalar.constant true : i1
   %false = scalar.constant false : i1
@@ -26,13 +25,16 @@ func.def @constant_batch(%condition: i1, %input: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":4,*
-CHECK: *"branches-folded":4,*
-CHECK: *"blocks-removed":1,*
+func.def @constant_batch(%condition: i1, %input: i32) -> (i32) {
+  test.use %input : i32
+  test.use %input : i32
+  test.use %input : i32
+  test.use %input : i32
+  func.return %input : i32
+}
 
 // ====
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
 // The entry condition proves all three later branches before any edge changes.
 // The side effects require executing each block instead of threading around it.
@@ -55,10 +57,17 @@ func.def @path_batch(%condition: i1, %input: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":3,*
-CHECK: *"branches-folded":3,*
-CHECK: *"blocks-removed":0,*
+func.def @path_batch(%condition: i1, %input: i32) -> (i32) {
+  cfg.cond_br %condition, ^first, ^other
+^first:
+  test.use %input : i32
+  test.use %input : i32
+  test.use %input : i32
+  func.return %input : i32
+^other:
+  %c0 = scalar.constant 0 : i32
+  func.return %c0 : i32
+}
 
 // ====
 // RUN: pass cfg-simplify
@@ -142,8 +151,6 @@ func.def @loop_batch(%count: i32, %input: i32) -> (i32) {
 func.def @loop_batch(%count: i32, %input: i32) -> (i32) {
   %c0 = scalar.constant 0 : i32
   %c1 = scalar.constant 1 : i32
-  %true = scalar.constant true : i1
-  %false = scalar.constant false : i1
   cfg.br ^header(%c0: i32, %input: i32)
 ^header(%iteration: i32, %value: i32):
   %more = scalar.cmpi slt, %iteration, %count : i32

@@ -19,6 +19,35 @@
 #include "iree/hal/drivers/webgpu/webgpu_imports.h"
 #include "iree/hal/drivers/webgpu/webgpu_semaphore.h"
 
+// WebGPU owns resource visibility within its memory domain. GPU submissions,
+// host mapping/unmapping, and file staging already establish the required
+// boundaries before signaling completion. Explicit queue barriers therefore
+// require no extra native command, and empty lists cannot elide that native
+// synchronization. This backend rejects ranged actions that WebGPU cannot
+// encode without promoting their resource scope.
+
+static iree_status_t iree_hal_webgpu_queue_validate_barriers(
+    const iree_hal_queue_barriers_t* barriers) {
+  if (!barriers) {
+    return iree_ok_status();
+  }
+  const iree_hal_barrier_list_t* lists[2] = {barriers->before, barriers->after};
+  for (iree_host_size_t boundary = 0; boundary < 2; ++boundary) {
+    if (!lists[boundary]) {
+      continue;
+    }
+    for (iree_host_size_t i = 0; i < lists[boundary]->count; ++i) {
+      if (iree_hal_memory_effects_requires_resources(
+              lists[boundary]->values[i].effects)) {
+        return iree_make_status(
+            IREE_STATUS_UNIMPLEMENTED,
+            "WebGPU queues do not support ranged memory transitions");
+      }
+    }
+  }
+  return iree_ok_status();
+}
+
 //===----------------------------------------------------------------------===//
 // iree_hal_webgpu_queue_t
 //===----------------------------------------------------------------------===//
@@ -31,7 +60,9 @@ static iree_status_t iree_hal_webgpu_queue_barrier(
     iree_hal_queue_t* base_queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_queue_barrier_flags_t flags) {
+  IREE_RETURN_IF_ERROR(iree_hal_webgpu_queue_validate_barriers(barriers));
   (void)flags;
   return iree_hal_webgpu_queue_submit_execute(
       (iree_hal_webgpu_queue_t*)base_queue, wait_semaphore_list,
@@ -86,7 +117,9 @@ static iree_status_t iree_hal_webgpu_queue_dispatch(
     iree_hal_executable_t* executable, iree_hal_executable_function_t function,
     const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
     const iree_hal_buffer_ref_list_t bindings,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_dispatch_flags_t flags) {
+  IREE_RETURN_IF_ERROR(iree_hal_webgpu_queue_validate_barriers(barriers));
   return iree_hal_webgpu_queue_submit_dispatch(
       (iree_hal_webgpu_queue_t*)base_queue, wait_semaphore_list,
       signal_semaphore_list, executable, function, config, constants, bindings,
@@ -98,7 +131,9 @@ static iree_status_t iree_hal_webgpu_queue_atomic_wait(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_wait_params_t params) {
+    iree_hal_atomic_wait_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
+  (void)barriers;
   (void)base_queue;
   (void)wait_semaphore_list;
   (void)signal_semaphore_list;
@@ -114,7 +149,9 @@ static iree_status_t iree_hal_webgpu_queue_atomic_store(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_store_params_t params) {
+    iree_hal_atomic_store_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
+  (void)barriers;
   (void)base_queue;
   (void)wait_semaphore_list;
   (void)signal_semaphore_list;
@@ -130,7 +167,9 @@ static iree_status_t iree_hal_webgpu_queue_atomic_rmw(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_rmw_params_t params) {
+    iree_hal_atomic_rmw_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
+  (void)barriers;
   (void)base_queue;
   (void)wait_semaphore_list;
   (void)signal_semaphore_list;
@@ -147,7 +186,9 @@ static iree_status_t iree_hal_webgpu_queue_timestamp(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_timestamp_flags_t flags) {
+  (void)barriers;
   (void)base_queue;
   (void)wait_semaphore_list;
   (void)signal_semaphore_list;
@@ -204,7 +245,9 @@ static iree_status_t iree_hal_webgpu_queue_transfer(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_host_size_t operation_count,
-    const iree_hal_transfer_operation_t* operations) {
+    const iree_hal_transfer_operation_t* operations,
+    const iree_hal_queue_barriers_t* barriers) {
+  (void)barriers;
   (void)base_queue;
   (void)wait_semaphore_list;
   (void)signal_semaphore_list;
@@ -220,7 +263,9 @@ static iree_status_t iree_hal_webgpu_queue_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_read_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_read_flags_t flags) {
+  IREE_RETURN_IF_ERROR(iree_hal_webgpu_queue_validate_barriers(barriers));
   return iree_hal_webgpu_queue_submit_read(
       (iree_hal_webgpu_queue_t*)base_queue, wait_semaphore_list,
       signal_semaphore_list, source_file, source_offset, target_buffer,
@@ -233,7 +278,9 @@ static iree_status_t iree_hal_webgpu_queue_write(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, iree_hal_write_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_write_flags_t flags) {
+  IREE_RETURN_IF_ERROR(iree_hal_webgpu_queue_validate_barriers(barriers));
   return iree_hal_webgpu_queue_submit_write(
       (iree_hal_webgpu_queue_t*)base_queue, wait_semaphore_list,
       signal_semaphore_list, source_buffer, source_offset, target_file,
@@ -936,8 +983,8 @@ static void iree_hal_webgpu_queue_op_wait_completion(
         iree_hal_buffer_mapping_t mapping = {{0}};
         work_status = iree_hal_buffer_map_range(
             state->read.storage, IREE_HAL_MAPPING_MODE_SCOPED,
-            IREE_HAL_MEMORY_ACCESS_READ, state->read.source_offset,
-            state->read.length, &mapping);
+            IREE_HAL_MEMORY_ACCESS_READ, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+            state->read.source_offset, state->read.length, &mapping);
         if (iree_status_is_ok(work_status)) {
           iree_hal_webgpu_import_queue_write_buffer(
               queue->queue_handle, gpu_handle, gpu_offset,
@@ -1387,9 +1434,9 @@ static iree_status_t iree_hal_webgpu_queue_read_inline(
   if (storage) {
     // HOST_LOCAL: map the storage buffer and upload from host pointer.
     iree_hal_buffer_mapping_t mapping = {{0}};
-    status = iree_hal_buffer_map_range(storage, IREE_HAL_MAPPING_MODE_SCOPED,
-                                       IREE_HAL_MEMORY_ACCESS_READ,
-                                       source_offset, length, &mapping);
+    status = iree_hal_buffer_map_range(
+        storage, IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_READ,
+        IREE_HAL_BUFFER_MAP_FLAG_NONE, source_offset, length, &mapping);
     if (iree_status_is_ok(status)) {
       iree_hal_webgpu_import_queue_write_buffer(
           queue->queue_handle, gpu_handle, gpu_offset,
@@ -1657,8 +1704,8 @@ static void iree_hal_webgpu_queue_write_phase3(
     iree_hal_buffer_mapping_t mapping = {{0}};
     status = iree_hal_buffer_map_range(
         state->target_storage, IREE_HAL_MAPPING_MODE_SCOPED,
-        IREE_HAL_MEMORY_ACCESS_WRITE, state->target_offset, state->length,
-        &mapping);
+        IREE_HAL_MEMORY_ACCESS_WRITE, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+        state->target_offset, state->length, &mapping);
     if (iree_status_is_ok(status)) {
       iree_hal_webgpu_import_buffer_get_mapped_range(
           state->staging_handle, /*offset=*/0, state->length,

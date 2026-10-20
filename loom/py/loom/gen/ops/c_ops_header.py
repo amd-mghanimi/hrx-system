@@ -478,6 +478,7 @@ def generate_ops_h(
                 "i64": "LOOM_DEFINE_ATTR_I64",
                 "f64": "LOOM_DEFINE_ATTR_F64",
                 "string": "LOOM_DEFINE_ATTR_STRING",
+                "string_array": "LOOM_DEFINE_ATTR_STRING_ARRAY",
                 "bool": "LOOM_DEFINE_ATTR_BOOL",
                 "i64_array": "LOOM_DEFINE_ATTR_I64_ARRAY",
                 "bytes": "LOOM_DEFINE_ATTR_BYTES",
@@ -524,7 +525,8 @@ def generate_ops_h(
 
         # Effective traits function declaration (hand-written, linked in).
         if op.effective_traits:
-            lines.append(f"loom_trait_flags_t {op.effective_traits}(const loom_op_t* op);")
+            lines.append(f"loom_trait_flags_t {op.effective_traits}(")
+            lines.append("    const loom_module_t* module, const loom_op_t* op);")
 
         # Fact inference function declaration (hand-written, linked in).
         if op.facts:

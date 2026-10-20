@@ -84,9 +84,9 @@ class AmdgpuFeedbackTest : public ::testing::Test {
     IREE_CHECK_OK(loom_builder_intern_string(&builder_, name, &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return (loom_symbol_ref_t){
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+    return loom_symbol_ref_t{
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -150,7 +150,8 @@ class AmdgpuFeedbackTest : public ::testing::Test {
     IREE_CHECK_OK(loom_low_func_def_build(
         &builder_, LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_TARGET,
         /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-        /*purity=*/0, /*inline_policy=*/0, /*allocation=*/0, /*schedule=*/0,
+        /*effect_contract=*/0, /*inline_policy=*/0, /*allocation=*/0,
+        /*schedule=*/0,
         /*descriptor_set=*/representation_contract, target, /*abi=*/0,
         loom_make_named_attr_slice(NULL, 0),
         loom_make_named_attr_slice(NULL, 0),
@@ -205,12 +206,12 @@ class AmdgpuFeedbackTest : public ::testing::Test {
     for (uint16_t i = descriptor->result_count; i < descriptor->operand_count;
          ++i) {
       const uint32_t operand_row = descriptor->operand_start + i;
-      EXPECT_LT(operand_row, descriptor_set_->operand_count);
-      if (operand_row >= descriptor_set_->operand_count) {
+      EXPECT_LT(operand_row, descriptor_set_->operand_index_count);
+      if (operand_row >= descriptor_set_->operand_index_count) {
         return count;
       }
       const loom_low_operand_t* operand =
-          &descriptor_set_->operands[operand_row];
+          loom_low_descriptor_operand(descriptor_set_, descriptor, i);
       if (loom_low_operand_role_is_packet_operand(operand->role)) {
         ++count;
       }
@@ -266,8 +267,8 @@ class AmdgpuFeedbackTest : public ::testing::Test {
 
   void VerifyModuleOk() {
     loom_verify_options_t options = {
-        /*.sink=*/{loom_diagnostic_stderr_sink, NULL},
-        /*.max_errors=*/20,
+        .sink = {loom_diagnostic_stderr_sink, NULL},
+        .max_errors = 20,
     };
     loom_verify_result_t result = {};
     IREE_ASSERT_OK(loom_verify_module(module_, &options, &result));
@@ -275,10 +276,11 @@ class AmdgpuFeedbackTest : public ::testing::Test {
   }
 
   void VerifyLowModuleOk() {
-    loom_low_verify_options_t options = {};
-    options.descriptor_registry = &low_registry_.registry;
-    options.emitter = {EmitDiagnosticToStderr, NULL};
-    options.max_errors = 20;
+    loom_low_verify_options_t options = {
+        .descriptor_registry = &low_registry_.registry,
+        .emitter = {EmitDiagnosticToStderr, NULL},
+        .max_errors = 20,
+    };
     loom_low_verify_scratch_t scratch =
         loom_low_verify_scratch_for_module(module_);
     loom_low_verify_result_t result = {};
@@ -1312,15 +1314,26 @@ TEST_F(AmdgpuFeedbackTest, BuildsSingleReservationAttempt) {
   ASSERT_EQ(compare_ops.size(), 2u);
   std::vector<loom_op_t*> and_ops =
       OpsForDescriptorRef(LOOM_AMDGPU_DESCRIPTOR_REF_S_AND_B64);
-  ASSERT_EQ(and_ops.size(), 1u);
+  ASSERT_EQ(and_ops.size(), 2u);
   loom_value_slice_t and_operands = loom_low_op_operands(and_ops[0]);
   ASSERT_EQ(and_operands.count, 2u);
   EXPECT_EQ(and_operands.values[0],
             loom_value_slice_get(loom_low_op_results(compare_ops[0]), 0));
   EXPECT_EQ(and_operands.values[1],
             loom_value_slice_get(loom_low_op_results(compare_ops[1]), 0));
-  EXPECT_EQ(attempt.cas_succeeded,
+  // Wave32 vector comparisons do not define the upper half of an SGPRx2.
+  // The scalar branch and subsequent EXEC update require an active-lane mask.
+  std::vector<loom_op_t*> exec_ops =
+      OpsForDescriptorRef(LOOM_AMDGPU_DESCRIPTOR_REF_S_MOV_B64_EXEC_READ);
+  ASSERT_EQ(exec_ops.size(), 1u);
+  loom_value_slice_t active_operands = loom_low_op_operands(and_ops[1]);
+  ASSERT_EQ(active_operands.count, 2u);
+  EXPECT_EQ(active_operands.values[0],
             loom_value_slice_get(loom_low_op_results(and_ops[0]), 0));
+  EXPECT_EQ(active_operands.values[1],
+            loom_value_slice_get(loom_low_op_results(exec_ops[0]), 0));
+  EXPECT_EQ(attempt.cas_succeeded,
+            loom_value_slice_get(loom_low_op_results(and_ops[1]), 0));
 }
 
 TEST_F(AmdgpuFeedbackTest, BuildsReservationCfgWithHotFallthrough) {
@@ -1391,16 +1404,30 @@ TEST_F(AmdgpuFeedbackTest, BuildsReservationCfgWithHotFallthrough) {
   EXPECT_EQ(loom_low_br_dest(dropped_terminator), continuation_block);
   ASSERT_EQ(loom_low_br_args(dropped_terminator).count, 3u);
 
-  EXPECT_NE(FindGlobalLoadSaddrInBlock(
-                check_block, LOOM_AMDGPU_DESCRIPTOR_REF_GLOBAL_LOAD_B64_SADDR,
-                channel_values.address,
-                LOOM_AMDGPU_FEEDBACK_CHANNEL_RESERVATION_HEAD_OFFSET),
-            nullptr);
-  EXPECT_NE(FindGlobalLoadSaddrInBlock(
-                check_block, LOOM_AMDGPU_DESCRIPTOR_REF_GLOBAL_LOAD_B64_SADDR,
-                channel_values.address,
-                LOOM_AMDGPU_FEEDBACK_CHANNEL_READ_TAIL_OFFSET),
-            nullptr);
+  const loom_op_t* head_load = FindGlobalLoadSaddrInBlock(
+      check_block, LOOM_AMDGPU_DESCRIPTOR_REF_GLOBAL_LOAD_B64_SADDR,
+      channel_values.address,
+      LOOM_AMDGPU_FEEDBACK_CHANNEL_RESERVATION_HEAD_OFFSET);
+  const loom_op_t* tail_load = FindGlobalLoadSaddrInBlock(
+      check_block, LOOM_AMDGPU_DESCRIPTOR_REF_GLOBAL_LOAD_B64_SADDR,
+      channel_values.address, LOOM_AMDGPU_FEEDBACK_CHANNEL_READ_TAIL_OFFSET);
+  ASSERT_NE(head_load, nullptr);
+  ASSERT_NE(tail_load, nullptr);
+  // Tail's acquire must precede the head load so concurrent consumption cannot
+  // produce a head older than the sampled tail and underflow the occupancy.
+  const loom_op_t* next_op = tail_load->next_op;
+  while (next_op && next_op != head_load) {
+    next_op = next_op->next_op;
+  }
+  EXPECT_EQ(next_op, head_load);
+  auto capacity_masks = OpsForDescriptorRefInBlock(
+      check_block, LOOM_AMDGPU_DESCRIPTOR_REF_S_AND_B64);
+  ASSERT_EQ(capacity_masks.size(), 1u);
+  const auto* active_mask =
+      DefiningOp(loom_low_op_operands(capacity_masks[0]).values[1]);
+  ASSERT_NE(active_mask, nullptr);
+  ExpectLowOpDescriptorRef(active_mask,
+                           LOOM_AMDGPU_DESCRIPTOR_REF_S_MOV_B64_EXEC_READ);
   ASSERT_EQ(OpsForDescriptorRefInBlock(check_block,
                                        LOOM_AMDGPU_DESCRIPTOR_REF_V_CMP_ULE_U32)
                 .size(),
@@ -1492,15 +1519,15 @@ TEST_F(AmdgpuFeedbackTest, EmitsPacketHeaderStores) {
       LOOM_LOCATION_UNKNOWN, &packet_address));
 
   loom_amdgpu_feedback_packet_header_t header = {
-      /*.record_length=*/(uint32_t)loom_amdgpu_feedback_packet_length(
+      .record_length = (uint32_t)loom_amdgpu_feedback_packet_length(
           /*payload_length=*/64),
-      /*.kind=*/LOOM_AMDGPU_FEEDBACK_PACKET_KIND_ASAN,
-      /*.flags=*/LOOM_AMDGPU_FEEDBACK_PACKET_FLAG_ASYNC,
-      /*.sequence=*/channel_values.ring_capacity,
-      /*.source_dispatch_ptr=*/config_values.notify_signal,
-      /*.source_workgroup_id_x=*/config_values.flags,
-      /*.source_workitem_id_x=*/channel_values.flags,
-      /*.source_context=*/config_values.source_context,
+      .kind = LOOM_AMDGPU_FEEDBACK_PACKET_KIND_ASAN,
+      .flags = LOOM_AMDGPU_FEEDBACK_PACKET_FLAG_ASYNC,
+      .sequence = channel_values.ring_capacity,
+      .source_dispatch_ptr = config_values.notify_signal,
+      .source_workgroup_id_x = config_values.flags,
+      .source_workitem_id_x = channel_values.flags,
+      .source_context = config_values.source_context,
   };
   IREE_ASSERT_OK(loom_amdgpu_build_feedback_packet_header(
       &builder_, descriptor_set_, &packet_address, &header,

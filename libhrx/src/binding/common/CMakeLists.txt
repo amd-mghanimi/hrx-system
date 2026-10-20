@@ -103,18 +103,22 @@ iree_cc_library(
     common
   HDRS
     "context.h"
+    "device.h"
     "direct_transfer.h"
+    "event.h"
     "event_timestamp_pool.h"
     "fat_binary.h"
     "graph.h"
     "hrx_bridge.h"
-    "internal.h"
+    "init.h"
     "kernel_arguments.h"
     "kpack.h"
+    "mem_pool.h"
     "memory.h"
     "module.h"
     "occupancy.h"
     "peer.h"
+    "registry.h"
     "stream.h"
     "stream_value.h"
     "tls.h"
@@ -287,7 +291,6 @@ iree_cc_test(
     ::common
     iree::async::util::proactor_pool
     iree::hal
-    iree::hal::drivers::task::semaphore
     iree::testing::gtest
     iree::testing::gtest_main
     libhrx::src::libhrx::hrx_static
@@ -303,6 +306,7 @@ iree_cc_test(
     ::common
     iree::base
     iree::hal
+    iree::hal::memory::heap_pool
     iree::testing::gtest
     iree::testing::gtest_main
     libhrx::src::libhrx::hrx_static
@@ -311,7 +315,7 @@ iree_cc_test(
 
 set(_memory_test_platform_linkopts "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  list(APPEND _memory_test_platform_linkopts "-Wl,--wrap=iree_hal_command_buffer_execution_barrier")
+  list(APPEND _memory_test_platform_linkopts "-Wl,--wrap=iree_hal_command_buffer_barrier")
 endif()
 iree_cc_test(
   NAME

@@ -25,6 +25,8 @@ class DialectGeneration:
     parameterized_attrs: Sequence[ParameterizedAttrDef] = ()
     encoding_families: Sequence[EncodingFamilyDef] = ()
     types: Sequence[Any] = ()
+    # Declarations used by structural contracts but emitted by another owner.
+    referenced_ops: Sequence[Op] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,12 @@ def _load_pipeline_generation() -> DialectGeneration:
     return DialectGeneration(pipeline_ops, list(ALL_PIPELINE_OPS), None)
 
 
+def _load_channel_generation() -> DialectGeneration:
+    from loom.dialect.channel import ALL_CHANNEL_OPS, channel_ops
+
+    return DialectGeneration(channel_ops, list(ALL_CHANNEL_OPS), None)
+
+
 def _load_buffer_generation() -> DialectGeneration:
     from loom.dialect.buffer import ALL_BUFFER_OPS, buffer_ops
 
@@ -158,8 +166,9 @@ def _load_index_generation() -> DialectGeneration:
 
 def _load_kernel_generation() -> DialectGeneration:
     from loom.dialect.kernel import ALL_KERNEL_OPS, kernel_ops
+    from loom.dialect.pipeline.defs import pipeline_strand
 
-    return DialectGeneration(kernel_ops, list(ALL_KERNEL_OPS), None)
+    return DialectGeneration(kernel_ops, list(ALL_KERNEL_OPS), None, referenced_ops=(pipeline_strand,))
 
 
 def _load_target_generation() -> DialectGeneration:
@@ -256,6 +265,7 @@ _DIALECT_GENERATION_LOADERS: tuple[tuple[str, DialectGenerationLoader], ...] = (
     ("command", _load_command_generation),
     ("group", _load_group_generation),
     ("pipeline", _load_pipeline_generation),
+    ("channel", _load_channel_generation),
     ("buffer", _load_buffer_generation),
     ("view", _load_view_generation),
     ("vector", _load_vector_generation),
@@ -283,6 +293,7 @@ def dialect_names() -> tuple[str, ...]:
 
 def _load_core_types() -> list[Any]:
     from loom.builtin_types import ALL_BUILTIN_TYPES
+    from loom.dialect.check import ALL_CHECK_TYPES
     from loom.dialect.group import ALL_GROUP_TYPES
     from loom.dialect.hal import ALL_HAL_TYPES
     from loom.dialect.kernel import ALL_KERNEL_TYPES
@@ -290,6 +301,7 @@ def _load_core_types() -> list[Any]:
 
     return [
         *ALL_BUILTIN_TYPES,
+        *ALL_CHECK_TYPES,
         *ALL_GROUP_TYPES,
         *ALL_HAL_TYPES,
         *ALL_KERNEL_TYPES,

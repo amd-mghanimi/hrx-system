@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import Enum
 
 from loom.dialect.buffer import defs as buffer
@@ -29,6 +30,7 @@ from loom.target.contracts import (
     SourceMemoryOperation,
     SourceMemoryProject,
     SourceMemoryRootKind,
+    SourceNode,
     TypePattern,
     ValueRef,
     Vector,
@@ -37,6 +39,7 @@ from loom.target.low_descriptors import Descriptor
 
 _DescriptorLookup = Callable[[str], Descriptor]
 
+_I16 = Scalar("i16")
 _I64 = Scalar("i64")
 _BYTE_STORAGE_TYPES = ("i8", "f8E4M3", "f8E5M2")
 _WORD_STORAGE_TYPES = ("i16", "f16", "bf16")
@@ -53,7 +56,17 @@ _STORAGE_FORMATS = (
     (("i32", "f32"), 4),
     (_BYTE_STORAGE_TYPES, 1),
     (_WORD_STORAGE_TYPES, 2),
+    (("i64", "f64"), 8),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryValueTransport:
+    """Moves a scalar memory value between its memory and source carriers."""
+
+    memory_type: TypePattern
+    load: Descriptor
+    store: Descriptor
 
 
 class _MemoryAddressing(Enum):
@@ -139,7 +152,8 @@ def _source_memory_constraint(
     return SourceMemoryConstraint(
         operation=operation,
         root_kind=SourceMemoryRootKind.ANY,
-        memory_spaces=("unknown", "generic", "global"),
+        memory_spaces=("unknown", "generic", "global", "private")
+        + (("constant",) if operation is SourceMemoryOperation.LOAD else ()),
         element_byte_count=element_byte_count,
         vector_lane_count=lane_count,
         vector_lane_byte_stride=element_byte_count,
@@ -163,6 +177,7 @@ def _source_memory_constraint(
             else 0
         ),
         preserve_source_index=addressing is _MemoryAddressing.PRESERVE_SOURCE_INDEX,
+        reuse_view_base=addressing is _MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
         diagnostic=diagnostic,
     )
 
@@ -204,16 +219,55 @@ def _memory_rule(
     descriptor_key: str,
     descriptor_lookup: _DescriptorLookup,
     diagnostic: GuardDiagnostic,
+    transport: _MemoryValueTransport | None = None,
+    source_nodes: Sequence[SourceNode] = (),
+    load_result: ValueRef | None = None,
+    instruction_operands: Mapping[str, ValueRef] | None = None,
+    pre_memory_emits: Sequence[EmitDescriptorOp] = (),
+    priority: int = 0,
+    report_key: str = "",
 ) -> DescriptorRule:
     descriptor = descriptor_lookup(descriptor_key)
-    operands = {"base": ValueRef.source_memory_root()}
+    instruction_operands = instruction_operands or {}
+    operands = {"base": ValueRef.source_memory_root(), **instruction_operands}
     results: dict[str, ValueRef] = {}
+    result_types: dict[str, TypePattern] = {}
+    transport_emit: EmitDescriptorOp | None = None
+    transport_descriptor: Descriptor | None = None
     if operation is SourceMemoryOperation.LOAD:
         type_field = "result"
-        results["dst"] = ValueRef.result("result")
+        if transport is None:
+            results["dst"] = (
+                ValueRef.result("result") if load_result is None else load_result
+            )
+        else:
+            if load_result is not None:
+                raise ValueError("transported x86 loads cannot override their result")
+            transport_descriptor = transport.load
+            memory_value = ValueRef.temporary("memory_value")
+            results["dst"] = memory_value
+            result_types["dst"] = transport.memory_type
+            transport_emit = EmitDescriptorOp(
+                descriptor=transport.load,
+                operands={"input": memory_value},
+                results={"dst": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+            )
     elif operation is SourceMemoryOperation.STORE:
         type_field = "value"
-        operands["value"] = ValueRef.operand("value")
+        if transport is None:
+            operands["value"] = ValueRef.operand("value")
+        else:
+            transport_descriptor = transport.store
+            memory_value = ValueRef.temporary("memory_value")
+            operands["value"] = memory_value
+            transport_emit = EmitDescriptorOp(
+                descriptor=transport.store,
+                operands={"input": ValueRef.operand("value")},
+                results={"dst": memory_value},
+                result_types={"dst": transport.memory_type},
+                form=DescriptorEmitForm.OP,
+            )
     else:
         raise ValueError(f"unsupported x86 memory operation {operation.value}")
     if addressing.is_dynamic:
@@ -236,6 +290,7 @@ def _memory_rule(
         descriptor=descriptor,
         operands=operands,
         results=results,
+        result_types=result_types,
         immediates=_memory_immediates(
             addressing, element_byte_count=element_byte_count
         ),
@@ -251,21 +306,26 @@ def _memory_rule(
             else None
         ),
     )
+    emits: list[EmitDescriptorOp] = []
     if addressing.dynamic_byte_stride_factor != 1:
-        emit = (
+        emits.append(
             _factored_index_emit(
                 descriptor_lookup=descriptor_lookup,
                 element_byte_count=element_byte_count,
                 dynamic_byte_stride_factor=addressing.dynamic_byte_stride_factor,
                 source_memory=source_memory,
-            ),
-            memory_emit,
+            )
         )
-    else:
-        emit = (memory_emit,)
+    if operation is SourceMemoryOperation.STORE and transport_emit is not None:
+        emits.append(transport_emit)
+    emits.extend(pre_memory_emits)
+    emits.append(memory_emit)
+    if operation is SourceMemoryOperation.LOAD and transport_emit is not None:
+        emits.append(transport_emit)
     return DescriptorRule(
         source_op=source_op,
         descriptor=descriptor,
+        source_nodes=source_nodes,
         guards=(
             *(
                 ()
@@ -277,8 +337,22 @@ def _memory_rule(
                 )
             ),
             Guard.value_type(type_field, value_type),
+            *(
+                (Guard.descriptor_available(transport_descriptor),)
+                if transport_descriptor is not None
+                else ()
+            ),
+            *(
+                Guard.descriptor_available(dependency)
+                for dependency in dict.fromkeys(
+                    emit.descriptor for emit in pre_memory_emits
+                )
+                if dependency != descriptor
+            ),
         ),
-        emit=emit,
+        emit=tuple(emits),
+        priority=priority,
+        report_key=report_key,
     )
 
 
@@ -287,10 +361,17 @@ def _memory_descriptor_key(
     operation: SourceMemoryOperation,
     *,
     addressing: _MemoryAddressing,
+    memory_form: str | None = None,
+    modifiers: Sequence[str] = (),
     register_suffix: str,
 ) -> str:
     indexed = ".indexed" if addressing.is_dynamic else ""
-    return f"{descriptor_key_prefix}.{operation.value}{indexed}.{register_suffix}"
+    modifier_suffix = "".join(f".{modifier}" for modifier in modifiers)
+    memory_form = operation.value if memory_form is None else memory_form
+    return (
+        f"{descriptor_key_prefix}.{memory_form}{indexed}{modifier_suffix}."
+        f"{register_suffix}"
+    )
 
 
 def _full_width_memory_rules(
@@ -303,18 +384,57 @@ def _full_width_memory_rules(
     descriptor_key: str,
     descriptor_lookup: _DescriptorLookup,
     diagnostic: GuardDiagnostic,
+    transport: _MemoryValueTransport | None = None,
+    source_nodes: Sequence[SourceNode] = (),
+    load_result: ValueRef | None = None,
+    instruction_operands: Mapping[str, ValueRef] | None = None,
+    pre_memory_emits: Sequence[EmitDescriptorOp] = (),
+    priority: int = 0,
+    report_key: str = "",
 ) -> tuple[DescriptorRule, ...]:
     """Materializes displacements that cannot fit an instruction's disp32."""
 
     descriptor = descriptor_lookup(descriptor_key)
+    instruction_operands = instruction_operands or {}
+    result_types: dict[str, TypePattern] = {}
+    transport_descriptor: Descriptor | None = None
+    transport_emit: EmitDescriptorOp | None = None
     if operation is SourceMemoryOperation.LOAD:
         type_field = "result"
-        results = {"dst": ValueRef.result("result")}
+        if transport is None:
+            results = {
+                "dst": ValueRef.result("result") if load_result is None else load_result
+            }
+        else:
+            if load_result is not None:
+                raise ValueError("transported x86 loads cannot override their result")
+            transport_descriptor = transport.load
+            memory_value = ValueRef.temporary("memory_value")
+            results = {"dst": memory_value}
+            result_types = {"dst": transport.memory_type}
+            transport_emit = EmitDescriptorOp(
+                descriptor=transport.load,
+                operands={"input": memory_value},
+                results={"dst": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+            )
         value_operands = {}
     elif operation is SourceMemoryOperation.STORE:
         type_field = "value"
         results = {}
-        value_operands = {"value": ValueRef.operand("value")}
+        if transport is None:
+            value_operands = {"value": ValueRef.operand("value")}
+        else:
+            transport_descriptor = transport.store
+            memory_value = ValueRef.temporary("memory_value")
+            value_operands = {"value": memory_value}
+            transport_emit = EmitDescriptorOp(
+                descriptor=transport.store,
+                operands={"input": ValueRef.operand("value")},
+                results={"dst": memory_value},
+                result_types={"dst": transport.memory_type},
+                form=DescriptorEmitForm.OP,
+            )
     else:
         raise ValueError(f"unsupported x86 memory operation {operation.value}")
     rules: list[DescriptorRule] = []
@@ -322,7 +442,8 @@ def _full_width_memory_rules(
         source_memory = SourceMemoryConstraint(
             operation=operation,
             root_kind=SourceMemoryRootKind.ANY,
-            memory_spaces=("unknown", "generic", "global"),
+            memory_spaces=("unknown", "generic", "global", "private")
+            + (("constant",) if operation is SourceMemoryOperation.LOAD else ()),
             element_byte_count=element_byte_count,
             vector_lane_count=lane_count,
             vector_lane_byte_stride=element_byte_count,
@@ -332,6 +453,7 @@ def _full_width_memory_rules(
             dynamic_term_count_minimum=1 if dynamic else 0,
             dynamic_view_base_term_count=None,
             allow_dynamic_stride_values=dynamic,
+            reuse_view_base=dynamic,
             diagnostic=diagnostic,
         )
         static_offset = ValueRef.temporary("static_byte_offset")
@@ -364,6 +486,9 @@ def _full_width_memory_rules(
                     ),
                 )
             )
+        if operation is SourceMemoryOperation.STORE and transport_emit is not None:
+            emits.append(transport_emit)
+        emits.extend(pre_memory_emits)
         emits.append(
             EmitDescriptorOp(
                 form=DescriptorEmitForm.OP,
@@ -371,19 +496,40 @@ def _full_width_memory_rules(
                 operands={
                     "base": ValueRef.source_memory_root(),
                     "index": byte_offset,
+                    **instruction_operands,
                     **value_operands,
                 },
                 results=results,
+                result_types=result_types,
                 immediates={"disp32": 0, "scale": 1},
                 source_memory=source_memory,
             )
         )
+        if operation is SourceMemoryOperation.LOAD and transport_emit is not None:
+            emits.append(transport_emit)
         rules.append(
             DescriptorRule(
                 source_op=source_op,
                 descriptor=descriptor,
-                guards=(Guard.value_type(type_field, value_type),),
+                source_nodes=source_nodes,
+                guards=(
+                    Guard.value_type(type_field, value_type),
+                    *(
+                        (Guard.descriptor_available(transport_descriptor),)
+                        if transport_descriptor is not None
+                        else ()
+                    ),
+                    *(
+                        Guard.descriptor_available(dependency)
+                        for dependency in dict.fromkeys(
+                            emit.descriptor for emit in pre_memory_emits
+                        )
+                        if dependency != descriptor
+                    ),
+                ),
                 emit=tuple(emits),
+                priority=priority,
+                report_key=report_key,
             )
         )
     return tuple(rules)
@@ -399,7 +545,7 @@ def _view_carrier_constraint(
     return SourceMemoryConstraint(
         operation=SourceMemoryOperation.VIEW_CARRIER,
         root_kind=SourceMemoryRootKind.ANY,
-        memory_spaces=("unknown", "generic", "global"),
+        memory_spaces=("unknown", "generic", "global", "private", "constant"),
         element_byte_count=element_byte_count,
         vector_lane_count=1,
         vector_lane_byte_stride=element_byte_count,
@@ -413,6 +559,7 @@ def _view_carrier_constraint(
         dynamic_term_count_minimum=1 if dynamic else 0,
         dynamic_view_base_term_count=None,
         allow_dynamic_stride_values=dynamic,
+        reuse_view_base=dynamic,
         diagnostic=diagnostic,
     )
 
@@ -535,12 +682,21 @@ def x86_view_carrier_rules(
     )
 
 
-def x86_scalar_memory_rules(
+def _gpr_memory_family_rules(
     descriptor_lookup: _DescriptorLookup,
     *,
+    load_op: Op,
+    store_op: Op,
+    value_type: TypePattern,
+    element_byte_count: int,
+    lane_count: int,
+    register_suffix: str,
+    load_mnemonic: str,
     diagnostic: GuardDiagnostic,
+    transport: _MemoryValueTransport | None = None,
+    priority: int = 0,
 ) -> tuple[DescriptorRule, ...]:
-    """Builds source-memory rules for x86 scalar register transfers."""
+    """Builds one logical memory family through scalar GPR transfers."""
 
     rules: list[DescriptorRule] = []
     # Both static transfers precede the dynamic load and store groups. Within
@@ -549,55 +705,325 @@ def x86_scalar_memory_rules(
         (_MemoryAddressing.STATIC,),
         tuple(addressing for addressing in _MemoryAddressing if addressing.is_dynamic),
     )
-    for value_type, element_byte_count, register_suffix, load_mnemonic in (
-        (Scalar("i32"), 4, "gpr32", "mov"),
-        (_I64, 8, "gpr64", "mov"),
-        (Scalar(_BYTE_STORAGE_TYPES), 1, "u8.gpr32", "movzx"),
-        (Scalar(_WORD_STORAGE_TYPES), 2, "u16.gpr32", "movzx"),
-    ):
-        operations = (
-            (view.view_load, SourceMemoryOperation.LOAD, load_mnemonic),
-            (view.view_store, SourceMemoryOperation.STORE, "mov"),
-        )
-        for addressings in addressing_groups:
-            for source_op, operation, mnemonic in operations:
-                rules.extend(
-                    _memory_rule(
-                        source_op,
-                        operation,
-                        value_type,
-                        element_byte_count=element_byte_count,
-                        lane_count=1,
-                        addressing=addressing,
-                        descriptor_key=_memory_descriptor_key(
-                            f"x86.scalar.{mnemonic}",
-                            operation,
-                            addressing=addressing,
-                            register_suffix=register_suffix,
-                        ),
-                        descriptor_lookup=descriptor_lookup,
-                        diagnostic=diagnostic,
-                    )
-                    for addressing in addressings
-                )
+    operations = (
+        (load_op, SourceMemoryOperation.LOAD, load_mnemonic),
+        (store_op, SourceMemoryOperation.STORE, "mov"),
+    )
+    for addressings in addressing_groups:
         for source_op, operation, mnemonic in operations:
             rules.extend(
-                _full_width_memory_rules(
+                _memory_rule(
                     source_op,
                     operation,
                     value_type,
                     element_byte_count=element_byte_count,
-                    lane_count=1,
+                    lane_count=lane_count,
+                    addressing=addressing,
                     descriptor_key=_memory_descriptor_key(
                         f"x86.scalar.{mnemonic}",
                         operation,
-                        addressing=_MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
+                        addressing=addressing,
                         register_suffix=register_suffix,
                     ),
                     descriptor_lookup=descriptor_lookup,
                     diagnostic=diagnostic,
+                    transport=transport,
+                    priority=priority,
+                )
+                for addressing in addressings
+            )
+    for source_op, operation, mnemonic in operations:
+        rules.extend(
+            _full_width_memory_rules(
+                source_op,
+                operation,
+                value_type,
+                element_byte_count=element_byte_count,
+                lane_count=lane_count,
+                descriptor_key=_memory_descriptor_key(
+                    f"x86.scalar.{mnemonic}",
+                    operation,
+                    addressing=_MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
+                    register_suffix=register_suffix,
+                ),
+                descriptor_lookup=descriptor_lookup,
+                diagnostic=diagnostic,
+                transport=transport,
+                priority=priority,
+            )
+        )
+    return tuple(rules)
+
+
+def x86_scalar_memory_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    diagnostic: GuardDiagnostic,
+) -> tuple[DescriptorRule, ...]:
+    """Builds source-memory rules for x86 scalar register transfers."""
+
+    return tuple(
+        rule
+        for value_type, element_byte_count, register_suffix, load_mnemonic in (
+            (Scalar("i32"), 4, "gpr32", "mov"),
+            (_I64, 8, "gpr64", "mov"),
+            (Scalar(_BYTE_STORAGE_TYPES), 1, "u8.gpr32", "movzx"),
+            (Scalar(_WORD_STORAGE_TYPES), 2, "u16.gpr32", "movzx"),
+        )
+        for rule in _gpr_memory_family_rules(
+            descriptor_lookup,
+            load_op=view.view_load,
+            store_op=view.view_store,
+            value_type=value_type,
+            element_byte_count=element_byte_count,
+            lane_count=1,
+            register_suffix=register_suffix,
+            load_mnemonic=load_mnemonic,
+            diagnostic=diagnostic,
+        )
+    )
+
+
+def x86_scalar_xmm_word_memory_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    value_type: TypePattern,
+    diagnostic: GuardDiagnostic,
+    priority: int = 0,
+) -> tuple[DescriptorRule, ...]:
+    """Transfers a 16-bit scalar through memory and an XMM source carrier."""
+
+    return _gpr_memory_family_rules(
+        descriptor_lookup,
+        load_op=view.view_load,
+        store_op=view.view_store,
+        value_type=value_type,
+        element_byte_count=2,
+        lane_count=1,
+        register_suffix="u16.gpr32",
+        load_mnemonic="movzx",
+        diagnostic=diagnostic,
+        transport=_MemoryValueTransport(
+            memory_type=_I16,
+            load=descriptor_lookup("x86.avx2.vmovd.xmm.gpr32"),
+            store=descriptor_lookup("x86.avx2.vmovd.gpr32.xmm"),
+        ),
+        priority=priority,
+    )
+
+
+def _direct_memory_type_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    operations: Sequence[tuple[Op, SourceMemoryOperation]],
+    descriptor_key_prefix: str,
+    register_suffix: str,
+    value_type: TypePattern,
+    element_byte_count: int,
+    lane_count: int,
+    diagnostic: GuardDiagnostic,
+    priority: int = 0,
+) -> tuple[DescriptorRule, ...]:
+    """Builds every addressing form for one exact native transfer type."""
+    rules: list[DescriptorRule] = []
+    for source_op, operation in operations:
+        for addressing in _MemoryAddressing:
+            descriptor_key = _memory_descriptor_key(
+                descriptor_key_prefix,
+                operation,
+                addressing=addressing,
+                register_suffix=register_suffix,
+            )
+            rules.append(
+                _memory_rule(
+                    source_op,
+                    operation,
+                    value_type,
+                    element_byte_count=element_byte_count,
+                    lane_count=lane_count,
+                    addressing=addressing,
+                    descriptor_key=descriptor_key,
+                    descriptor_lookup=descriptor_lookup,
+                    diagnostic=diagnostic,
+                    priority=priority,
                 )
             )
+        rules.extend(
+            _full_width_memory_rules(
+                source_op,
+                operation,
+                value_type,
+                element_byte_count=element_byte_count,
+                lane_count=lane_count,
+                descriptor_key=_memory_descriptor_key(
+                    descriptor_key_prefix,
+                    operation,
+                    addressing=_MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
+                    register_suffix=register_suffix,
+                ),
+                descriptor_lookup=descriptor_lookup,
+                diagnostic=diagnostic,
+                priority=priority,
+            )
+        )
+    return tuple(rules)
+
+
+def x86_scalar_float_memory_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    diagnostic: GuardDiagnostic,
+) -> tuple[DescriptorRule, ...]:
+    """Transfers scalar F32/F64 directly between memory and XMM carriers."""
+
+    return tuple(
+        rule
+        for element_type, element_byte_count, mnemonic in (
+            ("f32", 4, "vmovss"),
+            ("f64", 8, "vmovsd"),
+        )
+        for rule in _direct_memory_type_rules(
+            descriptor_lookup,
+            operations=(
+                (view.view_load, SourceMemoryOperation.LOAD),
+                (view.view_store, SourceMemoryOperation.STORE),
+            ),
+            descriptor_key_prefix=f"x86.avx2.{mnemonic}",
+            register_suffix="xmm",
+            value_type=Scalar(element_type),
+            element_byte_count=element_byte_count,
+            lane_count=1,
+            diagnostic=diagnostic,
+        )
+    )
+
+
+def x86_low_xmm_vector_memory_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    value_type: TypePattern,
+    element_byte_count: int,
+    lane_count: int,
+    diagnostic: GuardDiagnostic,
+    priority: int = 0,
+) -> tuple[DescriptorRule, ...]:
+    """Transfers one subregister logical vector through the low bits of XMM."""
+
+    payload_byte_count = element_byte_count * lane_count
+    if payload_byte_count not in (1, 2, 4, 8):
+        raise ValueError(
+            "low-XMM source memory requires a one-, two-, four-, or eight-byte payload"
+        )
+    if payload_byte_count <= 2:
+        memory_type = Scalar(f"i{payload_byte_count * 8}")
+        return _gpr_memory_family_rules(
+            descriptor_lookup,
+            load_op=vector.vector_load,
+            store_op=vector.vector_store,
+            value_type=value_type,
+            element_byte_count=element_byte_count,
+            lane_count=lane_count,
+            register_suffix=f"u{payload_byte_count * 8}.gpr32",
+            load_mnemonic="movzx",
+            diagnostic=diagnostic,
+            transport=_MemoryValueTransport(
+                memory_type=memory_type,
+                load=descriptor_lookup("x86.avx2.vmovd.xmm.gpr32"),
+                store=descriptor_lookup("x86.avx2.vmovd.gpr32.xmm"),
+            ),
+            priority=priority,
+        )
+    return _direct_memory_type_rules(
+        descriptor_lookup,
+        operations=(
+            (vector.vector_load, SourceMemoryOperation.LOAD),
+            (vector.vector_store, SourceMemoryOperation.STORE),
+        ),
+        descriptor_key_prefix=(
+            "x86.avx2.vmovss" if payload_byte_count == 4 else "x86.avx2.vmovsd"
+        ),
+        register_suffix="xmm",
+        value_type=value_type,
+        element_byte_count=element_byte_count,
+        lane_count=lane_count,
+        diagnostic=diagnostic,
+        priority=priority,
+    )
+
+
+def x86_fused_load_rules(
+    descriptor_lookup: _DescriptorLookup,
+    *,
+    source_op: Op,
+    source_type: TypePattern,
+    source_nodes: Sequence[SourceNode],
+    result: ValueRef,
+    element_byte_count: int,
+    lane_count: int,
+    descriptor_key_prefix: str,
+    descriptor_memory_form: str = "load",
+    descriptor_key_modifiers: Sequence[str] = (),
+    register_suffix: str,
+    instruction_operands: Mapping[str, ValueRef] | None = None,
+    pre_memory_emits: Sequence[EmitDescriptorOp] = (),
+    diagnostic: GuardDiagnostic,
+    report_key: str,
+    priority: int = 1,
+) -> tuple[DescriptorRule, ...]:
+    """Builds every x86 addressing form for a fused source load."""
+
+    rules = [
+        _memory_rule(
+            source_op,
+            SourceMemoryOperation.LOAD,
+            source_type,
+            element_byte_count=element_byte_count,
+            lane_count=lane_count,
+            addressing=addressing,
+            descriptor_key=_memory_descriptor_key(
+                descriptor_key_prefix,
+                SourceMemoryOperation.LOAD,
+                addressing=addressing,
+                memory_form=descriptor_memory_form,
+                modifiers=descriptor_key_modifiers,
+                register_suffix=register_suffix,
+            ),
+            descriptor_lookup=descriptor_lookup,
+            diagnostic=diagnostic,
+            source_nodes=source_nodes,
+            load_result=result,
+            instruction_operands=instruction_operands,
+            pre_memory_emits=pre_memory_emits,
+            priority=priority,
+            report_key=report_key,
+        )
+        for addressing in _MemoryAddressing
+    ]
+    rules.extend(
+        _full_width_memory_rules(
+            source_op,
+            SourceMemoryOperation.LOAD,
+            source_type,
+            element_byte_count=element_byte_count,
+            lane_count=lane_count,
+            descriptor_key=_memory_descriptor_key(
+                descriptor_key_prefix,
+                SourceMemoryOperation.LOAD,
+                addressing=_MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
+                memory_form=descriptor_memory_form,
+                modifiers=descriptor_key_modifiers,
+                register_suffix=register_suffix,
+            ),
+            descriptor_lookup=descriptor_lookup,
+            diagnostic=diagnostic,
+            source_nodes=source_nodes,
+            load_result=result,
+            instruction_operands=instruction_operands,
+            pre_memory_emits=pre_memory_emits,
+            priority=priority,
+            report_key=report_key,
+        )
+    )
     return tuple(rules)
 
 
@@ -608,61 +1034,43 @@ def x86_vector_memory_rules(
     vector_bit_widths: Sequence[int],
     diagnostic: GuardDiagnostic,
 ) -> tuple[DescriptorRule, ...]:
-    """Builds exact source-memory rules for x86 full-register transfers."""
+    """Builds exact source-memory rules for x86 vector carriers."""
 
     rules: list[DescriptorRule] = []
     for vector_bit_width in vector_bit_widths:
         register_suffix = {128: "xmm", 256: "ymm", 512: "zmm"}.get(vector_bit_width)
-        if register_suffix is None:
+        if register_suffix is None and vector_bit_width not in (8, 16, 32, 64):
             raise ValueError(f"unsupported x86 memory vector width {vector_bit_width}")
         for element_types, element_byte_count in _STORAGE_FORMATS:
             vector_byte_width = vector_bit_width // 8
             if vector_byte_width % element_byte_count != 0:
-                raise ValueError(
-                    f"x86 vector width {vector_bit_width} cannot store "
-                    f"{element_byte_count}-byte elements"
-                )
+                continue
             lane_count = vector_byte_width // element_byte_count
             value_type = Vector(element_types, lanes=lane_count)
-            for source_op, operation in (
-                (vector.vector_load, SourceMemoryOperation.LOAD),
-                (vector.vector_store, SourceMemoryOperation.STORE),
-            ):
-                for addressing in _MemoryAddressing:
-                    descriptor_key = _memory_descriptor_key(
-                        f"{descriptor_key_prefix}.vmovdqu32",
-                        operation,
-                        addressing=addressing,
-                        register_suffix=register_suffix,
-                    )
-                    rules.append(
-                        _memory_rule(
-                            source_op,
-                            operation,
-                            value_type,
-                            element_byte_count=element_byte_count,
-                            lane_count=lane_count,
-                            addressing=addressing,
-                            descriptor_key=descriptor_key,
-                            descriptor_lookup=descriptor_lookup,
-                            diagnostic=diagnostic,
-                        )
-                    )
+            if vector_bit_width < 128:
                 rules.extend(
-                    _full_width_memory_rules(
-                        source_op,
-                        operation,
-                        value_type,
+                    x86_low_xmm_vector_memory_rules(
+                        descriptor_lookup,
+                        value_type=value_type,
                         element_byte_count=element_byte_count,
                         lane_count=lane_count,
-                        descriptor_key=_memory_descriptor_key(
-                            f"{descriptor_key_prefix}.vmovdqu32",
-                            operation,
-                            addressing=_MemoryAddressing.MATERIALIZE_BYTE_OFFSET,
-                            register_suffix=register_suffix,
-                        ),
-                        descriptor_lookup=descriptor_lookup,
                         diagnostic=diagnostic,
                     )
                 )
+                continue
+            rules.extend(
+                _direct_memory_type_rules(
+                    descriptor_lookup,
+                    operations=(
+                        (vector.vector_load, SourceMemoryOperation.LOAD),
+                        (vector.vector_store, SourceMemoryOperation.STORE),
+                    ),
+                    descriptor_key_prefix=f"{descriptor_key_prefix}.vmovdqu32",
+                    register_suffix=register_suffix,
+                    value_type=value_type,
+                    element_byte_count=element_byte_count,
+                    lane_count=lane_count,
+                    diagnostic=diagnostic,
+                )
+            )
     return tuple(rules)

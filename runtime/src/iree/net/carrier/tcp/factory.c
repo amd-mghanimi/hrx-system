@@ -159,6 +159,7 @@ static iree_status_t iree_net_tcp_parse_address(
 
 static iree_async_socket_options_t iree_net_tcp_client_socket_options(void) {
   return IREE_ASYNC_SOCKET_OPTION_NO_DELAY |
+         IREE_ASYNC_SOCKET_OPTION_LOW_LATENCY_ACK |
          IREE_ASYNC_SOCKET_OPTION_KEEP_ALIVE |
          IREE_ASYNC_SOCKET_OPTION_ZERO_COPY;
 }
@@ -176,6 +177,10 @@ static iree_status_t iree_net_tcp_receive_pool_create(
     iree_async_proactor_t* proactor, iree_allocator_t host_allocator,
     iree_async_buffer_pool_t** out_receive_pool) {
   *out_receive_pool = NULL;
+  if (options->connection_options.receive_mode ==
+      IREE_NET_TCP_RECEIVE_MODE_PLACEMENT) {
+    return iree_ok_status();
+  }
   iree_async_slab_options_t slab_options = iree_async_slab_options_default();
   slab_options.buffer_size = options->receive_buffer_size;
   slab_options.buffer_count = options->receive_buffer_count;

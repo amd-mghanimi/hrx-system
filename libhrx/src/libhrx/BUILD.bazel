@@ -32,22 +32,25 @@ HRX_SRCS = [
     "graph_exec.c",
     "host_allocator.c",
     "mem_pool.c",
-    "pool.c",
+    "mem_pool_backing.c",
     "queue_ops.c",
     "runtime.c",
     "semaphore.c",
     "status.c",
     "stream.c",
     "transfer.c",
-    "vmm_slab_provider.c",
+    "virtual_buffer.c",
 ]
 
 HRX_HDRS = [
+    "buffer.h",
     "buffer_table.h",
+    "device.h",
     "hrx_internal.h",
     "mem_pool.h",
+    "mem_pool_backing.h",
+    "runtime.h",
     "transfer.h",
-    "vmm_slab_provider.h",
     "//libhrx/src:iree_hal_compat.h",
 ]
 
@@ -67,9 +70,9 @@ HRX_DEPS = [
     "//runtime/src/iree/base/threading",
     "//runtime/src/iree/async/util:proactor_pool",
     "//runtime/src/iree/hal",
-    "//runtime/src/iree/hal/memory:asan",
-    "//runtime/src/iree/hal/memory:passthrough_pool",
+    "//runtime/src/iree/hal/memory:asan_pool",
     "//runtime/src/iree/hal/memory:slab_provider",
+    "//runtime/src/iree/hal/memory:slab_cache",
     "//runtime/src/iree/hal/memory:tlsf_pool",
     "//runtime/src/iree/hal/drivers/task:driver",
     "//runtime/src/iree/hal/drivers/task/executable/loaders/registration",
@@ -92,6 +95,12 @@ HRX_AMDGPU_COPTS = iree_select({
     "//conditions:default": [],
 })
 
+# Public declarations opt in to the shared-library ABI through HRX_API.
+HRX_SHARED_VISIBILITY_COPTS = iree_select({
+    "@platforms//os:windows": [],
+    "//conditions:default": ["-fvisibility=hidden"],
+})
+
 # Static implementation library for in-tree integrations that directly compose
 # with private HRX surfaces. External consumers use the shared :hrx target.
 hrx_cc_library(
@@ -110,7 +119,7 @@ hrx_cc_shared_library(
     hdrs = HRX_HDRS,
     copts = [
         "-DHRX_BUILDING_SHARED",
-    ] + HRX_AMDGPU_COPTS,
+    ] + HRX_AMDGPU_COPTS + HRX_SHARED_VISIBILITY_COPTS,
     includes = HRX_INCLUDES,
     deps = HRX_DEPS,
 )
@@ -142,6 +151,42 @@ hrx_cc_test(
 )
 
 hrx_cc_test(
+    name = "status_test",
+    srcs = ["status_test.cc"],
+    deps = [
+        ":hrx_static",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+hrx_cc_test(
+    name = "buffer_test",
+    srcs = ["buffer_test.cc"],
+    deps = [
+        ":hrx_static",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+hrx_cc_test(
+    name = "virtual_buffer_test",
+    srcs = ["virtual_buffer_test.cc"],
+    deps = [
+        ":hrx_static",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+hrx_cc_test(
     name = "graph_buffer_test",
     srcs = ["graph_buffer_test.cc"],
     deps = [
@@ -166,8 +211,22 @@ hrx_cc_test(
 )
 
 hrx_cc_test(
-    name = "vmm_slab_provider_test",
-    srcs = ["vmm_slab_provider_test.cc"],
+    name = "mem_pool_backing_test",
+    srcs = ["mem_pool_backing_test.cc"],
+    deps = [
+        ":hrx_static",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:slab_cache",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+hrx_cc_test(
+    name = "mem_pool_backing_gpu_test",
+    srcs = ["mem_pool_backing_test.cc"],
+    copts = ["-DHRX_TEST_GPU=1"],
     resource_group = "iree-hal-drivers-amdgpu-tests",
     tags = [
         "iree-run-requirement=runtime.resource.amd_gpu",
@@ -177,8 +236,7 @@ hrx_cc_test(
         ":hrx_static",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
-        "//runtime/src/iree/hal/memory:slab_provider",
-        "//runtime/src/iree/hal/memory:tlsf_pool",
+        "//runtime/src/iree/hal/memory:slab_cache",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

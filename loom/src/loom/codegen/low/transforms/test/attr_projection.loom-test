@@ -42,7 +42,7 @@ low.func.def target<test.low.core>(@test_target) abi(object_function) @volatile_
 test.target<low_core> @test_target
 
 func.def target(@test_target) @dynamic_volatile_vector_load(%source: buffer, %element0: index) -> (vector<4xi32>) {
-  %element = index.assume %element0 [range(%element0, 0, 60), mul(%element0, 4)] : index
+  %element = index.assume %element0 [range(%element0, 0, 60), multiple_of(%element0, 4)] : index
   %base = index.constant 0 : offset
   %view = buffer.view %source[%base] : buffer -> view<64xi32>
   %result = vector.load<volatile> %view[%element] : view<64xi32> -> vector<4xi32>

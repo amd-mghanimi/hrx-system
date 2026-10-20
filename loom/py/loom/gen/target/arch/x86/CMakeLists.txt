@@ -53,6 +53,7 @@ iree_py_library(
     "x86_target_profiles.py"
   DEPS
     loom::py::loom::gen::support::support
+    loom::py::loom::target::arch::x86::feature_catalog
     loom::py::loom::target::arch::x86::target_info
 )
 
@@ -65,10 +66,11 @@ iree_py_library(
     "__init__.py"
     "x86_packed_dot_contract.py"
   DEPS
+    loom::py::loom::gen::target::arch::x86::low_descriptor_shard
     loom::py::loom::gen::bootstrap
     loom::py::loom::gen::support::support
     loom::py::loom::gen::support::native_layout
-    loom::py::loom::target::descriptor_sets
+    loom::py::loom::gen::target::low::low_descriptors
     loom::py::loom::target::low_descriptors
     loom::py::loom::target::arch::x86::descriptors
     loom::py::loom::target::arch::x86::target_info

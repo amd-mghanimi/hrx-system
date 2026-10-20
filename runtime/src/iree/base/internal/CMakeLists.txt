@@ -11,6 +11,18 @@ iree_add_all_subdirs()
 
 iree_cc_library(
   NAME
+    file_io_posix
+  HDRS
+    "file_io_posix.h"
+  SRCS
+    "file_io_posix.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     internal
   HDRS
     "atomics.h"
@@ -37,6 +49,18 @@ iree_cc_test(
     iree::base::core_headers
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    atomics_disabled_test
+  SRCS
+    "atomics_disabled_test.c"
+  DEFINES
+    "IREE_SYNCHRONIZATION_DISABLE_UNSAFE=1"
+  DEPS
+    ::internal
+    iree::base
 )
 
 iree_cc_test(
@@ -156,6 +180,8 @@ iree_cc_binary_benchmark(
     ::atomic_slist
     iree::testing::benchmark_main
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^(BM_PushPop|BM_PushNFlushFIFO/1024|BM_ContentionPushPop/iterations:10000/real_time/threads:8|BM_ProducerConsumerFlush/iterations:10000/real_time/threads:8)"
   TESTONLY
 )
 
@@ -266,6 +292,7 @@ iree_cc_library(
     "dynamic_library.h"
   SRCS
     "dynamic_library_posix.c"
+    "dynamic_library_wasi.c"
     "dynamic_library_win32.c"
   DEPS
     ${CMAKE_DL_LIBS}
@@ -419,6 +446,7 @@ iree_cc_library(
     "shm.h"
   SRCS
     "shm_posix.c"
+    "shm_reservation.c"
     "shm_win32.c"
   DEPS
     ::internal

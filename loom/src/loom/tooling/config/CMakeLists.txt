@@ -11,48 +11,30 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
-    config
+    input
   HDRS
-    "config.h"
+    "input.h"
   SRCS
-    "config.c"
-    "config_application.h"
-    "config_text.c"
+    "input.c"
   DEPS
     iree::base
-    iree::base::internal::arena
-    iree::base::internal::json
-    loom::analysis::symbol_value_constraints
-    loom::format::text::parser
-    loom::format::text::printer
-    loom::ir
-    loom::ops::config
-    loom::ops::encoding
-    loom::rewrite::remap
+    loom::config::text_binding
     loom::tooling::io::file
-    loom::util::json
-    loom::util::stream
   PUBLIC
 )
 
 loom_cc_test(
   NAME
-    config_test
+    input_test
   SRCS
-    "config_test.cc"
+    "input_test.cc"
   DEPS
-    ::config
+    ::input
     iree::base
-    iree::base::internal::arena
     iree::io::file_handle
     iree::testing::gtest
     iree::testing::gtest_main
     iree::testing::temp_file
-    loom::format::text::parser
-    loom::format::text::printer
-    loom::ir
-    loom::testing::context
-    loom::testing::module_ptr
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

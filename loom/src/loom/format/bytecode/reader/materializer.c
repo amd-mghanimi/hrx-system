@@ -41,7 +41,6 @@ typedef struct loom_bytecode_module_materialization_t {
 static iree_status_t loom_bytecode_module_allocate_output(
     loom_bytecode_module_materialization_t* reader) {
   loom_module_size_hints_t hints = {
-      .value_count = (iree_host_size_t)reader->view.summary.value_count,
       .string_count = reader->view.strings.count,
       .type_count = reader->view.types.count,
       .encoding_count = reader->view.encodings.count,

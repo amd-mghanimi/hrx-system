@@ -44,6 +44,7 @@ loom_cc_test(
         "//loom/src/loom/codegen/low:frame",
         "//loom/src/loom/codegen/low:placement",
         "//loom/src/loom/codegen/low/allocation:assignment",
+        "//loom/src/loom/target/test:descriptors",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -108,9 +109,11 @@ loom_cc_library(
     deps = [
         ":allocation_checker",
         ":source_workload",
+        "//loom/src/loom/analysis:storage_access",
         "//loom/src/loom/codegen:pass_environment",
         "//loom/src/loom/codegen/low:frame",
         "//loom/src/loom/codegen/low:function",
+        "//loom/src/loom/codegen/low:representation_binding",
         "//loom/src/loom/codegen/low:verify",
         "//loom/src/loom/codegen/low/lower",
         "//loom/src/loom/codegen/low/lower:source_selection",
@@ -138,20 +141,5 @@ loom_cc_library(
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/low",
         "//runtime/src/iree/base",
-    ],
-)
-
-loom_cc_library(
-    name = "text_asm_test_util",
-    testonly = True,
-    srcs = ["text_asm_test_util.cc"],
-    hdrs = ["text_asm_test_util.h"],
-    deps = [
-        "//loom/src/loom/codegen/low:descriptors",
-        "//loom/src/loom/codegen/low:text_asm",
-        "//loom/src/loom/format/text:low_asm",
-        "//loom/src/loom/ir",
-        "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal:arena",
     ],
 )

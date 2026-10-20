@@ -16,22 +16,50 @@ low.func.def target<amdgpu.rdna3.core>(@target) @counter_tracked_effect_braid(%a
   return %next0, %next1
 }
 
-// The four reads make both WMMAs and the effect-dependent write ready. The
-// emitted plan must consume only the oldest inputs, issue useful matrix work,
-// and defer the conflicting write until the later full drain.
+// Each read pair feeds one WMMA. The first WMMA can consume its inputs while
+// the second pair is still in flight. All four reads must finish before the
+// effect-dependent write, which waits for a full drain.
 // ----
   ds_read_b128 v[40:43], v16 offset:0
   ds_read_b128 v[44:47], v16 offset:16
   ds_read_b128 v[48:51], v16 offset:32
-  ds_read_b128 v[52:55], v16 offset:48
-  s_waitcnt vmcnt(63) lgkmcnt(2)
+  s_waitcnt vmcnt(63) lgkmcnt(1)
   v_wmma_f32_16x16x16_f16 v[8:15], v[40:47], v[0:7], v[8:15]
+  ds_read_b128 v[52:55], v16 offset:48
   s_waitcnt vmcnt(63) lgkmcnt(0)
   ds_write_b128 v16, v[20:23] offset:1024
   v_wmma_f32_16x16x16_f16 v[32:39], v[48:55], v[24:31], v[32:39]
   s_waitcnt vmcnt(63) lgkmcnt(0)
   s_barrier
   s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @prefetch_alias_preserves_compute_overlap strategy=source fixed=%current:physical_register:0:1 fixed=%prefetched:physical_register:8:2
+
+amdgpu.target<gfx1100> @target {subgroup_size = 32}
+
+// The next iteration's alias has no read of its own. Its physical handoff
+// belongs at the backedge, after this iteration's independent arithmetic.
+low.func.def schedule(locked) target<amdgpu.rdna3.core>(@target) @prefetch_alias_preserves_compute_overlap(%base: reg<amdgpu.sgpr x2>, %offset: reg<amdgpu.vgpr>, %lds: reg<amdgpu.vgpr>, %initial: reg<amdgpu.vgpr>, %lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) asm {
+  low.br ^loop(%initial: reg<amdgpu.vgpr>)
+^loop(%current: reg<amdgpu.vgpr>):
+  ds_write_b32 %lds, %current
+  %prefetched = global_load_b64_saddr %offset, %base
+  %next = slice %prefetched[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %product = v_mul_f32 %lhs, %rhs
+  ds_write_b32 %lds, %product {offset = 4}
+  low.br ^loop(%next: reg<amdgpu.vgpr>)
+}
+
+// ----
+.Lbb1:
+  ds_write_b32 v2, v0 offset:0
+  global_load_b64 v[8:9], v1, s[0:1] offset:0
+  v_mul_f32 v0, v3, v4
+  ds_write_b32 v2, v0 offset:4
+  s_waitcnt vmcnt(0) lgkmcnt(63)
+  v_mov_b32 v0, v9
+  s_branch .Lbb1
 
 // ====
 // RUN: emit low-schedule-json @mixed_issue_pipelines strategy=resource-stall diagnostics=resources output=none
@@ -46,3 +74,75 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @mixed_issue_pipelines(%addres
   %sum = v_add_u32 %lhs, %rhs
   return %loaded, %sum, %scalar
 }
+
+// ====
+
+// The compare begins the latency-bearing SSA path to the EXEC update. The
+// independent shift consumes the old EXEC value at issue, so it can fill that
+// latency without delaying the update.
+// RUN: emit low-schedule-query @exec_read_fills_compare_latency strategy=resource-stall order=1,0,2 kind=state consumer=2 timing=0:2
+
+amdgpu.target<gfx1100> @target
+
+low.func.def target<amdgpu.rdna3.core>(@target) @exec_read_fills_compare_latency(%value: reg<amdgpu.vgpr>, %lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.sgpr x2>) asm {
+  %shifted = v_lshlrev_b32_src0_inline %value, 2
+  %mask = v_cmp_lt_i32 %lhs, %rhs
+  %saved_exec, %active = s_and_saveexec_b64 %mask
+  return %shifted, %saved_exec
+}
+
+// ----
+block 0 order: 1, 0, 2
+node 2 <- 0, 1
+timing 0 -> 2: separation=0 source=event-pair quality=exact
+
+// ====
+// RUN: emit amdgpu-assembly @barrier_overlaps_arithmetic strategy=resource-stall
+
+amdgpu.target<gfx1100> @target {subgroup_size = 32}
+
+low.func.def target<amdgpu.rdna3.core>(@target) @barrier_overlaps_arithmetic(%address: reg<amdgpu.vgpr>, %payload: reg<amdgpu.vgpr>, %angle: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
+  ds_write_b32 %address, %payload
+  s_barrier
+  %loaded = ds_read_b32 %address
+  %coefficient = v_cos_f32 %angle
+  %result = v_mul_f32 %loaded, %coefficient
+  return %result
+}
+
+// ----
+  ds_write_b32 v2, v0 offset:0
+  v_cos_f32 v0, v1
+  s_waitcnt vmcnt(63) lgkmcnt(0)
+  s_barrier
+  ds_read_b32 v1, v2 offset:0
+  s_waitcnt vmcnt(63) lgkmcnt(0)
+  v_mul_f32 v0, v1, v0
+  s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @split_barrier_overlaps_arithmetic strategy=resource-stall
+
+amdgpu.target<gfx1200> @target {subgroup_size = 32}
+
+low.func.def target<amdgpu.rdna4.core>(@target) @split_barrier_overlaps_arithmetic(%address: reg<amdgpu.vgpr>, %payload: reg<amdgpu.vgpr>, %angle: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
+  ds_write_b32 %address, %payload
+  s_barrier_signal_all
+  %coefficient = v_cos_f32 %angle
+  s_barrier_wait_all
+  %loaded = ds_read_b32 %address
+  %result = v_mul_f32 %loaded, %coefficient
+  return %result
+}
+
+// ----
+  ds_write_b32 v2, v0 offset:0
+  v_cos_f32 v0, v1
+  s_wait_dscnt dscnt(0)
+  s_barrier_signal -1
+  s_barrier_wait -1
+  ds_read_b32 v1, v2 offset:0
+  s_wait_dscnt dscnt(0)
+  s_delay_alu instid0(TRANS32_DEP_1)
+  v_mul_f32 v0, v1, v0
+  s_endpgm

@@ -182,7 +182,7 @@ func.def @dense_layout_summary() -> (i64) {
 
 // Dynamic strided layout ops preserve stride facts in axis order.
 func.def @strided_layout_summary(%stride: index) -> (i64, i64) {
-  %stride2 = index.assume %stride [range(%stride, 8, 16), mul(%stride, 8)] : index
+  %stride2 = index.assume %stride [range(%stride, 8, 16), multiple_of(%stride, 8)] : index
   %layout = encoding.layout.strided [%stride2, 1] : encoding<layout>
   %kind = test.fact_encoding_layout_kind %layout : encoding<layout> -> i64
   %stride_hi = test.fact_encoding_layout_stride_hi %layout [0] : encoding<layout> -> i64
@@ -304,7 +304,7 @@ func.def @assume_spec_static_strided_layout_summary(%layout: encoding<layout>) -
 // the storage value even when authored operand order differs from descriptor
 // order.
 func.def @storage_layout_summary(%stride: index) -> (i64, i64) {
-  %stride2 = index.assume %stride [range(%stride, 8, 16), mul(%stride, 8)] : index
+  %stride2 = index.assume %stride [range(%stride, 8, 16), multiple_of(%stride, 8)] : index
   %layout = encoding.layout.strided [%stride2, 1] : encoding<layout>
   %schema = encoding.define #ggml.q4_0 : encoding<schema>
   %storage = encoding.define #encoding.storage {layout = %layout : encoding<layout>, schema = %schema : encoding<schema>} : encoding<storage>

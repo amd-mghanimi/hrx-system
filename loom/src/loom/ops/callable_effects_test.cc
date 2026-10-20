@@ -49,21 +49,21 @@ class CallableEffectsTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_module_intern_string(module_, name, &name_id));
     loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    *out_symbol = loom_symbol_ref_t{/*.module_id=*/0,
-                                    /*.symbol_id=*/symbol_id};
+    *out_symbol = loom_symbol_ref_t{.module_id = 0, .symbol_id = symbol_id};
   }
 
-  void BuildDeclaration(iree_string_view_t name, uint8_t purity,
+  void BuildDeclaration(iree_string_view_t name, uint8_t effect_contract,
                         loom_func_like_t* out_function) {
     loom_symbol_ref_t symbol = loom_symbol_ref_null();
     AddSymbol(name, &symbol);
     const loom_func_decl_build_flags_t build_flags =
-        purity != 0 ? LOOM_FUNC_DECL_BUILD_FLAG_HAS_PURITY : 0;
+        effect_contract != 0 ? LOOM_FUNC_DECL_BUILD_FLAG_HAS_EFFECT_CONTRACT
+                             : 0;
     loom_op_t* function_op = nullptr;
     IREE_ASSERT_OK(loom_func_decl_build(
         &module_builder_, build_flags, /*visibility=*/0, /*retain=*/0,
         /*import_module=*/LOOM_STRING_ID_INVALID,
-        /*import_symbol=*/LOOM_STRING_ID_INVALID, /*cc=*/0, purity,
+        /*import_symbol=*/LOOM_STRING_ID_INVALID, /*cc=*/0, effect_contract,
         /*temperature=*/0, /*inline_policy=*/0, loom_symbol_ref_null(),
         /*abi=*/0, loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
         loom_named_attr_slice_empty(), symbol,
@@ -82,8 +82,9 @@ class CallableEffectsTest : public ::testing::Test {
     AddSymbol(name, &symbol);
     loom_op_t* function_op = nullptr;
     IREE_ASSERT_OK(loom_func_def_build(
-        &module_builder_, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0,
-        /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+        &module_builder_, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+        /*retain=*/0,
+        /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
         loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
         LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol,
         /*arg_types=*/nullptr, /*arg_types_count=*/0,
@@ -108,7 +109,7 @@ class CallableEffectsTest : public ::testing::Test {
                   loom_op_t** out_call_op) {
     loom_builder_t builder = BodyBuilder(caller);
     IREE_ASSERT_OK(loom_func_call_build(
-        &builder, /*build_flags=*/0, /*purity=*/0, /*temperature=*/0,
+        &builder, /*build_flags=*/0, /*effect_contract=*/0, /*temperature=*/0,
         /*inline_policy=*/0, loom_func_like_callee(callee),
         /*operands=*/nullptr, /*operands_count=*/0,
         /*result_types=*/nullptr, /*result_count=*/0,
@@ -131,16 +132,48 @@ class CallableEffectsTest : public ::testing::Test {
   iree_arena_allocator_t rewriter_arena_;
 };
 
-TEST_F(CallableEffectsTest, DeclarationsRequireExplicitPureContract) {
+TEST_F(CallableEffectsTest, DeclarationsUseExplicitEffectContracts) {
   loom_func_like_t unspecified = {};
-  BuildDeclaration(IREE_SV("unspecified"), /*purity=*/0, &unspecified);
+  BuildDeclaration(IREE_SV("unspecified"), /*effect_contract=*/0, &unspecified);
   EXPECT_FALSE(loom_callable_effects_is_pure(unspecified));
   EXPECT_TRUE(loom_callable_effects_may_access_memory(unspecified));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(unspecified),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
 
   loom_func_like_t pure = {};
-  BuildDeclaration(IREE_SV("pure"), LOOM_FUNC_PURITY_PURE, &pure);
+  BuildDeclaration(IREE_SV("pure"), LOOM_CALLABLE_EFFECT_CONTRACT_PURE, &pure);
   EXPECT_TRUE(loom_callable_effects_is_pure(pure));
+  EXPECT_FALSE(loom_callable_effects_has_readonly_contract(pure));
   EXPECT_FALSE(loom_callable_effects_may_access_memory(pure));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(pure), 0);
+
+  loom_func_like_t readonly = {};
+  BuildDeclaration(IREE_SV("readonly"), LOOM_CALLABLE_EFFECT_CONTRACT_READONLY,
+                   &readonly);
+  EXPECT_FALSE(loom_callable_effects_is_pure(readonly));
+  EXPECT_TRUE(loom_callable_effects_has_readonly_contract(readonly));
+  EXPECT_TRUE(loom_callable_effects_may_access_memory(readonly));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(readonly), 0);
+}
+
+TEST_F(CallableEffectsTest, EffectContractSatisfactionIsDirectional) {
+  EXPECT_TRUE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_PURE, LOOM_CALLABLE_EFFECT_CONTRACT_PURE));
+  EXPECT_TRUE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_PURE,
+      LOOM_CALLABLE_EFFECT_CONTRACT_READONLY));
+  EXPECT_TRUE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_READONLY,
+      LOOM_CALLABLE_EFFECT_CONTRACT_READONLY));
+  EXPECT_FALSE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_READONLY,
+      LOOM_CALLABLE_EFFECT_CONTRACT_PURE));
+  EXPECT_TRUE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_UNSPECIFIED,
+      LOOM_CALLABLE_EFFECT_CONTRACT_UNSPECIFIED));
+  EXPECT_FALSE(loom_callable_effects_contract_satisfies(
+      LOOM_CALLABLE_EFFECT_CONTRACT_UNSPECIFIED,
+      LOOM_CALLABLE_EFFECT_CONTRACT_READONLY));
 }
 
 TEST_F(CallableEffectsTest, DefinitionsUseBodyEffects) {
@@ -149,9 +182,11 @@ TEST_F(CallableEffectsTest, DefinitionsUseBodyEffects) {
   AppendReturn(pure);
   EXPECT_TRUE(loom_callable_effects_is_pure(pure));
   EXPECT_FALSE(loom_callable_effects_may_access_memory(pure));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(pure), 0);
 
   loom_func_like_t unknown_effects = {};
-  BuildDeclaration(IREE_SV("unknown_effects"), /*purity=*/0, &unknown_effects);
+  BuildDeclaration(IREE_SV("unknown_effects"), /*effect_contract=*/0,
+                   &unknown_effects);
   loom_func_like_t impure = {};
   BuildDefinition(IREE_SV("impure"), &impure);
   loom_op_t* call_op = nullptr;
@@ -159,6 +194,8 @@ TEST_F(CallableEffectsTest, DefinitionsUseBodyEffects) {
   AppendReturn(impure);
   EXPECT_FALSE(loom_callable_effects_is_pure(impure));
   EXPECT_TRUE(loom_callable_effects_may_access_memory(impure));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(impure),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
 }
 
 TEST_F(CallableEffectsTest, PropagationRefreshesCallerEffects) {
@@ -173,25 +210,56 @@ TEST_F(CallableEffectsTest, PropagationRefreshesCallerEffects) {
   AppendReturn(caller);
   EXPECT_TRUE(loom_region_has_read_effects(loom_func_like_body(caller)));
   EXPECT_TRUE(loom_callable_effects_may_access_memory(caller));
-  EXPECT_EQ(loom_func_call_effective_traits(call_op),
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(caller),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
+  EXPECT_EQ(loom_func_call_effective_traits(module_, call_op),
             LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_UNKNOWN_EFFECTS);
   EXPECT_TRUE(iree_any_bit_set(call_op->traits, LOOM_TRAIT_CALLABLE_BOUNDARY));
 
   loom_rewriter_t rewriter = {};
   loom_rewriter_initialize(&rewriter, module_, &rewriter_arena_);
-  EXPECT_TRUE(loom_callable_effects_callee_is_pure(
-      module_, loom_func_like_callee(pure)));
+  EXPECT_EQ(loom_callable_effects_callee_contract(module_,
+                                                  loom_func_like_callee(pure)),
+            LOOM_CALLABLE_EFFECT_CONTRACT_PURE);
   IREE_EXPECT_OK(loom_func_call_canonicalize(call_op, &rewriter));
   loom_rewriter_deinitialize(&rewriter);
 
-  EXPECT_EQ(loom_func_call_purity(call_op), LOOM_FUNC_PURITY_PURE);
-  EXPECT_EQ(loom_func_call_effective_traits(call_op),
+  EXPECT_EQ(loom_func_call_effect_contract(call_op),
+            LOOM_CALLABLE_EFFECT_CONTRACT_PURE);
+  EXPECT_EQ(loom_func_call_effective_traits(module_, call_op),
             LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_PURE);
   EXPECT_TRUE(iree_any_bit_set(call_op->traits, LOOM_TRAIT_CALLABLE_BOUNDARY));
   EXPECT_FALSE(loom_region_has_read_effects(loom_func_like_body(caller)));
   EXPECT_FALSE(loom_region_has_write_effects(loom_func_like_body(caller)));
   EXPECT_FALSE(loom_callable_effects_may_access_memory(caller));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(caller), 0);
   EXPECT_FALSE(loom_region_has_convergent_effects(loom_func_like_body(caller)));
+}
+
+TEST_F(CallableEffectsTest, ReadonlyPropagationRetainsReadEffects) {
+  loom_func_like_t readonly = {};
+  BuildDeclaration(IREE_SV("readonly"), LOOM_CALLABLE_EFFECT_CONTRACT_READONLY,
+                   &readonly);
+
+  loom_func_like_t caller = {};
+  BuildDefinition(IREE_SV("caller"), &caller);
+  loom_op_t* call_op = nullptr;
+  AppendCall(caller, readonly, &call_op);
+  AppendReturn(caller);
+
+  loom_rewriter_t rewriter = {};
+  loom_rewriter_initialize(&rewriter, module_, &rewriter_arena_);
+  IREE_EXPECT_OK(loom_func_call_canonicalize(call_op, &rewriter));
+  loom_rewriter_deinitialize(&rewriter);
+
+  EXPECT_EQ(loom_func_call_effect_contract(call_op),
+            LOOM_CALLABLE_EFFECT_CONTRACT_READONLY);
+  EXPECT_EQ(loom_func_call_effective_traits(module_, call_op),
+            LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_READS_MEMORY);
+  EXPECT_TRUE(loom_region_has_read_effects(loom_func_like_body(caller)));
+  EXPECT_FALSE(loom_region_has_write_effects(loom_func_like_body(caller)));
+  EXPECT_TRUE(loom_callable_effects_may_access_memory(caller));
+  EXPECT_EQ(loom_callable_effects_written_memory_spaces(caller), 0);
 }
 
 }  // namespace

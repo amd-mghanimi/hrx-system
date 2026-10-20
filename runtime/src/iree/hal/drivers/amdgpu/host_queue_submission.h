@@ -296,6 +296,35 @@ void iree_hal_amdgpu_host_queue_emit_kernel_submission_prefix(
     const iree_hal_amdgpu_wait_resolution_t* resolution,
     const iree_hal_amdgpu_host_queue_kernel_submission_t* submission);
 
+// Entry release and exit acquire cannot be folded into a dispatch's acquire
+// and release fences: those execute on the opposite side of its data accesses.
+static inline uint32_t iree_hal_amdgpu_host_queue_payload_prefix_count(
+    const iree_hal_amdgpu_wait_resolution_t* resolution) {
+  return resolution->payload_barriers.before.release !=
+         IREE_HSA_FENCE_SCOPE_NONE;
+}
+
+static inline uint32_t iree_hal_amdgpu_host_queue_payload_suffix_count(
+    const iree_hal_amdgpu_wait_resolution_t* resolution) {
+  return resolution->payload_barriers.after.acquire !=
+         IREE_HSA_FENCE_SCOPE_NONE;
+}
+
+// Emits the optional release-before packet after resolved waits. The caller
+// reserves payload_prefix_count slots before its first operation packet.
+void iree_hal_amdgpu_host_queue_emit_payload_prefix(
+    iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_amdgpu_wait_resolution_t* resolution,
+    uint64_t first_packet_id);
+
+// Emits the optional acquire-after packet and owns the epoch completion signal
+// when present. The caller reserves payload_suffix_count trailing slots and
+// suppresses the earlier payload's queue epoch signal.
+void iree_hal_amdgpu_host_queue_emit_payload_suffix(
+    iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_amdgpu_wait_resolution_t* resolution,
+    iree_hal_semaphore_list_t signal_semaphore_list, uint64_t final_packet_id);
+
 // Commits a non-final queue-device start timestamp packet. The packet must be
 // reserved in |submission| and precede the queue operation payload.
 void iree_hal_amdgpu_host_queue_commit_queue_device_start_packet(

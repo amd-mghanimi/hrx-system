@@ -12,6 +12,7 @@
 #include "loomc/module.h"
 #include "loomc/product.h"
 #include "loomc/result.h"
+#include "loomc/target.h"
 #include "loomc/workspace.h"
 
 /// @file
@@ -42,6 +43,13 @@
 /// const loomc_string_view_t roots[] = {
 ///     loomc_make_cstring_view("@entry"),
 /// };
+/// const loomc_link_module_provider_t module_providers[] = {
+///     {
+///         .module = input_module,
+///         .provider_name = loomc_make_cstring_view("input"),
+///         .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
+///     },
+/// };
 /// loomc_link_options_t link_options = {
 ///     .type = LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
 ///     .structure_size = sizeof(loomc_link_options_t),
@@ -49,6 +57,8 @@
 ///     .mode = LOOMC_LINK_MODE_LINK,
 ///     .root_symbols = roots,
 ///     .root_symbol_count = 1,
+///     .module_providers = module_providers,
+///     .module_provider_count = 1,
 /// };
 ///
 /// loomc_module_t* module = NULL;
@@ -110,10 +120,28 @@ typedef enum loomc_link_flag_bits_e {
 
   /// Strip symbols used only by test or benchmark tooling.
   LOOMC_LINK_FLAG_STRIP_TEST_SYMBOLS = 1u << 2,
+
+  /// Select test/benchmark-only INPUT symbols as link roots. Library tests are
+  /// not selected. With STRIP_TEST_SYMBOLS, retain their callable subjects
+  /// instead of the test or benchmark wrappers.
+  LOOMC_LINK_FLAG_INCLUDE_INPUT_TESTS = 1u << 3,
 } loomc_link_flag_bits_t;
 
 /// Bitmask of `loomc_link_flag_bits_t` values.
 typedef uint32_t loomc_link_flags_t;
+
+/// Human-readable explanation of the completed link plan.
+#define LOOMC_ARTIFACT_FORMAT_LINK_PLAN_TEXT "loom-link-plan-text"
+
+/// Optional link-result artifact flags.
+typedef enum loomc_link_artifact_flag_bits_e {
+  /// Attach a REPORT artifact named `link-plan.txt` containing the selected
+  /// symbols, their providers, and why they are live. Produced only on success.
+  LOOMC_LINK_ARTIFACT_FLAG_PLAN_TEXT = 1u << 0,
+} loomc_link_artifact_flag_bits_t;
+
+/// Bitmask of `loomc_link_artifact_flag_bits_t` values.
+typedef uint32_t loomc_link_artifact_flags_t;
 
 /// Link product selection mode.
 typedef enum loomc_link_mode_e {
@@ -128,19 +156,43 @@ typedef enum loomc_link_mode_e {
   LOOMC_LINK_MODE_LINK = 1,
 } loomc_link_mode_t;
 
+/// Invocation-local materialized module provider.
+///
+/// Materialized providers let same-version producers link an existing
+/// `loomc_module_t` directly without serializing it into a source first. They
+/// participate in the same provider order and linkage-role rules as sources in
+/// a frozen index.
+///
+/// @lifetime
+/// The module and provider name are borrowed for the duration of
+/// `loomc_link_module`. The module is neither retained nor mutated. The caller
+/// must keep it alive and must not mutate it concurrently with linking.
+typedef struct loomc_link_module_provider_t {
+  /// Immutable module to index and materialize for this invocation.
+  const loomc_module_t* module;
+
+  /// Stable provider label for diagnostics and private-name determinism. Empty
+  /// uses the module name.
+  loomc_string_view_t provider_name;
+
+  /// Provider linkage role.
+  loomc_link_provider_role_t role;
+} loomc_link_module_provider_t;
+
 /// Link invocation options.
 ///
-/// A link invocation consumes a frozen index and returns either a retained
-/// module or a failed result with diagnostics. Merge mode materializes only
-/// primary INPUT providers and preserves unresolved contracts. Link mode
-/// selects a dependency closure from explicit roots or exported primary roots
+/// A link invocation consumes a frozen index, invocation-local materialized
+/// modules, or both and returns either a retained module or a failed result
+/// with diagnostics. Merge mode materializes only primary INPUT providers and
+/// preserves unresolved contracts. Link mode selects a dependency closure from
+/// explicit roots, exported primary roots, or primary test/benchmark roots,
 /// plus the exports of selected root providers across the complete supplied
-/// library universe. Linking preserves every target carried by the selected
-/// symbols. Target-specialization extensions participate in template-provider
-/// selection and project exact target facts into the standalone linked output.
-/// Config options materialize on the linked output for this invocation; frozen
-/// indexes and reusable input/library modules are never mutated by link-time
-/// specialization.
+/// library universe. Linking preserves
+/// every target carried by the selected symbols. Target-specialization
+/// extensions participate in template-provider selection and project exact
+/// target facts into the standalone linked output. Config options materialize
+/// on the linked output for this invocation; frozen indexes and reusable
+/// input/library modules are never mutated by link-time specialization.
 /// Template choices that depend on unavailable caller or target facts retain
 /// their viable providers until compilation. A closed library universe does
 /// not require template applicability to be resolved at the link boundary.
@@ -155,7 +207,9 @@ typedef struct loomc_link_options_t {
   /// `loomc_target_specialization_options_t`.
   const void* next;
 
-  /// Frozen provider index to link.
+  /// Frozen provider index to link. Required when `module_provider_count` is
+  /// zero. When materialized module providers are present this may be `NULL` or
+  /// a library-only index used as the immutable provider prefix.
   loomc_link_index_t* link_index;
 
   /// Output module name for this invocation. Empty uses the linker's default.
@@ -184,6 +238,26 @@ typedef struct loomc_link_options_t {
 
   /// Number of entries in `root_provider_ordinals`.
   loomc_host_size_t root_provider_count;
+
+  /// Invocation-local materialized module providers appended after the
+  /// optional frozen library prefix. Provider ordinals in this combined index
+  /// retain the frozen prefix ordinals and then follow this array order.
+  const loomc_link_module_provider_t* module_providers;
+
+  /// Number of entries in `module_providers`.
+  loomc_host_size_t module_provider_count;
+
+  /// Optional homogeneous profile applied to every linked kernel entry before
+  /// dependency and template selection. Borrowed for the call. NULL preserves
+  /// authored targets. Cannot be combined with nonempty explicit target
+  /// specializations or declaration bindings in `next`.
+  /// Requires `structure_size` to include this field.
+  const loomc_target_profile_t* kernel_target_profile;
+
+  /// Optional reports owned by the returned result, independently of the
+  /// module, index, and workspace. Zero performs no report formatting.
+  /// Requires `structure_size` to include this field.
+  loomc_link_artifact_flags_t artifact_flags;
 } loomc_link_options_t;
 
 /// Request-linking options.
@@ -234,7 +308,7 @@ LOOMC_API_EXPORT loomc_status_t loomc_linker_create(
     loomc_context_t* context, const loomc_linker_options_t* options,
     loomc_allocator_t allocator, loomc_linker_t** out_linker);
 
-/// Links a frozen index into an opaque module.
+/// Links frozen and invocation-local providers into an opaque module.
 ///
 /// @param linker Prepared linker.
 /// @param workspace Invocation-local scratch workspace.

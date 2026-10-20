@@ -7,15 +7,14 @@
 // Module-level SPIR-V target contract.
 //
 // SPIR-V binary emission produces one physical module at a time. Every function
-// in that module must agree on the target snapshot, artifact format, ABI,
-// descriptor set, and feature contract so module-level declarations and
-// capabilities have one meaning.
+// in that module must agree on the artifact format, ABI, descriptor set, and
+// feature contract so module-level declarations and capabilities have one
+// meaning. Subgroup widths and dispatch limits belong to individual entries.
 
 #ifndef LOOM_TARGET_ARCH_SPIRV_MODULE_CONTRACT_H_
 #define LOOM_TARGET_ARCH_SPIRV_MODULE_CONTRACT_H_
 
 #include "iree/base/api.h"
-#include "loom/codegen/low/target_binding.h"
 #include "loom/target/types.h"
 
 #ifdef __cplusplus
@@ -25,8 +24,6 @@ extern "C" {
 typedef struct loom_spirv_module_contract_t {
   // Borrowed target-record symbol name selected by the function.
   iree_string_view_t target_name;
-  // Borrowed target snapshot name selected by the function.
-  iree_string_view_t snapshot_name;
   // Target codegen format selected by the function.
   loom_target_codegen_format_t codegen_format;
   // Target artifact format selected by the function.
@@ -41,9 +38,11 @@ typedef struct loom_spirv_module_contract_t {
   uint64_t contract_feature_bits;
 } loom_spirv_module_contract_t;
 
-// Captures the SPIR-V module contract implied by a concretely bound |target|.
-loom_spirv_module_contract_t loom_spirv_module_contract_from_target(
-    const loom_low_resolved_target_t* target);
+// Captures the SPIR-V module contract implied by a prepared function binding.
+loom_spirv_module_contract_t loom_spirv_module_contract_make(
+    iree_string_view_t target_name, const loom_target_bundle_t* target_bundle,
+    uint64_t descriptor_set_stable_id, iree_string_view_t contract_set_key,
+    uint64_t contract_feature_bits);
 
 // Returns true when both contracts can be emitted into one SPIR-V module.
 bool loom_spirv_module_contract_equal(const loom_spirv_module_contract_t* lhs,

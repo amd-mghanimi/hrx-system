@@ -32,3 +32,19 @@ func.def @length_of_fixed_alloca() -> (offset) {
   %actual_length = index.constant 48 : offset
   func.return %actual_length : offset
 }
+
+// ====
+
+// An explicit backing resource leaves the requested allocation extent intact.
+// The pool is not the byte-length operand or the identity of the fresh buffer.
+func.def @length_of_pooled_alloca(%memory: pool) -> (offset) {
+  %byte_length = index.constant 48 : offset
+  %buffer = buffer.alloca<workgroup> pool(%memory) align(64) %byte_length : buffer
+  %actual_length = buffer.length %buffer
+  func.return %actual_length : offset
+}
+// ----
+func.def @length_of_pooled_alloca(%memory: pool) -> (offset) {
+  %actual_length = index.constant 48 : offset
+  func.return %actual_length : offset
+}

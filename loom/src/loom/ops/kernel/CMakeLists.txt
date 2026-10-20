@@ -9,6 +9,21 @@
 
 iree_add_all_subdirs()
 
+loom_cc_library(
+  NAME
+    launch_config_dependence
+  HDRS
+    "launch_config_dependence.h"
+  SRCS
+    "launch_config_dependence.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::value_relation
+    loom::ir
+  PUBLIC
+)
+
 loom_generated_cc_library(
   NAME
     kernel
@@ -18,6 +33,8 @@ loom_generated_cc_library(
     "canonicalize.c"
     "facts.c"
     "launch_config.c"
+    "launch_config_callable_summary.c"
+    "launch_config_contract.c"
     "verify.c"
   TEXTUAL_HDRS
     "ops.inc"
@@ -29,6 +46,8 @@ loom_generated_cc_library(
     "tables.c"
   HDRS
     "launch_config.h"
+    "launch_config_callable_summary.h"
+    "launch_config_contract.h"
     "ops.h"
   ARGS
     "--dialect=kernel"
@@ -37,21 +56,27 @@ loom_generated_cc_library(
   EXTRA_OUTPUTS
     "ops.inc"
   DEPS
+    ::launch_config_dependence
+    iree::base
     iree::base::internal
-    loom::analysis::control_uniformity
-    loom::analysis::symbol_facts
+    iree::base::internal::arena
+    loom::analysis::value_relation
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ops::atomic
     loom::ops::buffer
     loom::ops::cache
+    loom::ops::callable_effects
     loom::ops::combining
     loom::ops::func
     loom::ops::func_symbol_facts
+    loom::ops::function_contract_verify
     loom::ops::index
     loom::ops::op_defs
+    loom::ops::pipeline
     loom::ops::scf
     loom::ops::target
     loom::ops::template
@@ -60,6 +85,7 @@ loom_generated_cc_library(
     loom::target::facts
     loom::target::types
     loom::util::fact_table
+    loom::util::reference_facts
     loom::util::walk
 )
 

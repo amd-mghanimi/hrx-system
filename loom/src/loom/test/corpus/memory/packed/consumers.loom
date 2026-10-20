@@ -1,0 +1,453 @@
+// Packed indices cover both signed-byte halves and distinct lanes in every word.
+
+func.def device inline @compute_packed_word_lookup(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<4xi32>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
+  %packed = vector.load %input_view[0] : view<4xi32> -> vector<4xi32>
+  %bytes = vector.bitcast %packed : vector<4xi32> to vector<16xi8>
+  %indices = vector.extui %bytes : vector<16xi8> to vector<16xi32>
+  %values = vector.gather %table_view[0][%indices] : view<256xi32>, vector<16xi32> -> vector<16xi32>
+  vector.store %values, %output_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+kernel.def @packed_word_lookup() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_word_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_word_lookup_oracle(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_word_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_word_lookup_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<16xi32>
+    check.compare<@packed_word_lookup, @packed_word_lookup_oracle>(%input, %table, %output) : (tensor<16xi8>, tensor<256xi32>, tensor<16xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_byte_lookup(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<16xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
+  %packed = vector.load %input_view[0] : view<16xi8> -> vector<16xi8>
+  %indices = vector.extui %packed : vector<16xi8> to vector<16xi32>
+  %values = vector.gather %table_view[0][%indices] : view<256xi32>, vector<16xi32> -> vector<16xi32>
+  vector.store %values, %output_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+kernel.def @packed_byte_lookup() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_byte_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_byte_lookup_oracle(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_byte_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_byte_lookup_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<16xi32>
+    check.compare<@packed_byte_lookup, @packed_byte_lookup_oracle>(%input, %table, %output) : (tensor<16xi8>, tensor<256xi32>, tensor<16xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_halfword_lookup(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<8xi16>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<8xi32>
+  %packed = vector.load %input_view[0] : view<8xi16> -> vector<8xi16>
+  %wide = vector.extui %packed : vector<8xi16> to vector<8xi32>
+  %mask = vector.constant 255 : vector<8xi32>
+  %indices = vector.andi %wide, %mask : vector<8xi32>
+  %values = vector.gather %table_view[0][%indices] : view<256xi32>, vector<8xi32> -> vector<8xi32>
+  vector.store %values, %output_view[0] : vector<8xi32>, view<8xi32>
+  func.return
+}
+
+kernel.def @packed_halfword_lookup() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_halfword_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_halfword_lookup_oracle(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_halfword_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_halfword_lookup_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(256) step(17) : tensor<8xi16>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<8xi32>
+    check.compare<@packed_halfword_lookup, @packed_halfword_lookup_oracle>(%input, %table, %output) : (tensor<8xi16>, tensor<256xi32>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<8xi16>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_signed_byte_lookup(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<16xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
+  %packed = vector.load %input_view[0] : view<16xi8> -> vector<16xi8>
+  %signed = vector.extsi %packed : vector<16xi8> to vector<16xi32>
+  %bias = vector.constant 128 : vector<16xi32>
+  %indices = vector.addi %signed, %bias : vector<16xi32>
+  %values = vector.gather %table_view[0][%indices] : view<256xi32>, vector<16xi32> -> vector<16xi32>
+  vector.store %values, %output_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+kernel.def @packed_signed_byte_lookup() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_signed_byte_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_signed_byte_lookup_oracle(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_signed_byte_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_signed_byte_lookup_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<16xi32>
+    check.compare<@packed_signed_byte_lookup, @packed_signed_byte_lookup_oracle>(%input, %table, %output) : (tensor<16xi8>, tensor<256xi32>, tensor<16xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_short_lookup(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<8xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<8xi32>
+  %packed = vector.load %input_view[0] : view<8xi8> -> vector<8xi8>
+  %indices = vector.extui %packed : vector<8xi8> to vector<8xi32>
+  %values = vector.gather %table_view[0][%indices] : view<256xi32>, vector<8xi32> -> vector<8xi32>
+  vector.store %values, %output_view[0] : vector<8xi32>, view<8xi32>
+  func.return
+}
+
+kernel.def @packed_short_lookup() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_short_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_short_lookup_oracle(%input: buffer, %table: buffer, %output: buffer) {
+  func.call @compute_packed_short_lookup(%input, %table, %output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_short_lookup_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<8xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<8xi32>
+    check.compare<@packed_short_lookup, @packed_short_lookup_oracle>(%input, %table, %output) : (tensor<8xi8>, tensor<256xi32>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<8xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+// Both consumers observe the same captured bytes despite the intervening write.
+func.def device inline @compute_packed_snapshot_consumers(%input: buffer, %table: buffer, %unsigned_output: buffer, %signed_output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<16xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %unsigned_view = buffer.view %unsigned_output[%base] : buffer -> view<16xi32>
+  %signed_view = buffer.view %signed_output[%base] : buffer -> view<16xi32>
+  %packed = vector.load %input_view[0] : view<16xi8> -> vector<16xi8>
+  %unsigned = vector.extui %packed : vector<16xi8> to vector<16xi32>
+  %unsigned_values = vector.gather %table_view[0][%unsigned] : view<256xi32>, vector<16xi32> -> vector<16xi32>
+  %replacement = vector.constant 0 : vector<16xi8>
+  vector.store %replacement, %input_view[0] : vector<16xi8>, view<16xi8>
+  %signed = vector.extsi %packed : vector<16xi8> to vector<16xi32>
+  %bias = vector.constant 128 : vector<16xi32>
+  %signed_indices = vector.addi %signed, %bias : vector<16xi32>
+  %signed_values = vector.gather %table_view[0][%signed_indices] : view<256xi32>, vector<16xi32> -> vector<16xi32>
+  vector.store %unsigned_values, %unsigned_view[0] : vector<16xi32>, view<16xi32>
+  vector.store %signed_values, %signed_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+kernel.def @packed_snapshot_consumers() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %unsigned_output: buffer, %signed_output: buffer) {
+  func.call @compute_packed_snapshot_consumers(%input, %table, %unsigned_output, %signed_output) : (buffer, buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @packed_snapshot_consumers_oracle(%input: buffer, %table: buffer, %unsigned_output: buffer, %signed_output: buffer) {
+  func.call @compute_packed_snapshot_consumers(%input, %table, %unsigned_output, %signed_output) : (buffer, buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @packed_snapshot_consumer_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %unsigned_output = check.generate.fill value(-99) : tensor<16xi32>
+    %signed_output = check.generate.fill value(-99) : tensor<16xi32>
+    check.compare<@packed_snapshot_consumers, @packed_snapshot_consumers_oracle>(%input, %table, %unsigned_output, %signed_output) : (tensor<16xi8>, tensor<256xi32>, tensor<16xi32>, tensor<16xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%unsigned_output) expected(%unsigned_output) : tensor<16xi32>
+      check.expect.bitwise actual(%signed_output) expected(%signed_output) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_masked_consumer(%input: buffer, %table: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<16xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<256xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
+  %packed = vector.load %input_view[0] : view<16xi8> -> vector<16xi8>
+  %indices = vector.extui %packed : vector<16xi8> to vector<16xi32>
+  %start = index.constant 0 : index
+  %step = index.constant 1 : index
+  %mask = vector.mask.range [%start to %count step %step] : index -> vector<16xi1>
+  %passthrough = vector.constant -17 : vector<16xi32>
+  %values = vector.gather.mask %table_view[0][%indices], %mask, %passthrough : view<256xi32>, vector<16xi32>, vector<16xi1>, vector<16xi32>
+  vector.store.mask %values, %output_view[0], %mask : vector<16xi32>, view<16xi32>, vector<16xi1>
+  func.return
+}
+
+kernel.def @packed_masked_consumer() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %table: buffer, %output: buffer, %count: index) {
+  func.call @compute_packed_masked_consumer(%input, %table, %output, %count) : (buffer, buffer, buffer, index)
+  kernel.return
+}
+
+func.def @packed_masked_consumer_oracle(%input: buffer, %table: buffer, %output: buffer, %count: index) {
+  func.call @compute_packed_masked_consumer(%input, %table, %output, %count) : (buffer, buffer, buffer, index)
+  func.return
+}
+
+check.scenario @packed_masked_consumer_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(0) step(7) : tensor<16xi8>
+    %table = check.generate.iota offset(7) step(3) : tensor<256xi32>
+    %output = check.generate.fill value(-99) : tensor<16xi32>
+    %count = check.literal value(7) : index
+    check.compare<@packed_masked_consumer, @packed_masked_consumer_oracle>(%input, %table, %output, %count) : (tensor<16xi8>, tensor<256xi32>, tensor<16xi32>, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<256xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_packed_scatter_alias(%storage: buffer) {
+  %base = index.constant 0 : offset
+  %view = buffer.view %storage[%base] : buffer -> view<16xi8>
+  %packed = vector.load %view[0] : view<16xi8> -> vector<16xi8>
+  %last = scalar.constant 15 : i32
+  %step = scalar.constant -1 : i32
+  %reverse = vector.iota %last step %step : vector<16xi32>
+  vector.scatter %packed, %view[0][%reverse] : vector<16xi8>, view<16xi8>, vector<16xi32>
+  func.return
+}
+
+kernel.def @packed_scatter_alias() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%storage: buffer) {
+  func.call @compute_packed_scatter_alias(%storage) : (buffer)
+  kernel.return
+}
+
+func.def @packed_scatter_alias_oracle(%storage: buffer) {
+  func.call @compute_packed_scatter_alias(%storage) : (buffer)
+  func.return
+}
+
+check.scenario @packed_scatter_alias_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    check.compare<@packed_scatter_alias, @packed_scatter_alias_oracle>(%storage) : (tensor<16xi8>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<16xi8>
+    }
+  }
+  check.return
+}
+
+// The fourth lane has no source element and must retain its passthrough byte.
+func.def device inline @compute_masked_byte_tail(%input: buffer, %output: buffer, %active: i1) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<3xi8>
+  %output_view = buffer.view %output[%base] : buffer -> view<4xi8>
+  %inactive = scalar.constant false : i1
+  %mask = vector.from_elements %active, %active, %active, %inactive : vector<4xi1>
+  %passthrough = vector.constant 99 : vector<4xi8>
+  %loaded = vector.load.mask %input_view[0], %mask, %passthrough : view<3xi8>, vector<4xi1>, vector<4xi8>
+  vector.store %loaded, %output_view[0] : vector<4xi8>, view<4xi8>
+  func.return
+}
+
+kernel.def @masked_byte_tail() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %active: i1) {
+  func.call @compute_masked_byte_tail(%input, %output, %active) : (buffer, buffer, i1)
+  kernel.return
+}
+
+func.def @masked_byte_tail_oracle(%input: buffer, %output: buffer, %active: i1) {
+  func.call @compute_masked_byte_tail(%input, %output, %active) : (buffer, buffer, i1)
+  func.return
+}
+
+check.scenario @masked_byte_tail_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(51) step(9) : tensor<3xi8>
+    %output = check.generate.fill value(-99) : tensor<4xi8>
+    %active = check.literal value(true) : i1
+    check.compare<@masked_byte_tail, @masked_byte_tail_oracle>(%input, %output, %active) : (tensor<3xi8>, tensor<4xi8>, i1) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<3xi8>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi8>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(51) step(9) : tensor<3xi8>
+    %output = check.generate.fill value(-99) : tensor<4xi8>
+    %active = check.literal value(false) : i1
+    check.compare<@masked_byte_tail, @masked_byte_tail_oracle>(%input, %output, %active) : (tensor<3xi8>, tensor<4xi8>, i1) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<3xi8>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi8>
+    }
+  }
+  check.return
+}
+
+// Each workitem preserves a packed vector spanning more than one memory packet.
+// Publishing the old bytes separately keeps their storage live across the load.
+// Runtime trial values select empty, half-full, and full workitem populations.
+kernel.def @masked_packed_snapshot() {
+  %unit = index.constant 1 : index
+  %width = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%population: index, %input_arg: buffer, %previous_arg: buffer, %output_arg: buffer) {
+  %input, %previous, %output = buffer.assume.noalias %input_arg, %previous_arg, %output_arg : buffer, buffer, buffer
+  %base = index.constant 0 : offset
+  %packet_width = index.constant 20 : index
+  %half_width = index.constant 16 : index
+  %old_offset = index.constant 640 : index
+  %thread = kernel.workitem.id<x> : index
+  %active_count = index.mul %population, %half_width : index
+  %active = index.cmp ult, %thread, %active_count : index
+  %mask = vector.splat %active : vector<20xi1>
+  %position = index.mul %thread, %packet_width : index
+  %old_position = index.add %position, %old_offset : index
+  %source = buffer.view %input[%base] : buffer -> view<640xi8>
+  %fallback = buffer.view %previous[%base] : buffer -> view<640xi8>
+  %destination = buffer.view %output[%base] : buffer -> view<1280xi32>
+  %old = vector.load %fallback[%position] : view<640xi8> -> vector<20xi8>
+  %loaded = vector.load.mask %source[%position], %mask, %old : view<640xi8>, vector<20xi1>, vector<20xi8>
+  %wide = vector.extsi %loaded : vector<20xi8> to vector<20xi32>
+  %retained = vector.extsi %old : vector<20xi8> to vector<20xi32>
+  vector.store %wide, %destination[%position] : vector<20xi32>, view<1280xi32>
+  vector.store %retained, %destination[%old_position] : vector<20xi32>, view<1280xi32>
+  kernel.return
+}
+
+func.def @masked_packed_snapshot_oracle(%population: index, %input: buffer, %previous: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 640 : index
+  %step = index.constant 1 : index
+  %population_elements = index.constant 320 : index
+  %active_elements = index.mul %population, %population_elements : index
+  %source = buffer.view %input[%base] : buffer -> view<640xi8>
+  %fallback = buffer.view %previous[%base] : buffer -> view<640xi8>
+  %destination = buffer.view %output[%base] : buffer -> view<1280xi32>
+  scf.for %position = [%begin to %end step %step] {
+    %old = view.load %fallback[%position] : view<640xi8> -> i8
+    %active = index.cmp ult, %position, %active_elements : index
+    %value = scf.if %active -> (i8) {
+      %loaded = view.load %source[%position] : view<640xi8> -> i8
+      scf.yield %loaded : i8
+    } else {
+      scf.yield %old : i8
+    }
+    %wide = scalar.extsi %value : i8 to i32
+    %retained = scalar.extsi %old : i8 to i32
+    %old_position = index.add %position, %end : index
+    view.store %wide, %destination[%position] : i32, view<1280xi32>
+    view.store %retained, %destination[%old_position] : i32, view<1280xi32>
+  }
+  func.return
+}
+
+check.scenario @masked_packed_snapshot_values {
+  check.trial[3](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %old_entropy = check.entropy.fork %entropy name("fallback") : check.entropy
+    %old_seed = check.entropy.read %old_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<640xi8>
+    %previous = check.generate.random.uniform seed(%old_seed) range(-128 to 127) : tensor<640xi8>
+    %output = check.generate.fill value(-9999) : tensor<1280xi32>
+    check.compare<@masked_packed_snapshot, @masked_packed_snapshot_oracle>(%trial, %input, %previous, %output) : (index, tensor<640xi8>, tensor<640xi8>, tensor<1280xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<640xi8>
+      check.expect.bitwise actual(%previous) expected(%previous) : tensor<640xi8>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<1280xi32>
+    }
+  }
+  check.return
+}

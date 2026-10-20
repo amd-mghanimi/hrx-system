@@ -80,9 +80,8 @@ static iree_status_t loom_low_requirements_verify_operand_reg_classes(
     const loom_low_descriptor_t* descriptor,
     iree_string_view_t descriptor_key) {
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
-    const uint32_t operand_index = descriptor->operand_start + i;
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[operand_index];
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     if (operand->reg_class_alt_count == 0) {
       return iree_make_status(
           IREE_STATUS_FAILED_PRECONDITION,
@@ -121,11 +120,12 @@ static iree_status_t loom_low_requirements_verify_descriptor_schedule(
     const loom_low_descriptor_t* descriptor,
     iree_string_view_t descriptor_key) {
   const loom_low_schedule_class_t* schedule_class =
-      &descriptor_set->schedule_classes[loom_low_descriptor_set_descriptor_view(
-                                            descriptor_set, descriptor)
-                                            ->schedule_class_id];
+      loom_low_descriptor_set_schedule_class(
+          descriptor_set,
+          loom_low_descriptor_set_descriptor_view(descriptor_set, descriptor));
   const bool has_effect_or_control_payload =
-      descriptor->effect_count != 0 ||
+      loom_low_descriptor_layout(descriptor_set, descriptor)->effect_count !=
+          0 ||
       iree_any_bit_set(descriptor->flags,
                        LOOM_LOW_DESCRIPTOR_FLAG_SIDE_EFFECTING |
                            LOOM_LOW_DESCRIPTOR_FLAG_TERMINATOR);
@@ -201,7 +201,10 @@ iree_status_t loom_low_descriptor_set_verify_requirements(
     IREE_RETURN_IF_ERROR(
         loom_low_requirements_verify_core_tables(descriptor_set, set_key));
   }
-  for (uint32_t i = 0; i < descriptor_set->descriptor_count; ++i) {
+  for (uint32_t i = 0; i < descriptor_set->descriptor_ordinal_count; ++i) {
+    if (!loom_low_descriptor_set_has_descriptor(descriptor_set, i)) {
+      continue;
+    }
     IREE_RETURN_IF_ERROR(loom_low_requirements_verify_descriptor(
         descriptor_set, set_key, &descriptor_set->descriptors[i],
         requirements));

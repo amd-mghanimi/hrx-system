@@ -63,11 +63,16 @@ typedef uint32_t iree_async_notification_flags_t;
 //
 // The epoch counter is the source of truth for signal state. Native events are
 // only wakeup mechanisms and never carry one permit per logical observer.
+// Async waits are submitted to this notification's proactor and cancelled
+// through that same proactor. Its poll thread owns the notification's wait
+// state and invokes wait callbacks. Signaling and synchronous waits may run
+// on other threads.
 typedef struct iree_async_notification_t {
   // References held by callers and admitted asynchronous consumers.
   iree_atomic_ref_count_t ref_count;
 
-  // The proactor this notification is bound to. Not retained.
+  // Borrowed owner of async wait state. Must outlive the notification and its
+  // operations; retaining the notification does not keep polling alive.
   iree_async_proactor_t* proactor;
 
   // Local epoch and native private address-wait word. Unused when shared.

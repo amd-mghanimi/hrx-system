@@ -28,7 +28,7 @@ func.def public target(@target) @preserves_final_yield_before_signed_wrap(%seed:
   %14 = index.cmp slt, %11, %end : index
   cfg.cond_br %14, ^_bb2, ^_bb5
 ^_bb2:
-  %counter = index.assume %11 [range(%11, 2147483642, 2147483646), mul(%11, 2)] : index
+  %counter = index.assume %11 [range(%11, 2147483642, 2147483646), multiple_of(%11, 2)] : index
   test.use %counter : index
   %next_count = scalar.addi %count, %count_increment : i32
   %15 = index.sub %end, %counter : index

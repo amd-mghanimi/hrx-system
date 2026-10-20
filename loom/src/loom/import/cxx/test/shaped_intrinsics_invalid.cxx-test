@@ -5,14 +5,12 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.table.lookup")]] int custom(Integers, Integers);
 
 // ====
-// RUN: verify
 // Lookup requires vector operands.
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "shaped intrinsic operands must be vectors"
 [[loom::op("vector.table.lookup")]] Integers custom(int, Integers);
 
 // ====
-// RUN: verify
 // Lookup indices must be integral.
 typedef int Integers __attribute__((vector_size(16)));
 typedef float Floats __attribute__((vector_size(16)));
@@ -20,7 +18,6 @@ typedef float Floats __attribute__((vector_size(16)));
 [[loom::op("vector.table.lookup")]] Integers custom(Integers, Floats);
 
 // ====
-// RUN: verify
 // Lookup index lanes must match the result.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef int Integers __attribute__((vector_size(16)));
@@ -28,7 +25,6 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.table.lookup")]] Integers custom(Integers, SignedBytes);
 
 // ====
-// RUN: verify
 // Lookup preserves the table element signedness.
 typedef int Integers __attribute__((vector_size(16)));
 typedef unsigned UnsignedIntegers __attribute__((vector_size(16)));
@@ -36,36 +32,24 @@ typedef unsigned UnsignedIntegers __attribute__((vector_size(16)));
 [[loom::op("vector.table.lookup")]] Integers custom(UnsignedIntegers, Integers);
 
 // ====
-// RUN: verify
 // Lookup requires two operands.
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "intrinsic declaration has the wrong operand count"
 [[loom::op("vector.table.lookup")]] Integers custom(Integers);
 
 // ====
-// RUN: verify
 // Lookup cannot accept variadic operands.
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "intrinsic declaration has the wrong operand count"
 [[loom::op("vector.table.lookup")]] Integers custom(Integers, Integers, ...);
 
 // ====
-// RUN: verify
 // Lookup has no math flags.
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "register table lookup has no semantic arguments"
 [[loom::op("vector.table.lookup", "afn")]] Integers custom(Integers, Integers);
 
 // ====
-// RUN: verify
-// Dot requires an explicit signedness choice.
-typedef signed char SignedBytes __attribute__((vector_size(16)));
-typedef int Integers __attribute__((vector_size(16)));
-// ERROR@+1: LOWERING/059 "dot4i requires one signedness argument: s8s8, u8s8, s8u8, or u8u8"
-[[loom::op("vector.dot4i")]] Integers custom(SignedBytes, SignedBytes, Integers);
-
-// ====
-// RUN: verify
 // Dot rejects unknown signedness choices.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef int Integers __attribute__((vector_size(16)));
@@ -73,22 +57,19 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "unknown")]] Integers custom(SignedBytes, SignedBytes, Integers);
 
 // ====
-// RUN: verify
 // Dot accepts exactly one semantic argument.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef int Integers __attribute__((vector_size(16)));
-// ERROR@+1: LOWERING/059 "dot4i requires one signedness argument: s8s8, u8s8, s8u8, or u8u8"
+// ERROR@+1: LOWERING/059 "dot4i accepts no semantic arguments or one signedness argument: s8s8, u8s8, s8u8, or u8u8"
 [[loom::op("vector.dot4i", "s8s8", "afn")]] Integers custom(SignedBytes, SignedBytes, Integers);
 
 // ====
-// RUN: verify
 // Dot inputs must contain bytes.
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "dot4i requires equal i8 input shapes with four lanes per i32 accumulator/result lane"
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(Integers, Integers, Integers);
 
 // ====
-// RUN: verify
 // Dot input shapes must agree.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef signed char ShortBytes __attribute__((vector_size(8)));
@@ -97,7 +78,6 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(SignedBytes, ShortBytes, Integers);
 
 // ====
-// RUN: verify
 // Dot needs four byte lanes per result lane.
 typedef signed char ShortBytes __attribute__((vector_size(8)));
 typedef int Integers __attribute__((vector_size(16)));
@@ -105,7 +85,6 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(ShortBytes, ShortBytes, Integers);
 
 // ====
-// RUN: verify
 // Dot results and accumulators must contain i32 values.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef float Floats __attribute__((vector_size(16)));
@@ -113,7 +92,6 @@ typedef float Floats __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "s8s8")]] Floats custom(SignedBytes, SignedBytes, Floats);
 
 // ====
-// RUN: verify
 // Dot accumulator and result types must match exactly.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef int Integers __attribute__((vector_size(16)));
@@ -122,7 +100,6 @@ typedef unsigned UnsignedIntegers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(SignedBytes, SignedBytes, UnsignedIntegers);
 
 // ====
-// RUN: verify
 // The left byte type must match the dot signedness.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef unsigned char UnsignedBytes __attribute__((vector_size(16)));
@@ -131,7 +108,6 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(UnsignedBytes, SignedBytes, Integers);
 
 // ====
-// RUN: verify
 // The right byte type must match the dot signedness.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef unsigned char UnsignedBytes __attribute__((vector_size(16)));
@@ -140,9 +116,43 @@ typedef int Integers __attribute__((vector_size(16)));
 [[loom::op("vector.dot4i", "u8u8")]] Integers custom(UnsignedBytes, SignedBytes, Integers);
 
 // ====
-// RUN: verify
 // Dot requires an accumulator operand.
 typedef signed char SignedBytes __attribute__((vector_size(16)));
 typedef int Integers __attribute__((vector_size(16)));
 // ERROR@+1: LOWERING/059 "intrinsic declaration has the wrong operand count"
 [[loom::op("vector.dot4i", "s8s8")]] Integers custom(SignedBytes, SignedBytes);
+
+// ====
+// Splat constructs only the shape-preserving semantic vector representation.
+#include <loomcxx/vector.h>
+// ERROR@+1: LOWERING/059 "vector.splat result must be a semantic vector"
+[[loom::op("vector.splat")]] float custom(loom::type::indices<0>, float);
+
+// ====
+// One source index is required for every dynamic result axis.
+#include <loomcxx/vector.h>
+using Fragment = loom::type::vector<loom::type::shape<loom::type::dynamic>, float>;
+// ERROR@+1: LOWERING/059 "vector.splat dimensions have the wrong arity"
+[[loom::op("vector.splat")]] Fragment custom(loom::type::indices<0>, float);
+
+// ====
+// Dependent type references require native index identities.
+#include <loomcxx/vector.h>
+using Fragment = loom::type::vector<loom::type::shape<loom::type::dynamic>, float>;
+struct Dimensions { unsigned width; };
+// ERROR@+1: LOWERING/059 "vector.splat dimensions require logical indices"
+[[loom::op("vector.splat")]] Fragment custom(Dimensions, float);
+
+// ====
+// Splat preserves its scalar element type exactly.
+#include <loomcxx/vector.h>
+using Fragment = loom::type::vector<loom::type::shape<loom::type::dynamic>, float>;
+// ERROR@+1: LOWERING/059 "vector.splat value must match its result element"
+[[loom::op("vector.splat")]] Fragment custom(loom::type::indices<1>, int);
+
+// ====
+// Semantic-vector reductions preserve the vector element in seed and result.
+#include <loomcxx/vector.h>
+using Fragment = loom::type::vector<loom::type::shape<loom::type::dynamic>, float>;
+// ERROR@+1: LOWERING/059 "vector element, scalar seed, and result types must match"
+[[loom::op("vector.reduce", "addf")]] float custom(Fragment, int);

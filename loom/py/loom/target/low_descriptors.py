@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 from loom.ir import ScalarTypeKind
 from loom.stable_id import stable_id_from_string
@@ -97,6 +99,7 @@ class OperandFlag(CEnum):
     SCHEDULE_ONLY_STATE = "LOOM_LOW_OPERAND_FLAG_SCHEDULE_ONLY_STATE"
     EXECUTION_MASK = "LOOM_LOW_OPERAND_FLAG_EXECUTION_MASK"
     NARROWS_EXECUTION_MASK = "LOOM_LOW_OPERAND_FLAG_NARROWS_EXECUTION_MASK"
+    COMMUTATIVE_STATE_UPDATE = "LOOM_LOW_OPERAND_FLAG_COMMUTATIVE_STATE_UPDATE"
     STORAGE_CONTINUATION = "LOOM_LOW_OPERAND_FLAG_STORAGE_CONTINUATION"
     VARIADIC = "LOOM_LOW_OPERAND_FLAG_VARIADIC"
 
@@ -105,6 +108,7 @@ class RegClassAltFlag(CEnum):
     PREFERRED = "LOOM_LOW_REG_CLASS_ALT_FLAG_PREFERRED"
     IMMEDIATE = "LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE"
     PHYSICAL_ONLY = "LOOM_LOW_REG_CLASS_ALT_FLAG_PHYSICAL_ONLY"
+    LATE_READ = "LOOM_LOW_REG_CLASS_ALT_FLAG_LATE_READ"
 
 
 class RegClassFlag(CEnum):
@@ -114,6 +118,9 @@ class RegClassFlag(CEnum):
     UNSPILLABLE = "LOOM_LOW_REG_CLASS_FLAG_UNSPILLABLE"
     EXPLICIT_PHYSICAL_REGISTERS = "LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS"
     EVEN_ALIGNED_TUPLES = "LOOM_LOW_REG_CLASS_FLAG_EVEN_ALIGNED_TUPLES"
+    CONTIGUOUS_PHYSICAL_REGISTER_CANDIDATES = (
+        "LOOM_LOW_REG_CLASS_FLAG_CONTIGUOUS_PHYSICAL_REGISTER_CANDIDATES"
+    )
 
 
 class SpillSlotSpace(CEnum):
@@ -121,6 +128,17 @@ class SpillSlotSpace(CEnum):
     SCRATCH = "LOOM_LOW_SPILL_SLOT_SPACE_SCRATCH"
     PRIVATE = "LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE"
     LDS = "LOOM_LOW_SPILL_SLOT_SPACE_LDS"
+
+
+class RegisterPackingResourceFlag(CEnum):
+    UNSPILLABLE = "LOOM_LOW_REGISTER_PACKING_RESOURCE_FLAG_UNSPILLABLE"
+    HAS_AGGREGATE_MEMBER = (
+        "LOOM_LOW_REGISTER_PACKING_RESOURCE_FLAG_HAS_AGGREGATE_MEMBER"
+    )
+
+
+class RegisterPackingResourceMemberFlag(CEnum):
+    CAPACITY_SOURCE = "LOOM_LOW_REGISTER_PACKING_RESOURCE_MEMBER_FLAG_CAPACITY_SOURCE"
 
 
 class ImmediateKind(CEnum):
@@ -134,6 +152,7 @@ class ImmediateFlag(CEnum):
     SYMBOLIC = "LOOM_LOW_IMMEDIATE_FLAG_SYMBOLIC"
     RELATIVE = "LOOM_LOW_IMMEDIATE_FLAG_RELATIVE"
     DEFAULT_VALUE = "LOOM_LOW_IMMEDIATE_FLAG_DEFAULT_VALUE"
+    READ_ONLY_DATA = "LOOM_LOW_IMMEDIATE_FLAG_READ_ONLY_DATA"
 
 
 class EffectKind(CEnum):
@@ -183,12 +202,15 @@ class StorageLeaseFlag(CEnum):
 
 class ConstraintKind(CEnum):
     TIED = "LOOM_LOW_CONSTRAINT_KIND_TIED"
+    PREFER_TIED = "LOOM_LOW_CONSTRAINT_KIND_PREFER_TIED"
     COMMUTABLE = "LOOM_LOW_CONSTRAINT_KIND_COMMUTABLE"
     DESTRUCTIVE = "LOOM_LOW_CONSTRAINT_KIND_DESTRUCTIVE"
     EARLY_CLOBBER = "LOOM_LOW_CONSTRAINT_KIND_EARLY_CLOBBER"
     REMATERIALIZABLE = "LOOM_LOW_CONSTRAINT_KIND_REMATERIALIZABLE"
     FOLDABLE = "LOOM_LOW_CONSTRAINT_KIND_FOLDABLE"
     SAME_REGISTER_ORDINAL = "LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_ORDINAL"
+    SAME_REGISTER_VALUE_TYPE = "LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_VALUE_TYPE"
+    SAME_REGISTER_CLASS = "LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_CLASS"
 
 
 class LatencyKind(CEnum):
@@ -276,6 +298,9 @@ class DescriptorFlag(CEnum):
     UNIQUE_IDENTITY = "LOOM_LOW_DESCRIPTOR_FLAG_UNIQUE_IDENTITY"
     ENUM_IMMEDIATES = "LOOM_LOW_DESCRIPTOR_FLAG_ENUM_IMMEDIATES"
     SAFE_TO_SPECULATE = "LOOM_LOW_DESCRIPTOR_FLAG_SAFE_TO_SPECULATE"
+    STATE_ASSIGNMENT = "LOOM_LOW_DESCRIPTOR_FLAG_STATE_ASSIGNMENT"
+    LATE_READ = "LOOM_LOW_DESCRIPTOR_FLAG_LATE_READ"
+    TIED_RESULTS = "LOOM_LOW_DESCRIPTOR_FLAG_TIED_RESULTS"
 
 
 class DescriptorOpKind(CEnum):
@@ -283,6 +308,7 @@ class DescriptorOpKind(CEnum):
 
     OP = "LOOM_LOW_DESCRIPTOR_OP_KIND_OP"
     CONST = "LOOM_LOW_DESCRIPTOR_OP_KIND_CONST"
+    COND_BR = "LOOM_LOW_DESCRIPTOR_OP_KIND_COND_BR"
 
 
 class InstructionClass(CEnum):
@@ -351,6 +377,7 @@ class NativeAsmValueKind(CEnum):
     IMMEDIATE_TARGET_FORMAT = "LOOM_LOW_NATIVE_ASM_VALUE_KIND_IMMEDIATE_TARGET_FORMAT"
     REGISTER_PART = "LOOM_LOW_NATIVE_ASM_VALUE_KIND_REGISTER_PART"
     MODIFIER_LITERAL = "LOOM_LOW_NATIVE_ASM_VALUE_KIND_MODIFIER_LITERAL"
+    NEGATED_OPERAND = "LOOM_LOW_NATIVE_ASM_VALUE_KIND_NEGATED_OPERAND"
 
 
 class AsmOperandSegmentDelimiter(CEnum):
@@ -410,8 +437,11 @@ class RegisterPackingResourceMember:
 class RegisterPackingResource:
     """Instantaneous shared physical capacity used during Low scheduling."""
 
+    # Stable diagnostic name for the shared physical resource.
     name: str
-    capacity: int
+    # Member whose candidate domain spans the resource's complete capacity.
+    capacity_register_class: str
+    # Register-class views that consume the shared physical resource.
     members: tuple[RegisterPackingResourceMember, ...]
 
 
@@ -447,6 +477,15 @@ class RegisterPart:
 class RegClassAlt:
     reg_class: str | None
     flags: tuple[RegClassAltFlag, ...] = (RegClassAltFlag.PREFERRED,)
+    # Required power-of-two base alignment in allocation units for this operand.
+    unit_alignment: int = 1
+    # Register part read or written when this alternative is selected, or None
+    # when the whole register is accessed.
+    register_part: str | None = None
+    # Input storage remains live through result writes. None selects ordinary
+    # read-before-write timing; zero applies in every execution mode, and a
+    # positive size restricts the late read to that selected subgroup width.
+    late_read_subgroup_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,7 +501,6 @@ class Operand:
     encoding_field_id: int = 0
     encoding_adapter_id: int = 0
     data_format_id: int = 0
-    register_part: str | None = None
     read_stage: int = 0
     ready_stage: int = 0
     read_event: str | None = None
@@ -484,6 +522,9 @@ class Immediate:
     bit_width: int = 0
     value_step: int = 1
     encoding_field_id: int = 0
+    # Physical bit offset when this immediate populates only a subfield of its
+    # encoding field. None denotes whole-field ownership.
+    encoding_field_bit_offset: int | None = None
     encoding_slices: tuple[ImmediateEncodingSlice, ...] = ()
     enum_domain: str | None = None
     encoding_id: int = 0
@@ -541,6 +582,14 @@ class AsmOperandSegment:
 
 @dataclass(frozen=True, slots=True)
 class AsmForm:
+    """Low assembly spelling over canonical packet values.
+
+    Results and operands enumerate every explicit packet value in descriptor
+    order. Operand segments may group that order but cannot permute or omit
+    values. Implicit-state fields are not packet values. Native ISA spelling
+    can independently reorder or omit fields through native_assembly_values.
+    """
+
     mnemonic: str | None = None
     native_assembly_mnemonic: str | None = None
     results: tuple[str, ...] = ()
@@ -573,6 +622,15 @@ class Effect:
     width_bits: int = 0
     producer_event: str | None = None
     consumer_event: str | None = None
+
+    @property
+    def is_memory_access(self) -> bool:
+        """Returns whether this read or write has a memory attachment."""
+
+        return (
+            self.kind in (EffectKind.READ, EffectKind.WRITE)
+            and self.memory_space is not MemorySpace.NONE
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,6 +795,11 @@ class DescriptorSet:
     resources: tuple[Resource, ...]
     schedule_classes: tuple[ScheduleClass, ...]
     descriptors: tuple[Descriptor, ...]
+    # First descriptor indexed by source key for contract lookup.
+    _descriptors_by_key: Mapping[str, Descriptor] = field(
+        init=False, repr=False, compare=False, hash=False
+    )
+    # Dense target-table storage ordinal shared by views over the same tables.
     descriptor_set_ordinal: int | None = None
     physical_registers: tuple[PhysicalRegister, ...] = ()
     physical_register_views: tuple[PhysicalRegisterView, ...] = ()
@@ -754,6 +817,13 @@ class DescriptorSet:
     requires_structured_control_flow: bool = False
 
     def __post_init__(self) -> None:
+        descriptors_by_key: dict[str, Descriptor] = {}
+        for descriptor in self.descriptors:
+            descriptors_by_key.setdefault(descriptor.key, descriptor)
+        object.__setattr__(
+            self, "_descriptors_by_key", MappingProxyType(descriptors_by_key)
+        )
+
         canonical_target_contract_keys = tuple(
             sorted(set(self.supported_target_contract_keys))
         )
@@ -807,6 +877,11 @@ class DescriptorSet:
                     f"'{descriptor.key}' category '{descriptor.category.key}' "
                     "is not declared in categories"
                 )
+
+    def descriptor_by_key(self, key: str) -> Descriptor | None:
+        """Returns the first descriptor with `key`, if present."""
+
+        return self._descriptors_by_key.get(key)
 
 
 def target_relative_name(target_key: str | None, name: str) -> str:

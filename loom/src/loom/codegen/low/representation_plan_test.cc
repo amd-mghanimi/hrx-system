@@ -34,8 +34,10 @@ class RepresentationPlanTest : public ::testing::Test {
   static loom_low_representation_candidate_t Candidate(
       loom_low_representation_id_t representation, uint32_t runtime,
       uint32_t code_size = 0) {
-    return {/*.representation=*/representation,
-            /*.cost=*/{/*.runtime=*/runtime, /*.code_size=*/code_size}};
+    return {
+        .representation = representation,
+        .cost = {.runtime = runtime, .code_size = code_size},
+    };
   }
 
   iree_arena_block_pool_t block_pool_;
@@ -79,6 +81,57 @@ TEST_F(RepresentationPlanTest, TracksConstrainedComponentsAcrossUnions) {
 
   IREE_ASSERT_OK(loom_low_representation_plan_union(&plan, 2, 0));
   EXPECT_TRUE(loom_low_representation_plan_component_is_constrained(&plan, 3));
+}
+
+TEST_F(RepresentationPlanTest, CostContributionsDoNotActivateComponent) {
+  auto plan = MakePlan(4);
+  const loom_low_representation_candidate_t costs[] = {Candidate(10, 3),
+                                                       Candidate(20, 1)};
+  IREE_ASSERT_OK(loom_low_representation_plan_union(&plan, 0, 3));
+  IREE_ASSERT_OK(loom_low_representation_plan_contribute_costs(
+      &plan, 0, costs, IREE_ARRAYSIZE(costs)));
+
+  EXPECT_FALSE(loom_low_representation_plan_component_is_constrained(&plan, 0));
+  EXPECT_TRUE(loom_low_representation_plan_solve(&plan, nullptr));
+  loom_low_representation_id_t representation = 0;
+  EXPECT_FALSE(loom_low_representation_plan_lookup(&plan, 3, &representation));
+  EXPECT_EQ(representation, LOOM_LOW_REPRESENTATION_ID_NONE);
+}
+
+TEST_F(RepresentationPlanTest, CostsRecordedBeforeDomainSurviveUnion) {
+  auto plan = MakePlan(4);
+  const loom_low_representation_candidate_t consumer_costs[] = {
+      Candidate(10, 5), Candidate(20, 0)};
+  const loom_low_representation_candidate_t producer_domain[] = {
+      Candidate(10, 0), Candidate(20, 2)};
+  IREE_ASSERT_OK(loom_low_representation_plan_contribute_costs(
+      &plan, 0, consumer_costs, IREE_ARRAYSIZE(consumer_costs)));
+  IREE_ASSERT_OK(loom_low_representation_plan_constrain(
+      &plan, 3, producer_domain, IREE_ARRAYSIZE(producer_domain)));
+  IREE_ASSERT_OK(loom_low_representation_plan_union(&plan, 0, 3));
+
+  EXPECT_TRUE(loom_low_representation_plan_solve(&plan, nullptr));
+  loom_low_representation_id_t representation = 0;
+  EXPECT_TRUE(loom_low_representation_plan_lookup(&plan, 0, &representation));
+  EXPECT_EQ(representation, 20u);
+}
+
+TEST_F(RepresentationPlanTest, CostContributionsDoNotRestrictDomain) {
+  auto plan = MakePlan(2);
+  const loom_low_representation_candidate_t producer_domain[] = {
+      Candidate(10, 0), Candidate(20, 0)};
+  const loom_low_representation_candidate_t partial_costs[] = {
+      Candidate(20, 7)};
+  IREE_ASSERT_OK(loom_low_representation_plan_constrain(
+      &plan, 0, producer_domain, IREE_ARRAYSIZE(producer_domain)));
+  IREE_ASSERT_OK(loom_low_representation_plan_contribute_costs(
+      &plan, 1, partial_costs, IREE_ARRAYSIZE(partial_costs)));
+  IREE_ASSERT_OK(loom_low_representation_plan_union(&plan, 0, 1));
+
+  EXPECT_TRUE(loom_low_representation_plan_solve(&plan, nullptr));
+  loom_low_representation_id_t representation = 0;
+  EXPECT_TRUE(loom_low_representation_plan_lookup(&plan, 1, &representation));
+  EXPECT_EQ(representation, 10u);
 }
 
 TEST_F(RepresentationPlanTest, IntersectsDomainsAcrossUnionedValues) {

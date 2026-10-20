@@ -19,29 +19,20 @@
 // result aggregates them into a test-framework report.
 //
 // The execution engine does not own the loom_context_t or block pool. A
-// loom_check_environment_t supplies the dialect registration and target-low
-// descriptor registry package selected by each test runner binary or embedding.
+// loom_check_environment_t supplies dialect registration and the target
+// environment selected by each test runner binary or embedding.
 
 #ifndef LOOM_TOOLS_LOOM_CHECK_EXECUTE_H_
 #define LOOM_TOOLS_LOOM_CHECK_EXECUTE_H_
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
-#include "loom/codegen/low/verify.h"
 #include "loom/error/diagnostic.h"
 #include "loom/error/source.h"
 #include "loom/format/text/printer.h"
 #include "loom/ir/context.h"
-#include "loom/pass/registry.h"
-#include "loom/target/legalization.h"
-#include "loom/target/low_asm_diagnostics.h"
 #include "loom/target/low_descriptor_registry.h"
-#include "loom/target/low_legality.h"
-#include "loom/target/low_packet_diagnostics.h"
-#include "loom/target/math_policy.h"
-#include "loom/target/pipeline.h"
 #include "loom/testing/test_file.h"
-#include "loom/tooling/compile/pipeline.h"
 #include "loom/tooling/input/input.h"
 #include "loom/tools/loom-check/report.h"
 #include "loom/tools/loom-check/update.h"
@@ -51,13 +42,13 @@
 extern "C" {
 #endif
 
-typedef struct loom_low_lower_policy_registry_t
-    loom_low_lower_policy_registry_t;
 typedef struct loom_cleanup_pattern_provider_set_t
     loom_cleanup_pattern_provider_set_t;
 typedef struct loom_target_environment_t loom_target_environment_t;
 typedef struct loom_check_diagnostic_collector_t
     loom_check_diagnostic_collector_t;
+typedef struct loom_check_compile_session_t loom_check_compile_session_t;
+typedef struct loomc_module_t loomc_module_t;
 
 //===----------------------------------------------------------------------===//
 // Types
@@ -111,10 +102,10 @@ typedef struct loom_check_result_t {
   // source; apply multiple edits atomically or in descending range order.
   loom_json_value_list_t annotation_edits;
 
-  // Structured diagnostic JSON objects emitted through the shared
-  // loom_diagnostic_json_write_object path. These preserve the full
-  // parser/verifier shape: source ranges, highlights, related locations,
-  // params, field refs, rendered message, and fix hints.
+  // Structured diagnostic JSON objects. Internal checker stages preserve the
+  // complete parser/verifier shape; public compiler qualification preserves
+  // the code, message, source range, related locations, and rendered params
+  // exposed by LoomC.
   loom_json_value_list_t diagnostics;
 } loom_check_result_t;
 
@@ -146,52 +137,17 @@ typedef struct loom_check_register_context_callback_t {
   void* user_data;
 } loom_check_register_context_callback_t;
 
-// Initializes a linked target-low descriptor registry package.
-typedef iree_status_t (*loom_check_initialize_low_descriptor_registry_fn_t)(
-    void* user_data, loom_target_low_descriptor_registry_t* out_registry);
-
-// Callback for the descriptor registry package used by low asm parsing,
-// target-record resolution, descriptor-local verification, scheduling, and
-// allocation table emission.
-typedef struct loom_check_initialize_low_descriptor_registry_callback_t {
-  // Function that initializes the selected linked target-low registry package.
-  loom_check_initialize_low_descriptor_registry_fn_t fn;
-  // Opaque callback state forwarded to |fn|.
-  void* user_data;
-} loom_check_initialize_low_descriptor_registry_callback_t;
-
-// Initializes a linked source-to-target-low lowering policy registry package.
-typedef iree_status_t (*loom_check_initialize_low_lower_policy_registry_fn_t)(
-    void* user_data, loom_low_lower_policy_registry_t* out_registry);
-
-// Callback for the lowering policy registry package used by RUN: pass tests
-// that explicitly execute source-to-low. The policy package is intentionally
-// separate from descriptor tables: tools may want low parsing/scheduling
-// without linking source lowering.
-typedef struct loom_check_initialize_low_lower_policy_registry_callback_t {
-  // Function that initializes the selected linked lowering policy package.
-  loom_check_initialize_low_lower_policy_registry_fn_t fn;
-  // Opaque callback state forwarded to |fn|.
-  void* user_data;
-} loom_check_initialize_low_lower_policy_registry_callback_t;
-
-// Initializes a linked target math legalization policy registry package.
-typedef iree_status_t (*loom_check_initialize_math_policy_registry_fn_t)(
-    void* user_data, loom_target_math_policy_registry_t* out_registry);
-
-// Callback for the math policy registry package used by RUN: pass tests that
-// explicitly execute legalize-math.
-typedef struct loom_check_initialize_math_policy_registry_callback_t {
-  // Function that initializes the selected linked math policy package.
-  loom_check_initialize_math_policy_registry_fn_t fn;
-  // Opaque callback state forwarded to |fn|.
-  void* user_data;
-} loom_check_initialize_math_policy_registry_callback_t;
-
 typedef struct loom_check_environment_t loom_check_environment_t;
 typedef struct loom_check_emit_provider_t loom_check_emit_provider_t;
 typedef struct loom_check_requirement_provider_t
     loom_check_requirement_provider_t;
+
+enum loom_check_emit_provider_flag_bits_e {
+  // Provider output is complete and comparable alongside expected compiler
+  // errors.
+  LOOM_CHECK_EMIT_PROVIDER_FLAG_COMPARE_ERROR_OUTPUT = 1u << 0,
+};
+typedef uint32_t loom_check_emit_provider_flags_t;
 
 // Prepared module state passed to a linked emit provider.
 typedef struct loom_check_emit_provider_request_t {
@@ -205,17 +161,18 @@ typedef struct loom_check_emit_provider_request_t {
   iree_string_view_t filename;
   // Parsed test case being executed.
   const loom_test_case_t* test_case;
+  // Finalized runner context for checker-owned inspection IR.
+  loom_context_t* context;
   // Runner environment that selected this provider.
   const loom_check_environment_t* environment;
-  // Module admitted by the selected input provider.
-  loom_module_t* module;
-  // Source resolver for source-backed operation locations in |module|.
-  loom_source_resolver_t source_resolver;
+  // Public module admitted once through LoomC for this emit case.
+  loomc_module_t* public_module;
   // Linked target-low registry visible to this runner.
   const loom_target_low_descriptor_registry_t* low_registry;
   // Diagnostic collector for provider diagnostics.
   loom_check_diagnostic_collector_t* diagnostic_collector;
-  // Arena scoped to this emit case for analysis and diagnostics.
+  // Provider workspace, released after execute returns. Separate from the
+  // diagnostic collector's arena so analysis checkpoints cannot retire remarks.
   iree_arena_allocator_t* case_arena;
   // Block pool backing compile pipeline allocations for this emit case.
   iree_arena_block_pool_t* block_pool;
@@ -225,6 +182,17 @@ typedef struct loom_check_emit_provider_request_t {
   loom_check_result_t* result;
 } loom_check_emit_provider_request_t;
 
+// Mutable exact-version projection supplied only to native emit providers.
+// The public module has been verified against its context target before this
+// view is created. Native mutation invalidates that cached verification; common
+// dispatch verifies the module again after the callback succeeds.
+typedef struct loom_check_emit_native_module_t {
+  // Mutable module owned by the emit request's public module.
+  loom_module_t* module;
+  // Resolver for source-backed operation locations in |module|.
+  loom_source_resolver_t source_resolver;
+} loom_check_emit_native_module_t;
+
 // Returns true when |provider| owns emit targets named |target_name|.
 typedef bool (*loom_check_emit_provider_match_fn_t)(
     const loom_check_emit_provider_t* provider, iree_string_view_t target_name);
@@ -232,13 +200,19 @@ typedef bool (*loom_check_emit_provider_match_fn_t)(
 // Checks provider-specific REQUIRES declarations before execution.
 typedef iree_status_t (*loom_check_emit_provider_check_requirements_fn_t)(
     const loom_check_emit_provider_t* provider,
-    const loom_test_case_t* test_case, loom_check_result_t* result,
-    bool* out_continue_execution);
+    const loom_test_case_t* test_case, iree_string_view_t target_options,
+    loom_check_result_t* result, bool* out_continue_execution);
 
 // Emits the provider-owned comparable output for |request|.
 typedef iree_status_t (*loom_check_emit_provider_execute_fn_t)(
     const loom_check_emit_provider_t* provider,
     const loom_check_emit_provider_request_t* request);
+
+// Emits provider-owned output from a verified mutable native module.
+typedef iree_status_t (*loom_check_emit_provider_execute_native_fn_t)(
+    const loom_check_emit_provider_t* provider,
+    const loom_check_emit_provider_request_t* request,
+    const loom_check_emit_native_module_t* native_module);
 
 // Appends provider-owned emit target names to a diagnostic list.
 typedef iree_status_t (*loom_check_emit_provider_append_names_fn_t)(
@@ -249,12 +223,16 @@ typedef iree_status_t (*loom_check_emit_provider_append_names_fn_t)(
 struct loom_check_emit_provider_t {
   // Human-readable provider name used for debugging and ownership comments.
   iree_string_view_t name;
+  // Provider execution and output-comparison capabilities.
+  loom_check_emit_provider_flags_t flags;
   // Returns true when this provider owns an emit target name.
   loom_check_emit_provider_match_fn_t match;
   // Checks provider-specific REQUIRES declarations for an emit case.
   loom_check_emit_provider_check_requirements_fn_t check_requirements;
   // Emits provider-owned comparable output.
   loom_check_emit_provider_execute_fn_t execute;
+  // Emits from a verified native module when |execute| is NULL.
+  loom_check_emit_provider_execute_native_fn_t execute_native;
   // Appends supported emit target names to diagnostic help text.
   loom_check_emit_provider_append_names_fn_t append_names;
 };
@@ -311,35 +289,12 @@ struct loom_check_environment_t {
   loom_input_provider_list_t input_providers;
   // Dialect registration callback for the IR surface accepted by this runner.
   loom_check_register_context_callback_t register_context;
-  // Optional composed target environment used by compile-pipeline-backed modes.
+  // Composed target environment used by target-aware check modes.
   const loom_target_environment_t* target_environment;
+  // Lazy public compiler session used to admit every module-dependent case.
+  loom_check_compile_session_t* compile_session;
   // Cleanup rewrite providers linked into this runner.
   const loom_cleanup_pattern_provider_set_t* cleanup_pattern_provider_set;
-  // Target-low registry callback for descriptor-backed low IR operations.
-  loom_check_initialize_low_descriptor_registry_callback_t
-      initialize_low_descriptor_registry;
-  // Source-to-low lowering policy callback for emit modes that lower source IR
-  // into descriptor-backed low IR.
-  loom_check_initialize_low_lower_policy_registry_callback_t
-      initialize_low_lower_policy_registry;
-  // Target math legalization policy callback for math rewrite passes.
-  loom_check_initialize_math_policy_registry_callback_t
-      initialize_math_policy_registry;
-  // Optional target-owned pass descriptors linked into this runner.
-  const loom_pass_registry_t* pass_registry;
-  // Optional target-low source legality providers linked into this runner.
-  loom_target_low_legality_provider_list_t low_legality_provider_list;
-  // Optional target source legalizer providers linked into this runner.
-  loom_target_legalizer_provider_list_t legalizer_provider_list;
-  // Optional target-low packet diagnostic providers linked into this runner.
-  loom_target_low_packet_diagnostic_provider_list_t
-      low_packet_diagnostic_provider_list;
-  // Optional target-owned text low-asm diagnostic providers linked into this
-  // runner.
-  loom_target_low_asm_diagnostic_provider_list_t
-      low_asm_diagnostic_provider_list;
-  // Optional target-owned low verifier providers linked into this runner.
-  loom_low_verify_provider_list_t low_verify_provider_list;
   // Optional emit providers linked into this runner.
   loom_check_emit_provider_registry_t emit_providers;
   // Optional requirement providers linked into this runner.
@@ -388,23 +343,6 @@ iree_status_t loom_check_result_append_annotation_edit(
 // calling this.
 iree_status_t loom_check_context_register_and_finalize(
     const loom_check_environment_t* environment, loom_context_t* context);
-
-// Initializes the target-low descriptor registry selected by |environment|.
-iree_status_t loom_check_environment_initialize_low_descriptor_registry(
-    const loom_check_environment_t* environment,
-    loom_target_low_descriptor_registry_t* out_registry);
-
-// Initializes the source-to-target-low lowering policy registry selected by
-// |environment|.
-iree_status_t loom_check_environment_initialize_low_lower_policy_registry(
-    const loom_check_environment_t* environment,
-    loom_low_lower_policy_registry_t* out_registry);
-
-// Initializes the target math legalization policy registry selected by
-// |environment|.
-iree_status_t loom_check_environment_initialize_math_policy_registry(
-    const loom_check_environment_t* environment,
-    loom_target_math_policy_registry_t* out_registry);
 
 // Executes a single test case: checks declared environment requirements,
 // dispatches to the mode-specific function, then applies XFAIL inversion to

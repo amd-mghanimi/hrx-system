@@ -1,9 +1,3 @@
-// Copyright 2026 The IREE Authors
-//
-// Licensed under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-
 // Volatile reads order even when their results are unused and their addresses
 // differ. The branch case carries the same completion requirement to each edge.
 // RUN: emit amdgpu-assembly @volatile_reads strategy=source
@@ -17,9 +11,9 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @volatile_reads(%offset: reg<a
 }
 
 // ----
-  global_load_b32 v1, v0, s[0:1] offset:0
+  global_load_b32 v1, v0, s[0:1] offset:0 glc dlc
   s_waitcnt vmcnt(0) lgkmcnt(63)
-  global_load_b32 v0, v0, s[0:1] offset:4
+  global_load_b32 v0, v0, s[0:1] offset:4 glc dlc
   s_endpgm
 
 // ====
@@ -39,15 +33,15 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @volatile_branch(%offset: reg<
 }
 
 // ----
-  global_load_b32 v1, v0, s[0:1] offset:0
+  global_load_b32 v1, v0, s[0:1] offset:0 glc dlc
   s_cbranch_scc0 .Lbb2
 .Lbb1:
   s_waitcnt vmcnt(0) lgkmcnt(63)
-  global_load_b32 v0, v0, s[0:1] offset:4
+  global_load_b32 v0, v0, s[0:1] offset:4 glc dlc
   s_endpgm
 .Lbb2:
   s_waitcnt vmcnt(0) lgkmcnt(63)
-  global_load_b32 v0, v0, s[0:1] offset:8
+  global_load_b32 v0, v0, s[0:1] offset:8 glc dlc
   s_endpgm
 
 // ====

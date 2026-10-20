@@ -105,13 +105,11 @@ static iree_status_t loom_low_packet_json_write_type(
     const loom_module_t* module,
     const loom_text_print_options_t* type_print_options, loom_type_t type,
     loom_output_stream_t* stream) {
-  loom_json_escape_stream_t escape_data;
-  loom_output_stream_t escape_stream;
-  loom_json_escape_stream_init(stream, &escape_data, &escape_stream);
-  IREE_RETURN_IF_ERROR(loom_output_stream_write_char(stream, '"'));
+  loom_json_string_writer_t string;
+  IREE_RETURN_IF_ERROR(loom_json_string_begin(stream, &string));
   IREE_RETURN_IF_ERROR(loom_text_print_type_with_options(
-      type, module, &escape_stream, type_print_options));
-  return loom_output_stream_write_char(stream, '"');
+      type, module, &string.stream, type_print_options));
+  return loom_json_string_end(&string);
 }
 
 static iree_status_t loom_low_packet_json_write_location(
@@ -415,6 +413,16 @@ static iree_status_t loom_low_packet_json_write_attr(
     case LOOM_ATTR_STRING:
       return loom_low_packet_json_write_string_id_or_null(
           module, attr->string_id, stream);
+    case LOOM_ATTR_STRING_ARRAY: {
+      loom_json_array_writer_t array;
+      IREE_RETURN_IF_ERROR(loom_json_array_begin(stream, &array));
+      for (uint16_t i = 0; i < attr->count; ++i) {
+        IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&array));
+        IREE_RETURN_IF_ERROR(loom_low_packet_json_write_string_id_or_null(
+            module, attr->string_ids[i], stream));
+      }
+      return loom_json_array_end(&array);
+    }
     case LOOM_ATTR_BOOL:
       return loom_output_stream_write_cstring(stream,
                                               attr->raw ? "true" : "false");
@@ -683,9 +691,11 @@ static iree_status_t loom_low_packet_json_write_low_packet_attrs(
     return loom_json_array_end(&immediates);
   }
 
-  for (uint16_t i = 0; i < descriptor->immediate_count; ++i) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  for (uint16_t i = 0; i < descriptor_layout->immediate_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&immediates));
-    const uint32_t immediate_index = descriptor->immediate_start + i;
+    const uint32_t immediate_index = descriptor_layout->immediate_start + i;
     const loom_low_immediate_t* immediate =
         &descriptor_set->immediates[immediate_index];
     iree_string_view_t name = loom_low_descriptor_set_string(
@@ -831,7 +841,9 @@ static iree_status_t loom_low_packet_json_write_packet(
       schedule_class ? schedule_class->hazard_count : 0));
   IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
       &object, IREE_SV("effect_count"),
-      descriptor ? descriptor->effect_count : 0));
+      descriptor
+          ? loom_low_descriptor_layout(descriptor_set, descriptor)->effect_count
+          : 0));
   IREE_RETURN_IF_ERROR(
       loom_json_object_begin_field(&object, IREE_SV("results")));
   IREE_RETURN_IF_ERROR(loom_low_packet_json_write_packet_values(

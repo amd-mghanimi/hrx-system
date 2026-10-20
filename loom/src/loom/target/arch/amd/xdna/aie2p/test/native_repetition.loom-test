@@ -1,0 +1,480 @@
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// Writes to input i+2 precede reclamation of slot i. Prefetching across
+// that credit could observe stale input; ordinary instruction issue preserves
+// the source handshake instead of selecting autonomous read-ahead.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @feedback_input() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 32 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 8 : index
+  %consume_count = index.constant 8 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 32 : index
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %width : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=feedback_input realization=resident-configuration workers=2 *
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// The final produced record is not consumed. Core-issued ingress provides
+// its own completion; consumer exit alone cannot retire an autonomous producer.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @partial_consumer() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 32 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 8 : index
+  %consume_count = index.constant 7 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 32 : index
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %begin : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=partial_consumer realization=resident-configuration workers=2 *
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// Coalesced external geometry crosses the descriptor iterator limit while
+// local record credits retain bounded storage and exact consumer completion.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @coalesced_ingress() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 32 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 65 : index
+  %consume_count = index.constant 65 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 32 : index
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %begin : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=coalesced_ingress realization=resident-configuration workers=1 *
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// Distinct caller arguments can alias. Without a noalias contract, the output
+// may update a future input record and autonomous read-ahead is not admitted.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @unscoped_input() run(%input_arg: buffer, %output_arg: buffer) {
+  %input, %output = buffer.assume.alignment %input_arg, %output_arg {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 32 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 8 : index
+  %consume_count = index.constant 8 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 32 : index
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %begin : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=unscoped_input realization=resident-configuration workers=2 *
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// A regular egress loop retains an instruction worker for its authored wait.
+// Local MM2S completion cannot replace global-write completion before release.
+// The producer can reclaim the capacity-one slot while the invocation continues.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @repeated_egress() run(%output_arg: buffer) {
+  %output = buffer.assume.alignment %output_arg {minimum_alignment = 4} : buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 16 : offset
+  %capacity = index.constant 1 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<1x4xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<1x4xi32>, index -> channel<tile<4xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 2 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 16 : index
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %value = scalar.constant 7 : i32
+    %values = vector.splat %value : vector<4xi32>
+    scf.for %record = [%begin to %count step %step] {
+      %write, %payload = channel.reserve %records : channel<tile<4xi32>> -> (write<tile<4xi32>>, view<4xi32>)
+      vector.store %values, %payload[0] : vector<4xi32>, view<4xi32>
+      channel.publish %write : write<tile<4xi32>>
+    }
+  }
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %read, %payload = channel.acquire %records : channel<tile<4xi32>> -> (read<tile<4xi32>>, view<4xi32>)
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<4xi32>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<4xi32> to view<4xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<4xi32>>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=repeated_egress realization=resident-configuration workers=2 *
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// A Low leaf reads core storage and changes rounding state without invalidating
+// external input. Repeated SRAM ingress therefore remains DMA-owned.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+low.func.def inline target<amd.xdna.aie2p.core> @read_local(%storage: reg<aie2p.ep>) -> (reg<aie2p.er>) asm {
+  set.rounding 12
+  %value = lda %storage, 0
+  return %value
+}
+
+pipeline.def<kernel> public retain target(@device) @readonly_call_ingress() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %sram = pipeline.memory<workgroup>[0, 1] : pool
+  %core = pipeline.memory<workgroup>[0, 3] : pool
+  %bytes = index.constant 4 : offset
+  %origin = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %count = index.constant 8 : index
+  %record_bytes = index.constant 4 : index
+  %sram_storage = buffer.alloca<workgroup> pool(%sram) align(4) %bytes : buffer
+  %sram_slots = buffer.view %sram_storage[%origin] : buffer -> view<1x1xi32>
+  %incoming = channel.bind<fifo> %sram_slots, %c1 : view<1x1xi32>, index -> channel<tile<1xi32>>
+  %core_storage = buffer.alloca<workgroup> pool(%core) align(4) %bytes : buffer
+  %core_slots = buffer.view %core_storage[%origin] : buffer -> view<1x1xi32>
+  %local = channel.bind<fifo> %core_slots, %c1 : view<1x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %c1] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<1xi32>
+      %write, %payload = channel.reserve %incoming : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %copy = kernel.async.copy %external to %payload {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<1xi32> to view<1xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %c1] {
+      %read, %source = channel.acquire %incoming : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+      %write, %destination = channel.reserve %local : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      channel.copy %read -> %write : read<tile<1xi32>>, write<tile<1xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %c1] {
+      %read, %payload = channel.acquire<mutable> %local : channel<tile<1xi32>> -> (read<tile<1xi32>, mutable>, view<1xi32>)
+      %value = low.invoke @read_local(%core_storage) : (buffer) -> (i32)
+      %factor = scalar.constant 2 : i32
+      %scaled = scalar.muli %value, %factor : i32
+      view.store %scaled, %payload[0] : i32, view<1xi32>
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<1xi32>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<1xi32> to view<1xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<1xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=readonly_call_ingress realization=resident-configuration workers=1 *
+
+// ====
+// RUN: emit aie2p-xdna input=source-low
+
+// The finite stream exceeds the available descriptor and task-queue product.
+// Admission fails instead of queuing a blocking host refill or truncating it.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @finite_ingress_capacity() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 16 : offset
+  %capacity = index.constant 1 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<1x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<1x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 20000 : index
+  %consume_count = index.constant 20000 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 32 : index
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%origin] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      // ERROR@+1: XDNA/051 {requirement="a finite record stream within DMA descriptor and task-queue capacity"}
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %begin : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x2xi32, #encoding.layout.strided<strides=[4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ====
+// RUN: with-checks emit aie2p-xdna input=source-low output=pipeline-report
+
+// A record using all three native dimensions cannot coalesce a fourth axis.
+// Beyond the independent iterator's range, the producer remains core-issued
+// and preserves the authored addresses and completion edges.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @three_dimension_core_issue() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %storage_bytes = index.constant 48 : offset
+  %capacity = index.constant 3 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %storage_bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<3x2x2xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<3x2x2xi32>, index -> channel<tile<2x2xi32>>
+  %begin = index.constant 0 : index
+  %count = index.constant 65 : index
+  %consume_count = index.constant 65 : index
+  %step = index.constant 1 : index
+  %record_bytes = index.constant 64 : index
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %count step %step] {
+      %byte_index = index.mul %record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %input[%offset] : buffer -> view<2x1x2xi32, #encoding.layout.strided<strides=[8, 4, 1]>>
+      %write, %destination = channel.reserve %records : channel<tile<2x2xi32>> -> (write<tile<2x2xi32>>, view<2x2xi32>)
+      %copy = kernel.async.copy %external to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x1x2xi32, #encoding.layout.strided<strides=[8, 4, 1]>> to view<2x2xi32> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<2x2xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %width = index.constant 2 : index
+    %factor = scalar.constant 2 : i32
+    scf.for %record = [%begin to %consume_count step %step] {
+      %read, %payload = channel.acquire<mutable> %records : channel<tile<2x2xi32>> -> (read<tile<2x2xi32>, mutable>, view<2x2xi32>)
+      scf.for %row = [%begin to %width step %step] {
+        scf.for %column = [%begin to %width step %step] {
+          %value = view.load %payload[%row, %column] : view<2x2xi32> -> i32
+          %scaled = scalar.muli %value, %factor : i32
+          view.store %scaled, %payload[%row, %column] : i32, view<2x2xi32>
+        }
+      }
+      %output_record = index.add %record, %begin : index
+      %byte_index = index.mul %output_record, %record_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external = buffer.view %output[%offset] : buffer -> view<2x1x2xi32, #encoding.layout.strided<strides=[8, 4, 1]>>
+      %copy = kernel.async.copy %payload to %external {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x2xi32> to view<2x1x2xi32, #encoding.layout.strided<strides=[8, 4, 1]>> -> kernel.async.token
+      %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+      kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<2x2xi32>, mutable>
+    }
+  }
+}
+
+// ----
+CHECK: COMPILE-REPORT: pipeline root=three_dimension_core_issue realization=resident-configuration workers=2 *

@@ -11,6 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 
+from loom.target.arch.x86.feature_bits import (
+    FEATURE_AVX10_2,
+    FEATURE_AVX512_BF16,
+    FEATURE_AVX512_VL,
+    FEATURE_AVX512_VNNI,
+    FEATURE_AVX_VNNI,
+    FEATURE_AVX_VNNI_INT8,
+    FEATURE_AVX_VNNI_INT16,
+)
 from loom.target.native_contraction_layout import (
     ROLE_ACCUMULATOR,
     ROLE_LHS,
@@ -26,14 +35,6 @@ from loom.target.native_layout_facts import (
     NativeContractionRoleFacts,
     exact_native_contraction_role_facts,
 )
-
-FEATURE_AVX512_VNNI = 1 << 0
-FEATURE_AVX512_VL = 1 << 1
-FEATURE_AVX_VNNI = 1 << 2
-FEATURE_AVX_VNNI_INT8 = 1 << 3
-FEATURE_AVX_VNNI_INT16 = 1 << 4
-FEATURE_AVX10_2 = 1 << 5
-FEATURE_AVX512_BF16 = 1 << 6
 
 CONTRACT_FLAG_SATURATING = 1 << 0
 

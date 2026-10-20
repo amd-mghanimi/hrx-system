@@ -10,6 +10,7 @@ from typing import Any
 from loom.builder import IRBuilder, ValueRef
 from loom.dialect.buffer.builders import BufferBuilder
 from loom.dialect.cfg.builders import CfgBuilder
+from loom.dialect.channel.builders import ChannelBuilder
 from loom.dialect.check.builders import CheckBuilder
 from loom.dialect.command.builders import CommandBuilder
 from loom.dialect.encoding.builders import EncodingBuilder
@@ -55,6 +56,8 @@ class LoomBuilder:
     def buffer(self) -> BufferBuilder: ...
     @property
     def cfg(self) -> CfgBuilder: ...
+    @property
+    def channel(self) -> ChannelBuilder: ...
     @property
     def check(self) -> CheckBuilder: ...
     @property

@@ -90,6 +90,7 @@ iree_cc_library(
     libamdf::src::host_mapping
     libamdf::src::memory
     libamdf::src::memory_profile
+    libamdf::src::memory_reservation
     libamdf::src::memory_scope_state
     libamdf::src::structure
     libamdf::src::xdna::umd::context
@@ -157,10 +158,13 @@ iree_cc_library(
   SRCS
     "extension.c"
   DEPS
+    ::clock
     ::context
     ::device
     ::device_profile
+    ::firmware_trace
     ::kernel_queue
+    ::result_buffer
     amdf::headers
     libamdf::src::endpoint
     libamdf::src::platform
@@ -247,6 +251,92 @@ iree_cc_test(
   LABELS
     "iree-build-requirement=libamdf"
     "iree-build-requirement=libamdf.xdna"
+)
+endif()
+
+if(AMDF_BUILD AND AMDF_FAMILY_XDNA)
+iree_cc_library(
+  NAME
+    firmware_trace_format
+  HDRS
+    "firmware_trace_format.h"
+  SRCS
+    "firmware_trace_format.c"
+  DEPS
+    amdf::headers
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND AMDF_FAMILY_XDNA)
+iree_cc_library(
+  NAME
+    firmware_trace
+  HDRS
+    "firmware_trace.h"
+  SRCS
+    "firmware_trace.c"
+  DEPS
+    ::context
+    ::device
+    ::firmware_trace_format
+    amdf::headers
+    libamdf::src::device
+    libamdf::src::structure
+    libamdf::src::xdna::umd::firmware_trace
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND AMDF_FAMILY_XDNA)
+iree_cc_test(
+  NAME
+    firmware_trace_format_test
+  SRCS
+    "firmware_trace_format_test.cc"
+  DEPS
+    ::firmware_trace_format
+    amdf::headers
+    iree::third_party::google_test
+    iree::third_party::google_test_main
+  LABELS
+    "iree-build-requirement=libamdf"
+    "iree-build-requirement=libamdf.xdna"
+)
+endif()
+
+if(AMDF_BUILD AND AMDF_FAMILY_XDNA)
+iree_cc_library(
+  NAME
+    result_buffer
+  HDRS
+    "result_buffer.h"
+  SRCS
+    "result_buffer.c"
+  DEPS
+    ::context
+    amdf::headers
+    libamdf::src::memory_resource
+    libamdf::src::structure
+    libamdf::src::xdna::umd::result_buffer
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND AMDF_FAMILY_XDNA)
+iree_cc_library(
+  NAME
+    clock
+  HDRS
+    "clock.h"
+  SRCS
+    "clock.c"
+  DEPS
+    ::device
+    amdf::headers
+    libamdf::src::device
+    libamdf::src::xdna::umd::clock
+  PUBLIC
 )
 endif()
 

@@ -1,0 +1,70 @@
+func.decl import("prepare") @stage(%root: buffer, %tag: i64) -> (i32)
+
+func.decl import("prepare") @config_i64(%stage: i32, %key: buffer, %value: i64)
+
+// add_configured, delta
+global.rodata.def @add = bytes("6164645f636f6e66696775726564")
+
+global.rodata.def @delta = bytes("64656c7461")
+
+global.rodata.def @absent = bytes("616273656e745f636f6d6d616e64")
+
+global.rodata.def @unchanged = bytes("")
+
+func.def public @prepare_weight(%key: buffer) -> (i64) {
+  %c0 = index.constant 0 : offset
+  %letter = buffer.load.i8.u %key[%c0]
+  %a = scalar.constant 97 : i32
+  %b = scalar.constant 98 : i32
+  %s = scalar.constant 115 : i32
+  %m = scalar.constant 109 : i32
+  %is_a = scalar.cmpi eq, %letter, %a : i32
+  %is_b = scalar.cmpi eq, %letter, %b : i32
+  %is_size = scalar.cmpi eq, %letter, %s : i32
+  %is_missing = scalar.cmpi eq, %letter, %m : i32
+  %root, %bytes = scf.if %is_a -> (buffer, i64) {
+    %root = global.load @add : buffer
+    %bytes = scalar.constant 32 : i64
+    scf.yield %root, %bytes : buffer, i64
+  } else {
+    %root, %bytes = scf.if %is_b -> (buffer, i64) {
+      %root = global.load @add : buffer
+      %bytes = scalar.constant 32 : i64
+      scf.yield %root, %bytes : buffer, i64
+    } else {
+      %root, %bytes = scf.if %is_size -> (buffer, i64) {
+        %root = global.load @add : buffer
+        %bytes = scalar.constant 64 : i64
+        scf.yield %root, %bytes : buffer, i64
+      } else {
+        %root, %bytes = scf.if %is_missing -> (buffer, i64) {
+          %root = global.load @absent : buffer
+          %bytes = scalar.constant 32 : i64
+          scf.yield %root, %bytes : buffer, i64
+        } else {
+          %root = global.load @unchanged : buffer
+          %bytes = scalar.constant 0 : i64
+          scf.yield %root, %bytes : buffer, i64
+        }
+        scf.yield %root, %bytes : buffer, i64
+      }
+      scf.yield %root, %bytes : buffer, i64
+    }
+    scf.yield %root, %bytes : buffer, i64
+  }
+  %c0_i64 = scalar.constant 0 : i64
+  %prepared = scalar.cmpi ne, %bytes, %c0_i64 : i64
+  scf.if %prepared {
+    %command = func.call @stage(%root, %c0_i64) : (buffer, i64) -> (i32)
+    %c3 = scalar.constant 3 : i64
+    %c7 = scalar.constant 7 : i64
+    %value = scf.if %is_b -> (i64) {
+      scf.yield %c7 : i64
+    } else {
+      scf.yield %c3 : i64
+    }
+    %delta = global.load @delta : buffer
+    func.call @config_i64(%command, %delta, %value) : (i32, buffer, i64)
+  }
+  func.return %bytes : i64
+}

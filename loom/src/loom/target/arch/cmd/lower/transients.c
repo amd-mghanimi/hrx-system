@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "iree/base/internal/math.h"
+#include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/facts.h"
 #include "loom/ir/module.h"
 #include "loom/ops/buffer/ops.h"
@@ -169,17 +171,35 @@ static iree_status_t loom_cmd_transient_append_range(
   return iree_ok_status();
 }
 
+static iree_status_t loom_cmd_transient_emit_allocation_error(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter, iree_string_view_t requirement) {
+  const loom_diagnostic_param_t params[] = {loom_param_string(requirement)};
+  const loom_diagnostic_emission_t emission = {
+      .module = module,
+      .op = op,
+      .error = LOOM_ERR_LOWERING_065,
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+  };
+  return iree_diagnostic_emit(emitter, &emission);
+}
+
 static iree_status_t loom_cmd_transient_collect_allocation(
-    loom_cmd_transient_build_t* build, const loom_op_t* op,
-    iree_host_size_t definition_wave) {
+    loom_cmd_transient_build_t* build, const loom_module_t* module,
+    const loom_op_t* op, iree_host_size_t definition_wave,
+    iree_diagnostic_emitter_t emitter, bool* out_valid) {
+  *out_valid = false;
+  if (loom_buffer_alloca_pool(op) != LOOM_VALUE_ID_INVALID) {
+    return loom_cmd_transient_emit_allocation_error(
+        module, op, emitter,
+        IREE_SV("explicit pool binding before transient slab preparation"));
+  }
   const loom_value_fact_memory_space_t memory_space =
       loom_buffer_alloca_memory_space(op);
   if (memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL) {
-    return iree_make_status(
-        IREE_STATUS_UNIMPLEMENTED,
-        "portable command programs require buffer.alloca in global memory; "
-        "memory space %u is not representable",
-        (unsigned)memory_space);
+    return loom_cmd_transient_emit_allocation_error(module, op, emitter,
+                                                    IREE_SV("global memory"));
   }
 
   int64_t byte_length_i64 = 0;
@@ -188,10 +208,8 @@ static iree_status_t loom_cmd_transient_collect_allocation(
                                        loom_buffer_alloca_byte_length(op)),
           &byte_length_i64) ||
       byte_length_i64 <= 0) {
-    return iree_make_status(
-        IREE_STATUS_UNIMPLEMENTED,
-        "command buffer.alloca must have a finite positive byte-length "
-        "maximum before program preparation");
+    return loom_cmd_transient_emit_allocation_error(
+        module, op, emitter, IREE_SV("a finite positive byte-length maximum"));
   }
   const uint64_t byte_length = (uint64_t)byte_length_i64;
   const uint64_t base_alignment =
@@ -209,6 +227,7 @@ static iree_status_t loom_cmd_transient_collect_allocation(
       .first_wave = IREE_HOST_SIZE_MAX,
       .source_ordinal = build->allocation_count - 1,
   };
+  *out_valid = true;
   return iree_ok_status();
 }
 
@@ -476,7 +495,7 @@ static iree_status_t loom_cmd_transient_append_result_range(
       return iree_make_status(
           IREE_STATUS_UNIMPLEMENTED,
           "command transient views require exact nonnegative byte ranges "
-          "before program preparation");
+          "before command planning");
     }
     return loom_cmd_transient_append_range(build, result, allocation,
                                            (uint64_t)byte_offset,
@@ -519,8 +538,10 @@ iree_status_t loom_cmd_transient_layout_build(
     const loom_module_t* module, loom_func_like_t program,
     const loom_value_fact_table_t* fact_table,
     const loom_cmd_schedule_plan_t* schedule, uint32_t binding_index,
+    iree_diagnostic_emitter_t diagnostic_emitter,
     iree_arena_allocator_t* scratch_arena,
-    loom_cmd_transient_layout_t* out_layout) {
+    loom_cmd_transient_layout_t* out_layout, bool* out_valid) {
+  *out_valid = false;
   IREE_ASSERT_ARGUMENT(module);
   IREE_ASSERT(loom_func_like_isa(program));
   IREE_ASSERT_ARGUMENT(fact_table);
@@ -536,8 +557,13 @@ iree_status_t loom_cmd_transient_layout_build(
   };
   for (iree_host_size_t i = 0; i < schedule->allocation_count; ++i) {
     const loom_cmd_schedule_allocation_t allocation = schedule->allocations[i];
+    bool valid = false;
     IREE_RETURN_IF_ERROR(loom_cmd_transient_collect_allocation(
-        &build, allocation.op, allocation.definition_wave));
+        &build, module, allocation.op, allocation.definition_wave,
+        diagnostic_emitter, &valid));
+    if (!valid) {
+      return iree_ok_status();
+    }
   }
   loom_cmd_transient_mark_scheduled_uses(&build, schedule);
   IREE_RETURN_IF_ERROR(loom_cmd_transient_pack_allocations(&build));
@@ -545,7 +571,7 @@ iree_status_t loom_cmd_transient_layout_build(
   IREE_RETURN_IF_ERROR(loom_walk_function(
       module, program, LOOM_WALK_PRE_ORDER,
       (loom_walk_callback_t){loom_cmd_transient_range_visit, &build},
-      scratch_arena, &walk_result));
+      &walk_result));
   IREE_ASSERT_EQ(walk_result, LOOM_WALK_CONTINUE);
 
   *out_layout = (loom_cmd_transient_layout_t){
@@ -559,5 +585,6 @@ iree_status_t loom_cmd_transient_layout_build(
       .buffer_ranges = build.buffer_ranges,
       .buffer_range_count = build.buffer_range_count,
   };
+  *out_valid = true;
   return iree_ok_status();
 }

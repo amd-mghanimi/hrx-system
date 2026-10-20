@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from loom.gen.support.string_pool import CStringPool
@@ -17,7 +17,10 @@ from loom.gen.target.low.compiled import (
     CompiledAsmForm,
     CompiledAsmImmediate,
     CompiledAsmOperandSegment,
+    CompiledAsmOperandType,
+    CompiledAsmResultType,
     CompiledAsmTableStorage,
+    CompiledAsmTiedResult,
     CompiledDescriptorSet,
     CompiledNativeAsmValue,
     CompiledOperandForm,
@@ -28,6 +31,7 @@ from loom.gen.target.low.compiled import (
     CompiledRegisterPackingResource,
     CompiledRegisterPackingResourceMember,
     CompiledResourceCalendar,
+    CompiledScheduleClassTable,
     DescriptorAllowlist,
     append_interned_sequence,
 )
@@ -47,6 +51,7 @@ from loom.target.low_descriptors import (
     Hazard,
     Immediate,
     ImmediateEncodingSlice,
+    ImmediateFlag,
     ImmediateKind,
     InstructionClass,
     IssueUse,
@@ -58,10 +63,14 @@ from loom.target.low_descriptors import (
     OperandForm,
     OperandFormImmediateAction,
     OperandRole,
+    PhysicalRegister,
     PhysicalRegisterView,
     PressureDelta,
     RegClass,
     RegClassAltFlag,
+    RegClassFlag,
+    RegisterPackingResourceFlag,
+    RegisterPackingResourceMemberFlag,
     Resource,
     ResourceKind,
     ScheduleClass,
@@ -69,6 +78,95 @@ from loom.target.low_descriptors import (
     StorageLease,
     descriptor_stable_id,
 )
+
+
+def _derive_mutable_state_classes(
+    descriptors: Sequence[Descriptor],
+    register_classes: Mapping[str, RegClass],
+    physical_registers: Mapping[str, PhysicalRegister],
+) -> frozenset[str]:
+    """Returns every register class that may alias descriptor-written state."""
+
+    written_classes = {
+        alternative.reg_class
+        for descriptor in descriptors
+        for operand in descriptor.operands
+        if OperandFlag.STATE_WRITE in operand.flags
+        for alternative in operand.reg_alts
+        if alternative.reg_class is not None
+    }
+    written_alias_sets: set[int] = set()
+    written_atomic_units: set[int] = set()
+    for class_name in written_classes:
+        register_class = register_classes.get(class_name)
+        if register_class is None:
+            continue
+        if register_class.alias_set_id:
+            written_alias_sets.add(register_class.alias_set_id)
+        if RegClassFlag.EXPLICIT_PHYSICAL_REGISTERS in register_class.flags:
+            written_atomic_units.update(atomic_unit for register_name in register_class.physical_registers for atomic_unit in physical_registers[register_name].atomic_units)
+
+    mutable_classes = set(written_classes)
+    for register_class in register_classes.values():
+        if register_class.alias_set_id and register_class.alias_set_id in written_alias_sets:
+            mutable_classes.add(register_class.name)
+            continue
+        if RegClassFlag.EXPLICIT_PHYSICAL_REGISTERS not in register_class.flags:
+            continue
+        if any(atomic_unit in written_atomic_units for register_name in register_class.physical_registers for atomic_unit in physical_registers[register_name].atomic_units):
+            mutable_classes.add(register_class.name)
+    return frozenset(mutable_classes)
+
+
+def _derive_reg_class_pressure_set_ids(
+    register_classes: Sequence[RegClass],
+    physical_register_views: Sequence[PhysicalRegisterView],
+) -> list[int]:
+    """Assigns shared pressure sets for equivalent allocation domains."""
+
+    views_by_class: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for view in physical_register_views:
+        views_by_class.setdefault(view.reg_class, []).append((view.physical_register, view.units))
+
+    keys: list[Hashable | None] = []
+    key_counts: dict[Hashable, int] = {}
+    for register_class in register_classes:
+        if RegClassFlag.EXPLICIT_PHYSICAL_REGISTERS not in register_class.flags:
+            keys.append(None)
+            continue
+        key = (
+            register_class.target_bank_id,
+            RegClassFlag.CONTIGUOUS_PHYSICAL_REGISTER_CANDIDATES in register_class.flags,
+            RegClassFlag.EVEN_ALIGNED_TUPLES in register_class.flags,
+            register_class.physical_registers,
+            tuple(views_by_class.get(register_class.name, ())),
+        )
+        keys.append(key)
+        key_counts[key] = key_counts.get(key, 0) + 1
+
+    next_pressure_set_id = (
+        max(
+            (register_class.alias_set_id for register_class in register_classes),
+            default=0,
+        )
+        + 1
+    )
+    pressure_set_ids_by_key: dict[Hashable, int] = {}
+    pressure_set_ids = [register_class.alias_set_id for register_class in register_classes]
+    for register_class_index, key in enumerate(keys):
+        if key is None or key_counts[key] == 1:
+            continue
+        pressure_set_id = pressure_set_ids_by_key.get(key)
+        if pressure_set_id is None:
+            validation.validate_u16(
+                next_pressure_set_id,
+                "derived explicit register pressure-set ID",
+            )
+            pressure_set_id = next_pressure_set_id
+            pressure_set_ids_by_key[key] = pressure_set_id
+            next_pressure_set_id += 1
+        pressure_set_ids[register_class_index] = pressure_set_id
+    return pressure_set_ids
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +177,8 @@ class _CompiledOperandRow:
     operand: Operand
     # Source value position derived from the descriptor operand layout.
     source_value_index: int | None
+    # Packet operand whose producer joins this result's replay recipe.
+    rematerialization_source_operand_index: int | None
     # First row in the shared register-class-alternative table.
     reg_class_alt_start: int
     # Whether the result constraint permits rematerialization.
@@ -105,7 +205,9 @@ def _physical_register_packing_order(reg_class: RegClass, views: Sequence[Physic
     Larger views group the bank first, then smaller views group their pieces.
     For nested register views this visits siblings before opening another
     aggregate. Overlapping non-nested views use the first containing group at
-    each width as a deterministic preference, not a legality restriction.
+    each width as a deterministic preference, not a legality restriction. A
+    group stays at its earliest semantic ordinal so a partial view does not
+    outrank unrelated candidates that precede it.
     """
 
     ordinals = {name: index for index, name in enumerate(reg_class.physical_registers)}
@@ -116,14 +218,15 @@ def _physical_register_packing_order(reg_class: RegClass, views: Sequence[Physic
     group_keys: list[dict[int, int]] = []
     for width in sorted(groups_by_width, reverse=True):
         keys: dict[int, int] = {}
-        for group_index, group in enumerate(sorted(set(groups_by_width[width]))):
+        for group in sorted(set(groups_by_width[width])):
+            group_anchor = min(group)
             for ordinal in group:
-                keys.setdefault(ordinal, group_index)
+                keys.setdefault(ordinal, group_anchor)
         group_keys.append(keys)
     return sorted(
         range(len(ordinals)),
         key=lambda ordinal: (
-            *(keys.get(ordinal, len(ordinals) + ordinal) for keys in group_keys),
+            *(keys.get(ordinal, ordinal) for keys in group_keys),
             ordinal,
         ),
     )
@@ -235,7 +338,9 @@ def derive_instruction_classes(
     if EffectKind.CONTROL in effect_kinds:
         classes.add(InstructionClass.CONTROL)
 
-    has_memory_effect = bool({EffectKind.READ, EffectKind.WRITE}.intersection(effect_kinds))
+    has_memory_read = any(effect.kind is EffectKind.READ and effect.is_memory_access for effect in descriptor.effects)
+    has_memory_write = any(effect.kind is EffectKind.WRITE and effect.is_memory_access for effect in descriptor.effects)
+    has_memory_effect = has_memory_read or has_memory_write
     has_memory_resource = any(resources[issue_use.resource].kind in (ResourceKind.LOAD, ResourceKind.STORE) for issue_use in schedule_class.issue_uses)
     if (has_memory_effect or has_memory_resource) and not _MEMORY_INSTRUCTION_CLASSES.intersection(classes):
         classes.add(InstructionClass.GENERIC_MEMORY)
@@ -256,78 +361,31 @@ def derive_instruction_classes(
     if InstructionClass.PRIVATE_MEMORY in classes and InstructionClass.GLOBAL_MEMORY in classes:
         raise ValueError(f"descriptor '{descriptor.key}' combines private and global memory instruction classes")
     if InstructionClass.ATOMIC in classes and not has_memory_effect:
-        raise ValueError(f"descriptor '{descriptor.key}' has the atomic instruction class without a read or write effect")
+        raise ValueError(f"descriptor '{descriptor.key}' has the atomic instruction class without a memory read or write effect")
     if InstructionClass.EXECUTION_BARRIER in classes and EffectKind.BARRIER not in effect_kinds:
         raise ValueError(f"descriptor '{descriptor.key}' has the execution-barrier instruction class without a barrier effect")
     read_classes = {
         InstructionClass.GLOBAL_LOAD,
         InstructionClass.BUFFER_LOAD,
     }
-    if read_classes.intersection(classes) and EffectKind.READ not in effect_kinds:
-        raise ValueError(f"descriptor '{descriptor.key}' has a load instruction class without a read effect")
+    if read_classes.intersection(classes) and not has_memory_read:
+        raise ValueError(f"descriptor '{descriptor.key}' has a load instruction class without a memory read effect")
     write_classes = {
         InstructionClass.GLOBAL_STORE,
         InstructionClass.BUFFER_STORE,
     }
-    if write_classes.intersection(classes) and EffectKind.WRITE not in effect_kinds:
-        raise ValueError(f"descriptor '{descriptor.key}' has a store instruction class without a write effect")
+    if write_classes.intersection(classes) and not has_memory_write:
+        raise ValueError(f"descriptor '{descriptor.key}' has a store instruction class without a memory write effect")
 
     return tuple(instruction_class for instruction_class in InstructionClass if instruction_class in classes)
 
 
-def derive_minimum_issue_cycles(
-    schedule_class: ScheduleClass,
-    resources: dict[str, Resource],
-) -> int:
-    """Derives the schedule class's resource-throughput lower bound."""
-
-    unit_cycles_by_resource: dict[str, int] = {}
-    for issue_use in schedule_class.issue_uses:
-        resource = resources.get(issue_use.resource)
-        if resource is None:
-            raise ValueError(f"schedule class '{schedule_class.name}' references unknown resource '{issue_use.resource}'")
-        validation.validate_u16(
-            resource.capacity_per_cycle,
-            f"resource '{resource.name}' capacity per cycle",
-        )
-        if resource.capacity_per_cycle == 0:
-            raise ValueError(f"resource '{resource.name}' has zero capacity per cycle")
-        validation.validate_u16(
-            issue_use.cycles,
-            f"schedule class '{schedule_class.name}' issue-use cycles",
-        )
-        if issue_use.cycles == 0:
-            raise ValueError(f"schedule class '{schedule_class.name}' issue-use for resource '{resource.name}' has zero occupied cycles")
-        validation.validate_u16(
-            issue_use.units,
-            f"schedule class '{schedule_class.name}' issue-use units",
-        )
-        if issue_use.units == 0:
-            raise ValueError(f"schedule class '{schedule_class.name}' issue-use for resource '{resource.name}' consumes zero units")
-        if issue_use.units > resource.capacity_per_cycle:
-            raise ValueError(f"schedule class '{schedule_class.name}' issue-use for resource '{resource.name}' consumes {issue_use.units} units with capacity {resource.capacity_per_cycle}")
-        validation.validate_u16(
-            issue_use.stage,
-            f"schedule class '{schedule_class.name}' issue-use stage",
-        )
-        unit_cycles_by_resource[resource.name] = unit_cycles_by_resource.get(resource.name, 0) + issue_use.cycles * issue_use.units
-
-    minimum_issue_cycles = max(
-        ((unit_cycles + resources[resource_name].capacity_per_cycle - 1) // resources[resource_name].capacity_per_cycle for resource_name, unit_cycles in unit_cycles_by_resource.items()),
-        default=0,
-    )
-    validation.validate_u16(
-        minimum_issue_cycles,
-        f"schedule class '{schedule_class.name}' minimum issue cycles",
-    )
-    return minimum_issue_cycles
-
-
-def _compile_resource_calendars(
+def compile_resource_calendars(
     resources: Sequence[Resource],
     schedule_classes: Sequence[ScheduleClass],
+    lookback_cycles: int,
 ) -> tuple[list[CompiledResourceCalendar], int]:
-    """Retains occupancy horizons and common instruction-issue demand."""
+    """Retains bounded issue history, forward horizons and common demand."""
 
     groups = {resource.name: resource.contention_group_id or -index - 1 for index, resource in enumerate(resources)}
     horizons: dict[int, int] = dict.fromkeys(groups.values(), 0)
@@ -344,7 +402,7 @@ def _compile_resource_calendars(
     calendars: dict[int, CompiledResourceCalendar] = {}
     slot_count = 0
     for group, horizon in horizons.items():
-        length = 1 << (horizon - 1).bit_length() if horizon else 0
+        length = 1 << (horizon + lookback_cycles - 1).bit_length() if horizon else 0
         calendars[group] = CompiledResourceCalendar(slot_start=slot_count, slot_mask=max(length - 1, 0), minimum_issue_units=minimum_issue_units.get(group, 0))
         slot_count += length
     validation.validate_u32(slot_count, "resource calendar slot count")
@@ -392,6 +450,14 @@ def derive_descriptor_projections(
         derived_flags.append(DescriptorFlag.ENUM_IMMEDIATES)
     if has_early_clobber_constraint and not has_early_clobber_flag:
         derived_flags.append(DescriptorFlag.EARLY_CLOBBER)
+    if DescriptorFlag.LATE_READ in descriptor.flags:
+        raise ValueError(f"descriptor '{descriptor.key}' authors the derived late-read flag")
+    if any(alternative.late_read_subgroup_size is not None for operand in descriptor.operands for alternative in operand.reg_alts):
+        derived_flags.append(DescriptorFlag.LATE_READ)
+    if DescriptorFlag.TIED_RESULTS in descriptor.flags:
+        raise ValueError(f"descriptor '{descriptor.key}' authors the derived tied-results flag")
+    if any(constraint.kind in (ConstraintKind.TIED, ConstraintKind.DESTRUCTIVE) for constraint in descriptor.constraints):
+        derived_flags.append(DescriptorFlag.TIED_RESULTS)
     has_variadic_operand = operand_layout.has_variadic_operands
     has_variadic_flag = DescriptorFlag.VARIADIC_OPERANDS in descriptor.flags
     if has_variadic_flag and not has_variadic_operand:
@@ -530,8 +596,6 @@ def _compile_operand_form(
     descriptor_ordinals: dict[str, int],
     selected_descriptors: Sequence[Descriptor],
     operand_form: OperandForm,
-    match_start: int,
-    operand_map_start: int,
 ) -> tuple[
     CompiledOperandForm,
     tuple[CompiledOperandFormMatch, ...],
@@ -565,6 +629,15 @@ def _compile_operand_form(
 
     replacement_ordinal = descriptor_ordinals[operand_form.replacement_descriptor]
     replacement = selected_descriptors[replacement_ordinal]
+
+    # Replacements preserve the packet's retained memory proof at each effect
+    # ordinal. Timing events may change with the encoding; semantic effects may
+    # not change identity, width, scope, or ordering.
+    def semantic_effects(value: Descriptor):
+        return tuple((effect.kind, effect.memory_space, effect.scope_id, effect.flags, effect.width_bits) for effect in value.effects)
+
+    if semantic_effects(descriptor) != semantic_effects(replacement):
+        raise ValueError(f"descriptor '{descriptor.key}' operand form replacement '{replacement.key}' must preserve semantic effect ordinals")
     _replacement_operand_indices, replacement_immediate_indices = _index_descriptor_fields(replacement)
     source_result_count = validation.validate_descriptor_operands(descriptor).result_count
     replacement_result_count = validation.validate_descriptor_operands(replacement).result_count
@@ -641,9 +714,9 @@ def _compile_operand_form(
             replacement_immediate_index=replacement_immediate_index,
             immediate_match_index=immediate_match_index,
             immediate_action=operand_form.immediate_action,
-            match_start=match_start,
+            match_start=0,
             match_count=len(compiled_matches),
-            operand_map_start=operand_map_start,
+            operand_map_start=0,
             operand_map_count=len(operand_map),
         ),
         tuple(compiled_matches),
@@ -701,7 +774,9 @@ def _compile_asm_form(
             raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' has {len(asm_form.result_value_types)} result value types for {len(result_indices)} results")
         if not any(value_type is not None for value_type in asm_form.result_value_types):
             raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' has an empty result value type recipe")
-        operand_inferred_result_indices = {constraint.lhs_operand_index for constraint in descriptor.constraints if constraint.kind in (ConstraintKind.TIED, ConstraintKind.DESTRUCTIVE)}
+        operand_inferred_result_indices = {
+            constraint.lhs_operand_index for constraint in descriptor.constraints if constraint.kind in (ConstraintKind.TIED, ConstraintKind.PREFER_TIED, ConstraintKind.DESTRUCTIVE)
+        }
         for result_index, (operand_index, value_type) in enumerate(zip(result_indices, asm_form.result_value_types, strict=True)):
             if value_type is not None and operand_index in operand_inferred_result_indices:
                 raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' result {result_index} is operand-inferred and must use the exact operand type")
@@ -754,6 +829,31 @@ def _compile_asm_form(
             missing_fields = ", ".join(sorted(variadic_operand_fields - referenced_variadic_fields))
             raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' omits variadic operand field(s): {missing_fields}")
 
+    # The text parser and builder pass packet values through in canonical IR
+    # order. Native ISA permutations have their own native_assembly_values.
+    expected_results = tuple(operand.field_name for operand in descriptor.operands if operand.role is OperandRole.RESULT)
+    expected_operands = tuple(operand.field_name for operand in descriptor.operands if operand.role in packet_operand_roles)
+    if asm_form.results != expected_results:
+        raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' results must enumerate canonical packet order {expected_results}, got {asm_form.results}")
+    if asm_operand_fields != expected_operands:
+        raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' operands must enumerate canonical packet order {expected_operands}, got {asm_operand_fields}")
+
+    # Preserve exact operand-derived types and default ownership separately:
+    # destructive register reuse alone does not consume IR ownership.
+    result_types: list[CompiledAsmResultType] = list(asm_form.result_value_types or (None,) * len(result_indices))
+    packet_operand_indices = {descriptor_index: packet_index for packet_index, descriptor_index in enumerate(operand_order)}
+    tied_results = []
+    for constraint in descriptor.constraints:
+        if constraint.kind not in (ConstraintKind.TIED, ConstraintKind.PREFER_TIED, ConstraintKind.DESTRUCTIVE):
+            continue
+        result_index = constraint.lhs_operand_index
+        operand_index = packet_operand_indices[constraint.rhs_operand_index]
+        previous = result_types[result_index]
+        tied = constraint.kind in (ConstraintKind.TIED, ConstraintKind.PREFER_TIED)
+        if tied:
+            tied_results.append(CompiledAsmTiedResult(result_index, operand_index))
+        result_types[result_index] = CompiledAsmOperandType(operand_index, tied or (isinstance(previous, CompiledAsmOperandType) and previous.tied))
+
     immediate_order = []
     seen_immediate_names: set[str] = set()
     for immediate in asm_form.immediates:
@@ -781,6 +881,13 @@ def _compile_asm_form(
             )
         )
 
+    # Retain the parser/printer's complete order so implicit field lookup needs
+    # no descriptor scan or explicit-prefix membership search at runtime.
+    explicit_immediate_count = len(immediate_order)
+    has_named_immediates = any(immediate.name is not None or ImmediateFlag.DEFAULT_VALUE in descriptor.immediates[immediate.immediate_index].flags for immediate in immediate_order)
+    explicit_immediate_indices = {immediate.immediate_index for immediate in immediate_order}
+    immediate_order.extend(CompiledAsmImmediate(immediate_index=index, name_label=None, name=None) for index in range(len(descriptor.immediates)) if index not in explicit_immediate_indices)
+
     native_assembly_values = []
     for value_ordinal, value in enumerate(asm_form.native_assembly_values):
         native_assembly_values.append(
@@ -803,11 +910,18 @@ def _compile_asm_form(
         mnemonic=mnemonic,
         native_assembly_mnemonic_label=native_assembly_mnemonic_label,
         native_assembly_mnemonic=native_assembly_mnemonic,
-        result_indices=tuple(result_indices),
-        operand_indices=tuple(operand_order),
         operand_segments=tuple(operand_segments),
-        result_value_types=asm_form.result_value_types,
+        result_types=tuple(result_types) if any(result_type is not None for result_type in result_types) else (),
+        tied_results=tuple(tied_results),
         immediates=tuple(immediate_order),
+        explicit_immediate_count=explicit_immediate_count,
+        has_named_immediates=has_named_immediates,
+        requires_named_immediates=any(
+            ImmediateFlag.DEFAULT_VALUE not in descriptor.immediates[immediate.immediate_index].flags for immediate in immediate_order[0 if has_named_immediates else explicit_immediate_count :]
+        ),
+        native_owns_immediate_syntax=any(
+            value.kind in (NativeAsmValueKind.IMMEDIATE_I64, NativeAsmValueKind.IMMEDIATE_UNSIGNED_HEX, NativeAsmValueKind.IMMEDIATE_TARGET_FORMAT) for value in native_assembly_values
+        ),
         native_assembly_values=tuple(native_assembly_values),
     )
 
@@ -877,8 +991,9 @@ def _compile_native_asm_value(
         operand = descriptor.operands[operand_index]
         if operand.role is not OperandRole.RESULT and operand.role not in packet_operand_roles:
             raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' native register-part field '{name}' does not name a result or explicit packet operand")
-        if operand.register_part is None:
-            raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' native register-part field '{name}' names a full-register operand")
+        concrete_alternatives = tuple(reg_alt for reg_alt in operand.reg_alts if reg_alt.reg_class is not None)
+        if not concrete_alternatives or any(reg_alt.register_part is None for reg_alt in concrete_alternatives):
+            raise ValueError(f"descriptor '{descriptor.key}' asm form '{mnemonic}' native register-part field '{name}' names a full-register alternative")
         return CompiledNativeAsmValue(
             kind=kind,
             index=operand_index,
@@ -906,7 +1021,7 @@ def _compile_native_asm_value(
             literal=None,
         )
 
-    if kind is NativeAsmValueKind.OPERAND:
+    if kind in (NativeAsmValueKind.OPERAND, NativeAsmValueKind.NEGATED_OPERAND):
         reject_literal_and_bit_width()
         name = require_field_name()
         operand_index = operand_indices.get(name)
@@ -1020,6 +1135,7 @@ def compile_descriptor_set(
     *,
     allow_ambiguous_asm_mnemonics: bool = False,
     required_schedule_class_names: Sequence[str] = (),
+    required_resource_names: Sequence[str] = (),
 ) -> CompiledDescriptorSet:
     if spec.generator_version == 0:
         raise ValueError(f"descriptor set '{spec.key}' has zero generator version")
@@ -1043,28 +1159,38 @@ def compile_descriptor_set(
     )
     if physical_register_views != spec.physical_register_views:
         spec = replace(spec, physical_register_views=physical_register_views)
-    disjoint_schedule_classes = validation.validate_schedule_model(spec)
+    disjoint_schedule_classes, minimum_issue_cycles_by_class = validation.validate_schedule_model(spec)
     validation.validate_schedule_alternatives(spec)
     register_part_inputs = _dedupe_by_name(spec.register_parts, lambda item: item.name)
     resource_inputs = _dedupe_by_name(spec.resources, lambda item: item.name)
     schedule_inputs = _dedupe_by_name(spec.schedule_classes, lambda item: item.name)
     enum_domain_inputs = _dedupe_by_name(spec.enum_domains, lambda item: item.name)
     _dedupe_by_name(spec.descriptors, lambda item: item.key)
+    mutable_state_classes = _derive_mutable_state_classes(
+        spec.descriptors,
+        reg_class_inputs,
+        physical_register_inputs,
+    )
 
     operand_layouts_by_descriptor: dict[str, validation.DescriptorOperandLayout] = {}
-    rematerializable_results_by_descriptor: dict[str, tuple[int, ...]] = {}
+    constraint_projections_by_descriptor: dict[str, validation.DescriptorConstraintProjection] = {}
     source_value_indices_by_descriptor: dict[str, tuple[int | None, ...]] = {}
     projected_descriptors_by_key: dict[str, Descriptor] = {}
     for descriptor in spec.descriptors:
         operand_layout = validation.validate_descriptor_operands(descriptor)
         validation.validate_descriptor_speculation(descriptor)
+        validation.validate_descriptor_state_assignment(descriptor, reg_class_inputs)
         operand_layouts_by_descriptor[descriptor.key] = operand_layout
         result_count = operand_layout.result_count
         source_value_indices_by_descriptor[descriptor.key] = validation.descriptor_operand_source_value_indices(
             descriptor,
             result_count,
         )
-        rematerializable_results_by_descriptor[descriptor.key] = validation.validate_descriptor_constraints(descriptor)
+        constraint_projections_by_descriptor[descriptor.key] = validation.validate_descriptor_constraints(
+            descriptor,
+            mutable_state_classes,
+            result_count,
+        )
         validation.validate_descriptor_op_kind(descriptor, result_count)
         validation.validate_allocation_move_descriptor(
             descriptor,
@@ -1098,9 +1224,12 @@ def compile_descriptor_set(
     # that a tiny allowlisted descriptor slice does not happen to use.
     used_reg_class_names: set[str] = set(reg_class_inputs)
     used_register_part_names: set[str] = set()
-    used_resource_names: set[str] = set()
+    used_resource_names = set(required_resource_names)
     used_schedule_names = set(required_schedule_class_names)
     used_timing_event_names: set[str] = set()
+    unknown_required_resource_names = sorted(used_resource_names - resource_inputs.keys())
+    if unknown_required_resource_names:
+        raise ValueError(f"descriptor set '{spec.key}' requires unknown resources: {', '.join(unknown_required_resource_names)}")
     unknown_required_schedule_names = sorted(used_schedule_names - schedule_inputs.keys())
     if unknown_required_schedule_names:
         raise ValueError(f"descriptor set '{spec.key}' requires unknown schedule classes: {', '.join(unknown_required_schedule_names)}")
@@ -1138,6 +1267,7 @@ def compile_descriptor_set(
                 f"descriptor '{descriptor.key}' immediate '{immediate.field_name}' encoding id",
             )
             validation.validate_immediate_encoding(descriptor, immediate)
+            validation.validate_immediate_flags(descriptor, immediate)
             if immediate.kind is ImmediateKind.ENUM:
                 if immediate.value_step != 1:
                     raise ValueError(f"descriptor '{descriptor.key}' enum immediate '{immediate.field_name}' has non-unit value step {immediate.value_step}")
@@ -1149,35 +1279,58 @@ def compile_descriptor_set(
             elif immediate.enum_domain is not None:
                 raise ValueError(f"descriptor '{descriptor.key}' non-enum immediate '{immediate.field_name}' references enum domain '{immediate.enum_domain}'")
             validation.validate_immediate_default(descriptor, immediate, enum_domain_inputs)
-        for operand in descriptor.operands:
+        for operand_index, operand in enumerate(descriptor.operands):
             validation.validate_u16(
                 operand.encoding_field_id,
                 f"descriptor '{descriptor.key}' operand '{operand.field_name}' encoding field id",
             )
-            concrete_reg_alt_count = 0
+            register_parts_by_class: dict[str, str | None] = {}
             for reg_alt in operand.reg_alts:
+                if RegClassAltFlag.LATE_READ in reg_alt.flags:
+                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' authors the derived late-read flag")
+                if reg_alt.late_read_subgroup_size is not None:
+                    validation.validate_u16(reg_alt.late_read_subgroup_size, f"descriptor '{descriptor.key}' operand '{operand.field_name}' late-read subgroup size")
+                    if reg_alt.reg_class is None or operand.role not in (OperandRole.OPERAND, OperandRole.PREDICATE, OperandRole.RESOURCE):
+                        raise ValueError(f"descriptor '{descriptor.key}' late read requires an explicit register input")
+                    if any(constraint.kind in (ConstraintKind.TIED, ConstraintKind.PREFER_TIED) and constraint.rhs_operand_index == operand_index for constraint in descriptor.constraints):
+                        raise ValueError(f"descriptor '{descriptor.key}' late read cannot share a tied result's storage")
+                validation.validate_u16(
+                    reg_alt.unit_alignment,
+                    f"descriptor '{descriptor.key}' operand '{operand.field_name}' register alignment",
+                )
+                if reg_alt.unit_alignment == 0 or reg_alt.unit_alignment & (reg_alt.unit_alignment - 1):
+                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' register alignment must be a positive power of two")
                 if reg_alt.reg_class is None:
                     if RegClassAltFlag.IMMEDIATE not in reg_alt.flags:
                         raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' has a classless alternative without the immediate flag")
+                    if reg_alt.unit_alignment != 1:
+                        raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' immediate alternative cannot require register alignment")
+                    if reg_alt.register_part is not None:
+                        raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' immediate alternative cannot name register part '{reg_alt.register_part}'")
                     continue
                 if reg_alt.reg_class not in reg_class_inputs:
                     raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' references unknown register class '{reg_alt.reg_class}'")
+                previous_register_part = register_parts_by_class.setdefault(reg_alt.reg_class, reg_alt.register_part)
+                if previous_register_part != reg_alt.register_part:
+                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' has ambiguous register parts for register class '{reg_alt.reg_class}'")
+                if reg_alt.unit_alignment != 1 and RegClassFlag.EXPLICIT_PHYSICAL_REGISTERS in reg_class_inputs[reg_alt.reg_class].flags:
+                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' explicit physical alternative cannot require numeric register alignment")
                 used_reg_class_names.add(reg_alt.reg_class)
-                concrete_reg_alt_count += 1
-            if operand.register_part is not None:
-                if operand.register_part not in register_part_inputs:
-                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' references unknown register part '{operand.register_part}'")
-                if concrete_reg_alt_count != 1:
-                    raise ValueError(f"descriptor '{descriptor.key}' operand '{operand.field_name}' with a register part must name exactly one concrete register class alternative")
-                register_part = register_part_inputs[operand.register_part]
+                if reg_alt.register_part is None:
+                    continue
+                if reg_alt.register_part not in register_part_inputs:
+                    raise ValueError(
+                        f"descriptor '{descriptor.key}' operand '{operand.field_name}' alternative for register class '{reg_alt.reg_class}' references unknown register part '{reg_alt.register_part}'"
+                    )
+                register_part = register_part_inputs[reg_alt.register_part]
                 validation.validate_register_part(register_part)
                 if register_part.reg_class not in reg_class_inputs:
                     raise ValueError(f"register part '{register_part.name}' references unknown register class '{register_part.reg_class}'")
-                if not any(reg_alt.reg_class == register_part.reg_class for reg_alt in operand.reg_alts):
+                if reg_alt.reg_class != register_part.reg_class:
                     raise ValueError(
-                        f"descriptor '{descriptor.key}' operand '{operand.field_name}' uses register part '{register_part.name}' for register class '{register_part.reg_class}' but the operand does not accept that class"
+                        f"descriptor '{descriptor.key}' operand '{operand.field_name}' alternative for register class '{reg_alt.reg_class}' uses register part '{register_part.name}' for register class '{register_part.reg_class}'"
                     )
-                used_register_part_names.add(operand.register_part)
+                used_register_part_names.add(reg_alt.register_part)
                 used_reg_class_names.add(register_part.reg_class)
             if operand.read_event is not None:
                 used_timing_event_names.add(operand.read_event)
@@ -1207,41 +1360,11 @@ def compile_descriptor_set(
     for schedule_name in list(used_schedule_names):
         schedule_class = schedule_inputs[schedule_name]
         for issue_use in schedule_class.issue_uses:
-            if issue_use.resource not in resource_inputs:
-                raise ValueError(f"schedule class '{schedule_name}' references unknown resource '{issue_use.resource}'")
             used_resource_names.add(issue_use.resource)
         for hazard in schedule_class.hazards:
-            if validation.hazard_reference_count(hazard) != 1:
-                raise ValueError(f"schedule class '{schedule_name}' hazard must reference exactly one resource, counter, or target id")
             if hazard.resource is not None:
-                if hazard.resource not in resource_inputs:
-                    raise ValueError(f"schedule class '{schedule_name}' hazard references unknown resource '{hazard.resource}'")
                 used_resource_names.add(hazard.resource)
-            if hazard.counter_id is not None:
-                validation.validate_u16(
-                    hazard.counter_id,
-                    f"schedule class '{schedule_name}' hazard counter id",
-                )
-            if hazard.target_id is not None:
-                validation.validate_u16(
-                    hazard.target_id,
-                    f"schedule class '{schedule_name}' hazard target id",
-                )
-            validation.validate_u16(
-                hazard.producer_stage,
-                f"schedule class '{schedule_name}' hazard producer stage",
-            )
-            validation.validate_u16(
-                hazard.consumer_stage,
-                f"schedule class '{schedule_name}' hazard consumer stage",
-            )
-            validation.validate_u16(
-                hazard.distance,
-                f"schedule class '{schedule_name}' hazard distance",
-            )
         for pressure_delta in schedule_class.pressure_deltas:
-            if pressure_delta.reg_class not in reg_class_inputs:
-                raise ValueError(f"schedule class '{schedule_name}' references unknown pressure register class '{pressure_delta.reg_class}'")
             used_reg_class_names.add(pressure_delta.reg_class)
 
     instruction_classes = [
@@ -1294,6 +1417,10 @@ def compile_descriptor_set(
     )
     validation.validate_u16_table_count(len(register_parts), f"descriptor set '{spec.key}' register part")
     reg_class_ids = {reg_class.name: i for i, reg_class in enumerate(reg_classes)}
+    reg_class_pressure_set_ids = _derive_reg_class_pressure_set_ids(
+        reg_classes,
+        spec.physical_register_views,
+    )
     physical_register_ids = {physical_register.name: i for i, physical_register in enumerate(physical_registers)}
     register_part_ids = {part.name: i for i, part in enumerate(register_parts)}
     resource_ids = {resource.name: i for i, resource in enumerate(resources)}
@@ -1379,8 +1506,11 @@ def compile_descriptor_set(
     asm_table_storage = CompiledAsmTableStorage()
     asm_table_storage.append_forms(asm_forms)
 
-    reg_class_alts: list[tuple[int | None, tuple[RegClassAltFlag, ...]]] = []
-    reg_alt_group_starts: dict[tuple[tuple[int | None, tuple[RegClassAltFlag, ...]], ...], int] = {}
+    reg_class_alts: list[tuple[int | None, int | None, tuple[RegClassAltFlag, ...], int, int]] = []
+    reg_alt_group_starts: dict[
+        tuple[tuple[int | None, int | None, tuple[RegClassAltFlag, ...], int, int], ...],
+        int,
+    ] = {}
     immediate_encoding_slice_group_starts: dict[tuple[ImmediateEncodingSlice, ...], int] = {}
     effect_group_starts: dict[tuple[Effect, ...], int] = {}
     constraint_group_starts: dict[tuple[Constraint, ...], int] = {}
@@ -1388,7 +1518,9 @@ def compile_descriptor_set(
     feature_mask_group_starts: dict[tuple[int, ...], int] = {}
     encoding_field_value_group_starts: dict[tuple[EncodingFieldValue, ...], int] = {}
     compiled_operand_rows: list[_CompiledOperandRow] = []
-    operand_group_starts: dict[tuple[_CompiledOperandRow, ...], int] = {}
+    operand_row_indices: dict[_CompiledOperandRow, int] = {}
+    operand_indices: list[int] = []
+    operand_group_starts: dict[tuple[int, ...], int] = {}
     compiled_immediate_rows: list[_CompiledImmediateRow] = []
     immediate_group_starts: dict[tuple[_CompiledImmediateRow, ...], int] = {}
     immediate_encoding_slices: list[ImmediateEncodingSlice] = []
@@ -1398,13 +1530,18 @@ def compile_descriptor_set(
     storage_leases: list[StorageLease] = []
     storage_lease_labels: list[tuple[str, int]] = []
     issue_uses: list[IssueUse] = []
+    issue_use_group_starts: dict[tuple[IssueUse, ...], int] = {}
     hazards: list[Hazard] = []
+    hazard_group_starts: dict[tuple[Hazard, ...], int] = {}
     pressure_deltas: list[PressureDelta] = []
+    pressure_delta_group_starts: dict[tuple[PressureDelta, ...], int] = {}
     feature_mask_words: list[int] = []
     encoding_field_values: list[EncodingFieldValue] = []
     operand_forms: list[CompiledOperandForm] = []
     operand_form_matches: list[CompiledOperandFormMatch] = []
+    operand_form_match_group_starts: dict[tuple[CompiledOperandFormMatch, ...], int] = {}
     operand_form_operand_indices: list[int] = []
+    operand_form_map_group_starts: dict[tuple[int, ...], int] = {}
     descriptor_rows: list[dict[str, int]] = []
     schedule_rows: list[dict[str, int]] = []
     enum_domain_rows: list[dict[str, int]] = []
@@ -1503,36 +1640,54 @@ def compile_descriptor_set(
     register_packing_resource_members: list[CompiledRegisterPackingResourceMember] = []
     for resource in spec.register_packing_resources:
         member_start = len(register_packing_resource_members)
+        capacity = validation.derive_register_packing_resource_capacity(reg_class_inputs, resource)
+        resource_flags: list[RegisterPackingResourceFlag] = []
+        if all(RegClassFlag.UNSPILLABLE in reg_class_inputs[member.register_class].flags for member in resource.members):
+            resource_flags.append(RegisterPackingResourceFlag.UNSPILLABLE)
+        if any(member.register_unit_count > 1 for member in resource.members):
+            resource_flags.append(RegisterPackingResourceFlag.HAS_AGGREGATE_MEMBER)
         register_packing_resource_members.extend(
             CompiledRegisterPackingResourceMember(
                 reg_class_id=reg_class_ids[member.register_class],
                 register_unit_count=member.register_unit_count,
                 resource_unit_count=member.resource_unit_count,
+                flags=((RegisterPackingResourceMemberFlag.CAPACITY_SOURCE,) if member.register_class == resource.capacity_register_class else ()),
             )
             for member in resource.members
         )
         register_packing_resources.append(
             CompiledRegisterPackingResource(
                 source=resource,
+                capacity=capacity,
+                flags=tuple(resource_flags),
                 member_start=member_start,
                 member_count=len(resource.members),
             )
         )
 
     for schedule_class in schedule_classes:
-        issue_use_start = len(issue_uses)
-        issue_uses.extend(schedule_class.issue_uses)
-        hazard_start = len(hazards)
-        hazards.extend(schedule_class.hazards)
-        pressure_delta_start = len(pressure_deltas)
-        pressure_deltas.extend(schedule_class.pressure_deltas)
+        issue_use_start, _ = append_interned_sequence(
+            schedule_class.issue_uses,
+            issue_uses,
+            issue_use_group_starts,
+        )
+        hazard_start, _ = append_interned_sequence(
+            schedule_class.hazards,
+            hazards,
+            hazard_group_starts,
+        )
+        pressure_delta_start, _ = append_interned_sequence(
+            schedule_class.pressure_deltas,
+            pressure_deltas,
+            pressure_delta_group_starts,
+        )
         schedule_rows.append(
             {
                 "issue_use_start": issue_use_start,
                 "issue_use_count": len(schedule_class.issue_uses),
                 "hazard_start": hazard_start,
                 "hazard_count": len(schedule_class.hazards),
-                "minimum_issue_cycles": derive_minimum_issue_cycles(schedule_class, resource_inputs),
+                "minimum_issue_cycles": minimum_issue_cycles_by_class[schedule_class.name],
                 "pressure_delta_start": pressure_delta_start,
                 "pressure_delta_count": len(schedule_class.pressure_deltas),
             }
@@ -1550,19 +1705,27 @@ def compile_descriptor_set(
         )
 
     for descriptor in selected_descriptors:
-        rematerializable_result_set = set(rematerializable_results_by_descriptor[descriptor.key])
-        descriptor_operand_rows: list[_CompiledOperandRow] = []
+        constraint_projection = constraint_projections_by_descriptor[descriptor.key]
+        rematerializable_result_set = set(constraint_projection.rematerializable_results)
+        source_value_indices = source_value_indices_by_descriptor[descriptor.key]
+        descriptor_operand_indices: list[int] = []
         for operand_index, (operand, source_value_index) in enumerate(
             zip(
                 descriptor.operands,
-                source_value_indices_by_descriptor[descriptor.key],
+                source_value_indices,
                 strict=True,
             )
         ):
-            alt_group: tuple[tuple[int | None, tuple[RegClassAltFlag, ...]], ...] = tuple(
+            alt_group: tuple[
+                tuple[int | None, int | None, tuple[RegClassAltFlag, ...], int, int],
+                ...,
+            ] = tuple(
                 (
                     None if reg_alt.reg_class is None else reg_class_ids[reg_alt.reg_class],
-                    reg_alt.flags,
+                    None if reg_alt.register_part is None else register_part_ids[reg_alt.register_part],
+                    reg_alt.flags + ((RegClassAltFlag.LATE_READ,) if reg_alt.late_read_subgroup_size is not None else ()),
+                    reg_alt.unit_alignment.bit_length() - 1,
+                    reg_alt.late_read_subgroup_size or 0,
                 )
                 for reg_alt in operand.reg_alts
             )
@@ -1571,17 +1734,26 @@ def compile_descriptor_set(
                 reg_class_alts,
                 reg_alt_group_starts,
             )
-            descriptor_operand_rows.append(
-                _CompiledOperandRow(
-                    operand=operand,
-                    source_value_index=source_value_index,
-                    reg_class_alt_start=reg_class_alt_start,
-                    rematerializable=(operand_index in rematerializable_result_set),
-                )
+            source_descriptor_operand_index = (
+                constraint_projection.rematerialization_source_operand_indices[operand_index] if operand_index < len(constraint_projection.rematerialization_source_operand_indices) else None
             )
+            rematerialization_source_operand_index = None if source_descriptor_operand_index is None else source_value_indices[source_descriptor_operand_index]
+            operand_row = _CompiledOperandRow(
+                operand=operand,
+                source_value_index=source_value_index,
+                rematerialization_source_operand_index=rematerialization_source_operand_index,
+                reg_class_alt_start=reg_class_alt_start,
+                rematerializable=(operand_index in rematerializable_result_set),
+            )
+            row_index = operand_row_indices.get(operand_row)
+            if row_index is None:
+                row_index = len(compiled_operand_rows)
+                operand_row_indices[operand_row] = row_index
+                compiled_operand_rows.append(operand_row)
+            descriptor_operand_indices.append(row_index)
         operand_start, _ = append_interned_sequence(
-            descriptor_operand_rows,
-            compiled_operand_rows,
+            descriptor_operand_indices,
+            operand_indices,
             operand_group_starts,
         )
 
@@ -1644,12 +1816,18 @@ def compile_descriptor_set(
                 descriptor_ordinals,
                 selected_descriptors,
                 operand_form,
-                len(operand_form_matches),
-                len(operand_form_operand_indices),
+            )
+            compiled_form.match_start, _ = append_interned_sequence(
+                compiled_matches,
+                operand_form_matches,
+                operand_form_match_group_starts,
+            )
+            compiled_form.operand_map_start, _ = append_interned_sequence(
+                operand_map,
+                operand_form_operand_indices,
+                operand_form_map_group_starts,
             )
             operand_forms.append(compiled_form)
-            operand_form_matches.extend(compiled_matches)
-            operand_form_operand_indices.extend(operand_map)
         descriptor_rows.append(
             {
                 "operand_start": operand_start,
@@ -1675,6 +1853,7 @@ def compile_descriptor_set(
 
     operands = [row.operand for row in compiled_operand_rows]
     operand_source_value_indices = [row.source_value_index for row in compiled_operand_rows]
+    operand_rematerialization_source_operand_indices = [row.rematerialization_source_operand_index for row in compiled_operand_rows]
     operand_alt_starts = [row.reg_class_alt_start for row in compiled_operand_rows]
     operand_rematerializable = [row.rematerializable for row in compiled_operand_rows]
     immediates = [row.immediate for row in compiled_immediate_rows]
@@ -1684,12 +1863,8 @@ def compile_descriptor_set(
 
     compact_start_tables = (
         ("descriptor", selected_descriptors),
-        ("asm operand index", asm_table_storage.operand_indices),
-        ("asm operand segment", asm_table_storage.operand_segments),
-        ("asm result value type", asm_table_storage.result_value_types),
-        ("asm immediate", asm_table_storage.immediates),
-        ("native asm value", asm_table_storage.native_values),
         ("operand", operands),
+        ("operand index", operand_indices),
         ("immediate", immediates),
         ("effect", effects),
         ("constraint", constraints),
@@ -1697,29 +1872,35 @@ def compile_descriptor_set(
         ("feature mask word", feature_mask_words),
         ("encoding field value", encoding_field_values),
         ("operand form", operand_forms),
+        ("issue use", issue_uses),
+        ("hazard", hazards),
+        ("pressure delta", pressure_deltas),
     )
     for table_name, rows in compact_start_tables:
         validation.validate_u16_table_count(len(rows), f"descriptor set '{spec.key}' {table_name}")
 
-    descriptor_refs = sorted((descriptor.key, i) for i, descriptor in enumerate(selected_descriptors))
     schedule_alternative_rows = [
         (source_ordinal, descriptor_ordinals[alternative_key]) for source_ordinal, descriptor in enumerate(source_descriptors) for alternative_key in descriptor.schedule_alternatives
     ]
-    seen_stable_ids: dict[int, str] = {}
-    for descriptor in selected_descriptors:
+    ordinals_by_stable_id: dict[int, int] = {}
+    for ordinal, descriptor in enumerate(selected_descriptors):
         stable_id = descriptor_stable_id(descriptor.key)
-        previous_key = seen_stable_ids.get(stable_id)
-        if previous_key is not None:
+        previous_ordinal = ordinals_by_stable_id.get(stable_id)
+        if previous_ordinal is not None:
+            previous_key = selected_descriptors[previous_ordinal].key
             raise ValueError(f"descriptor '{descriptor.key}' stable ID collides with '{previous_key}'")
-        seen_stable_ids[stable_id] = descriptor.key
+        ordinals_by_stable_id[stable_id] = ordinal
+    descriptor_refs = [ordinals_by_stable_id[stable_id] for stable_id in sorted(ordinals_by_stable_id)]
 
-    resource_calendars, resource_calendar_slot_count = _compile_resource_calendars(resources, schedule_classes)
+    resource_calendar_lookback_cycles = max((max(0, -row.minimum_issue_separation_cycles) for row in event_separations), default=0)
+    resource_calendars, resource_calendar_slot_count = compile_resource_calendars(resources, schedule_classes, resource_calendar_lookback_cycles)
     return CompiledDescriptorSet(
         spec=spec,
         source_descriptors=source_descriptors,
         descriptors=selected_descriptors,
         instruction_classes=instruction_classes,
         reg_classes=reg_classes,
+        reg_class_pressure_set_ids=reg_class_pressure_set_ids,
         physical_registers=physical_registers,
         physical_register_candidate_ids=physical_register_candidate_ids,
         physical_register_allocation_ordinals=physical_register_allocation_ordinals,
@@ -1738,7 +1919,13 @@ def compile_descriptor_set(
         resources=resources,
         resource_calendars=resource_calendars,
         resource_calendar_slot_count=resource_calendar_slot_count,
+        resource_calendar_lookback_cycles=resource_calendar_lookback_cycles,
         schedule_classes=schedule_classes,
+        schedule_class_table=CompiledScheduleClassTable(
+            schedule_classes=tuple(schedule_classes),
+            schedule_rows=tuple(schedule_rows),
+            canonical_count=len(schedule_classes),
+        ),
         timing_events=timing_events,
         event_separations=event_separations,
         enum_domains=enum_domains,
@@ -1750,8 +1937,10 @@ def compile_descriptor_set(
         enum_domain_ids=enum_domain_ids,
         string_pool=string_pool,
         reg_class_alts=reg_class_alts,
+        operand_indices=operand_indices,
         operands=operands,
         operand_source_value_indices=operand_source_value_indices,
+        operand_rematerialization_source_operand_indices=operand_rematerialization_source_operand_indices,
         operand_alt_starts=operand_alt_starts,
         operand_rematerializable=operand_rematerializable,
         immediates=immediates,

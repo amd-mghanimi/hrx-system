@@ -27,19 +27,19 @@ namespace loom {
 namespace {
 
 static const loom_encoding_family_descriptor_t kQ8_0EncodingDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(4, "q8_0"),
-    /*.role=*/LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
+    .name = LOOM_BSTRING_REF(4, "q8_0"),
+    .role = LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
 };
 static const loom_encoding_vtable_t kQ8_0EncodingVtable = {
-    /*.descriptor=*/&kQ8_0EncodingDescriptor,
+    .descriptor = &kQ8_0EncodingDescriptor,
 };
 
 static const loom_encoding_family_descriptor_t kDenseEncodingDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(5, "dense"),
-    /*.role=*/LOOM_ENCODING_ROLE_ADDRESS_LAYOUT,
+    .name = LOOM_BSTRING_REF(5, "dense"),
+    .role = LOOM_ENCODING_ROLE_ADDRESS_LAYOUT,
 };
 static const loom_encoding_vtable_t kDenseEncodingVtable = {
-    /*.descriptor=*/&kDenseEncodingDescriptor,
+    .descriptor = &kDenseEncodingDescriptor,
 };
 
 // Helper to print a type and return the output as a std::string.
@@ -72,9 +72,9 @@ static void CapturePrintFieldCallback(void* user_data,
                                       iree_host_size_t end) {
   auto* fields = static_cast<std::vector<CapturedPrintField>*>(user_data);
   fields->push_back(CapturedPrintField{
-      /*.field_ref=*/field_ref,
-      /*.start=*/start,
-      /*.end=*/end,
+      .field_ref = field_ref,
+      .start = start,
+      .end = end,
   });
 }
 
@@ -278,42 +278,12 @@ TEST(PrintType, EncodingType) {
             "encoding<transform>");
 }
 
-TEST(PrintType, PoolStaticBlockSize) {
-  loom_type_t type = loom_type_pool(loom_dim_pack_static(65536));
-  EXPECT_EQ(print_type(type), "pool<65536>");
-}
-
-TEST(PrintType, PoolStaticSmallBlockSize) {
-  loom_type_t type = loom_type_pool(loom_dim_pack_static(4096));
-  EXPECT_EQ(print_type(type), "pool<4096>");
-}
-
-TEST(PrintType, PoolDynamicBlockSize) {
-  // Dynamic dims without module context print as [%?].
-  loom_type_t type = loom_type_pool(loom_dim_pack_dynamic(42));
-  EXPECT_EQ(print_type(type), "pool<[%?]>");
-}
-
-TEST(PrintType, PoolTypeKindCheck) {
-  loom_type_t type = loom_type_pool(loom_dim_pack_static(4096));
+TEST(PrintType, Pool) {
+  const loom_type_t type = loom_type_pool();
+  EXPECT_EQ(print_type(type), "pool");
   EXPECT_TRUE(loom_type_is_pool(type));
-  EXPECT_FALSE(loom_type_is_tile(type));
-  EXPECT_FALSE(loom_type_is_tensor(type));
-  EXPECT_FALSE(loom_type_is_scalar(type));
-}
-
-TEST(PrintType, PoolDimAccessor) {
-  loom_type_t type = loom_type_pool(loom_dim_pack_static(65536));
-  EXPECT_EQ(loom_type_rank(type), 1);
-  EXPECT_FALSE(loom_type_dim_is_dynamic_at(type, 0));
-  EXPECT_EQ(loom_type_dim_static_size_at(type, 0), 65536);
-}
-
-TEST(PrintType, PoolDynamicDimAccessor) {
-  loom_type_t type = loom_type_pool(loom_dim_pack_dynamic(7));
-  EXPECT_EQ(loom_type_rank(type), 1);
-  EXPECT_TRUE(loom_type_dim_is_dynamic_at(type, 0));
-  EXPECT_EQ(loom_type_dim_value_id_at(type, 0), 7u);
+  EXPECT_FALSE(loom_type_may_reference_values(type));
+  EXPECT_EQ(loom_type_rank(type), 0);
 }
 
 TEST(PrintType, UnknownTypeKindErrors) {
@@ -382,8 +352,8 @@ class PrintOpTest : public ::testing::Test {
     iree_string_builder_t builder;
     iree_string_builder_initialize(iree_allocator_system(), &builder);
     loom_print_field_callback_t callback = {
-        /*.fn=*/CapturePrintFieldCallback,
-        /*.user_data=*/fields,
+        .fn = CapturePrintFieldCallback,
+        .user_data = fields,
     };
     iree_status_t status = loom_text_print_operation_with_field_callback(
         module_, op, &builder, flags, callback);
@@ -1084,7 +1054,7 @@ TEST_F(PrintOpTest, FuncDefTiedResultPrintsEntryArgName) {
   loom_type_t arg_types[] = {f32};
   loom_type_t result_types[] = {f32};
   loom_tied_result_t tied_results[] = {
-      {/*.result_index=*/0, /*.operand_index=*/0, /*.has_type_change=*/false},
+      {.result_index = 0, .operand_index = 0, .has_type_change = false},
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_func_build(
@@ -1102,7 +1072,7 @@ TEST_F(PrintOpTest, FuncDeclTiedResultPrintsArgOperandName) {
   loom_type_t arg_types[] = {f32};
   loom_type_t result_types[] = {f32};
   loom_tied_result_t tied_results[] = {
-      {/*.result_index=*/0, /*.operand_index=*/0, /*.has_type_change=*/false},
+      {.result_index = 0, .operand_index = 0, .has_type_change = false},
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_decl_build(
@@ -1154,9 +1124,8 @@ TEST_F(PrintOpTest, AttrsOpWithDictEntries) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("foo"), &foo_id));
 
   loom_named_attr_t entries[2] = {
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(foo_id)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {.name_id = label_id, .reserved = {}, .value = loom_attr_string(foo_id)},
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1184,8 +1153,11 @@ TEST_F(PrintOpTest, AttrsOpTypeAttrUsesNamedDynamicDimension) {
   loom_type_t f32 = loom_type_scalar(LOOM_SCALAR_TYPE_F32);
   loom_value_id_t input = def(f32);
   loom_named_attr_t entries[] = {
-      {/*.name_id=*/intern("shape"), /*.reserved=*/{},
-       /*.value=*/loom_attr_type(dynamic_tensor_id)},
+      {
+          .name_id = intern("shape"),
+          .reserved = {},
+          .value = loom_attr_type(dynamic_tensor_id),
+      },
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1208,8 +1180,11 @@ TEST_F(PrintOpTest, AttrsOpStringAttrsUseCanonicalEscapes) {
       &value_id));
 
   loom_named_attr_t entries[1] = {
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(value_id)},
+      {
+          .name_id = label_id,
+          .reserved = {},
+          .value = loom_attr_string(value_id),
+      },
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1234,8 +1209,11 @@ TEST_F(PrintOpTest, AttrsOpStringAttrsRejectInvalidUtf8) {
       loom_module_intern_string(module_, IREE_SV("\xFF"), &invalid_id));
 
   loom_named_attr_t entries[1] = {
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(invalid_id)},
+      {
+          .name_id = label_id,
+          .reserved = {},
+          .value = loom_attr_string(invalid_id),
+      },
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1266,8 +1244,8 @@ TEST_F(PrintOpTest, AttrsOpWithNestedDictEntries) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("zeta"), &zeta_id));
 
   loom_named_attr_t nested_entries[2] = {
-      {/*.name_id=*/zeta_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(2)},
-      {/*.name_id=*/alpha_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(1)},
+      {.name_id = zeta_id, .reserved = {}, .value = loom_attr_i64(2)},
+      {.name_id = alpha_id, .reserved = {}, .value = loom_attr_i64(1)},
   };
   loom_attribute_t nested_dict = {0};
   IREE_ASSERT_OK(loom_module_make_canonical_attr_dict(
@@ -1277,11 +1255,13 @@ TEST_F(PrintOpTest, AttrsOpWithNestedDictEntries) {
       &nested_dict));
 
   loom_named_attr_t entries[3] = {
-      {/*.name_id=*/phase_id, /*.reserved=*/{}, /*.value=*/nested_dict},
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/empty_id,
-       /*.reserved=*/{},
-       /*.value=*/loom_make_canonical_attr_dict(/*entries=*/NULL, /*count=*/0)},
+      {.name_id = phase_id, .reserved = {}, .value = nested_dict},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {
+          .name_id = empty_id,
+          .reserved = {},
+          .value = loom_make_canonical_attr_dict(/*entries=*/NULL, /*count=*/0),
+      },
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1360,7 +1340,7 @@ TEST_F(PrintOpTest,
 
 TEST_F(PrintOpTest, DeflateWithResultDimReference) {
   // test.deflate with result 0's dim referencing result 1 (the length).
-  // Uses loom_builder_reserve_results so the result value_ids are known
+  // Uses loom_builder_reserve_values so the result value_ids are known
   // before constructing the result types.
   loom_type_t tensor_dyn = loom_type_shaped_1d(
       LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32, loom_dim_pack_dynamic(0), 0);
@@ -1370,7 +1350,7 @@ TEST_F(PrintOpTest, DeflateWithResultDimReference) {
   // Reserve 2 result value_ids so we can reference result[1] in
   // result[0]'s type.
   loom_value_id_t result_ids[2];
-  IREE_ASSERT_OK(loom_builder_reserve_results(&builder_, 2, result_ids));
+  IREE_ASSERT_OK(loom_builder_reserve_values(&builder_, 2, result_ids));
   loom_type_t tensor_ref =
       loom_type_shaped_1d(LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32,
                           loom_dim_pack_dynamic(result_ids[1]), 0);
@@ -1567,9 +1547,8 @@ TEST_F(PrintOpTest, FieldCallbackReportsAttrAndRegionSpans) {
   loom_string_id_t label_id = intern("label");
   loom_string_id_t foo_id = intern("foo");
   loom_named_attr_t entries[2] = {
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(foo_id)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {.name_id = label_id, .reserved = {}, .value = loom_attr_string(foo_id)},
   };
   loom_op_t* attrs_op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1846,7 +1825,7 @@ TEST(PredicateLayout, StructSize) {
 TEST(PredicateLayout, FieldOffsets) {
   // Verify fields are at expected offsets for correct packing.
   loom_predicate_t predicate = {0};
-  predicate.kind = LOOM_PREDICATE_MUL;
+  predicate.kind = LOOM_PREDICATE_MULTIPLE_OF;
   predicate.arg_count = 2;
   predicate.arg_tags[0] = LOOM_PRED_ARG_VALUE;
   predicate.arg_tags[1] = LOOM_PRED_ARG_CONST;
@@ -1855,7 +1834,7 @@ TEST(PredicateLayout, FieldOffsets) {
   predicate.args[1] = 16;
   predicate.args[2] = 0;
 
-  EXPECT_EQ(predicate.kind, LOOM_PREDICATE_MUL);
+  EXPECT_EQ(predicate.kind, LOOM_PREDICATE_MULTIPLE_OF);
   EXPECT_EQ(predicate.arg_count, 2);
   EXPECT_EQ(predicate.arg_tags[0], LOOM_PRED_ARG_VALUE);
   EXPECT_EQ(predicate.arg_tags[1], LOOM_PRED_ARG_CONST);
@@ -1868,11 +1847,14 @@ TEST(PredicateLayout, FieldOffsets) {
 TEST(PredicateLayout, AllKindsValid) {
   // Verify all predicate kinds can be stored and retrieved.
   loom_predicate_kind_t kinds[] = {
-      LOOM_PREDICATE_EQ,      LOOM_PREDICATE_NE,     LOOM_PREDICATE_LT,
-      LOOM_PREDICATE_LE,      LOOM_PREDICATE_GT,     LOOM_PREDICATE_GE,
-      LOOM_PREDICATE_MUL,     LOOM_PREDICATE_MIN,    LOOM_PREDICATE_MAX,
-      LOOM_PREDICATE_POW2,    LOOM_PREDICATE_RANGE,  LOOM_PREDICATE_NOT_NAN,
-      LOOM_PREDICATE_NOT_INF, LOOM_PREDICATE_FINITE,
+      LOOM_PREDICATE_EQ,          LOOM_PREDICATE_NE,
+      LOOM_PREDICATE_LT,          LOOM_PREDICATE_LE,
+      LOOM_PREDICATE_GT,          LOOM_PREDICATE_GE,
+      LOOM_PREDICATE_MULTIPLE_OF, LOOM_PREDICATE_POWER_OF_TWO,
+      LOOM_PREDICATE_RANGE,       LOOM_PREDICATE_NOT_NAN,
+      LOOM_PREDICATE_NOT_INF,     LOOM_PREDICATE_FINITE,
+      LOOM_PREDICATE_ULT,         LOOM_PREDICATE_ULE,
+      LOOM_PREDICATE_UGT,         LOOM_PREDICATE_UGE,
   };
   for (int i = 0; i < (int)IREE_ARRAYSIZE(kinds); ++i) {
     loom_predicate_t predicate = {0};
@@ -1920,9 +1902,9 @@ TEST(PredicateLayout, LargeConstants) {
 TEST(PredicateAttr, Construction) {
   // Verify loom_attr_predicate_list constructs the right attribute.
   loom_predicate_t predicates[2] = {};
-  predicates[0].kind = LOOM_PREDICATE_MUL;
+  predicates[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   predicates[0].arg_count = 2;
-  predicates[1].kind = LOOM_PREDICATE_POW2;
+  predicates[1].kind = LOOM_PREDICATE_POWER_OF_TWO;
   predicates[1].arg_count = 1;
 
   loom_attribute_t attr = loom_attr_predicate_list(predicates, 2);
@@ -1962,18 +1944,19 @@ static const uint8_t kPredTestPredicatesBname[] =
     "predicates";
 static const loom_attr_descriptor_t kPredTestAttrDesc[] = {
     {
-        /*.name=*/kPredTestPredicatesBname,
-        /*.attr_kind=*/LOOM_ATTR_PREDICATE_LIST,
+        .name = kPredTestPredicatesBname,
+        .attr_kind = LOOM_ATTR_PREDICATE_LIST,
     },
 };
 static constexpr loom_op_vtable_t kPredTestVtable = [] {
-  loom_op_vtable_t vtable = {};
-  vtable.traits = LOOM_TRAIT_PURE;
-  vtable.attribute_count = 1;
-  vtable.attr_descriptors = kPredTestAttrDesc;
-  vtable.name = kPredTestName;
-  vtable.format_elements = kPredTestFormat;
-  vtable.format_element_count = IREE_ARRAYSIZE(kPredTestFormat);
+  loom_op_vtable_t vtable = {
+      .traits = LOOM_TRAIT_PURE,
+      .attribute_count = 1,
+      .attr_descriptors = kPredTestAttrDesc,
+      .name = kPredTestName,
+      .format_elements = kPredTestFormat,
+      .format_element_count = IREE_ARRAYSIZE(kPredTestFormat),
+  };
   return vtable;
 }();
 
@@ -2066,7 +2049,7 @@ class PrintPredicateTest : public ::testing::Test {
   uint16_t pred_test_kind_ = 0;
 };
 
-TEST_F(PrintPredicateTest, SingleMulPredicate) {
+TEST_F(PrintPredicateTest, SingleMultipleOfPredicate) {
   // Define a value so we can reference it by name.
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_value_id_t dim_value = def(index_type);
@@ -2075,9 +2058,9 @@ TEST_F(PrintPredicateTest, SingleMulPredicate) {
   loom_string_id_t name_id = intern("M");
   loom_module_value(module_, dim_value)->name_id = name_id;
 
-  // Build: mul(%M, 16)
+  // Build: multiple_of(%M, 16)
   loom_predicate_t predicates[1] = {};
-  predicates[0].kind = LOOM_PREDICATE_MUL;
+  predicates[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   predicates[0].arg_count = 2;
   predicates[0].arg_tags[0] = LOOM_PRED_ARG_VALUE;
   predicates[0].arg_tags[1] = LOOM_PRED_ARG_CONST;
@@ -2086,7 +2069,7 @@ TEST_F(PrintPredicateTest, SingleMulPredicate) {
 
   loom_op_t* op = build_pred_op(predicates, 1);
   EXPECT_EQ(print_op(op, LOOM_TEXT_PRINT_DEFAULT),
-            "test.predtest [mul(%M, 16)]\n");
+            "test.predtest [multiple_of(%M, 16)]\n");
 }
 
 TEST_F(PrintPredicateTest, MultipleMixedPredicates) {
@@ -2096,9 +2079,9 @@ TEST_F(PrintPredicateTest, MultipleMixedPredicates) {
   loom_string_id_t k_name = intern("K");
   loom_module_value(module_, k_value)->name_id = k_name;
 
-  // Build: [mul(%K, 16), lt(%K, 1024)]
+  // Build: [multiple_of(%K, 16), lt(%K, 1024)]
   loom_predicate_t predicates[2] = {};
-  predicates[0].kind = LOOM_PREDICATE_MUL;
+  predicates[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   predicates[0].arg_count = 2;
   predicates[0].arg_tags[0] = LOOM_PRED_ARG_VALUE;
   predicates[0].arg_tags[1] = LOOM_PRED_ARG_CONST;
@@ -2114,26 +2097,26 @@ TEST_F(PrintPredicateTest, MultipleMixedPredicates) {
 
   loom_op_t* op = build_pred_op(predicates, 2);
   EXPECT_EQ(print_op(op, LOOM_TEXT_PRINT_DEFAULT),
-            "test.predtest [mul(%K, 16), lt(%K, 1024)]\n");
+            "test.predtest [multiple_of(%K, 16), lt(%K, 1024)]\n");
 }
 
-TEST_F(PrintPredicateTest, Pow2SingleArg) {
+TEST_F(PrintPredicateTest, PowerOfTwoSingleArg) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_value_id_t value = def(index_type);
 
   loom_string_id_t name = intern("N");
   loom_module_value(module_, value)->name_id = name;
 
-  // Build: [pow2(%N)]
+  // Build: [power_of_two(%N)]
   loom_predicate_t predicates[1] = {};
-  predicates[0].kind = LOOM_PREDICATE_POW2;
+  predicates[0].kind = LOOM_PREDICATE_POWER_OF_TWO;
   predicates[0].arg_count = 1;
   predicates[0].arg_tags[0] = LOOM_PRED_ARG_VALUE;
   predicates[0].args[0] = (int64_t)value;
 
   loom_op_t* op = build_pred_op(predicates, 1);
   EXPECT_EQ(print_op(op, LOOM_TEXT_PRINT_DEFAULT),
-            "test.predtest [pow2(%N)]\n");
+            "test.predtest [power_of_two(%N)]\n");
 }
 
 TEST_F(PrintPredicateTest, RangeThreeArgs) {
@@ -2167,8 +2150,9 @@ TEST_F(PrintPredicateTest, EmptyPredicateList) {
 TEST_F(PrintPredicateTest, AllPredicateKinds) {
   // Verify all predicate kinds print their correct name.
   const char* expected_names[] = {
-      "eq",  "ne",  "lt",   "le",    "gt",      "ge",      "mul",
-      "min", "max", "pow2", "range", "not_nan", "not_inf", "finite"};
+      "eq",          "ne",           "lt",    "le",      "gt",      "ge",
+      "multiple_of", "power_of_two", "range", "not_nan", "not_inf", "finite",
+      "ult",         "ule",          "ugt",   "uge"};
   for (int kind = 0; kind < LOOM_PREDICATE_COUNT_; ++kind) {
     loom_predicate_t predicates[1] = {};
     predicates[0].kind = (uint8_t)kind;
@@ -2207,7 +2191,7 @@ TEST_F(PrintPredicateTest, GeneratedTestAssume) {
 
   // Build predicates for the where clause.
   loom_predicate_t predicates[2] = {};
-  predicates[0].kind = LOOM_PREDICATE_MUL;
+  predicates[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   predicates[0].arg_count = 2;
   predicates[0].arg_tags[0] = LOOM_PRED_ARG_VALUE;
   predicates[0].args[0] = m_id;
@@ -2231,7 +2215,7 @@ TEST_F(PrintPredicateTest, GeneratedTestAssume) {
 
   std::string output = print_op(op, LOOM_TEXT_PRINT_DEFAULT);
   EXPECT_EQ(output,
-            "%2, %3 = test.assume %M, %K [mul(%M, 16), lt(%K, 1024)]"
+            "%2, %3 = test.assume %M, %K [multiple_of(%M, 16), lt(%K, 1024)]"
             " : index, index\n");
 }
 
@@ -2247,14 +2231,17 @@ TEST_F(PrintOpTest, TypeWithStaticEncoding) {
   IREE_ASSERT_OK(
       loom_module_intern_string(module_, IREE_SV("block"), &block_id));
 
-  loom_named_attr_t param = {/*.name_id=*/block_id, /*.reserved=*/{},
-                             /*.value=*/loom_attr_i64(32)};
+  loom_named_attr_t param = {
+      .name_id = block_id,
+      .reserved = {},
+      .value = loom_attr_i64(32),
+  };
   loom_encoding_t encoding = {
-      /*.name_id=*/name_id,
-      /*.alias_id=*/LOOM_STRING_ID_INVALID,
-      /*.attribute_count=*/1,
-      /*.family=*/{},
-      /*.attributes=*/&param,
+      .name_id = name_id,
+      .alias_id = LOOM_STRING_ID_INVALID,
+      .attribute_count = 1,
+      .family = {},
+      .attributes = &param,
   };
   uint16_t encoding_id = 0;
   IREE_ASSERT_OK(loom_module_add_encoding(module_, &encoding, &encoding_id));
@@ -2272,9 +2259,9 @@ TEST_F(PrintOpTest, TypeWithEncodingAlias) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("enc"), &alias_id));
 
   loom_encoding_t encoding = {
-      /*.name_id=*/name_id,
-      /*.alias_id=*/alias_id,
-      /*.attribute_count=*/0,
+      .name_id = name_id,
+      .alias_id = alias_id,
+      .attribute_count = 0,
   };
   uint16_t encoding_id = 0;
   IREE_ASSERT_OK(loom_module_add_encoding(module_, &encoding, &encoding_id));
@@ -2290,9 +2277,9 @@ TEST_F(PrintOpTest, TypeWithEncodingNoParams) {
       loom_module_intern_string(module_, IREE_SV("dense"), &name_id));
 
   loom_encoding_t encoding = {
-      /*.name_id=*/name_id,
-      /*.alias_id=*/LOOM_STRING_ID_INVALID,
-      /*.attribute_count=*/0,
+      .name_id = name_id,
+      .alias_id = LOOM_STRING_ID_INVALID,
+      .attribute_count = 0,
   };
   uint16_t encoding_id = 0;
   IREE_ASSERT_OK(loom_module_add_encoding(module_, &encoding, &encoding_id));
@@ -2421,7 +2408,7 @@ TEST_F(PrintOpTest, LocationOpaque) {
       loom_module_register_source(module_, IREE_SV("torch"), &source_id));
 
   // Add an opaque location.
-  loom_location_entry_t opaque_loc = {/*.kind=*/LOOM_LOCATION_OPAQUE};
+  loom_location_entry_t opaque_loc = {.kind = LOOM_LOCATION_OPAQUE};
   opaque_loc.opaque.source_id = 0;
   const char* data = "node_id=42";
   opaque_loc.opaque.data = (const uint8_t*)data;
@@ -2445,7 +2432,7 @@ TEST_F(PrintOpTest, LocationOpaqueUsesCanonicalStringEscapes) {
   IREE_ASSERT_OK(loom_module_register_source(module_, IREE_SV("torch \"aten\""),
                                              &source_id));
 
-  loom_location_entry_t opaque_loc = {/*.kind=*/LOOM_LOCATION_OPAQUE};
+  loom_location_entry_t opaque_loc = {.kind = LOOM_LOCATION_OPAQUE};
   opaque_loc.opaque.source_id = source_id;
   const char* data = "node\\id\n\x01";
   opaque_loc.opaque.data = (const uint8_t*)data;
@@ -2470,7 +2457,7 @@ TEST_F(PrintOpTest, LocationOpaqueRejectsInvalidUtf8Data) {
   IREE_ASSERT_OK(
       loom_module_register_source(module_, IREE_SV("torch"), &source_id));
 
-  loom_location_entry_t opaque_loc = {/*.kind=*/LOOM_LOCATION_OPAQUE};
+  loom_location_entry_t opaque_loc = {.kind = LOOM_LOCATION_OPAQUE};
   opaque_loc.opaque.source_id = source_id;
   const uint8_t data[] = {0xFF};
   opaque_loc.opaque.data = data;
@@ -2593,7 +2580,7 @@ TEST_F(PrintOpTest, LocationFusedPrintsNestedLocationBodies) {
   loom_source_id_t torch_source_id = LOOM_SOURCE_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_register_source(module_, IREE_SV("torch"), &torch_source_id));
-  loom_location_entry_t opaque_loc = {/*.kind=*/LOOM_LOCATION_OPAQUE};
+  loom_location_entry_t opaque_loc = {.kind = LOOM_LOCATION_OPAQUE};
   opaque_loc.opaque.source_id = torch_source_id;
   const char* data = "node\n42";
   opaque_loc.opaque.data = (const uint8_t*)data;
@@ -2606,7 +2593,7 @@ TEST_F(PrintOpTest, LocationFusedPrintsNestedLocationBodies) {
       &module_->arena, 2, sizeof(*nested_children), (void**)&nested_children));
   nested_children[0] = recipe_loc_id;
   nested_children[1] = opaque_loc_id;
-  loom_location_entry_t nested_fused_loc = {/*.kind=*/LOOM_LOCATION_FUSED};
+  loom_location_entry_t nested_fused_loc = {.kind = LOOM_LOCATION_FUSED};
   nested_fused_loc.fused.count = 2;
   nested_fused_loc.fused.children = nested_children;
   loom_location_id_t nested_fused_loc_id = LOOM_LOCATION_UNKNOWN;
@@ -2618,7 +2605,7 @@ TEST_F(PrintOpTest, LocationFusedPrintsNestedLocationBodies) {
       &module_->arena, 2, sizeof(*root_children), (void**)&root_children));
   root_children[0] = jax_loc_id;
   root_children[1] = nested_fused_loc_id;
-  loom_location_entry_t fused_loc = {/*.kind=*/LOOM_LOCATION_FUSED};
+  loom_location_entry_t fused_loc = {.kind = LOOM_LOCATION_FUSED};
   fused_loc.fused.count = 2;
   fused_loc.fused.children = root_children;
   loom_location_id_t fused_loc_id = LOOM_LOCATION_UNKNOWN;
@@ -2643,7 +2630,7 @@ TEST_F(PrintOpTest, LocationFusedRejectsOutOfRangeChildId) {
   IREE_ASSERT_OK(iree_arena_allocate_array(
       &module_->arena, 1, sizeof(*children), (void**)&children));
   children[0] = 42;
-  loom_location_entry_t fused_loc = {/*.kind=*/LOOM_LOCATION_FUSED};
+  loom_location_entry_t fused_loc = {.kind = LOOM_LOCATION_FUSED};
   fused_loc.fused.count = 1;
   fused_loc.fused.children = children;
   loom_location_id_t fused_loc_id = LOOM_LOCATION_UNKNOWN;
@@ -2770,10 +2757,10 @@ TEST_F(PrintOpTest, BoundsCheckIndexListDynamicOutOfRange) {
   loom_test_update_initialize_static_offsets(
       op, loom_attr_i64_array(static_offsets, 1));
   loom_op_results(op)[0] = def(tensor_type);
-  loom_op_tied_results(op)[0] = (loom_tied_result_t){
-      /*.result_index=*/0,
-      /*.operand_index=*/1,
-      /*.has_type_change=*/true,
+  loom_op_tied_results(op)[0] = loom_tied_result_t{
+      .result_index = 0,
+      .operand_index = 1,
+      .has_type_change = true,
   };
   IREE_ASSERT_OK(loom_builder_finalize_op(&builder_, op));
   // The index list starts dynamic operands at field index 2, but this malformed

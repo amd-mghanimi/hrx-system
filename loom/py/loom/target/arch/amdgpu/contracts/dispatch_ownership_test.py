@@ -35,26 +35,23 @@ _ROW_TAG_ENUMS_BY_KIND = {
     "preselect": re.compile(
         r"enum loom_amdgpu_preselect_policy_e\s*\{(?P<body>.*?)\};", re.DOTALL
     ),
-    "report_key": re.compile(
-        r"enum loom_amdgpu_report_key_kind_e\s*\{(?P<body>.*?)\};", re.DOTALL
+    "report": re.compile(
+        r"enum loom_amdgpu_report_kind_e\s*\{(?P<body>.*?)\};", re.DOTALL
     ),
 }
 _ROW_TAG_NAME_RE = re.compile(
-    r"\b(LOOM_AMDGPU_(?:STORAGE|PRESELECT|REPORT_KEY)_[A-Z0-9_]+)\b"
+    r"\b(LOOM_AMDGPU_(?:STORAGE|PRESELECT|REPORT)_[A-Z0-9_]+)\b"
 )
 _PUBLIC_ROW_MACRO_RE = re.compile(r"#define LOOM_AMDGPU_([A-Z0-9_]+ROW)\b")
 _ROW_TAG_SENTINELS_BY_KIND = {
     "storage": frozenset(
         {
-            "LOOM_AMDGPU_STORAGE_SOURCE_OPERANDS",
             "LOOM_AMDGPU_STORAGE_PLAN_LEADING_SOURCES",
             "LOOM_AMDGPU_STORAGE_MAX",
         }
     ),
     "preselect": frozenset({"LOOM_AMDGPU_PRESELECT_NONE", "LOOM_AMDGPU_PRESELECT_MAX"}),
-    "report_key": frozenset(
-        {"LOOM_AMDGPU_REPORT_KEY_NONE", "LOOM_AMDGPU_REPORT_KEY_MAX"}
-    ),
+    "report": frozenset({"LOOM_AMDGPU_REPORT_NONE", "LOOM_AMDGPU_REPORT_MAX"}),
 }
 
 
@@ -157,12 +154,12 @@ def test_validate_dispatch_rows_rejects_wrong_policy_namespace() -> None:
         )
 
 
-def test_validate_dispatch_rows_rejects_wrong_report_key_namespace() -> None:
+def test_validate_dispatch_rows_rejects_wrong_report_kind_namespace() -> None:
     rows = (
         DispatchRow(
             op_kind="LOOM_OP_KERNEL_WORKGROUP_REDUCE",
             role=DispatchRowRole.RECIPE,
-            macro_name="RECIPE_DATA_SOURCE_REPORT_KEY_ROW",
+            macro_name="RECIPE_DATA_SOURCE_REPORT_ROW",
             arguments=(
                 "LOOM_OP_KERNEL_WORKGROUP_REDUCE",
                 "loom_amdgpu_workgroup_reduce_plan_t",
@@ -175,16 +172,16 @@ def test_validate_dispatch_rows_rejects_wrong_report_key_namespace() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="expects a report key"):
+    with pytest.raises(ValueError, match="expects a report kind"):
         validate_dispatch_rows(rows, generated_lower_rule_op_kinds=())
 
 
-def test_validate_dispatch_rows_accepts_report_key() -> None:
+def test_validate_dispatch_rows_accepts_report_kind() -> None:
     rows = (
         DispatchRow(
             op_kind="LOOM_OP_KERNEL_WORKGROUP_REDUCE",
             role=DispatchRowRole.RECIPE,
-            macro_name="RECIPE_DATA_SOURCE_REPORT_KEY_ROW",
+            macro_name="RECIPE_DATA_SOURCE_REPORT_ROW",
             arguments=(
                 "LOOM_OP_KERNEL_WORKGROUP_REDUCE",
                 "loom_amdgpu_workgroup_reduce_plan_t",
@@ -192,7 +189,7 @@ def test_validate_dispatch_rows_accepts_report_key() -> None:
                 "emit",
                 "verify",
                 "1",
-                "LOOM_AMDGPU_REPORT_KEY_WORKGROUP_REDUCE_PUBLICATION",
+                "LOOM_AMDGPU_REPORT_WORKGROUP_REDUCE_PUBLICATION",
             ),
         ),
     )
@@ -205,7 +202,7 @@ def test_validate_dispatch_rows_accepts_capability_recipe() -> None:
         DispatchRow(
             op_kind="LOOM_OP_KERNEL_ASYNC_TENSOR_LOAD_TO_LDS",
             role=DispatchRowRole.RECIPE,
-            macro_name="RECIPE_CAPABILITY_DATA_STORAGE_REPORT_KEY_ROW",
+            macro_name="RECIPE_CAPABILITY_DATA_STORAGE_REPORT_ROW",
             arguments=(
                 "LOOM_OP_KERNEL_ASYNC_TENSOR_LOAD_TO_LDS",
                 "loom_amdgpu_tensor_load_plan_t",
@@ -213,7 +210,7 @@ def test_validate_dispatch_rows_accepts_capability_recipe() -> None:
                 "emit",
                 "verify",
                 "LOOM_AMDGPU_STORAGE_ASYNC_TENSOR",
-                "LOOM_AMDGPU_REPORT_KEY_TENSOR_MEMORY_PACKET",
+                "LOOM_AMDGPU_REPORT_TENSOR_MEMORY_PACKET",
                 "LOOM_AMDGPU_LOWER_CAPABILITY_ASYNC_TENSOR_LOAD_TO_LDS",
             ),
         ),
@@ -244,12 +241,12 @@ def test_validate_dispatch_rows_rejects_non_capability_recipe_guard() -> None:
         validate_dispatch_rows(rows, generated_lower_rule_op_kinds=())
 
 
-def test_validate_dispatch_rows_accepts_memory_report_key() -> None:
+def test_validate_dispatch_rows_accepts_memory_report_kind() -> None:
     rows = (
         DispatchRow(
             op_kind="LOOM_OP_VECTOR_FRAGMENT_LOAD",
             role=DispatchRowRole.MEMORY,
-            macro_name="MEMORY_DATA_STORAGE_REPORT_KEY_ROW",
+            macro_name="MEMORY_DATA_STORAGE_REPORT_ROW",
             arguments=(
                 "LOOM_OP_VECTOR_FRAGMENT_LOAD",
                 "loom_amdgpu_fragment_memory_plan_t",
@@ -257,7 +254,7 @@ def test_validate_dispatch_rows_accepts_memory_report_key() -> None:
                 "emit",
                 "verify",
                 "LOOM_AMDGPU_STORAGE_FRAGMENT_MEMORY",
-                "LOOM_AMDGPU_REPORT_KEY_FRAGMENT_MEMORY_STRATEGY",
+                "LOOM_AMDGPU_REPORT_FRAGMENT_MEMORY_STRATEGY",
             ),
         ),
     )

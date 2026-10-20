@@ -490,7 +490,8 @@ class Peer {
 };
 
 class ConnectionTest
-    : public ::testing::TestWithParam<std::tuple<const char*, uint32_t>> {
+    : public ::testing::TestWithParam<std::tuple<
+          const char*, uint32_t, iree_net_rdma_completion_queue_mode_t>> {
  protected:
   void SetUp() override {
     const char* address = std::getenv("IREE_NET_RDMA_CM_TEST_ADDRESS");
@@ -510,7 +511,7 @@ class ConnectionTest
       IREE_ASSERT_OK(iree_async_proactor_create_posix(
           options, iree_allocator_system(), &proactor_));
     }
-    IREE_ASSERT_OK(iree_net_rdma_connection_events_create(
+    IREE_ASSERT_OK(iree_net_rdma_connection_events_allocate(
         context_, proactor_, std::get<1>(GetParam()),
         {+[](void* user_data, const rdma_cm_event* event) {
            auto* self = static_cast<ConnectionTest*>(user_data);
@@ -555,17 +556,20 @@ class ConnectionTest
     if (listener_events_) {
       bool joined = false;
       iree_net_rdma_connection_events_deactivate(
-          listener_events_,
-          {+[](void* user_data) { *static_cast<bool*>(user_data) = true; },
-           &joined});
+          listener_events_, {+[](void* user_data, iree_status_t status) {
+                               IREE_CHECK_OK(status);
+                               *static_cast<bool*>(user_data) = true;
+                             },
+                             &joined});
       PollUntil(proactor_, [&] { return joined; });
-      iree_net_rdma_connection_events_destroy(listener_events_);
+      iree_net_rdma_connection_events_free(listener_events_);
       listener_events_ = nullptr;
     }
   }
 
   iree_net_rdma_connection_options_t Options(uint32_t identity) {
     auto options = iree_net_rdma_connection_options_default();
+    options.completion_mode = std::get<2>(GetParam());
     options.control.send_count = 2;
     options.control.receive_count = 2;
     options.control.service_batch_size = std::get<1>(GetParam());
@@ -693,6 +697,83 @@ TEST_P(ConnectionTest, MessageBootstrapRegisteredTargetAndConsumerResult) {
   for (iree_host_size_t i = 0; i < kLength; ++i) {
     EXPECT_EQ(second.target()[i], uint8_t(i));
   }
+}
+
+TEST_P(ConnectionTest, MixedCompletionModesShareOnePollOwner) {
+  // Sixteen independent connections (both ends here) share one poll owner.
+  // Each includes a busy side and a readiness side, with directions
+  // alternating. Later connections must establish through CM while earlier CQs
+  // stay runnable.
+  constexpr size_t kConnectionCount = 16;
+  constexpr size_t kLength = 257;
+  std::array<std::unique_ptr<Peer>, kConnectionCount> senders;
+  std::array<std::unique_ptr<Peer>, kConnectionCount> receivers;
+  for (size_t i = 0; i < kConnectionCount; ++i) {
+    auto sender_options = Options(0);
+    auto receiver_options = Options(1);
+    sender_options.completion_mode =
+        (i & 1) ? IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS
+                : IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL;
+    receiver_options.completion_mode =
+        (i & 1) ? IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL
+                : IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS;
+    senders[i] =
+        std::make_unique<Peer>(context_, proactor_, sender_options, 2 * i);
+    receivers[i] = std::make_unique<Peer>(context_, proactor_, receiver_options,
+                                          2 * i + 1);
+    ASSERT_NO_FATAL_FAILURE(Connect(*senders[i], *receivers[i]));
+    ASSERT_NO_FATAL_FAILURE(OpenBoth(*senders[i], *receivers[i]));
+  }
+  StopListener();
+  for (size_t i = 0; i < kConnectionCount; ++i) {
+    auto& sender = *senders[i];
+    auto& receiver = *receivers[i];
+    std::array<uint8_t, IREE_NET_RDMA_TARGET_WIRE_SIZE> description;
+    iree_host_size_t length = 0;
+    IREE_ASSERT_OK(iree_net_direct_endpoint_export_target(
+        receiver.direct_endpoint(),
+        iree_async_span_make(receiver.region(), 8192, kLength),
+        IREE_ASYNC_BUFFER_ACCESS_FLAG_REMOTE_WRITE,
+        iree_make_byte_span(description.data(), description.size()), &length));
+    iree_net_direct_target_t target = {};
+    IREE_ASSERT_OK(iree_net_direct_endpoint_import_target(
+        sender.direct_endpoint(),
+        iree_make_const_byte_span(description.data(), length), &target));
+    for (size_t j = 0; j < kLength; ++j) {
+      sender.source()[j] = uint8_t(i + j);
+    }
+    IREE_ASSERT_OK(sender.Write(0, kLength, target, 0, uint32_t(i)));
+  }
+  PollUntil(proactor_, [&] {
+    for (size_t i = 0; i < kConnectionCount; ++i) {
+      if (senders[i]->source_statuses().empty() ||
+          receivers[i]->notifications().empty()) {
+        return false;
+      }
+    }
+    return true;
+  });
+  for (size_t i = 0; i < kConnectionCount; ++i) {
+    EXPECT_EQ(senders[i]->source_statuses(),
+              (std::vector<iree_status_code_t>{IREE_STATUS_OK}));
+    EXPECT_EQ(receivers[i]->notifications(),
+              (std::vector<uint32_t>{uint32_t(i)}));
+    for (size_t j = 0; j < kLength; ++j) {
+      EXPECT_EQ(receivers[i]->target()[j], uint8_t(i + j));
+    }
+    senders[i]->Close();
+    receivers[i]->Close();
+  }
+  PollUntil(proactor_, [&] {
+    for (size_t i = 0; i < kConnectionCount; ++i) {
+      if (!senders[i]->has(Peer::kClosed) ||
+          !receivers[i]->has(Peer::kClosed)) {
+        return false;
+      }
+    }
+    return true;
+  });
+  EXPECT_EQ(proactor_->progress_list, nullptr);
 }
 
 TEST_P(ConnectionTest, LateDirectOpenDoesNotBlockReadyMessageOrdinal) {
@@ -1027,7 +1108,8 @@ TEST_P(ConnectionTest, NativeFailureHandoffJoinsIndependentPollOwners) {
     // Stop with a published callback still queued. Synchronous unsubscription
     // cannot authorize releasing the owner until that callback has run.
     iree_net_rdma_device_failure_deactivate(
-        monitors[2], {+[](void* user_data) {
+        monitors[2], {+[](void* user_data, iree_status_t status) {
+                        IREE_CHECK_OK(status);
                         static_cast<Owner*>(user_data)->stopped = true;
                       },
                       &owners[2]});
@@ -1051,7 +1133,8 @@ TEST_P(ConnectionTest, NativeFailureHandoffJoinsIndependentPollOwners) {
     for (uint32_t i = 0; i < monitors.size(); ++i) {
       if (!owners[i].stopped) {
         iree_net_rdma_device_failure_deactivate(
-            monitors[i], {+[](void* user_data) {
+            monitors[i], {+[](void* user_data, iree_status_t status) {
+                            IREE_CHECK_OK(status);
                             static_cast<Owner*>(user_data)->stopped = true;
                           },
                           &owners[i]});
@@ -1064,10 +1147,12 @@ TEST_P(ConnectionTest, NativeFailureHandoffJoinsIndependentPollOwners) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(Native, ConnectionTest,
-                         ::testing::Combine(::testing::Values("io_uring",
-                                                              "posix"),
-                                            ::testing::Values(1u, 8u)));
+INSTANTIATE_TEST_SUITE_P(
+    Native, ConnectionTest,
+    ::testing::Combine(
+        ::testing::Values("io_uring", "posix"), ::testing::Values(1u, 8u),
+        ::testing::Values(IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS,
+                          IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL)));
 
 }  // namespace
 }  // namespace iree::net::rdma

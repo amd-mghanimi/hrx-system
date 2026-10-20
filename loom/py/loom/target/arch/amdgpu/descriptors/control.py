@@ -304,15 +304,15 @@ def _s_sendmsg_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _s_sendmsg_rtn_b32_overlay() -> AmdgpuDescriptorOverlay:
+def _s_sendmsg_rtn_overlay(bits: int) -> AmdgpuDescriptorOverlay:
     return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.s_sendmsg_rtn_b32",
-        instruction_name="S_SENDMSG_RTN_B32",
-        mnemonic="s_sendmsg_rtn_b32",
+        descriptor_key=f"amdgpu.s_sendmsg_rtn_b{bits}",
+        instruction_name=f"S_SENDMSG_RTN_B{bits}",
+        mnemonic=f"s_sendmsg_rtn_b{bits}",
         encoding_name="ENC_SOP1",
-        semantic_tag="control.message.send.return.u32",
+        semantic_tag=f"control.message.send.return.u{bits}",
         schedule_class=_SCHEDULE_MESSAGE,
-        operands=(AmdgpuOperandOverlay("SDST", _sgpr_result()),),
+        operands=(AmdgpuOperandOverlay("SDST", _sgpr_result(units=bits // 32)),),
         immediate_fields=("SSRC0",),
         immediates=(_SENDMSG_RTN_MESSAGE_IMMEDIATE,),
         # The message has no memory alias, but writes SDST asynchronously through
@@ -381,6 +381,8 @@ def _s_set_vgpr_msb_descriptor() -> Descriptor:
 
 
 def _s_barrier_overlay() -> AmdgpuDescriptorOverlay:
+    # Effects order workgroup memory and convergent protocols. Independent
+    # register arithmetic can cross the barrier without changing either.
     return AmdgpuDescriptorOverlay(
         descriptor_key="amdgpu.s_barrier",
         instruction_name="S_BARRIER",
@@ -390,7 +392,7 @@ def _s_barrier_overlay() -> AmdgpuDescriptorOverlay:
         schedule_class=_SCHEDULE_BARRIER,
         operands=(),
         effects=(_WORKGROUP_BARRIER_EFFECT, _CONVERGENT_EFFECT),
-        flags=(DescriptorFlag.SIDE_EFFECTING, DescriptorFlag.BARRIER),
+        flags=(DescriptorFlag.SIDE_EFFECTING,),
     )
 
 
@@ -406,7 +408,7 @@ def _s_barrier_signal_all_overlay() -> AmdgpuDescriptorOverlay:
         operands=(),
         fixed_encoding_fields=(("SSRC0", _predefined("-1", "OPR_SSRC_BARRIER_ID")),),
         effects=(_WORKGROUP_BARRIER_EFFECT, _CONVERGENT_EFFECT),
-        flags=(DescriptorFlag.SIDE_EFFECTING, DescriptorFlag.BARRIER),
+        flags=(DescriptorFlag.SIDE_EFFECTING,),
         asm_forms=_asm(
             mnemonic="s_barrier_signal_all",
             native_assembly_mnemonic="s_barrier_signal",
@@ -425,8 +427,8 @@ def _s_barrier_wait_all_overlay() -> AmdgpuDescriptorOverlay:
         schedule_class=_SCHEDULE_BARRIER,
         operands=(),
         fixed_encoding_fields=(("SIMM16", AmdgpuEncodingFieldAllOnes()),),
-        effects=(_WORKGROUP_BARRIER_EFFECT, _CONVERGENT_EFFECT),
-        flags=(DescriptorFlag.SIDE_EFFECTING, DescriptorFlag.BARRIER),
+        effects=(_EXECUTION_BARRIER_EFFECT, _CONVERGENT_EFFECT),
+        flags=(DescriptorFlag.SIDE_EFFECTING,),
         asm_forms=_asm(
             mnemonic="s_barrier_wait_all",
             native_assembly_mnemonic="s_barrier_wait",
@@ -525,7 +527,7 @@ def _s_prefetch_overlay(
         operands=tuple(operands),
         immediate_fields=("IOFFSET", "SDATA"),
         immediates=(
-            _offset_immediate(24),
+            _signed_offset_immediate(24),
             _PREFETCH_COUNT_IMMEDIATE,
         ),
         effects=(effect,),
@@ -578,16 +580,40 @@ def _gfx12_prefetch_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
     )
 
 
-def _gfx950_cache_control_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+def _cdna_cache_control_overlays(
+    *, isa_generation: int
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
     return (
-        _cache_control_overlay(
-            descriptor_key="amdgpu.buffer_inv",
-            instruction_name="BUFFER_INV",
-            completion_counter=_COUNTER_VMEM_LOAD,
-            mnemonic="buffer_inv",
-            encoding_name="ENC_MUBUF",
-            semantic_tag="memory.cache.invalidate.buffer",
-            cache_fields=(("SC0", 1), ("SC1", 1)),
+        *(
+            (
+                _cache_control_overlay(
+                    descriptor_key=f"amdgpu.{mnemonic}",
+                    instruction_name=mnemonic.upper(),
+                    completion_counter=_COUNTER_VMEM_LOAD,
+                    mnemonic=mnemonic,
+                    encoding_name="ENC_MUBUF",
+                    semantic_tag=semantic_tag,
+                )
+                for mnemonic, semantic_tag in (
+                    ("buffer_invl2", "memory.cache.invalidate.buffer.l2"),
+                    (
+                        "buffer_wbinvl1_vol",
+                        "memory.cache.invalidate.buffer.l1.volatile",
+                    ),
+                )
+            )
+            if isa_generation == 2
+            else (
+                _cache_control_overlay(
+                    descriptor_key="amdgpu.buffer_inv",
+                    instruction_name="BUFFER_INV",
+                    completion_counter=_COUNTER_VMEM_LOAD,
+                    mnemonic="buffer_inv",
+                    encoding_name="ENC_MUBUF",
+                    semantic_tag="memory.cache.invalidate.buffer",
+                    cache_fields=(("SC0", 1), ("SC1", 1)),
+                ),
+            )
         ),
         _cache_control_overlay(
             descriptor_key="amdgpu.buffer_wbl2",
@@ -596,7 +622,7 @@ def _gfx950_cache_control_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
             mnemonic="buffer_wbl2",
             encoding_name="ENC_MUBUF",
             semantic_tag="memory.cache.writeback.buffer.l2",
-            cache_fields=(("SC0", 1), ("SC1", 1)),
+            cache_fields=(("SC0", 1), ("SC1", 1)) if isa_generation >= 3 else (),
         ),
         _cache_control_overlay(
             descriptor_key="amdgpu.s_dcache_inv",
@@ -750,7 +776,7 @@ __all__ = (
     "_gfx11_cache_control_overlays",
     "_gfx12_cache_control_overlays",
     "_gfx12_prefetch_overlays",
-    "_gfx950_cache_control_overlays",
+    "_cdna_cache_control_overlays",
     "_s_barrier_overlay",
     "_s_barrier_signal_all_overlay",
     "_s_barrier_wait_all_overlay",
@@ -759,7 +785,7 @@ __all__ = (
     "_s_mov_b64_shared_base_overlay",
     "_s_prefetch_overlay",
     "_s_sendmsg_overlay",
-    "_s_sendmsg_rtn_b32_overlay",
+    "_s_sendmsg_rtn_overlay",
     "_s_sethalt_overlay",
     "_s_set_inst_prefetch_distance_overlay",
     "_s_set_vgpr_msb_descriptor",

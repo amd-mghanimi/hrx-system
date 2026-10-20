@@ -58,7 +58,7 @@ typedef enum loom_link_plan_dependency_policy_e {
 typedef enum loom_link_plan_live_reason_e {
   // Selected because merge mode includes every linkable INPUT symbol.
   LOOM_LINK_PLAN_LIVE_MERGE = 0,
-  // Selected because the user or exported-root policy named it as a root.
+  // Selected because the user or export policy included it in the root set.
   LOOM_LINK_PLAN_LIVE_ROOT = 1,
   // Selected because another live symbol references it.
   LOOM_LINK_PLAN_LIVE_DEPENDENCY = 2,
@@ -132,9 +132,11 @@ typedef struct loom_link_plan_options_t {
     // Index-wide symbol ordinals in caller-defined stable order.
     const iree_host_size_t* values;
   } root_symbol_ordinals;
-  // Select test-only symbols from INPUT providers as roots in LINK mode.
-  // Test-only symbols from LIBRARY providers remain ordinary dependency
-  // candidates and are not selected merely because their library is present.
+  // Select test-only symbols from INPUT providers as roots in LINK mode. When
+  // test symbols are stripped, their direct non-test callable dependencies
+  // become roots instead. Test-only symbols from LIBRARY providers remain
+  // ordinary dependency candidates and are not selected merely because their
+  // library is present.
   bool include_input_tests;
 } loom_link_plan_options_t;
 
@@ -196,6 +198,14 @@ iree_host_size_t loom_link_plan_symbol_count(const loom_link_plan_t* plan);
 
 // Returns live symbol selection |ordinal|, or NULL if out of range.
 const loom_link_plan_symbol_t* loom_link_plan_symbol_at(
+    const loom_link_plan_t* plan, iree_host_size_t ordinal);
+
+// Returns the index-wide symbol ordinal defining the construction identity of
+// selected symbol |ordinal|, or INVALID_ORDINAL when |ordinal| is out of range.
+// A declaration resolved to a concrete definition shares that definition's
+// identity. Repeated link-once definitions share their canonical indexed
+// representative; every other selected symbol retains its own identity.
+iree_host_size_t loom_link_plan_symbol_identity_ordinal(
     const loom_link_plan_t* plan, iree_host_size_t ordinal);
 
 // Returns the number of explicit structural facet selections in a link plan.

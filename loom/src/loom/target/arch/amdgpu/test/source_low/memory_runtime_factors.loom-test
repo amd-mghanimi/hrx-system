@@ -1,0 +1,216 @@
+// RUN: emit source-low target=amdgpu:gfx1151 output=low
+
+// A varying coordinate consumes a uniform pitch directly in SRC0.
+func.def @varying_coordinate_scalar_pitch(%input: buffer, %coordinates: vector<2xi32>, %pitch_input: index) -> (i32) {
+  %raw_coordinate = vector.extract %coordinates[0] : vector<2xi32> -> i32
+  %coordinate_input = index.cast %raw_coordinate : i32 to index
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 7)] : index
+  %pitch = index.assume %pitch_input [range(%pitch_input, 1, 16)] : index
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %global[%base] : buffer -> view<8x1xi32, %layout>
+  %value = view.load %view[%coordinate, 0] : view<8x1xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @varying_coordinate_scalar_pitch(%coordinates: reg<amdgpu.vgpr x2>, %pitch: reg<amdgpu.sgpr>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %coordinate = slice %coordinates[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %18 = v_mul_lo_u32 %pitch, %coordinate
+  %19 = v_lshlrev_b32_src0_inline %18, 2
+  %value = global_load_b32_saddr %19, %view
+  return %value
+}
+
+// ====
+
+// Uniform coordinates and varying pitches commute the other way.
+func.def @scalar_coordinate_varying_pitch(%input: buffer, %coordinate_input: index, %pitches: vector<2xi32>) -> (i32) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 7)] : index
+  %raw_pitch = vector.extract %pitches[0] : vector<2xi32> -> i32
+  %pitch_input = index.cast %raw_pitch : i32 to index
+  %pitch = index.assume %pitch_input [range(%pitch_input, 1, 16)] : index
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %global[%base] : buffer -> view<8x1xi32, %layout>
+  %value = view.load %view[%coordinate, 0] : view<8x1xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @scalar_coordinate_varying_pitch(%coordinate: reg<amdgpu.sgpr>, %pitches: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %pitch = slice %pitches[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %18 = v_mul_lo_u32 %coordinate, %pitch
+  %19 = v_lshlrev_b32_src0_inline %18, 2
+  %value = global_load_b32_saddr %19, %view
+  return %value
+}
+
+// ====
+
+// Neither factor may be treated as subgroup-uniform merely because the result
+// is a bounded address. Wide carriers contribute their low words in place.
+func.def @varying_wide_factors(%input: buffer, %factors: vector<2xi64>) -> (i32) {
+  %raw_coordinate = vector.extract %factors[0] : vector<2xi64> -> i64
+  %raw_pitch = vector.extract %factors[1] : vector<2xi64> -> i64
+  %bounded_coordinate = scalar.assume %raw_coordinate [range(%raw_coordinate, 0, 7)] : i64
+  %bounded_pitch = scalar.assume %raw_pitch [range(%raw_pitch, 1, 16)] : i64
+  %coordinate = index.cast %bounded_coordinate : i64 to index
+  %pitch = index.cast %bounded_pitch : i64 to index
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %global[%base] : buffer -> view<8x1xi32, %layout>
+  %value = view.load %view[%coordinate, 0] : view<8x1xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @varying_wide_factors(%factors: reg<amdgpu.vgpr x4>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %coordinate = slice %factors[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %pitch = slice %factors[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %21 = v_mul_lo_u32 %coordinate, %pitch
+  %22 = v_lshlrev_b32_src0_inline %21, 2
+  %value = global_load_b32_saddr %22, %view
+  return %value
+}
+
+// ====
+
+// Flat addressing uses the same low-word products when the complete term is
+// bounded, even though the buffer address itself remains full-width.
+func.def @flat_multiple_scalar_factors(%input: buffer, %coordinates: vector<2xi32>, %origins: vector<2xi64>, %rows_input: index, %columns_input: i64) -> (i32) {
+  %raw_coordinate = vector.extract %coordinates[0] : vector<2xi32> -> i32
+  %coordinate_input = index.cast %raw_coordinate : i32 to index
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 7)] : index
+  %rows = index.assume %rows_input [range(%rows_input, 1, 16)] : index
+  %columns_wide = scalar.assume %columns_input [range(%columns_input, 1, 16)] : i64
+  %columns = index.cast %columns_wide : i64 to index
+  %raw_origin = vector.extract %origins[0] : vector<2xi64> -> i64
+  %origin = scalar.assume %raw_origin [range(%raw_origin, 4294967296, 8589934592), multiple_of(%raw_origin, 4)] : i64
+  %base = index.cast %origin : i64 to offset
+  %view = buffer.view %input[%base] : buffer -> view<8x[%rows]x[%columns]xi32>
+  %value = view.load %view[%coordinate, 0, 0] : view<8x[%rows]x[%columns]xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @flat_multiple_scalar_factors(%coordinates: reg<amdgpu.vgpr x2>, %origins: reg<amdgpu.vgpr x4>, %rows: reg<amdgpu.sgpr>, %columns_wide: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %coordinate = slice %coordinates[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %columns = slice %columns_wide[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %46 = slice %origins[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %45 = slice %origins[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %28 = slice %view[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %29 = slice %view[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %30, %31 = v_add_co_u32 %28, %46
+  %32 = v_mov_b32_copy %29
+  %33, %34 = v_add_co_ci_u32 %32, %45, %31
+  %35 = v_mul_lo_u32 %rows, %coordinate
+  %36 = v_mul_lo_u32 %columns, %35
+  %37 = v_lshlrev_b32_src0_inline %36, 2
+  %38 = v_mov_b32 0
+  %39, %40 = v_add_co_u32 %30, %37
+  %41, %42 = v_add_co_ci_u32 %33, %38, %40
+  %43 = concat(%39, %41) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %value = global_load_b32_vaddr %43
+  return %value
+}
+
+// ====
+
+// Shared memory requires a vector address even when all factors are uniform.
+// Only the completed scalar product needs to cross into the vector bank.
+kernel.def @shared_scalar_factors() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%coordinate_input: index, %pitch_input: index, %value: i32) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 7)] : index
+  %pitch = index.assume %pitch_input [range(%pitch_input, 1, 16)] : index
+  %base = index.constant 0 : offset
+  %capacity = index.constant 512 : offset
+  %storage = buffer.alloca<workgroup> align(4) %capacity : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %storage[%base] : buffer -> view<8x1xi32, %layout>
+  view.store %value, %view[%coordinate, 0] : i32, view<8x1xi32, %layout>
+  kernel.return
+}
+
+// ----
+low.kernel.def target<amdgpu.rdna3_5.core> abi_layout({constant_count = 3, direct_arg_count = 3, direct_arg_names = {arg0 = "coordinate_input", arg1 = "pitch_input", arg2 = "value"}, direct_arg_offsets = [0, 4, 8], direct_arg_parameter_indices = [0, 1, 2], direct_arg_sizes = [4, 4, 4], parameter_count = 3, resource_count = 0, resource_offsets = [], resource_parameter_indices = [], uses_kernarg_segment_ptr = true}) workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @shared_scalar_factors(%coordinate: reg<amdgpu.sgpr>, %pitch: reg<amdgpu.sgpr>, %value: reg<amdgpu.sgpr>) asm {
+  %14 = storage {byte_alignment = 4, byte_length = 512} : low.storage<workgroup>
+  %16 = v_mov_b32_copy %value
+  %17 = s_mul_i32 %coordinate, %pitch
+  %18 = v_mov_b32_copy %17
+  %19 = v_lshlrev_b32_src0_inline %18, 2
+  ds_write_b32 %19, %16
+  return
+}
+
+// ====
+
+// A varying predicate is an EXEC-width mask, not a scalar integer factor.
+func.def @varying_predicate_coordinate(%input: buffer, %conditions: vector<2xi32>, %pitch_input: index) -> (i32) {
+  %condition = vector.extract %conditions[0] : vector<2xi32> -> i32
+  %c0 = scalar.constant 0 : i32
+  %predicate = scalar.cmpi ne, %condition, %c0 : i32
+  %coordinate = index.cast %predicate : i1 to index
+  %pitch = index.assume %pitch_input [range(%pitch_input, 1, 16)] : index
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %global[%base] : buffer -> view<2x1xi32, %layout>
+  %value = view.load %view[%coordinate, 0] : view<2x1xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @varying_predicate_coordinate(%conditions: reg<amdgpu.vgpr x2>, %pitch: reg<amdgpu.sgpr>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %condition = slice %conditions[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %predicate = v_cmp_ne_i32_src1_inline %condition {rhs = 0}
+  %20 = v_mov_b32 0
+  %21 = v_mov_b32 1
+  %coordinate = v_cndmask_b32 %20, %21, %predicate
+  %23 = v_mul_lo_u32 %pitch, %coordinate
+  %24 = v_lshlrev_b32_src0_inline %23, 2
+  %value = global_load_b32_saddr %24, %view
+  return %value
+}
+
+// ====
+
+// A uniform predicate remains a scalar zero/one while the pitch varies.
+func.def @scalar_predicate_coordinate(%input: buffer, %condition: i32, %pitches: vector<2xi32>) -> (i32) {
+  %c0 = scalar.constant 0 : i32
+  %predicate = scalar.cmpi ne, %condition, %c0 : i32
+  %coordinate = index.cast %predicate : i1 to index
+  %raw_pitch = vector.extract %pitches[0] : vector<2xi32> -> i32
+  %pitch_input = index.cast %raw_pitch : i32 to index
+  %pitch = index.assume %pitch_input [range(%pitch_input, 1, 16)] : index
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %layout = encoding.layout.strided [%pitch, 1] : encoding<layout>
+  %view = buffer.view %global[%base] : buffer -> view<2x1xi32, %layout>
+  %value = view.load %view[%coordinate, 0] : view<2x1xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @scalar_predicate_coordinate(%condition: reg<amdgpu.sgpr>, %pitches: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr>) asm {
+  %view = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %c0 = s_mov_b32 0
+  %predicate = s_cmp_lg_i32 %condition, %c0
+  %22 = s_mov_b32 1
+  %coordinate = s_cselect_b32 %22, %c0, %predicate
+  %pitch = slice %pitches[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %25 = v_mul_lo_u32 %coordinate, %pitch
+  %26 = v_lshlrev_b32_src0_inline %25, 2
+  %value = global_load_b32_saddr %26, %view
+  return %value
+}

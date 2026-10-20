@@ -13,7 +13,9 @@ loom_check_test_suite(
   NAME
     test
   SRCS
+    "frame_storage.loom-test"
     "ownership_lifetime.loom-test"
+    "ownership_regions.loom-test"
     "test_resource_lifetime.loom-test"
 )
 

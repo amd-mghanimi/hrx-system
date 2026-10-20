@@ -216,6 +216,17 @@ void iree_clang_tidy_style_indirect_release_ignored(
   }
 }
 
+typedef struct iree_clang_tidy_style_lease_t {
+  // Whether the caller-owned storage currently holds a scratch lease.
+  int acquired;
+} iree_clang_tidy_style_lease_t;
+void iree_clang_tidy_style_lease_release(iree_clang_tidy_style_lease_t* lease);
+void iree_clang_tidy_style_guarded_lease(iree_clang_tidy_style_lease_t* lease) {
+  if (lease) {
+    iree_clang_tidy_style_lease_release(lease);
+  }
+}
+
 #define EXPECT_TRUE(expr) ((void)(expr))
 #define ASSERT_TRUE(expr) ((void)(expr))
 #define EXPECT_FALSE(expr) ((void)(expr))

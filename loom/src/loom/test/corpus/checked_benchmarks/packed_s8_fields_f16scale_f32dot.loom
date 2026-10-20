@@ -23,7 +23,7 @@ kernel.def @packed_s8_fields_f16scale_f32dot() {
   %output_view = buffer.view %output_noalias[%base] : buffer -> view<4xf32>
 
   %rhs_base0 = index.mul %lane, %packed_field_count : index
-  %rhs_base = index.assume %rhs_base0 [range(%rhs_base0, 0, 12), mul(%rhs_base0, 4)] : index
+  %rhs_base = index.assume %rhs_base0 [range(%rhs_base0, 0, 12), multiple_of(%rhs_base0, 4)] : index
   %packed = vector.load %field_view[%lane] : view<4xi32> -> vector<1xi32>
   %scale_f16 = view.load %scale_view[%lane] : view<4xf16> -> f16
   %rhs_values = vector.load %rhs_view[%rhs_base] : view<16xf32> -> vector<4xf32>

@@ -14,13 +14,44 @@ from enum import Enum, unique
 from typing import Self
 
 from loom.dsl import ATTR_TYPE_ENUM, ATTR_TYPE_I64, ATTR_TYPE_I64_ARRAY, Op
-from loom.target.contracts.descriptors import _require_immediate
+from loom.target.contracts.descriptors import (
+    _require_immediate,
+    _validate_immediate_literal,
+)
 from loom.target.contracts.kinds import SourceValueKind
-from loom.target.contracts.source import ValueRef, _require_attr, _require_value
-from loom.target.low_descriptors import Descriptor, ImmediateKind
+from loom.target.contracts.source import (
+    ValueRef,
+    _require_attr,
+    _require_operand,
+    _require_value,
+)
+from loom.target.low_descriptors import (
+    Descriptor,
+    DescriptorSet,
+    ImmediateFlag,
+    ImmediateKind,
+)
 
 _I64_MIN = -(2**63)
 _I64_MAX = 2**63 - 1
+
+
+def _require_read_only_data_immediate(
+    source_op: Op,
+    descriptor: Descriptor,
+    bound_immediate_name: str | None,
+    subject: str,
+) -> None:
+    if bound_immediate_name is None:
+        raise ValueError(
+            f"{source_op.name}: {subject} must bind one descriptor immediate"
+        )
+    immediate = _require_immediate(descriptor, bound_immediate_name, subject)
+    if ImmediateFlag.READ_ONLY_DATA not in immediate.flags:
+        raise ValueError(
+            f"{source_op.name}: {subject} descriptor immediate "
+            f"'{bound_immediate_name}' must reference read-only data"
+        )
 
 
 @unique
@@ -29,10 +60,18 @@ class AttrProjectKind(Enum):
 
     DIRECT = "direct"
     ENUM_ORDINAL = "enum_ordinal"
+    ENUM_REMAP = "enum_remap"
     I64_LOG2 = "i64_log2"
     I64_ARRAY_ELEMENT = "i64_array_element"
     I64_ARRAY_ELEMENT_PLUS_LITERAL = "i64_array_element_plus_literal"
+    I64_ARRAY_LITERAL_MINUS_ELEMENT = "i64_array_literal_minus_element"
+    I64_ARRAY_ELEMENT_QUOTIENT = "i64_array_element_quotient"
+    I64_ARRAY_ELEMENT_REMAINDER = "i64_array_element_remainder"
     I64_ARRAY_LANE_BYTE_OFFSET = "i64_array_lane_byte_offset"
+    I64_ARRAY_SHUFFLE_MASK_CHUNK = "i64_array_shuffle_mask_chunk"
+    I64_ARRAY_READ_ONLY_ELEMENTS = "i64_array_read_only_elements"
+    I64_ARRAY_READ_ONLY_BYTE_SEGMENT = "i64_array_read_only_byte_segment"
+    I64_ARRAY_READ_ONLY_BYTE_WORDS = "i64_array_read_only_byte_words"
     I64_ARRAY_PACK_ELEMENTS = "i64_array_pack_elements"
     ATTRS_PACK_CONSECUTIVE = "attrs_pack_consecutive"
     I64_LOW_BIT_MASK = "i64_low_bit_mask"
@@ -42,6 +81,13 @@ class AttrProjectKind(Enum):
     I64_LITERAL_MINUS_ATTRS = "i64_literal_minus_attrs"
     I64_ATTR_MINUS_LITERAL = "i64_attr_minus_literal"
     EXPAND_LANE_I64_ARRAY_TO_BYTE_LANES = "expand_lane_i64_array_to_byte_lanes"
+
+
+@unique
+class OperandSegmentProjectKind(Enum):
+    """Projection from an ordered source operand segment."""
+
+    EXACT_BITS_READ_ONLY = "exact_bits_read_only"
 
 
 @unique
@@ -56,10 +102,15 @@ class ValueProjectKind(Enum):
     U32_DIVISOR_MAGIC_MULTIPLIER = "u32_divisor_magic_multiplier"
     U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32 = "u32_divisor_magic_multiplier_as_i32"
     U32_DIVISOR_MAGIC_SHIFT = "u32_divisor_magic_shift"
+    I32_DIVISOR_MAGIC_MULTIPLIER = "i32_divisor_magic_multiplier"
+    I32_DIVISOR_MAGIC_SHIFT = "i32_divisor_magic_shift"
     I32_AS_U32_BITS = "i32_as_u32_bits"
     FLOAT_BITS = "float_bits"
     FLOAT_AS_F32_I32 = "float_as_f32_i32"
+    FLOAT_AS_F64_I64 = "float_as_f64_i64"
     FLOAT_AS_F64_I32_WORD = "float_as_f64_i32_word"
+    FLOAT_POWER_OF_TWO_EXPONENT = "float_power_of_two_exponent"
+    FLOAT_POWER_OF_TWO_NEGATED_EXPONENT = "float_power_of_two_negated_exponent"
 
 
 @unique
@@ -68,6 +119,7 @@ class ValueTypeProjectKind(Enum):
 
     STATIC_DIM_SCALED = "static_dim_scaled"
     LITERAL_MINUS_STATIC_DIM_SCALED = "literal_minus_static_dim_scaled"
+    STATIC_DIM_LOW_BITS_MASK = "static_dim_low_bits_mask"
 
 
 _I32_WORD_VALUE_PROJECT_KINDS = (
@@ -79,6 +131,13 @@ _SIGNED_I32_VALUE_PROJECT_KINDS = (
     *_I32_WORD_VALUE_PROJECT_KINDS,
     ValueProjectKind.FLOAT_AS_F32_I32,
     ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32,
+)
+
+_SIGNED_I64_VALUE_PROJECT_KINDS = (ValueProjectKind.FLOAT_AS_F64_I64,)
+
+_SIGNED_FLOAT_VALUE_PROJECT_KINDS = (
+    ValueProjectKind.FLOAT_AS_F32_I32,
+    ValueProjectKind.FLOAT_AS_F64_I64,
 )
 
 
@@ -101,11 +160,40 @@ class SourceOpProjectKind(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ReadOnlyDataLiteral:
+    """Immutable literal bytes bound to a read-only-data immediate."""
+
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, bytes):
+            raise TypeError("read-only data literal must use bytes")
+        if not self.data:
+            raise ValueError("read-only data literal must not be empty")
+        if len(self.data) > 255:
+            raise ValueError("read-only data literal must fit in 255 bytes")
+
+    def validate(
+        self,
+        source_op: Op,
+        descriptor: Descriptor,
+        bound_immediate_name: str | None,
+    ) -> None:
+        _require_read_only_data_immediate(
+            source_op,
+            descriptor,
+            bound_immediate_name,
+            "read-only data literal",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AttrProject:
     """Descriptor immediate projection from a source attribute."""
 
     kind: AttrProjectKind
     source_attr: str
+    source_node: str = ""
     other_source_attr: str = ""
     literal_i64: int = 0
     element: int | None = None
@@ -115,6 +203,14 @@ class AttrProject:
     source_lane_count: int | None = None
     bytes_per_lane: int | None = None
     target_names: tuple[str, ...] = ()
+    enum_values: tuple[tuple[str, int], ...] = ()
+
+    def in_source_node(self, source_node: str) -> Self:
+        """Returns this projection scoped to a named descriptor-rule node."""
+
+        if not source_node:
+            raise ValueError("attribute projection source node must be non-empty")
+        return replace(self, source_node=source_node)
 
     @classmethod
     def direct(cls, source_attr: str) -> Self:
@@ -123,6 +219,15 @@ class AttrProject:
     @classmethod
     def enum_ordinal(cls, source_attr: str) -> Self:
         return cls(kind=AttrProjectKind.ENUM_ORDINAL, source_attr=source_attr)
+
+    @classmethod
+    def enum_remap(cls, source_attr: str, values: Mapping[str, int]) -> Self:
+        """Maps source enum cases to compact target immediate values."""
+        return cls(
+            kind=AttrProjectKind.ENUM_REMAP,
+            source_attr=source_attr,
+            enum_values=tuple(sorted(values.items())),
+        )
 
     @classmethod
     def i64_log2(cls, source_attr: str) -> Self:
@@ -160,6 +265,59 @@ class AttrProject:
         )
 
     @classmethod
+    def i64_array_literal_minus_element(
+        cls,
+        source_attr: str,
+        *,
+        element: int,
+        literal: int,
+    ) -> Self:
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+            source_attr=source_attr,
+            element=element,
+            literal_i64=literal,
+        )
+
+    @classmethod
+    def i64_array_element_quotient(
+        cls,
+        source_attr: str,
+        *,
+        element: int,
+        divisor: int,
+        target_bit_offset: int = 0,
+    ) -> Self:
+        if divisor <= 0:
+            raise ValueError("i64-array element quotient divisor must be positive")
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT,
+            source_attr=source_attr,
+            element=element,
+            literal_i64=divisor,
+            target_bit_offset=target_bit_offset,
+        )
+
+    @classmethod
+    def i64_array_element_remainder(
+        cls,
+        source_attr: str,
+        *,
+        element: int,
+        divisor: int,
+        target_bit_offset: int = 0,
+    ) -> Self:
+        if divisor <= 0:
+            raise ValueError("i64-array element remainder divisor must be positive")
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_ELEMENT_REMAINDER,
+            source_attr=source_attr,
+            element=element,
+            literal_i64=divisor,
+            target_bit_offset=target_bit_offset,
+        )
+
+    @classmethod
     def i64_array_lane_byte_offset(
         cls,
         source_attr: str,
@@ -194,6 +352,72 @@ class AttrProject:
             count=count,
             bit_width=bit_width,
             target_bit_offset=target_bit_offset,
+        )
+
+    @classmethod
+    def i64_array_shuffle_mask_chunk(
+        cls,
+        source_attr: str,
+        *,
+        output_byte_offset: int,
+        bytes_per_lane: int,
+        source_byte_offset: int,
+        source_byte_count: int = 16,
+    ) -> Self:
+        """Packs eight PSHUFB selectors for one source byte segment."""
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+            source_attr=source_attr,
+            element=output_byte_offset,
+            bytes_per_lane=bytes_per_lane,
+            literal_i64=source_byte_offset,
+            count=source_byte_count,
+        )
+
+    @classmethod
+    def i64_array_read_only_elements(
+        cls,
+        source_attr: str,
+        *,
+        bit_width: int,
+    ) -> Self:
+        """Encodes every array element as one little-endian integer."""
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+            source_attr=source_attr,
+            bit_width=bit_width,
+        )
+
+    @classmethod
+    def i64_array_read_only_byte_segment(
+        cls,
+        source_attr: str,
+        *,
+        bytes_per_lane: int,
+        source_byte_offset: int,
+        source_byte_count: int = 16,
+    ) -> Self:
+        """Encodes byte selectors relative to one fixed source segment."""
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+            source_attr=source_attr,
+            bytes_per_lane=bytes_per_lane,
+            literal_i64=source_byte_offset,
+            count=source_byte_count,
+        )
+
+    @classmethod
+    def i64_array_read_only_byte_words(
+        cls,
+        source_attr: str,
+        *,
+        byte_parity: int,
+    ) -> Self:
+        """Encodes byte selectors as word indices and 0/8-bit shifts."""
+        return cls(
+            kind=AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
+            source_attr=source_attr,
+            element=byte_parity,
         )
 
     @classmethod
@@ -308,7 +532,12 @@ class AttrProject:
             )
         literal_kinds = (
             AttrProjectKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+            AttrProjectKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+            AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT,
+            AttrProjectKind.I64_ARRAY_ELEMENT_REMAINDER,
             AttrProjectKind.I64_ARRAY_LANE_BYTE_OFFSET,
+            AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+            AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
             AttrProjectKind.I64_LITERAL_MINUS_ATTR,
             AttrProjectKind.I64_LITERAL_MINUS_ATTRS,
             AttrProjectKind.I64_ATTR_MINUS_LITERAL,
@@ -337,7 +566,13 @@ class AttrProject:
             in (
                 AttrProjectKind.I64_LOG2,
                 *mask_kinds,
-                *literal_kinds,
+                AttrProjectKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+                AttrProjectKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+                AttrProjectKind.I64_ARRAY_LANE_BYTE_OFFSET,
+                AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+                AttrProjectKind.I64_LITERAL_MINUS_ATTR,
+                AttrProjectKind.I64_LITERAL_MINUS_ATTRS,
+                AttrProjectKind.I64_ATTR_MINUS_LITERAL,
             )
             and self.target_bit_offset != 0
         ):
@@ -346,24 +581,59 @@ class AttrProject:
             )
         if self.count is not None and self.bit_width is not None:
             packed_bit_count = self.count * self.bit_width
-            if packed_bit_count + self.target_bit_offset > 63:
-                raise ValueError(
-                    f"{self.kind.value} packed bit count must fit in signed i64"
-                )
+            if packed_bit_count + self.target_bit_offset > 64:
+                raise ValueError(f"{self.kind.value} packed bit count must fit in i64")
         if self.source_lane_count is not None and self.source_lane_count < 0:
             raise ValueError(
                 f"{self.kind.value} source lane count must be non-negative"
             )
         if self.bytes_per_lane is not None and self.bytes_per_lane <= 0:
             raise ValueError(f"{self.kind.value} bytes per lane must be positive")
+        if self.kind == AttrProjectKind.ENUM_REMAP:
+            if not self.enum_values:
+                raise ValueError("enum_remap projection requires enum values")
+            keywords = tuple(keyword for keyword, _ in self.enum_values)
+            if len(keywords) != len(set(keywords)):
+                raise ValueError("enum_remap projection repeats an enum keyword")
+            if any(not keyword for keyword in keywords):
+                raise ValueError("enum_remap projection keywords must be non-empty")
+            if any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for _, value in self.enum_values
+            ):
+                raise ValueError("enum_remap projection values must be integers")
+        elif self.enum_values:
+            raise ValueError(f"{self.kind.value} projection must not carry enum values")
+
+    def _referenced_op(
+        self,
+        source_op: Op,
+        source_ops: Mapping[str, Op] | None,
+        subject: str,
+    ) -> Op:
+        if not self.source_node:
+            return source_op
+        referenced_op = (
+            source_ops.get(self.source_node) if source_ops is not None else None
+        )
+        if referenced_op is None:
+            raise ValueError(
+                f"{source_op.name}: {subject} references unknown source node "
+                f"'{self.source_node}'"
+            )
+        return referenced_op
 
     def validate(
         self,
         source_op: Op,
+        descriptor_set: DescriptorSet,
         descriptor: Descriptor,
         bound_immediate_name: str | None,
+        *,
+        source_ops: Mapping[str, Op] | None = None,
     ) -> None:
         subject = f"immediate projection {self.kind.value}"
+        source_op = self._referenced_op(source_op, source_ops, subject)
         attr = _require_attr(source_op, self.source_attr, subject)
         if self.kind == AttrProjectKind.DIRECT:
             if bound_immediate_name is None:
@@ -388,6 +658,15 @@ class AttrProject:
                     f"{source_op.name}: {subject} descriptor immediate "
                     f"'{bound_immediate_name}' must be an enum immediate"
                 )
+            return
+        if self.kind == AttrProjectKind.ENUM_REMAP:
+            self._validate_enum_remap(
+                source_op,
+                descriptor_set,
+                descriptor,
+                bound_immediate_name,
+                subject,
+            )
             return
         if self.kind == AttrProjectKind.ATTRS_PACK_CONSECUTIVE:
             if bound_immediate_name is None:
@@ -452,10 +731,24 @@ class AttrProject:
                 f"{source_op.name}: {subject} source attr '{self.source_attr}' "
                 "must be an i64_array attr"
             )
+        read_only_data_kinds = (
+            AttrProjectKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+            AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+            AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
+        )
+        if self.kind in read_only_data_kinds:
+            self._validate_read_only_data(
+                source_op, descriptor, bound_immediate_name, subject
+            )
+            return
         if self.kind in (
             AttrProjectKind.I64_ARRAY_ELEMENT,
             AttrProjectKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+            AttrProjectKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+            AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT,
+            AttrProjectKind.I64_ARRAY_ELEMENT_REMAINDER,
             AttrProjectKind.I64_ARRAY_LANE_BYTE_OFFSET,
+            AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
         ):
             if bound_immediate_name is None:
                 raise ValueError(
@@ -465,10 +758,31 @@ class AttrProject:
             if self.element is None:
                 raise ValueError(f"{source_op.name}: {subject} needs an element")
             if (
+                self.kind
+                in (
+                    AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT,
+                    AttrProjectKind.I64_ARRAY_ELEMENT_REMAINDER,
+                )
+                and self.literal_i64 <= 0
+            ):
+                raise ValueError(
+                    f"{source_op.name}: {subject} needs a positive divisor"
+                )
+            if (
                 self.kind == AttrProjectKind.I64_ARRAY_LANE_BYTE_OFFSET
                 and self.bytes_per_lane is None
             ):
                 raise ValueError(f"{source_op.name}: {subject} needs bytes_per_lane")
+            if self.kind == AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK:
+                if self.bytes_per_lane is None or self.count is None:
+                    raise ValueError(
+                        f"{source_op.name}: {subject} needs bytes_per_lane/count"
+                    )
+                if self.count > 128:
+                    raise ValueError(
+                        f"{source_op.name}: {subject} source byte count must fit "
+                        "the PSHUFB selector domain"
+                    )
             return
         if self.kind == AttrProjectKind.I64_ARRAY_PACK_ELEMENTS:
             if bound_immediate_name is None:
@@ -499,6 +813,106 @@ class AttrProject:
             )
         for name in self.target_names:
             _require_immediate(descriptor, name, subject)
+
+    def _validate_read_only_data(
+        self,
+        source_op: Op,
+        descriptor: Descriptor,
+        bound_immediate_name: str | None,
+        subject: str,
+    ) -> None:
+        _require_read_only_data_immediate(
+            source_op, descriptor, bound_immediate_name, subject
+        )
+        if self.kind == AttrProjectKind.I64_ARRAY_READ_ONLY_ELEMENTS:
+            if self.bit_width not in (8, 16, 32, 64):
+                raise ValueError(
+                    f"{source_op.name}: {subject} element bit width must be "
+                    "8, 16, 32, or 64"
+                )
+        elif self.kind == AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT:
+            if self.bytes_per_lane is None or self.count is None:
+                raise ValueError(
+                    f"{source_op.name}: {subject} needs bytes_per_lane/count"
+                )
+            if self.literal_i64 < 0:
+                raise ValueError(
+                    f"{source_op.name}: {subject} source byte offset must be "
+                    "non-negative"
+                )
+            if self.count > 128:
+                raise ValueError(
+                    f"{source_op.name}: {subject} source byte count must fit "
+                    "the byte-selector domain"
+                )
+        elif self.element not in (0, 1):
+            raise ValueError(
+                f"{source_op.name}: {subject} byte parity must be zero or one"
+            )
+
+    def _validate_enum_remap(
+        self,
+        source_op: Op,
+        descriptor_set: DescriptorSet,
+        descriptor: Descriptor,
+        bound_immediate_name: str | None,
+        subject: str,
+    ) -> None:
+        if bound_immediate_name is None:
+            raise ValueError(
+                f"{source_op.name}: {subject} must bind one descriptor immediate"
+            )
+        immediate = _require_immediate(descriptor, bound_immediate_name, subject)
+        attr = _require_attr(source_op, self.source_attr, subject)
+        if attr.attr_type != ATTR_TYPE_ENUM or attr.enum_def is None:
+            raise ValueError(
+                f"{source_op.name}: {subject} source attr "
+                f"'{self.source_attr}' must be an enum attr"
+            )
+        if immediate.kind not in (
+            ImmediateKind.UNSIGNED,
+            ImmediateKind.ORDINAL,
+            ImmediateKind.ENUM,
+        ):
+            raise ValueError(
+                f"{source_op.name}: {subject} descriptor immediate "
+                f"'{bound_immediate_name}' must be an unsigned, ordinal, or enum "
+                "immediate"
+            )
+        source_keywords = set(attr.enum_def.keywords)
+        projected_keywords = {keyword for keyword, _ in self.enum_values}
+        if projected_keywords != source_keywords:
+            missing = sorted(source_keywords - projected_keywords)
+            extra = sorted(projected_keywords - source_keywords)
+            details = []
+            if missing:
+                details.append(f"missing {missing}")
+            if extra:
+                details.append(f"unknown {extra}")
+            raise ValueError(
+                f"{source_op.name}: {subject} must map every source enum "
+                f"case ({', '.join(details)})"
+            )
+        for _, value in self.enum_values:
+            _validate_immediate_literal(
+                source_op,
+                descriptor_set,
+                descriptor,
+                immediate,
+                value,
+            )
+        case_span = max(case.value for case in attr.enum_def.cases) + 1
+        bit_width = max(1, max(value for _, value in self.enum_values).bit_length())
+        if bit_width > 32:
+            raise ValueError(
+                f"{source_op.name}: {subject} target values need "
+                f"{bit_width} bits; at most 32 are available"
+            )
+        if case_span * bit_width > 95:
+            raise ValueError(
+                f"{source_op.name}: {subject} packed map needs "
+                f"{case_span * bit_width} bits; at most 95 are available"
+            )
 
     def _validate_i64_attr_projection(
         self,
@@ -533,6 +947,46 @@ class AttrProject:
                 f"{source_op.name}: {subject} source attr "
                 f"'{self.other_source_attr}' must be an i64 attr"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class OperandSegmentProject:
+    """Descriptor immediate projection from an ordered operand segment."""
+
+    kind: OperandSegmentProjectKind
+    source_operand: str
+    bit_width: int
+
+    @classmethod
+    def exact_bits_read_only(cls, source_operand: str, *, bit_width: int) -> Self:
+        """Encodes each exact scalar operand as declared-width little-endian data."""
+        return cls(
+            kind=OperandSegmentProjectKind.EXACT_BITS_READ_ONLY,
+            source_operand=source_operand,
+            bit_width=bit_width,
+        )
+
+    def validate(
+        self,
+        source_op: Op,
+        descriptor: Descriptor,
+        bound_immediate_name: str | None,
+    ) -> None:
+        subject = f"immediate projection {self.kind.value}"
+        operand = _require_operand(source_op, self.source_operand, subject)
+        if not operand.variadic:
+            raise ValueError(
+                f"{source_op.name}: {subject} field '{self.source_operand}' "
+                "must be a variadic operand"
+            )
+        if self.bit_width not in (8, 16, 32, 64):
+            raise ValueError(
+                f"{source_op.name}: {subject} element bit width must be "
+                "8, 16, 32, or 64"
+            )
+        _require_read_only_data_immediate(
+            source_op, descriptor, bound_immediate_name, subject
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +1029,8 @@ class ValueProject:
 
     kind: ValueProjectKind
     source_value: str
+    # Numerator paired with the divisor for reciprocal projections.
+    other_source_value: str = ""
     source_node: str = ""
     target_bit_offset: int = 0
     word_index: int = 0
@@ -635,18 +1091,25 @@ class ValueProject:
 
     @classmethod
     def u32_divisor_magic_multiplier(
-        cls, source_value: str, *, bit_width: int = 32, target_bit_offset: int = 0
+        cls,
+        numerator: str,
+        divisor: str,
+        *,
+        bit_width: int = 32,
+        target_bit_offset: int = 0,
     ) -> Self:
         """Projects a reciprocal for a 32- or 64-bit high-half multiply.
 
-        The 32-bit recipe retains its correction and post-shift. The 64-bit
-        reciprocal is ceil(2^64 / divisor): its high product is the u32
-        quotient, and multiplying its low product by the divisor yields the
-        remainder in the high half.
+        The 32-bit recipe consumes the numerator range and retains its correction
+        and post-shift. The 64-bit reciprocal stays ceil(2^64 / divisor): its high
+        product is the u32 quotient, and multiplying its low product by the
+        divisor yields the remainder in the high half. That direct remainder
+        identity requires the full reciprocal precision even for bounded inputs.
         """
         return cls(
             kind=ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER,
-            source_value=source_value,
+            source_value=divisor,
+            other_source_value=numerator,
             target_bit_offset=target_bit_offset,
             multiplier_bit_width=bit_width,
         )
@@ -654,7 +1117,8 @@ class ValueProject:
     @classmethod
     def u32_divisor_magic_shift(
         cls,
-        source_value: str,
+        numerator: str,
+        divisor: str,
         *,
         product_bit_width: int,
         target_bit_offset: int = 0,
@@ -666,17 +1130,35 @@ class ValueProject:
         """
         return cls(
             kind=ValueProjectKind.U32_DIVISOR_MAGIC_SHIFT,
-            source_value=source_value,
+            source_value=divisor,
+            other_source_value=numerator,
             target_bit_offset=target_bit_offset,
             product_bit_width=product_bit_width,
         )
 
     @classmethod
-    def u32_divisor_magic_multiplier_as_i32(cls, source_value: str) -> Self:
+    def u32_divisor_magic_multiplier_as_i32(cls, numerator: str, divisor: str) -> Self:
         """Projects unsigned reciprocal bits as a signed i32 immediate."""
         return cls(
             kind=ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32,
-            source_value=source_value,
+            source_value=divisor,
+            other_source_value=numerator,
+        )
+
+    @classmethod
+    def i32_divisor_magic_multiplier(cls, divisor: str) -> Self:
+        """Projects signed reciprocal bits as a zero-extended u32 immediate."""
+        return cls(
+            kind=ValueProjectKind.I32_DIVISOR_MAGIC_MULTIPLIER,
+            source_value=divisor,
+        )
+
+    @classmethod
+    def i32_divisor_magic_shift(cls, divisor: str) -> Self:
+        """Projects the arithmetic post-shift for a signed i32 reciprocal."""
+        return cls(
+            kind=ValueProjectKind.I32_DIVISOR_MAGIC_SHIFT,
+            source_value=divisor,
         )
 
     @classmethod
@@ -709,6 +1191,14 @@ class ValueProject:
         )
 
     @classmethod
+    def float_as_f64_i64(cls, source_value: str) -> Self:
+        """Projects exact f64 bits reinterpreted as a signed i64."""
+        return cls(
+            kind=ValueProjectKind.FLOAT_AS_F64_I64,
+            source_value=source_value,
+        )
+
+    @classmethod
     def float_as_f64_i32_word(cls, source_value: str, *, word_index: int) -> Self:
         """Projects one signed i32 word from an exact f64 bit pattern."""
         return cls(
@@ -717,9 +1207,42 @@ class ValueProject:
             word_index=word_index,
         )
 
+    @classmethod
+    def float_power_of_two_exponent(
+        cls, source_value: str, *, target_bit_offset: int = 0
+    ) -> Self:
+        """Projects the mathematical exponent of an exact signed power of two."""
+        return cls(
+            kind=ValueProjectKind.FLOAT_POWER_OF_TWO_EXPONENT,
+            source_value=source_value,
+            target_bit_offset=target_bit_offset,
+        )
+
+    @classmethod
+    def float_power_of_two_negated_exponent(
+        cls, source_value: str, *, target_bit_offset: int = 0
+    ) -> Self:
+        """Projects the negated exponent of an exact signed power of two."""
+        return cls(
+            kind=ValueProjectKind.FLOAT_POWER_OF_TWO_NEGATED_EXPONENT,
+            source_value=source_value,
+            target_bit_offset=target_bit_offset,
+        )
+
     def __post_init__(self) -> None:
         if not self.source_value:
             raise ValueError(f"{self.kind.value} projection requires a source value")
+        if self.kind in (
+            ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER,
+            ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32,
+            ValueProjectKind.U32_DIVISOR_MAGIC_SHIFT,
+        ):
+            if not self.other_source_value:
+                raise ValueError(f"{self.kind.value} projection requires a numerator")
+        elif self.other_source_value:
+            raise ValueError(
+                f"{self.kind.value} projection does not consume a second value"
+            )
         if self.target_bit_offset < 0:
             raise ValueError(
                 f"{self.kind.value} target bit offset must be non-negative"
@@ -733,6 +1256,13 @@ class ValueProject:
                 )
         elif self.word_index != 0:
             raise ValueError(f"{self.kind.value} projection must not name an i32 word")
+        if (
+            self.kind in _SIGNED_FLOAT_VALUE_PROJECT_KINDS
+            and self.target_bit_offset != 0
+        ):
+            raise ValueError(
+                f"{self.kind.value} projection must not use target bit offset"
+            )
         if (
             self.kind == ValueProjectKind.U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32
             and self.target_bit_offset != 0
@@ -775,6 +1305,8 @@ class ValueProject:
                     f"'{self.source_node}'"
                 )
         _require_value(referenced_op, self.source_value, subject)
+        if self.other_source_value:
+            _require_value(referenced_op, self.other_source_value, subject)
         if bound_immediate_name is None:
             raise ValueError(
                 f"{source_op.name}: {subject} must bind one descriptor immediate"
@@ -786,6 +1318,13 @@ class ValueProject:
             raise ValueError(
                 f"{source_op.name}: {subject} descriptor immediate "
                 f"'{bound_immediate_name}' must be a signed 32-bit immediate"
+            )
+        if self.kind in _SIGNED_I64_VALUE_PROJECT_KINDS and (
+            immediate.kind != ImmediateKind.SIGNED or immediate.bit_width != 64
+        ):
+            raise ValueError(
+                f"{source_op.name}: {subject} descriptor immediate "
+                f"'{bound_immediate_name}' must be a signed 64-bit immediate"
             )
 
 
@@ -835,6 +1374,25 @@ class ValueTypeProject:
             scale=scale,
             dimension=dimension,
             literal_i64=literal,
+        )
+
+    @classmethod
+    def static_dim_low_bits_mask(
+        cls,
+        source: ValueRef,
+        *,
+        scale: int = 1,
+        dimension: int = 0,
+        addend: int = 0,
+    ) -> Self:
+        """Projects a low-bit mask whose width comes from a static dimension."""
+
+        return cls(
+            kind=ValueTypeProjectKind.STATIC_DIM_LOW_BITS_MASK,
+            source=source,
+            scale=scale,
+            dimension=dimension,
+            literal_i64=addend,
         )
 
     def __post_init__(self) -> None:
@@ -906,6 +1464,7 @@ class SourceMemoryProject:
 
     @classmethod
     def static_byte_offset(cls) -> Self:
+        """Projects the residual displacement of the selected memory recipe."""
         return cls(kind=SourceMemoryProjectKind.STATIC_BYTE_OFFSET)
 
     @classmethod

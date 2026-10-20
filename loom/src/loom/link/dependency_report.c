@@ -109,6 +109,10 @@ static iree_string_view_t loom_link_dependency_facet_name(
       return IREE_SV("command_contract");
     case LOOM_LINK_SYMBOL_FACET_COMMAND_IMPLEMENTATION:
       return IREE_SV("command_implementation");
+    case LOOM_LINK_SYMBOL_FACET_PIPELINE_CONTRACT:
+      return IREE_SV("pipeline_contract");
+    case LOOM_LINK_SYMBOL_FACET_PIPELINE_IMPLEMENTATION:
+      return IREE_SV("pipeline_implementation");
     case LOOM_LINK_SYMBOL_FACET_INVALID:
       return IREE_SV("contract");
   }
@@ -155,12 +159,11 @@ static iree_string_view_t loom_link_dependency_requirement_name(
 
 static iree_status_t loom_link_dependency_write_symbol_name(
     loom_output_stream_t* stream, iree_string_view_t name) {
-  loom_json_escape_stream_t escape_data;
-  loom_output_stream_t escape_stream;
-  loom_json_escape_stream_init(stream, &escape_data, &escape_stream);
-  IREE_RETURN_IF_ERROR(loom_output_stream_write_cstring(stream, "\"@"));
-  IREE_RETURN_IF_ERROR(loom_output_stream_write(&escape_stream, name));
-  return loom_output_stream_write_char(stream, '"');
+  loom_json_string_writer_t string;
+  IREE_RETURN_IF_ERROR(loom_json_string_begin(stream, &string));
+  IREE_RETURN_IF_ERROR(loom_output_stream_write_char(&string.stream, '@'));
+  IREE_RETURN_IF_ERROR(loom_output_stream_write(&string.stream, name));
+  return loom_json_string_end(&string);
 }
 
 static iree_status_t loom_link_dependency_write_symbol_field(

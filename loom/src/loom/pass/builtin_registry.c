@@ -9,7 +9,6 @@
 #include <stdint.h>
 
 #include "loom/codegen/low/pipeline/pass_environment.h"
-#include "loom/codegen/low/pipeline/pass_requirements.h"
 #include "loom/codegen/low/transforms/allocation.h"
 #include "loom/codegen/low/transforms/cfg_tuple_decomposition.h"
 #include "loom/codegen/low/transforms/cse.h"
@@ -36,14 +35,15 @@
 #include "loom/transforms/cleanup/strip_hints.h"
 #include "loom/transforms/encoding/layout_transport.h"
 #include "loom/transforms/func/locations.h"
-#include "loom/transforms/kernel/kernel_async_legality.h"
 #include "loom/transforms/kernel/kernel_resources.h"
+#include "loom/transforms/kernel/kernel_synchronization_legality.h"
 #include "loom/transforms/kernel/promote_private_fragments.h"
 #include "loom/transforms/kernel/stage_loop_carried_fragments.h"
 #include "loom/transforms/loop/licm.h"
 #include "loom/transforms/loop/loop_fusion.h"
 #include "loom/transforms/math/legalize.h"
 #include "loom/transforms/ownership/ownership_lifetime.h"
+#include "loom/transforms/pipeline/outline.h"
 #include "loom/transforms/scf/scf_pipeline.h"
 #include "loom/transforms/scf/scf_to_cfg.h"
 #include "loom/transforms/scf/scf_unroll.h"
@@ -218,6 +218,12 @@ static const loom_pass_option_enum_value_t kLowTargetLegalizeModeValues[] = {
     {.value = IREE_SVL("final")},
 };
 
+static const loom_pass_option_enum_value_t kLowTargetLegalizeBoundaryValues[] =
+    {
+        {.value = IREE_SVL("logical")},
+        {.value = IREE_SVL("projected")},
+};
+
 static const loom_pass_option_enum_value_t kLowTargetLegalizePolicyValues[] = {
     {.value = IREE_SVL("prefer-native")},
     {.value = IREE_SVL("reference-only")},
@@ -225,6 +231,12 @@ static const loom_pass_option_enum_value_t kLowTargetLegalizePolicyValues[] = {
 };
 
 static const loom_pass_option_schema_t kLowTargetLegalizeOptionSchema[] = {
+    {
+        .name = IREE_SVL("boundaries"),
+        .kind = LOOM_PASS_OPTION_SCHEMA_ENUM,
+        .enum_values = kLowTargetLegalizeBoundaryValues,
+        .enum_value_count = IREE_ARRAYSIZE(kLowTargetLegalizeBoundaryValues),
+    },
     {
         .name = IREE_SVL("max-errors"),
         .kind = LOOM_PASS_OPTION_SCHEMA_UINT32,
@@ -433,9 +445,9 @@ static const loom_pass_descriptor_t kBuiltinPassDescriptors[] = {
         .option_schema_count = IREE_ARRAYSIZE(kInlineCallablesOptionSchema),
     },
     {
-        .key = IREE_SVL("kernel-async-legality"),
-        .info = loom_kernel_async_legality_pass_info,
-        .function_run = loom_kernel_async_legality_run,
+        .key = IREE_SVL("kernel-synchronization-legality"),
+        .info = loom_kernel_synchronization_legality_pass_info,
+        .function_run = loom_kernel_synchronization_legality_run,
     },
     {
         .key = IREE_SVL("legalize-math"),
@@ -512,6 +524,11 @@ static const loom_pass_descriptor_t kBuiltinPassDescriptors[] = {
         .function_run = loom_normalize_kernel_resources_run,
     },
     {
+        .key = IREE_SVL("outline-pipeline-strands"),
+        .info = loom_pipeline_outline_pass_info,
+        .module_run = loom_pipeline_outline_run,
+    },
+    {
         .key = IREE_SVL("ownership-lifetime"),
         .info = loom_ownership_lifetime_pass_info,
         .module_run = loom_ownership_lifetime_run,
@@ -525,6 +542,14 @@ static const loom_pass_descriptor_t kBuiltinPassDescriptors[] = {
         .key = IREE_SVL("project-boundary-representations"),
         .info = loom_project_boundary_representations_pass_info,
         .module_run = loom_project_boundary_representations_run,
+        .requirement_defs = kMutableFunctionVersionRequirements,
+        .requirement_count =
+            IREE_ARRAYSIZE(kMutableFunctionVersionRequirements),
+    },
+    {
+        .key = IREE_SVL("project-loop-boundary-representations"),
+        .info = loom_project_loop_boundary_representations_pass_info,
+        .module_run = loom_project_loop_boundary_representations_run,
         .requirement_defs = kMutableFunctionVersionRequirements,
         .requirement_count =
             IREE_ARRAYSIZE(kMutableFunctionVersionRequirements),
@@ -666,4 +691,15 @@ static const loom_pass_registry_t kBuiltinPassRegistry = {
 
 const loom_pass_registry_t* loom_pass_builtin_registry(void) {
   return &kBuiltinPassRegistry;
+}
+
+iree_status_t loom_pass_registry_storage_initialize_with_builtins(
+    const loom_pass_registry_t* extension_registry,
+    loom_pass_registry_storage_t* out_storage) {
+  const loom_pass_registry_t* registries[] = {
+      loom_pass_builtin_registry(),
+      extension_registry,
+  };
+  return loom_pass_registry_storage_initialize_from_registries(
+      registries, IREE_ARRAYSIZE(registries), out_storage);
 }

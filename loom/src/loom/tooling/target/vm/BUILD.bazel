@@ -13,21 +13,40 @@ package(
     licenses = ["notice"],
 )
 
+_VM_CHECK_VISIBILITY = ["//loom/src/loom/tools/loom-check:__pkg__"]
+
+loom_cc_library(
+    name = "loom_check",
+    srcs = ["check/loom_check.c"],
+    hdrs = ["check/loom_check.h"],
+    deps = [
+        "//loom/src/loom/tools/loom-check:execute",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/vm/bytecode:disassembler",
+    ],
+)
+
+loom_cc_library(
+    name = "check_provider",
+    srcs = ["check/provider.c"],
+    hdrs = ["check/provider.h"],
+    visibility = _VM_CHECK_VISIBILITY,
+    deps = [
+        ":loom_check",
+        "//loom/src/loom/tools/loom-check:provider",
+        "//runtime/src/iree/base",
+    ],
+)
+
 loom_cc_library(
     name = "testbench",
     srcs = ["testbench.c"],
     hdrs = ["testbench.h"],
     deps = [
-        "//loom/src/loom/error:source",
-        "//loom/src/loom/link:linker",
-        "//loom/src/loom/ops:op_defs",
-        "//loom/src/loom/ops/func",
-        "//loom/src/loom/target:provider",
-        "//loom/src/loom/target/arch/vm:module",
-        "//loom/src/loom/target/arch/vm:provider",
-        "//loom/src/loom/tooling/compile:pipeline",
-        "//loom/src/loom/tooling/config",
-        "//loom/src/loom/tooling/testbench:invocation",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/target/vm",
+        "//loom/src/loom/tooling/testbench:compiled_provider",
+        "//loom/src/loom/tooling/testbench/scenario:executor",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/vm",
@@ -65,22 +84,17 @@ loom_cc_test(
     target_compatible_with = loom_config_compatible_with(["//loom/config/target/arch:vm"]),
     deps = [
         ":imports_bytecode",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/target/vm",
         "//loom/src/loom/format:location",
-        "//loom/src/loom/format/bytecode:reader",
         "//loom/src/loom/format/bytecode:writer",
         "//loom/src/loom/ir",
-        "//loom/src/loom/link:linker",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops:op_registry",
         "//loom/src/loom/ops/func",
         "//loom/src/loom/ops/func:location_capture",
         "//loom/src/loom/ops/func:location_capture_test_data",
-        "//loom/src/loom/target:provider",
-        "//loom/src/loom/target/arch/vm:module",
-        "//loom/src/loom/target/arch/vm:provider",
-        "//loom/src/loom/tooling/compile:pipeline",
         "//loom/src/loom/tooling/input",
-        "//loom/src/loom/transforms/cleanup:configured",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/io:stream",
@@ -131,15 +145,10 @@ loom_cc_test(
     deps = [
         ":emission_test_data",
         ":native_references_bytecode",
-        "//loom/src/loom/ir",
-        "//loom/src/loom/ops:op_registry",
-        "//loom/src/loom/ops/func",
-        "//loom/src/loom/target:provider",
-        "//loom/src/loom/target/arch/vm:module",
-        "//loom/src/loom/target/arch/vm:provider",
-        "//loom/src/loom/tooling/compile:pipeline",
-        "//loom/src/loom/tooling/input",
-        "//loom/src/loom/transforms/cleanup:configured",
+        "//loom/binding/c:interop",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/target/vm",
+        "//loom/src/loom/target/emit/vm:module_compiler",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",

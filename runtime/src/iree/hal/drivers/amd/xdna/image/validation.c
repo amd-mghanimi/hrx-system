@@ -43,6 +43,34 @@ static bool iree_hal_amd_xdna_image_range_initialized(
   return covered >= range_end;
 }
 
+// Relocations are admitted in destination/offset order within each table slice.
+// Tests overlap with an interval, or strict intersection with a point when
+// begin == end, using the last relocation starting before end.
+static bool iree_hal_amd_xdna_image_relocation_intersects(
+    const iree_hal_amd_xdna_image_tables_t* tables, uint32_t first,
+    uint32_t count, uint32_t allocation_use, uint64_t begin, uint64_t end) {
+  uint32_t low = 0, high = count;
+  while (low < high) {
+    const uint32_t middle = low + (high - low) / 2;
+    const iree_xdna_elf_relocation_record_t relocation =
+        iree_hal_amd_xdna_image_tables_relocation(tables, first + middle);
+    if (relocation.destination_use < allocation_use ||
+        (relocation.destination_use == allocation_use &&
+         relocation.byte_offset < end)) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  if (!low) {
+    return false;
+  }
+  const iree_xdna_elf_relocation_record_t relocation =
+      iree_hal_amd_xdna_image_tables_relocation(tables, first + low - 1);
+  return relocation.destination_use == allocation_use &&
+         (uint64_t)relocation.byte_offset + 8 > begin;
+}
+
 static iree_status_t iree_hal_amd_xdna_image_validate_allocations(
     const iree_hal_amd_xdna_image_tables_t* tables,
     const iree_hal_amd_xdna_image_directory_t* directory) {
@@ -161,6 +189,17 @@ static iree_status_t iree_hal_amd_xdna_image_validate_entry(
     const iree_xdna_elf_binding_record_t binding =
         iree_hal_amd_xdna_image_tables_binding(tables,
                                                entry->first_binding + i);
+    if (binding.kind == IREE_XDNA_ELF_BINDING_KIND_NONE) {
+      if (binding.address_space != IREE_XDNA_ELF_BINDING_ADDRESS_SPACE_NONE ||
+          binding.access != 0 || binding.usage != 0 ||
+          binding.minimum_byte_length != 0 || binding.minimum_alignment != 0 ||
+          binding.minimum_byte_offset != 0 ||
+          binding.maximum_byte_offset != 0) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "invalid unused XDNA binding %u", i);
+      }
+      continue;
+    }
     if (binding.kind != IREE_XDNA_ELF_BINDING_KIND_BUFFER ||
         (binding.address_space != IREE_XDNA_ELF_BINDING_ADDRESS_SPACE_GLOBAL &&
          binding.address_space != IREE_XDNA_ELF_BINDING_ADDRESS_SPACE_HOST) ||
@@ -196,6 +235,15 @@ static iree_status_t iree_hal_amd_xdna_image_validate_entry(
     const iree_xdna_elf_relocation_record_t dynamic_relocation =
         iree_hal_amd_xdna_image_tables_relocation(
             tables, entry->first_dynamic_relocation + i);
+    const iree_xdna_elf_binding_record_t source_binding =
+        iree_hal_amd_xdna_image_tables_binding(
+            tables, entry->first_binding + dynamic_relocation.source_ordinal);
+    if (source_binding.kind == IREE_XDNA_ELF_BINDING_KIND_NONE) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "XDNA dynamic relocation sources unused binding %u",
+          dynamic_relocation.source_ordinal);
+    }
     const iree_xdna_elf_allocation_record_t destination =
         iree_hal_amd_xdna_image_entry_allocation(
             tables, entry, dynamic_relocation.destination_use);
@@ -238,6 +286,42 @@ static iree_status_t iree_hal_amd_xdna_image_validate_entry(
         invocation.byte_offset % target->instruction_alignment != 0) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                               "invalid XDNA invocation %u", i);
+    }
+    if (invocation.measurement.begin || invocation.measurement.end) {
+      if (invocation.measurement.begin < 16 ||
+          invocation.measurement.begin % 4 != 0 ||
+          invocation.measurement.end % 4 != 0 ||
+          invocation.measurement.end < invocation.measurement.begin ||
+          invocation.measurement.end > invocation.byte_length ||
+          invocation.byte_length > UINT32_MAX - 24) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "invalid XDNA measurement interval %u", i);
+      }
+      // The header and all insertion/copy boundaries must remain indivisible.
+      const uint64_t boundaries[] = {
+          (uint64_t)invocation.byte_offset + invocation.measurement.begin,
+          (uint64_t)invocation.byte_offset + invocation.measurement.end,
+          (uint64_t)invocation.byte_offset + invocation.byte_length,
+      };
+      const uint32_t first[] = {entry->first_static_relocation,
+                                entry->first_dynamic_relocation};
+      const uint32_t count[] = {entry->static_relocation_count,
+                                entry->dynamic_relocation_count};
+      for (uint32_t table = 0; table < 2; ++table) {
+        bool intersects = iree_hal_amd_xdna_image_relocation_intersects(
+            tables, first[table], count[table], invocation.allocation_use,
+            invocation.byte_offset, (uint64_t)invocation.byte_offset + 16);
+        for (uint32_t j = 0; j < IREE_ARRAYSIZE(boundaries); ++j) {
+          intersects |= iree_hal_amd_xdna_image_relocation_intersects(
+              tables, first[table], count[table], invocation.allocation_use,
+              boundaries[j], boundaries[j]);
+        }
+        if (intersects) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "XDNA measurement header or boundary intersects a relocation");
+        }
+      }
     }
     const iree_xdna_elf_allocation_record_t allocation =
         iree_hal_amd_xdna_image_entry_allocation(tables, entry,

@@ -52,17 +52,21 @@ class LowLowerFunctionBoundaryTest : public ::testing::Test {
     mapping_context_.options = &options_;
     mapping_context_.policy = &policy_;
     mapping_context_.result = &result_;
-    mapping_context_.lowering.fact_table = &fact_table_;
+    mapping_context_.fact_table = &fact_table_;
     IREE_ASSERT_OK(loom_target_low_descriptor_set_select_for_source_lowering(
         options_.descriptor_registry, loom_target_facts_bundle(&target_facts_),
         &mapping_context_.descriptor_set));
-    iree_arena_initialize(&block_pool_, &mapping_context_.function_arena);
+    mapping_context_.function_arena = &function_arena_;
+    mapping_context_.lowering = &frame_;
+    iree_arena_initialize(&block_pool_, &function_arena_);
+    iree_arena_initialize(&block_pool_, &mapping_context_.analysis_arena);
     iree_arena_initialize(&block_pool_, &mapping_context_.emission_arena);
   }
 
   void TearDown() override {
     iree_arena_deinitialize(&mapping_context_.emission_arena);
-    iree_arena_deinitialize(&mapping_context_.function_arena);
+    iree_arena_deinitialize(&mapping_context_.analysis_arena);
+    iree_arena_deinitialize(&function_arena_);
     loom_low_lower_result_deinitialize(&result_);
     loom_module_free(module_);
     loom_context_deinitialize(&context_);
@@ -134,6 +138,10 @@ class LowLowerFunctionBoundaryTest : public ::testing::Test {
   loom_low_lower_policy_t policy_ = {};
   loom_low_lower_options_t options_ = {};
   loom_low_lower_result_t result_ = {};
+  // Stable storage for retained function decisions.
+  iree_arena_allocator_t function_arena_;
+  // Prepared signature and value bindings shared by the mapping context.
+  loom_low_lowering_frame_t frame_ = {};
   loom_low_lower_context_t mapping_context_ = {};
 };
 
@@ -147,8 +155,9 @@ TEST_F(LowLowerFunctionBoundaryTest,
   const loom_type_t argument_types[] = {loom_type_buffer(), i32_type};
   loom_op_t* source_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0,
-      /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+      &module_builder, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+      /*retain=*/0,
+      /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
       loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
       LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol,
       argument_types, IREE_ARRAYSIZE(argument_types), &i32_type, 1, nullptr, 0,
@@ -176,10 +185,10 @@ TEST_F(LowLowerFunctionBoundaryTest,
 
   ComputeFacts(source_function);
   mapping_context_.source_function = source_function;
-  loom_low_lower_abi_argument_t resource_argument = {};
-  resource_argument.resource_build_flags =
-      LOOM_LOW_RESOURCE_BUILD_FLAG_HAS_EXTENT;
-  resource_argument.resource_extent = 64;
+  loom_low_lower_abi_argument_t resource_argument = {
+      .resource_build_flags = LOOM_LOW_RESOURCE_BUILD_FLAG_HAS_EXTENT,
+      .resource_extent = 64,
+  };
   IREE_ASSERT_OK(loom_low_lower_query_argument(
       &mapping_context_, 0, source_arguments[0], &resource_argument));
   EXPECT_EQ(resource_argument.kind, LOOM_LOW_LOWER_ABI_ARGUMENT_RESOURCE);
@@ -280,7 +289,7 @@ TEST_F(LowLowerFunctionBoundaryTest,
       LOOM_FUNC_DECL_BUILD_FLAG_HAS_IMPORT_MODULE |
           LOOM_FUNC_DECL_BUILD_FLAG_HAS_IMPORT_SYMBOL,
       /*visibility=*/0, /*retain=*/0, import_module, import_symbol,
-      /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+      /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
       loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
       LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol, &i32_type,
       1, &i32_type, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
@@ -295,8 +304,20 @@ TEST_F(LowLowerFunctionBoundaryTest,
   SetValueName(loom_op_const_results(source_op)[0], IREE_SV("output"));
   SetArgumentPredicate(source_declaration, source_arguments[0]);
 
-  IREE_ASSERT_OK(loom_low_lower_declaration(module_, source_declaration,
-                                            &options_, &result_));
+  const iree_host_size_t value_count = module_->values.count;
+  const loom_low_lower_declaration_plan_t* plan = nullptr;
+  IREE_ASSERT_OK(loom_low_lower_plan_declaration(module_, source_declaration,
+                                                 &options_, &analysis_arena_,
+                                                 &result_, &plan));
+  ASSERT_EQ(result_.error_count, 0u);
+  ASSERT_NE(plan, nullptr);
+  EXPECT_EQ(result_.low_func_op, nullptr);
+  EXPECT_EQ(module_->values.count, value_count);
+  EXPECT_EQ(module_->symbols.entries[symbol.symbol_id].defining_op, source_op);
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module_, source_arguments[0]), i32_type));
+
+  IREE_ASSERT_OK(loom_low_lower_emit_declaration(module_, plan, &result_));
   ASSERT_EQ(result_.error_count, 0u);
   ASSERT_NE(result_.descriptor_set, nullptr);
   ASSERT_NE(result_.low_func_op, nullptr);
@@ -357,7 +378,7 @@ TEST_F(LowLowerFunctionBoundaryTest,
 class LowLowerResultMappingTest : public LowLowerFunctionBoundaryTest,
                                   public ::testing::WithParamInterface<bool> {};
 
-TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedResultTypes) {
+TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedBoundary) {
   const uint16_t result_count = GetParam() ? 2 : 0;
   const loom_type_t argument_types[] = {
       loom_type_scalar(LOOM_SCALAR_TYPE_I32),
@@ -370,8 +391,9 @@ TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedResultTypes) {
                           &builder);
   loom_op_t* source_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &builder, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-      /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+      &builder, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+      /*retain=*/0, /*cc=*/0,
+      /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
       loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
       LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol,
       argument_types, IREE_ARRAYSIZE(argument_types), result_types,
@@ -389,10 +411,12 @@ TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedResultTypes) {
   ComputeFacts(mapping_context_.source_function);
 
   struct ResultQueryState {
+    // Exit whose representation queries are counted.
     const loom_op_t* exit_op;
+    // Number of result-carrier queries made by boundary planning.
     uint32_t query_count;
   } result_query_state = {
-      /*.exit_op=*/return_op,
+      .exit_op = return_op,
   };
   policy_.map_value = {
       +[](void* user_data, loom_low_lower_context_t* context,
@@ -416,7 +440,50 @@ TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedResultTypes) {
   IREE_ASSERT_OK(loom_low_lower_function_boundary_finalize(&mapping_context_));
   ASSERT_EQ(result_.error_count, 0u);
   EXPECT_EQ(result_query_state.query_count, result_count);
-  EXPECT_EQ(mapping_context_.lowering.result_types != nullptr, GetParam());
+  EXPECT_EQ(mapping_context_.lowering->boundary.result_types != nullptr,
+            GetParam());
+
+  struct LayoutQueryState {
+    // Dictionary key identifying the target's retained layout.
+    loom_string_id_t key;
+    // Number of calls made to the target layout planner.
+    uint32_t query_count;
+  } layout_query_state = {InternString(IREE_SV("layout")), 0};
+  policy_.map_abi_layout = {
+      +[](void* user_data, loom_low_lower_context_t* context,
+          loom_low_lower_abi_layout_kind_t kind, const loom_type_t* arguments,
+          iree_host_size_t argument_count, const loom_type_t* results,
+          iree_host_size_t result_count, iree_arena_allocator_t* scratch_arena,
+          loom_named_attr_slice_t* out_layout) -> iree_status_t {
+        auto* state = static_cast<LayoutQueryState*>(user_data);
+        ++state->query_count;
+        EXPECT_EQ(kind, LOOM_LOW_LOWER_ABI_LAYOUT_KIND_FUNC);
+        EXPECT_EQ(context->low_func_op, nullptr);
+        EXPECT_EQ(argument_count, 2u);
+        EXPECT_TRUE(loom_low_type_is_register(arguments[0]));
+        EXPECT_TRUE(loom_low_type_is_register(arguments[1]));
+        for (iree_host_size_t i = 0; i < result_count; ++i) {
+          EXPECT_TRUE(loom_low_type_is_register(results[i]));
+        }
+        loom_named_attr_t* entry = nullptr;
+        IREE_RETURN_IF_ERROR(iree_arena_allocate(
+            scratch_arena, sizeof(*entry), reinterpret_cast<void**>(&entry)));
+        *entry = {};
+        entry->name_id = state->key;
+        entry->value = loom_attr_i64(32);
+        *out_layout = loom_make_named_attr_slice(entry, 1);
+        return iree_ok_status();
+      },
+      &layout_query_state,
+  };
+  iree_arena_allocator_t scratch_arena;
+  iree_arena_initialize(&block_pool_, &scratch_arena);
+  IREE_ASSERT_OK(
+      loom_low_lower_function_boundary_plan(&mapping_context_, &scratch_arena));
+  iree_arena_deinitialize(&scratch_arena);
+  EXPECT_EQ(layout_query_state.query_count, 1u);
+  EXPECT_EQ(module_->symbols.entries[symbol.symbol_id].defining_op, source_op);
+  EXPECT_EQ(result_.low_func_op, nullptr);
 
   loom_low_lower_emission_scope_begin(&mapping_context_);
   IREE_ASSERT_OK(
@@ -424,10 +491,16 @@ TEST_P(LowLowerResultMappingTest, DefinitionConsumesPreparedResultTypes) {
   loom_low_lower_emission_scope_end(&mapping_context_);
   ASSERT_EQ(result_.error_count, 0u);
   EXPECT_EQ(result_query_state.query_count, result_count);
+  EXPECT_EQ(layout_query_state.query_count, 1u);
+  const loom_named_attr_slice_t layout =
+      loom_low_func_def_abi_layout(result_.low_func_op);
+  ASSERT_EQ(layout.count, 1u);
+  EXPECT_EQ(layout.entries[0].name_id, layout_query_state.key);
+  EXPECT_EQ(loom_attr_as_i64(layout.entries[0].value), 32);
   ASSERT_EQ(result_.low_func_op->result_count, result_count);
   for (uint16_t i = 0; i < result_count; ++i) {
     EXPECT_TRUE(loom_type_equal(
-        mapping_context_.lowering.result_types[i],
+        mapping_context_.lowering->boundary.result_types[i],
         loom_module_value_type(module_,
                                loom_op_const_results(result_.low_func_op)[i])));
   }
@@ -452,8 +525,9 @@ TEST_P(LowLowerArgumentQueryTest, OnlyRequiredArgumentsEmitDiagnostics) {
   };
   loom_op_t* source_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &builder, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-      /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+      &builder, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+      /*retain=*/0, /*cc=*/0,
+      /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
       loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
       LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(),
       AddSymbol(IREE_SV("arguments")), argument_types,
@@ -483,14 +557,15 @@ TEST_P(LowLowerArgumentQueryTest, OnlyRequiredArgumentsEmitDiagnostics) {
                                                arguments[1], &absent_argument));
   EXPECT_EQ(loom_type_kind(absent_argument.abi_type), LOOM_TYPE_NONE);
   EXPECT_EQ(result_.error_count, 0u);
-  EXPECT_EQ(mapping_context_.lowering.argument_map, nullptr);
+  EXPECT_EQ(mapping_context_.lowering->boundary.argument_map, nullptr);
 
   IREE_ASSERT_OK(loom_low_lower_function_boundary_validate(&mapping_context_));
   EXPECT_EQ(result_.error_count, 1u);
-  EXPECT_TRUE(
-      loom_type_equal(native_argument.abi_type,
-                      mapping_context_.lowering.argument_map[0].abi_type));
-  EXPECT_EQ(loom_type_kind(mapping_context_.lowering.argument_map[1].abi_type),
+  EXPECT_TRUE(loom_type_equal(
+      native_argument.abi_type,
+      mapping_context_.lowering->boundary.argument_map[0].abi_type));
+  EXPECT_EQ(loom_type_kind(
+                mapping_context_.lowering->boundary.argument_map[1].abi_type),
             LOOM_TYPE_NONE);
 }
 

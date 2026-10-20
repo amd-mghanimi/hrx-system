@@ -14,8 +14,9 @@ static_assert(sizeof(loom_condition_relation_matrix_row_t) == 16,
               "sparse condition-relation rows must remain 16 bytes");
 static_assert(sizeof(loom_condition_relation_matrix_range_t) == 20,
               "condition-relation ranges must remain 20 bytes");
-static_assert(sizeof(loom_condition_relation_matrix_view_t) == 16,
-              "condition-relation views must remain 16 bytes");
+static_assert(sizeof(loom_condition_relation_matrix_view_t) ==
+                  (IREE_PTR_SIZE == 8 ? 16 : 12),
+              "condition-relation views must remain compact");
 
 static bool loom_condition_relation_matrix_row_less(
     const loom_condition_relation_matrix_row_t* left,
@@ -54,9 +55,9 @@ void loom_condition_relation_matrix_builder_reset(
 
 iree_status_t loom_condition_relation_matrix_builder_add(
     loom_condition_relation_matrix_builder_t* builder,
-    loom_condition_relation_outcome_t outcome, uint32_t left,
+    loom_integer_order_outcome_t outcome, uint32_t left,
     loom_condition_relation_set_id_t excluded) {
-  IREE_ASSERT_LT(outcome, LOOM_CONDITION_RELATION_OUTCOME_COUNT);
+  IREE_ASSERT_LT(outcome, LOOM_INTEGER_ORDER_OUTCOME_COUNT);
   if (excluded == LOOM_CONDITION_RELATION_SET_EMPTY) {
     return iree_ok_status();
   }
@@ -111,8 +112,8 @@ iree_status_t loom_condition_relation_matrix_builder_build(
     }
     loom_condition_relation_matrix_row_t* destination =
         &builder->rows[row_count - 1];
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       if (source.excluded[outcome] == LOOM_CONDITION_RELATION_SET_EMPTY) {
         continue;
       }
@@ -189,9 +190,9 @@ loom_condition_relation_matrix_find_const(
 
 bool loom_condition_relation_matrix_set(
     loom_condition_relation_matrix_t* matrix,
-    loom_condition_relation_outcome_t outcome, uint32_t left,
+    loom_integer_order_outcome_t outcome, uint32_t left,
     loom_condition_relation_set_id_t excluded) {
-  IREE_ASSERT_LT(outcome, LOOM_CONDITION_RELATION_OUTCOME_COUNT);
+  IREE_ASSERT_LT(outcome, LOOM_INTEGER_ORDER_OUTCOME_COUNT);
   loom_condition_relation_matrix_row_t* row =
       loom_condition_relation_matrix_find(matrix, left);
   IREE_ASSERT(row);
@@ -217,8 +218,8 @@ iree_status_t loom_condition_relation_matrix_intersect_into(
                 other->rows[other_position].left == destination_row->left
             ? &other->rows[other_position]
             : NULL;
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       const loom_condition_relation_set_id_t other_excluded =
           other_row ? other_row->excluded[outcome]
                     : LOOM_CONDITION_RELATION_SET_EMPTY;

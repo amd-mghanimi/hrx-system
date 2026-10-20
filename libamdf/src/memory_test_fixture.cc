@@ -76,6 +76,9 @@ static amdf_status_t FakeMemoryDestroyNative(amdf_memory_t* base_memory,
   auto* memory =
       static_cast<FakeMemory*>(base_memory->accesses[access_ordinal].native);
   ++memory->device->destroy_call_count;
+  if (memory->device->observe_release != nullptr) {
+    memory->device->observe_release(memory->device);
+  }
   if (memory->device->release_order != nullptr) {
     memory->device->release_order->push_back(
         memory->device->backing_id.words[0]);
@@ -334,45 +337,49 @@ void InitializeFakeDevice(uint64_t identity, amdf_instance_t* instance,
 }
 
 amdf_memory_create_info_t MakeMemoryCreateInfo(FakeDevice& device) {
-  amdf_memory_create_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO;
-  info.structure_size = sizeof(info);
-  info.memory_profile_ordinal = 0;
-  info.access_count = 1;
-  info.accesses = &device.request;
-  info.required_flags =
-      AMDF_MEMORY_FLAG_HOST_VISIBLE | AMDF_MEMORY_FLAG_SHAREABLE;
-  info.byte_length = 4096;
-  info.minimum_alignment = 4096;
+  amdf_memory_create_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+      .structure_size = sizeof(info),
+      .memory_profile_ordinal = 0,
+      .access_count = 1,
+      .required_flags =
+          AMDF_MEMORY_FLAG_HOST_VISIBLE | AMDF_MEMORY_FLAG_SHAREABLE,
+      .byte_length = 4096,
+      .minimum_alignment = 4096,
+      .accesses = &device.request,
+  };
   return info;
 }
 
 amdf_memory_import_info_t MakeMemoryImportInfo(FakeDevice& device) {
-  amdf_memory_import_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_MEMORY_IMPORT_INFO;
-  info.structure_size = sizeof(info);
-  info.memory_profile_ordinal = 2;
-  info.access_count = 1;
-  info.accesses = &device.request;
-  info.required_flags = AMDF_MEMORY_FLAG_HOST_VISIBLE;
-  info.minimum_alignment = 4096;
+  amdf_memory_import_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_IMPORT_INFO,
+      .structure_size = sizeof(info),
+      .memory_profile_ordinal = 2,
+      .access_count = 1,
+      .required_flags = AMDF_MEMORY_FLAG_HOST_VISIBLE,
+      .minimum_alignment = 4096,
+      .accesses = &device.request,
+  };
   return info;
 }
 
 amdf_memory_export_info_t MakeMemoryExportInfo() {
-  amdf_memory_export_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_MEMORY_EXPORT_INFO;
-  info.structure_size = sizeof(info);
-  info.external_memory_type = AMDF_EXTERNAL_MEMORY_TYPE_DMA_BUF_FD;
-  info.byte_length = 4096;
+  amdf_memory_export_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_EXPORT_INFO,
+      .structure_size = sizeof(info),
+      .external_memory_type = AMDF_EXTERNAL_MEMORY_TYPE_DMA_BUF_FD,
+      .byte_length = 4096,
+  };
   return info;
 }
 
 amdf_memory_site_t MakeMemorySite(amdf_memory_t* memory,
                                   uint32_t queue_family_ordinal) {
-  amdf_memory_site_t site = {};
-  site.type = AMDF_STRUCTURE_TYPE_MEMORY_SITE;
-  site.structure_size = sizeof(site);
+  amdf_memory_site_t site = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_SITE,
+      .structure_size = sizeof(site),
+  };
   site.value.device.memory = memory;
   site.value.device.queue_family_ordinal = queue_family_ordinal;
   return site;

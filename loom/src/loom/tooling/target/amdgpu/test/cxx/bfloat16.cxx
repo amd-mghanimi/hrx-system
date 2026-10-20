@@ -26,13 +26,13 @@ struct Packet {
 
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void scale_bfloat_vectors(const BFloat4* input, BFloat4* output) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   output[lane + 1] = scale(Packet{input[lane + 1], -2.0bf16});
 }
 
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void convert_bfloat(const float* input, bfloat16_t* output, float* expanded) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   bfloat16_t value = input[lane];
   output[lane] = value;
   expanded[lane] = value;
@@ -41,7 +41,7 @@ void convert_bfloat(const float* input, bfloat16_t* output, float* expanded) {
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void convert_formats(const float16_t* input_half, bfloat16_t* output_bfloat,
                      const bfloat16_t* input_bfloat, float16_t* output_half) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   output_bfloat[lane] = (bfloat16_t)input_half[lane];
   output_half[lane] = (float16_t)input_bfloat[lane];
 }

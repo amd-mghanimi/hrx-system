@@ -10,7 +10,6 @@
 #include <string.h>
 
 #include "iree/hal/drivers/vulkan/buffer.h"
-#include "iree/hal/drivers/vulkan/sparse_buffer.h"
 #include "iree/hal/drivers/vulkan/syms.h"
 
 #if !defined(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)
@@ -332,11 +331,6 @@ IREE_API_EXPORT iree_status_t iree_hal_vulkan_allocated_buffer_handle(
     iree_hal_buffer_t* allocated_buffer, VkDeviceMemory* out_memory,
     VkBuffer* out_handle) {
   IREE_ASSERT_ARGUMENT(allocated_buffer);
-  if (iree_hal_vulkan_buffer_isa(
-          iree_hal_buffer_allocated_buffer(allocated_buffer))) {
-    return iree_hal_vulkan_buffer_handle(allocated_buffer, out_memory,
-                                         out_handle);
-  }
-  return iree_hal_vulkan_sparse_buffer_handle(allocated_buffer, out_memory,
-                                              out_handle);
+  return iree_hal_vulkan_buffer_handle(allocated_buffer, out_memory,
+                                       out_handle);
 }

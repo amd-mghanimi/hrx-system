@@ -11,6 +11,7 @@
 #include "loom/analysis/ownership_lifetime.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/test/ops.h"
+#include "loom/pass/options.h"
 #include "loom/pass/report.h"
 #include "loom/pass/value_facts.h"
 
@@ -145,6 +146,7 @@ static iree_status_t loom_test_noop_run(loom_pass_t* pass,
       trace, pass, IREE_SV("test.noop"),
       loom_test_pass_function_name(module, function)));
   if (trace) {
+    trace->events[trace->event_count - 1].function = function;
     ++trace->noop_invocation_count;
   }
   loom_test_invocation_statistics_t* statistics =
@@ -271,7 +273,7 @@ static iree_status_t loom_test_resource_lifetime_build_release(
 
 static iree_status_t loom_test_resource_lifetime_run(loom_pass_t* pass,
                                                      loom_module_t* module) {
-  const loom_ownership_lifetime_materialization_policy_t policy = {
+  const loom_ownership_lifetime_policy_t policy = {
       .family =
           {
               .name = IREE_SVL("test.resource"),
@@ -279,7 +281,7 @@ static iree_status_t loom_test_resource_lifetime_run(loom_pass_t* pass,
           },
       .build_release = loom_test_resource_lifetime_build_release,
   };
-  loom_ownership_lifetime_materialize_options_t options = {
+  loom_ownership_lifetime_options_t options = {
       .arena = pass->arena,
       .emitter = pass->diagnostic_emitter,
       .phase_name = pass->info->name,

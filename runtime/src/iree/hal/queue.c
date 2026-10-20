@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "iree/hal/buffer.h"
+#include "iree/hal/buffer_allocation.h"
 #include "iree/hal/command_buffer.h"
 #include "iree/hal/detail.h"
 #include "iree/hal/device.h"
@@ -17,6 +18,7 @@
 #include "iree/hal/file.h"
 #include "iree/hal/pool.h"
 #include "iree/hal/semaphore.h"
+#include "iree/hal/virtual_buffer.h"
 
 #define _VTABLE_DISPATCH(queue, method_name) \
   IREE_HAL_VTABLE_DISPATCH(queue, iree_hal_queue, method_name)
@@ -59,6 +61,8 @@ IREE_API_EXPORT void iree_hal_queue_family_initialize(
   out_queue_family->device = device;
   out_queue_family->ordinal = ordinal;
   out_queue_family->spec = spec;
+  out_queue_family->memory.domain = NULL;
+  out_queue_family->memory.queue_scope_id = UINT32_MAX;
 }
 
 //===----------------------------------------------------------------------===//
@@ -292,16 +296,73 @@ static iree_status_t iree_hal_queue_validate_family_access(
   return iree_ok_status();
 }
 
+static iree_status_t iree_hal_queue_validate_barrier_list(
+    const iree_hal_queue_t* queue, const iree_hal_barrier_list_t* barriers) {
+  if (!barriers) {
+    return iree_ok_status();
+  }
+  if (IREE_UNLIKELY(barriers->count && !barriers->values)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "queue barrier list storage is null");
+  }
+  for (iree_host_size_t i = 0; i < barriers->count; ++i) {
+    const iree_hal_barrier_t* barrier = &barriers->values[i];
+    IREE_RETURN_IF_ERROR(
+        iree_hal_barrier_validate(barrier, iree_hal_queue_family(queue)));
+    for (iree_host_size_t j = 0; j < barrier->buffer_barrier_count; ++j) {
+      const iree_hal_buffer_ref_t ref = barrier->buffer_barriers[j].buffer_ref;
+      if (IREE_UNLIKELY(!ref.buffer)) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "queue barriers require direct buffer references");
+      }
+      IREE_RETURN_IF_ERROR(
+          iree_hal_buffer_validate_range(ref.buffer, ref.offset, ref.length));
+      IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_family_usage(
+          ref.buffer, iree_hal_queue_family(queue),
+          IREE_HAL_BUFFER_USAGE_NONE));
+      const iree_hal_memory_transition_recipe_t* recipe =
+          barrier->buffer_barriers[j].recipe;
+      const uint32_t effects = recipe ? recipe->effects.bits : 0;
+      const iree_hal_memory_access_t access =
+          ((effects & IREE_HAL_MEMORY_EFFECT_HOST_FLUSH)
+               ? IREE_HAL_MEMORY_ACCESS_WRITE
+               : 0) |
+          ((effects & IREE_HAL_MEMORY_EFFECT_HOST_INVALIDATE)
+               ? IREE_HAL_MEMORY_ACCESS_READ
+               : 0);
+      if (access) {
+        IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_access(
+            iree_hal_buffer_allowed_access(ref.buffer), access));
+      }
+    }
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t iree_hal_queue_validate_barriers(
+    const iree_hal_queue_t* queue, const iree_hal_queue_barriers_t* barriers) {
+  if (!barriers) {
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(
+      iree_hal_queue_validate_barrier_list(queue, barriers->before));
+  return iree_hal_queue_validate_barrier_list(queue, barriers->after);
+}
+
 IREE_API_EXPORT iree_status_t
 iree_hal_queue_barrier(iree_hal_queue_t* queue,
                        const iree_hal_semaphore_list_t wait_semaphore_list,
                        const iree_hal_semaphore_list_t signal_semaphore_list,
+                       const iree_hal_queue_barriers_t* barriers,
                        iree_hal_queue_barrier_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "queue is null"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
@@ -313,7 +374,7 @@ iree_hal_queue_barrier(iree_hal_queue_t* queue,
                              flags));
   }
   iree_status_t status = _VTABLE_DISPATCH(queue, barrier)(
-      queue, wait_semaphore_list, signal_semaphore_list, flags);
+      queue, wait_semaphore_list, signal_semaphore_list, barriers, flags);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -404,6 +465,31 @@ iree_hal_queue_host_call(iree_hal_queue_t* queue,
   return status;
 }
 
+IREE_API_EXPORT iree_status_t iree_hal_queue_map(
+    iree_hal_queue_t* queue, iree_hal_semaphore_list_t waits,
+    iree_hal_semaphore_list_t signals, iree_host_size_t mapping_count,
+    const iree_hal_memory_mapping_t* mappings,
+    iree_hal_queue_map_flags_t flags) {
+  if (!queue || (mapping_count && !mappings) ||
+      iree_any_bit_set(flags, ~IREE_HAL_QUEUE_MAP_FLAG_BORROW_BUFFERS)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "invalid mapping queue, array or flags");
+  }
+  IREE_RETURN_IF_ERROR(iree_hal_queue_validate_semaphore_list("wait", waits));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_queue_validate_semaphore_list("signal", signals));
+  IREE_TRACE_ZONE_BEGIN(z0);
+  const iree_hal_queue_vtable_t* vtable =
+      (const iree_hal_queue_vtable_t*)queue->resource.vtable;
+  iree_status_t status =
+      vtable->map
+          ? vtable->map(queue, waits, signals, mapping_count, mappings, flags)
+          : iree_hal_memory_mapping_queue_map(queue, waits, signals,
+                                              mapping_count, mappings, flags);
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
 IREE_API_EXPORT iree_status_t iree_hal_queue_query_dispatch_concurrency(
     iree_hal_queue_t* queue, iree_hal_executable_t* executable,
     iree_hal_executable_function_t function,
@@ -471,6 +557,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_dispatch(
     iree_hal_executable_t* executable, iree_hal_executable_function_t function,
     const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
     const iree_hal_buffer_ref_list_t bindings,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_dispatch_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
   const iree_hal_dispatch_flags_t known_flags =
@@ -510,6 +597,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_dispatch(
                              "dispatch binding storage is null"));
   }
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
                                             "signal", signal_semaphore_list));
@@ -531,7 +620,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_dispatch(
   }
   iree_status_t status = _VTABLE_DISPATCH(queue, dispatch)(
       queue, wait_semaphore_list, signal_semaphore_list, executable, function,
-      config, constants, bindings, flags);
+      config, constants, bindings, barriers, flags);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -548,21 +637,13 @@ static iree_status_t iree_hal_queue_validate_atomic_target(
   }
   IREE_RETURN_IF_ERROR(
       iree_hal_buffer_validate_range(target_buffer, target_offset, byte_count));
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_usage(
-      iree_hal_buffer_allowed_usage(target_buffer), usage));
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_family_usage(
+      target_buffer, iree_hal_queue_family(queue), usage));
   IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_access(
       iree_hal_buffer_allowed_access(target_buffer), access));
   IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_memory_type(
       iree_hal_buffer_memory_type(target_buffer),
       IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE));
-
-  const iree_hal_buffer_placement_t placement =
-      iree_hal_buffer_allocation_placement(target_buffer);
-  if (!iree_hal_buffer_placement_is_undefined(placement) &&
-      !iree_hal_queue_family_affinity_is_any(placement.queue_family_affinity)) {
-    IREE_RETURN_IF_ERROR(iree_hal_queue_validate_family_access(
-        queue, placement.queue_family_affinity));
-  }
 
   const iree_device_size_t absolute_offset =
       iree_hal_buffer_byte_offset(target_buffer) + target_offset;
@@ -585,7 +666,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_wait(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_wait_params_t params) {
+    iree_hal_atomic_wait_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
   IREE_TRACE_ZONE_BEGIN(z0);
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
@@ -595,6 +677,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_wait(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                              "atomic target buffer is null"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
@@ -608,7 +692,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_wait(
               IREE_HAL_MEMORY_ACCESS_READ));
   iree_status_t status = _VTABLE_DISPATCH(queue, atomic_wait)(
       queue, wait_semaphore_list, signal_semaphore_list, target_buffer,
-      target_offset, params);
+      target_offset, params, barriers);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -618,7 +702,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_store(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_store_params_t params) {
+    iree_hal_atomic_store_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
   IREE_TRACE_ZONE_BEGIN(z0);
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
@@ -628,6 +713,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_store(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                              "atomic target buffer is null"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
@@ -641,7 +728,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_store(
               IREE_HAL_MEMORY_ACCESS_WRITE));
   iree_status_t status = _VTABLE_DISPATCH(queue, atomic_store)(
       queue, wait_semaphore_list, signal_semaphore_list, target_buffer,
-      target_offset, params);
+      target_offset, params, barriers);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -651,7 +738,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_rmw(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_rmw_params_t params) {
+    iree_hal_atomic_rmw_params_t params,
+    const iree_hal_queue_barriers_t* barriers) {
   IREE_TRACE_ZONE_BEGIN(z0);
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
@@ -661,6 +749,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_rmw(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                              "atomic target buffer is null"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
@@ -674,7 +764,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_rmw(
               IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE));
   iree_status_t status = _VTABLE_DISPATCH(queue, atomic_rmw)(
       queue, wait_semaphore_list, signal_semaphore_list, target_buffer,
-      target_offset, params);
+      target_offset, params, barriers);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -684,6 +774,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_timestamp(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_timestamp_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
   if (IREE_UNLIKELY(!queue)) {
@@ -700,12 +791,14 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_timestamp(
                          "unsupported timestamp flags: 0x%016" PRIx64, flags));
   }
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
                                             "signal", signal_semaphore_list));
   iree_status_t status = _VTABLE_DISPATCH(queue, timestamp)(
       queue, wait_semaphore_list, signal_semaphore_list, target_buffer,
-      target_offset, flags);
+      target_offset, barriers, flags);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -759,6 +852,9 @@ iree_hal_queue_alloca(iree_hal_queue_t* queue,
                 IREE_STATUS_INVALID_ARGUMENT,
                 "queue allocations require a readiness signal semaphore"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_pool_validate_family_usage(
+              pool, iree_hal_queue_family(queue), IREE_HAL_BUFFER_USAGE_NONE));
   for (iree_host_size_t i = 0; i < request_count; ++i) {
     if (IREE_UNLIKELY(requests[i].allocation_size == 0)) {
       IREE_RETURN_AND_END_ZONE_IF_ERROR(
@@ -767,15 +863,13 @@ iree_hal_queue_alloca(iree_hal_queue_t* queue,
                                " has a zero allocation size",
                                i));
     }
-    const iree_hal_queue_family_affinity_t request_affinity =
-        requests[i].params.queue_family_affinity
-            ? requests[i].params.queue_family_affinity
-            : IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
-    iree_status_t status =
-        iree_hal_queue_validate_family_access(queue, request_affinity);
-    if (!iree_status_is_ok(status)) {
+    if (IREE_UNLIKELY(
+            !iree_device_size_is_valid_alignment(requests[i].min_alignment))) {
       IREE_RETURN_AND_END_ZONE_IF_ERROR(
-          z0, iree_status_annotate_f(status, "allocation request %" PRIhsz, i));
+          z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                               "allocation request %" PRIhsz
+                               " has an invalid alignment",
+                               i));
     }
   }
   iree_status_t status = (_VTABLE_DISPATCH(queue, alloca))(
@@ -820,11 +914,28 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_dealloca(
                                "deallocation buffer %" PRIhsz
                                " is not an allocation root",
                                i));
+    } else if (IREE_UNLIKELY(!iree_hal_buffer_allocation_vtable(buffers[i]))) {
+      IREE_RETURN_AND_END_ZONE_IF_ERROR(
+          z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                               "deallocation buffer %" PRIhsz
+                               " is not a queue allocation root",
+                               i));
     }
     const iree_hal_buffer_placement_t placement =
         iree_hal_buffer_allocation_placement(buffers[i]);
-    iree_status_t status = iree_hal_queue_validate_family_access(
-        queue, placement.queue_family_affinity);
+    iree_status_t status = iree_hal_buffer_validate_family_usage(
+        buffers[i], iree_hal_queue_family(queue), IREE_HAL_BUFFER_USAGE_NONE);
+    if (iree_status_is_ok(status) && !buffers[i]->memory.contract) {
+      if (placement.device !=
+          iree_hal_queue_family_device(queue->queue_family)) {
+        status =
+            iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                             "deallocation buffer belongs to another device");
+      } else {
+        status = iree_hal_queue_validate_family_access(
+            queue, placement.queue_family_affinity);
+      }
+    }
     if (!iree_status_is_ok(status)) {
       IREE_RETURN_AND_END_ZONE_IF_ERROR(
           z0,
@@ -847,23 +958,14 @@ static iree_status_t iree_hal_queue_validate_transfer_buffer(
                             "transfer buffer is null");
   }
   IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_range(buffer, offset, length));
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_usage(
-      iree_hal_buffer_allowed_usage(buffer), required_usage));
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_family_usage(
+      buffer, iree_hal_queue_family(queue), required_usage));
   IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_access(
       iree_hal_buffer_allowed_access(buffer), required_access));
   IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_memory_type(
       iree_hal_buffer_memory_type(buffer),
       IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE));
 
-  const iree_hal_buffer_placement_t placement =
-      iree_hal_buffer_allocation_placement(buffer);
-  const iree_hal_queue_family_affinity_t queue_family_affinity =
-      placement.queue_family_affinity;
-  if (!iree_hal_buffer_placement_is_undefined(placement) &&
-      !iree_hal_queue_family_affinity_is_any(queue_family_affinity)) {
-    IREE_RETURN_IF_ERROR(
-        iree_hal_queue_validate_family_access(queue, queue_family_affinity));
-  }
   return iree_ok_status();
 }
 
@@ -1029,13 +1131,16 @@ iree_hal_queue_transfer(iree_hal_queue_t* queue,
                         const iree_hal_semaphore_list_t wait_semaphore_list,
                         const iree_hal_semaphore_list_t signal_semaphore_list,
                         iree_host_size_t operation_count,
-                        const iree_hal_transfer_operation_t* operations) {
+                        const iree_hal_transfer_operation_t* operations,
+                        const iree_hal_queue_barriers_t* barriers) {
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)operation_count);
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "queue is null"));
   }
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
@@ -1062,7 +1167,7 @@ iree_hal_queue_transfer(iree_hal_queue_t* queue,
   }
   iree_status_t status = _VTABLE_DISPATCH(queue, transfer)(
       queue, wait_semaphore_list, signal_semaphore_list, operation_count,
-      operations);
+      operations, barriers);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -1073,7 +1178,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_fill(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, const void* pattern,
-    iree_host_size_t pattern_length, iree_hal_fill_flags_t flags) {
+    iree_host_size_t pattern_length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_fill_flags_t flags) {
   const iree_hal_transfer_operation_t operation = {
       .type = IREE_HAL_TRANSFER_OPERATION_TYPE_FILL,
       .fill =
@@ -1087,7 +1193,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_fill(
           },
   };
   return iree_hal_queue_transfer(queue, wait_semaphore_list,
-                                 signal_semaphore_list, 1, &operation);
+                                 signal_semaphore_list, 1, &operation,
+                                 barriers);
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_queue_update(
@@ -1096,7 +1203,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_update(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     const void* source_buffer, iree_host_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_update_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_update_flags_t flags) {
   const iree_hal_transfer_operation_t operation = {
       .type = IREE_HAL_TRANSFER_OPERATION_TYPE_UPDATE,
       .update =
@@ -1110,7 +1218,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_update(
           },
   };
   return iree_hal_queue_transfer(queue, wait_semaphore_list,
-                                 signal_semaphore_list, 1, &operation);
+                                 signal_semaphore_list, 1, &operation,
+                                 barriers);
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_queue_copy(
@@ -1119,7 +1228,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_copy(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_copy_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_copy_flags_t flags) {
   const iree_hal_transfer_operation_t operation = {
       .type = IREE_HAL_TRANSFER_OPERATION_TYPE_COPY,
       .copy =
@@ -1133,7 +1243,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_copy(
           },
   };
   return iree_hal_queue_transfer(queue, wait_semaphore_list,
-                                 signal_semaphore_list, 1, &operation);
+                                 signal_semaphore_list, 1, &operation,
+                                 barriers);
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_queue_upload(
@@ -1141,7 +1252,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_upload(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list, const void* source,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers) {
   const iree_hal_transfer_operation_t operation = {
       .type = IREE_HAL_TRANSFER_OPERATION_TYPE_UPLOAD,
       .upload =
@@ -1153,7 +1264,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_upload(
           },
   };
   return iree_hal_queue_transfer(queue, wait_semaphore_list,
-                                 signal_semaphore_list, 1, &operation);
+                                 signal_semaphore_list, 1, &operation,
+                                 barriers);
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_queue_download(
@@ -1161,7 +1273,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_download(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
-    void* target, iree_device_size_t length) {
+    void* target, iree_device_size_t length,
+    const iree_hal_queue_barriers_t* barriers) {
   const iree_hal_transfer_operation_t operation = {
       .type = IREE_HAL_TRANSFER_OPERATION_TYPE_DOWNLOAD,
       .download =
@@ -1173,7 +1286,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_download(
           },
   };
   return iree_hal_queue_transfer(queue, wait_semaphore_list,
-                                 signal_semaphore_list, 1, &operation);
+                                 signal_semaphore_list, 1, &operation,
+                                 barriers);
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_queue_read(
@@ -1182,7 +1296,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_read_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_read_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)length);
   if (IREE_UNLIKELY(!queue)) {
@@ -1190,13 +1305,15 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_read(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "queue is null"));
   }
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
                                             "signal", signal_semaphore_list));
   if (length == 0) {
     iree_status_t status = _VTABLE_DISPATCH(queue, transfer)(
         queue, wait_semaphore_list, signal_semaphore_list,
-        /*operation_count=*/0, /*operations=*/NULL);
+        /*operation_count=*/0, /*operations=*/NULL, barriers);
     IREE_TRACE_ZONE_END(z0);
     return status;
   }
@@ -1230,11 +1347,11 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_read(
     status = iree_hal_queue_copy(
         queue, wait_semaphore_list, signal_semaphore_list,
         source_storage_buffer, (iree_device_size_t)source_offset, target_buffer,
-        target_offset, length, IREE_HAL_COPY_FLAG_NONE);
+        target_offset, length, barriers, IREE_HAL_COPY_FLAG_NONE);
   } else {
     status = _VTABLE_DISPATCH(queue, read)(
         queue, wait_semaphore_list, signal_semaphore_list, source_file,
-        source_offset, target_buffer, target_offset, length, flags);
+        source_offset, target_buffer, target_offset, length, barriers, flags);
   }
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -1246,7 +1363,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_write(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, iree_hal_write_flags_t flags) {
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_write_flags_t flags) {
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)length);
   if (IREE_UNLIKELY(!queue)) {
@@ -1254,13 +1372,15 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_write(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "queue is null"));
   }
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hal_queue_validate_barriers(queue, barriers));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_validate_semaphore_list("wait", wait_semaphore_list));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_queue_validate_semaphore_list(
                                             "signal", signal_semaphore_list));
   if (length == 0) {
     iree_status_t status = _VTABLE_DISPATCH(queue, transfer)(
         queue, wait_semaphore_list, signal_semaphore_list,
-        /*operation_count=*/0, /*operations=*/NULL);
+        /*operation_count=*/0, /*operations=*/NULL, barriers);
     IREE_TRACE_ZONE_END(z0);
     return status;
   }
@@ -1294,11 +1414,11 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_write(
     status = iree_hal_queue_copy(
         queue, wait_semaphore_list, signal_semaphore_list, source_buffer,
         source_offset, target_storage_buffer, (iree_device_size_t)target_offset,
-        length, IREE_HAL_COPY_FLAG_NONE);
+        length, barriers, IREE_HAL_COPY_FLAG_NONE);
   } else {
     status = _VTABLE_DISPATCH(queue, write)(
         queue, wait_semaphore_list, signal_semaphore_list, source_buffer,
-        source_offset, target_file, target_offset, length, flags);
+        source_offset, target_file, target_offset, length, barriers, flags);
   }
   IREE_TRACE_ZONE_END(z0);
   return status;

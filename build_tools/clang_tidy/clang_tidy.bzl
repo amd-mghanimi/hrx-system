@@ -44,17 +44,50 @@ def _clang_tidy_compile_args(compile_args, compiler):
         if arg not in _CLANG_TIDY_UNSUPPORTED_COMPILE_ARGS and arg not in resource_includes
     ]
 
-    # The fixed compilation database replaces argv[0], losing the driver mode
-    # normally selected by clang-cl or cl.exe. Keep MSVC-style options active.
+    # A toolchain wrapper may not have a driver-recognized name. Preserve the
+    # configured driver mode when the compile action uses MSVC options.
     if compiler in ["clang-cl", "msvc-cl"]:
         filtered_args.append("--driver-mode=cl")
 
-    # Preserve the resource directory named by Bazel's crosstool module map.
-    # The clang-tidy VFS overlay redirects this virtual path to the declared,
-    # relocated LLVM tree.
+    # Analyze with the selected clang-tidy version's declared builtin headers.
+    # The overlay also maps the compiler's header names to these same files so
+    # crosstool module maps retain their header ownership under layering checks.
     return filtered_args + [
         "-resource-dir=%s" % CLANG_TIDY_CLANG_RESOURCE_DIR,
     ]
+
+def _clang_resource_overlay(ctx, cc_toolchain, kind):
+    # Clang advertises its implicit resource include root through the selected
+    # toolchain. That root can differ from the LLVM used to build clang-tidy.
+    # Map both names to the same declared files, preserving module-map identity
+    # without importing either installation's undeclared host headers.
+    aliases = [
+        directory
+        for directory in cc_toolchain.built_in_include_directories
+        if "/lib/clang/" in directory and directory.endswith("/include")
+    ]
+    if not aliases:
+        return ctx.file._clang_resource_overlay
+    overlay = ctx.actions.declare_file(ctx.label.name + "." + kind + ".resource-overlay.json")
+    external_contents = (
+        "../" * len(overlay.dirname.split("/")) +
+        ctx.file._clang_resource_overlay.dirname + "/clang-resource/include"
+    )
+    roots = [
+        {
+            "external-contents": external_contents,
+            "name": directory,
+            "type": "directory-remap",
+        }
+        for directory in depset([CLANG_TIDY_CLANG_RESOURCE_DIR + "/include"] + aliases).to_list()
+    ]
+    ctx.actions.write(overlay, json.encode({
+        "overlay-relative": True,
+        "roots": roots,
+        "use-external-names": False,
+        "version": 0,
+    }))
+    return overlay
 
 IreeClangTidyInfo = provider(
     doc = "clang-tidy artifacts collected from configured C/C++ targets.",
@@ -160,7 +193,7 @@ def _recursion_summary_path(target_label, source):
         _sanitize_path(source.path),
     )
 
-def _run_clang_tidy_action(ctx, target, cc_toolchain, feature_configuration, source):
+def _run_clang_tidy_action(ctx, target, cc_toolchain, feature_configuration, source, resource_overlay):
     compile_command = iree_cc_compile_command(
         ctx,
         target,
@@ -177,11 +210,12 @@ def _run_clang_tidy_action(ctx, target, cc_toolchain, feature_configuration, sou
     outputs = [report]
     args = ctx.actions.args()
     args.add("--clang-tidy", ctx.executable._clang_tidy)
+    args.add("--compiler", compile_command.compiler)
     args.add("--plugin", ctx.executable._plugin)
     args.add("--source", source)
     args.add("--output", report)
     args.add("--config-file", ctx.file._config)
-    args.add("--vfsoverlay", ctx.file._clang_resource_overlay)
+    args.add("--vfsoverlay", resource_overlay)
     if emit_fixes:
         fixes = ctx.actions.declare_file(_clang_tidy_fixes_path(target.label, source))
         outputs.append(fixes)
@@ -194,7 +228,7 @@ def _run_clang_tidy_action(ctx, target, cc_toolchain, feature_configuration, sou
 
     compilation_context = target[CcInfo].compilation_context
     inputs = depset(
-        direct = [source, ctx.file._config, ctx.file._clang_resource_overlay],
+        direct = [source, ctx.file._config, resource_overlay],
         transitive = _compilation_input_depsets(compilation_context, cc_toolchain) + [
             depset(ctx.files._clang_resource_headers),
         ],
@@ -213,7 +247,7 @@ def _run_clang_tidy_action(ctx, target, cc_toolchain, feature_configuration, sou
     )
     return report, fixes
 
-def _run_recursion_summary_action(ctx, target, cc_toolchain, feature_configuration, source):
+def _run_recursion_summary_action(ctx, target, cc_toolchain, feature_configuration, source, resource_overlay):
     compile_command = iree_cc_compile_command(
         ctx,
         target,
@@ -225,11 +259,12 @@ def _run_recursion_summary_action(ctx, target, cc_toolchain, feature_configurati
     summary = ctx.actions.declare_file(_recursion_summary_path(target.label, source))
     args = ctx.actions.args()
     args.add("--clang-tidy", ctx.executable._clang_tidy)
+    args.add("--compiler", compile_command.compiler)
     args.add("--plugin", ctx.executable._plugin)
     args.add("--source", source)
     args.add("--output", report)
     args.add("--config-file", ctx.file._config)
-    args.add("--vfsoverlay", ctx.file._clang_resource_overlay)
+    args.add("--vfsoverlay", resource_overlay)
     args.add("--checks=-*,iree-unbounded-recursion")
     args.add("--recursion-summary", summary)
     args.add("--suppress-recursion-diagnostics")
@@ -238,7 +273,7 @@ def _run_recursion_summary_action(ctx, target, cc_toolchain, feature_configurati
 
     compilation_context = target[CcInfo].compilation_context
     inputs = depset(
-        direct = [source, ctx.file._config, ctx.file._clang_resource_overlay],
+        direct = [source, ctx.file._config, resource_overlay],
         transitive = _compilation_input_depsets(compilation_context, cc_toolchain) + [
             depset(ctx.files._clang_resource_headers),
         ],
@@ -284,6 +319,7 @@ def _collect_clang_tidy_aspect_impl(target, ctx):
     if CcInfo in target:
         cc_toolchain = find_cc_toolchain(ctx)
         feature_configuration = iree_cc_feature_configuration(ctx, cc_toolchain)
+        resource_overlay = _clang_resource_overlay(ctx, cc_toolchain, "clang-tidy")
         for source in iree_cc_source_files(ctx):
             report, fixes = _run_clang_tidy_action(
                 ctx,
@@ -291,6 +327,7 @@ def _collect_clang_tidy_aspect_impl(target, ctx):
                 cc_toolchain,
                 feature_configuration,
                 source,
+                resource_overlay,
             )
             local_reports.append(report)
             if fixes:
@@ -393,6 +430,7 @@ def _collect_recursion_aspect_impl(target, ctx):
     if CcInfo in target:
         cc_toolchain = find_cc_toolchain(ctx)
         feature_configuration = iree_cc_feature_configuration(ctx, cc_toolchain)
+        resource_overlay = _clang_resource_overlay(ctx, cc_toolchain, "recursion")
         for source in iree_cc_source_files(ctx):
             report, summary = _run_recursion_summary_action(
                 ctx,
@@ -400,6 +438,7 @@ def _collect_recursion_aspect_impl(target, ctx):
                 cc_toolchain,
                 feature_configuration,
                 source,
+                resource_overlay,
             )
             local_reports.append(report)
             local_summaries.append(summary)

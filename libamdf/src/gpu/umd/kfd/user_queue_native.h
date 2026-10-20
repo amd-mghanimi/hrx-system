@@ -15,6 +15,7 @@
 
 #include "amdf/amdf.h"
 #include "libamdf/src/gpu/umd/kfd/buffer.h"
+#include "libamdf/src/gpu/umd/kfd/doorbell.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,16 @@ typedef struct amdf_gpu_kfd_user_queue_native_api_t {
   // Releases one complete KFD doorbell aperture, retaining it on failure.
   amdf_status_t (*doorbell_unmap)(void* user_data, void* mapping,
                                   size_t byte_length);
+  // Creates a queue-owned GPU view; failure leaves both outputs unchanged.
+  amdf_status_t (*device_doorbell_create)(
+      void* user_data, amdf_gpu_umd_device_t* device, size_t byte_length,
+      amdf_gpu_kfd_doorbell_t** out_doorbell, uint64_t* out_device_address);
+  // Consumes the GPU view on every result after successful queue retirement.
+  amdf_status_t (*device_doorbell_destroy)(void* user_data,
+                                           amdf_gpu_kfd_doorbell_t* doorbell);
+  // Consumes only bookkeeping when native queue retirement is unproven.
+  void (*device_doorbell_abandon)(void* user_data,
+                                  amdf_gpu_kfd_doorbell_t* doorbell);
   // Samples the fault cache of the device's own render-file VM, not global
   // hardware state. Failure leaves the output unchanged.
   amdf_status_t (*vm_fault_query)(

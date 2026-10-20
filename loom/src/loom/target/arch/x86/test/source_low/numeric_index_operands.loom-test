@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_index_operands.loom-test
 // RUN: emit source-low target=x86:avx2 output=low
 
 func.def @uniform_lhs_index_operands(%input: buffer, %uniform: index) -> (index, index, index, index, index) {
@@ -88,15 +87,13 @@ func.def @constant_index_operands(%input: buffer) -> (index, index, index, index
 low.func.def target<x86.avx2.core> abi(object_function) @constant_index_operands(%aligned_input: reg<x86.gpr64>) -> (reg<x86.gpr64>, reg<x86.gpr64>, reg<x86.gpr64>, reg<x86.gpr64>) asm {
   %word = mov.load.gpr32 %aligned_input {disp32 = 0}
   %value = movsxd.gpr64.gpr32 %word
-  %factor = mov.imm64 65
-  %26 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
-  %masked = and.imm.gpr64 %26 {imm32 = 64}
-  %28 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
-  %tagged = or.imm.gpr64 %28 {imm32 = 128}
-  %30 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
-  %toggled = xor.imm.gpr64 %30 {imm32 = -16}
-  %32 = copy %factor : reg<x86.gpr64> -> reg<x86.gpr64>
-  %scaled = imul.gpr64 %32, %value
+  %25 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %masked = and.imm.gpr64 %25 {imm32 = 64}
+  %27 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %tagged = or.imm.gpr64 %27 {imm32 = 128}
+  %29 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %toggled = xor.imm.gpr64 %29 {imm32 = -16}
+  %scaled = imul.imm.gpr64 %value {imm32 = 65}
   return %masked, %tagged, %toggled, %scaled
 }
 
@@ -247,11 +244,30 @@ low.func.def target<x86.avx2.core> abi(object_function) @high_bit_offset_add(%bo
 
 // Every result keeps its matching input, including mixed address domains.
 func.def @bounded_addresses(%row: index, %column: index, %byte_offset: offset) -> (index, index, offset) {
-  %bounded_row, %bounded_column, %aligned_offset = index.assume %row, %column, %byte_offset [range(%row, 0, 31), range(%column, 0, 63), mul(%byte_offset, 16)] : index, index, offset
+  %bounded_row, %bounded_column, %aligned_offset = index.assume %row, %column, %byte_offset [range(%row, 0, 31), range(%column, 0, 63), multiple_of(%byte_offset, 16)] : index, index, offset
   func.return %bounded_row, %bounded_column, %aligned_offset : index, index, offset
 }
 
 // ----
 low.func.def target<x86.avx2.core> abi(object_function) @bounded_addresses(%bounded_row: reg<x86.gpr64>, %bounded_column: reg<x86.gpr64>, %aligned_offset: reg<x86.gpr64>) -> (reg<x86.gpr64>, reg<x86.gpr64>, reg<x86.gpr64>) asm {
   return %bounded_row, %bounded_column, %aligned_offset
+}
+
+// ====
+
+func.def @index_rotations(%value: index, %count: index) -> (index, index) {
+  %left = index.rotli %value, %count : index
+  %right = index.rotri %value, %count : index
+  func.return %left, %right : index, index
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @index_rotations(%value: reg<x86.gpr64>, %count: reg<x86.gpr64>) -> (reg<x86.gpr64>, reg<x86.gpr64>) asm {
+  %10 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %11 = copy %count : reg<x86.gpr64> -> reg<x86.rcx>
+  %left = rol.cl.gpr64 %10, %11
+  %13 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %14 = copy %count : reg<x86.gpr64> -> reg<x86.rcx>
+  %right = ror.cl.gpr64 %13, %14
+  return %left, %right
 }

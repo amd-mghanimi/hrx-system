@@ -1,121 +1,130 @@
 // RUN: verify
 
-func.def @copy(%input: buffer, %output: buffer) {
-  func.return
-}
-
-pipeline.def<kernel> @valid() launch(%input: buffer, %output: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<4x8x8xi8>
-  %output_view = buffer.view %output[%base] : buffer -> view<8x8xi8>
-  %input_tiles = pipeline.read %input_view on %workers : view<4x8x8xi8>, group -> pipeline.flow<tile<8x8xi8>>
-  %output_tiles = pipeline.stage @copy on %workers(%input_tiles) : (group, pipeline.flow<tile<8x8xi8>>) -> (pipeline.flow<tile<8x8xi8>>)
-  %folded = pipeline.fold<addi> %output_tiles : pipeline.flow<tile<8x8xi8>>
-  pipeline.write %folded to %output_view : pipeline.flow<tile<8x8xi8>>, view<8x8xi8>
-  pipeline.return
+pipeline.def<kernel> @select_memory(%column: index) run() {
+  %memory = pipeline.memory<workgroup>[%column, 3] : pool
 }
 
 // ====
 
-pipeline.def @non_buffer_binding() launch(%binding: i32) {
-  // ERROR@-1: TYPE/003 {operand_name="launch binding 0", actual_type="i32", expected_constraint="buffer"}
-  pipeline.return
+pipeline.def @ambiguous_memory(%column: index) run() {
+  // ERROR@+1: STRUCTURE/029 "pipeline.def<kernel>"
+  %memory = pipeline.memory<workgroup>[%column, 3] : pool
 }
 
 // ====
 
-func.def @wrong_group(%input: buffer) {
-  func.return
-}
-
-pipeline.def @scatter_wrong_group() launch(%input: buffer) {
-  %base = index.constant 0 : offset
-  %not_group = index.constant 1 : index
-  %input_view = buffer.view %input[%base] : buffer -> view<1x8xi8>
-  // ERROR@+1: TYPE/003 {operand_name="group", actual_type="index", expected_constraint="group"}
-  %tiles = pipeline.scatter %input_view across %not_group : view<1x8xi8>, index -> pipeline.flow<tile<8xi8>>
-  pipeline.return
+command.program.def @command_memory() launch() {
+  // ERROR@+1: STRUCTURE/029 "pipeline.def" "command.program.def"
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  command.return
 }
 
 // ====
 
-pipeline.def @scatter_wrong_shape() launch(%input: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<1x8xi8>
-  // ERROR@+1: TYPE/004 {result_name="result", actual_type="pipeline.flow<tile<4xi8>>", expected_constraint="pipeline.flow tile matching the source view suffix"}
-  %tiles = pipeline.scatter %input_view across %workers : view<1x8xi8>, group -> pipeline.flow<tile<4xi8>>
-  pipeline.return
+pipeline.def<kernel> @negative_memory_coordinate() run() {
+  // ERROR@+1: STRUCTURE/014 "coordinates" "-1"
+  %memory = pipeline.memory<workgroup>[0, -1] : pool
 }
 
 // ====
 
-pipeline.def @read_non_tile_flow() launch(%input: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<8xi8>
-  // ERROR@+1: TYPE/004 {result_name="result", actual_type="pipeline.flow<i8>", expected_constraint="pipeline.flow<tile<...>>"}
-  %tiles = pipeline.read %input_view on %workers : view<8xi8>, group -> pipeline.flow<i8>
-  pipeline.return
+pipeline.def<kernel> @missing_memory_coordinates() run() {
+  // ERROR@+1: STRUCTURE/014 "worker rank" "0"
+  %memory = pipeline.memory<workgroup>[] : pool
 }
 
 // ====
 
-func.def @one_buffer(%input: buffer) {
-  func.return
-}
-
-pipeline.def @stage_wrong_arity() launch(%input: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<8xi8>
-  %input_tiles = pipeline.read %input_view on %workers : view<8xi8>, group -> pipeline.flow<tile<8xi8>>
-  // ERROR@+1: STRUCTURE/013 "entry argument" "1" "stage flow" "2"
-  %output_tiles = pipeline.stage @one_buffer on %workers(%input_tiles) : (group, pipeline.flow<tile<8xi8>>) -> (pipeline.flow<tile<8xi8>>)
-  pipeline.return
+pipeline.def<kernel> @memory_inside_worker() run() {
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    // ERROR@+1: STRUCTURE/029 "pipeline.strand"
+    %memory = pipeline.memory<workgroup>[0, 2] : pool
+  }
 }
 
 // ====
 
-pipeline.def @write_wrong_shape() launch(%input: buffer, %output: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<8xi8>
-  %output_view = buffer.view %output[%base] : buffer -> view<4xi8>
-  %tiles = pipeline.read %input_view on %workers : view<8xi8>, group -> pipeline.flow<tile<8xi8>>
-  // ERROR@+1: TYPE/003 {operand_name="source", actual_type="pipeline.flow<tile<8xi8>>", expected_constraint="pipeline.flow tile matching a target view suffix"}
-  pipeline.write %tiles to %output_view : pipeline.flow<tile<8xi8>>, view<4xi8>
-  pipeline.return
+pipeline.def @typed_arguments(%width: index) run(%input: channel<tile<[%width]xf32>>, %scratch: view<[%width]xf32>, %count: index) {
 }
 
 // ====
 
-pipeline.def @fold_wrong_combining_domain() launch(%input: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<4x8xi8>
-  %tiles = pipeline.read %input_view on %workers : view<4x8xi8>, group -> pipeline.flow<tile<8xi8>>
-  // ERROR@+1: TYPE/003 {operand_name="source", actual_type="pipeline.flow<tile<8xi8>>", expected_constraint="floating-point tile element type for fold kind"}
-  %folded = pipeline.fold<addf> %tiles : pipeline.flow<tile<8xi8>>
-  pipeline.return
+// A reusable command product is authored with command.program.def; pipeline
+// scope names the directly loadable kernel artifact boundary.
+// ERROR@+1: PARSE/017 "scope" "command"
+pipeline.def<command> @unsupported_command_scope() run() {
 }
 
 // ====
 
-pipeline.def @fold_integer_fastmath() launch(%input: buffer) {
-  %worker_lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %worker_lanes : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<4x8xi8>
-  %tiles = pipeline.read %input_view on %workers : view<4x8xi8>, group -> pipeline.flow<tile<8xi8>>
-  // ERROR@+1: TYPE/003 {operand_name="source", actual_type="pipeline.flow<tile<8xi8>>", expected_constraint="floating-point tile element type when float flags are present"}
-  %folded = pipeline.fold<addi, reassoc> %tiles : pipeline.flow<tile<8xi8>>
-  pipeline.return
+// The construction loop captures its own column. The worker loop remains
+// ordinary runtime control and each acquired input is released independently.
+target.decl @npu
+
+pipeline.def target(@npu) @columns(%width: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  %record_begin = index.constant 0 : index
+  %record_step = index.constant 1 : index
+  %columns = index.constant 8 : index
+  scf.for %column = [%record_begin to %columns step %record_step] {
+    pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+      scf.for %record = [%record_begin to %count step %record_step] {
+        %read, %view = channel.acquire %input : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+        channel.release %read : read<tile<[%width]xi32>>
+      }
+    }
+  }
+}
+
+// ====
+
+pipeline.def @unequal_worker_rank() run() {
+  // ERROR@+1: STRUCTURE/013 "counts" "1" "worker rank" "2"
+  pipeline.strand workers([0, 2], [1], [1, 1]) {
+  }
+}
+
+// ====
+
+pipeline.def @empty_worker_rank() run() {
+  // ERROR@+1: STRUCTURE/014 "worker rank" "0" "at least one worker dimension"
+  pipeline.strand workers([], [], []) {
+  }
+}
+
+// ====
+
+pipeline.def @invalid_worker_stride() run() {
+  // ERROR@+1: STRUCTURE/014 "strides" "0" "positive worker stride"
+  pipeline.strand workers([0, 2], [1, 1], [1, 0]) {
+  }
+}
+
+// ====
+
+pipeline.def @negative_worker_count() run() {
+  // ERROR@+1: STRUCTURE/014 "counts" "-1" "nonnegative worker coordinate or count"
+  pipeline.strand workers([0], [-1], [1]) {
+  }
+}
+
+// ====
+
+// Matching flattened types do not permit changing which arguments specialize
+// a child and which are supplied with each invocation.
+pipeline.def @child(%width: index) run(%count: index) {
+}
+
+pipeline.def @wrong_staging(%width: index) run(%count: index) {
+  // ERROR@+1: STRUCTURE/013 "specialization" "0" "pipeline specialization argument" "1"
+  pipeline.compose @child(%width, %count) : (index, index)
+}
+
+// ====
+
+pipeline.def @child(%width: index) run(%input: channel<tile<[%width]xi32>>) {
+}
+
+pipeline.def @wrong_record_width(%width: index, %other_width: index) run(%input: channel<tile<[%other_width]xi32>>) {
+  // ERROR@+1: TYPE/001 {field_a="operand 1", field_b="contract argument 1"}
+  pipeline.compose @child[%width](%input) : [index](channel<tile<[%other_width]xi32>>)
 }

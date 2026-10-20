@@ -50,11 +50,17 @@ class LowAllocationActiveCapacityTest : public ::testing::Test {
                       std::vector<uint32_t> refined_ends = {}) {
     std::vector<uint32_t> interval_indices(intervals.size());
     std::iota(interval_indices.begin(), interval_indices.end(), 0);
-    std::vector<uint32_t> unit_offsets;
+    std::vector<loom_low_allocation_unit_liveness_value_t> values;
     std::vector<uint32_t> unit_starts;
     std::vector<uint32_t> unit_ends;
     for (const auto& interval : intervals) {
-      unit_offsets.push_back(static_cast<uint32_t>(unit_ends.size()));
+      if (interval.value_class.type_kind != LOOM_TYPE_REGISTER ||
+          interval.unit_count == 0) {
+        values.push_back({UINT32_MAX, UINT32_MAX});
+        continue;
+      }
+      values.push_back(
+          {static_cast<uint32_t>(unit_ends.size()), interval.start_point});
       unit_starts.insert(unit_starts.end(), interval.unit_count,
                          interval.start_point);
       unit_ends.insert(unit_ends.end(), interval.unit_count,
@@ -64,16 +70,18 @@ class LowAllocationActiveCapacityTest : public ::testing::Test {
       ASSERT_EQ(refined_ends.size(), unit_ends.size());
       unit_ends = std::move(refined_ends);
     }
-    loom_liveness_analysis_t liveness = {};
-    liveness.intervals = intervals.data();
-    liveness.interval_count = intervals.size();
-    liveness.value_count = intervals.size();
-    liveness.value_interval_indices = interval_indices.data();
-    loom_low_allocation_unit_liveness_t unit_liveness = {};
-    unit_liveness.point_starts_by_value_ordinal = unit_offsets.data();
-    unit_liveness.start_points = unit_starts.data();
-    unit_liveness.end_points = unit_ends.data();
-    unit_liveness.point_count = unit_ends.size();
+    loom_liveness_analysis_t liveness = {
+        .intervals = intervals.data(),
+        .interval_count = intervals.size(),
+        .value_count = intervals.size(),
+        .value_interval_indices = interval_indices.data(),
+    };
+    loom_low_allocation_unit_liveness_t unit_liveness = {
+        .values = values.data(),
+        .start_points = unit_starts.data(),
+        .end_points = unit_ends.data(),
+        .point_count = unit_ends.size(),
+    };
 
     // Build both adjacency directions used by production placement tables.
     std::sort(edges.begin(), edges.end());
@@ -104,16 +112,18 @@ class LowAllocationActiveCapacityTest : public ::testing::Test {
         range.start = static_cast<uint32_t>(i);
       }
     }
-    loom_low_placement_table_t placement = {};
-    placement.value_count = static_cast<loom_value_ordinal_t>(intervals.size());
-    placement.relations = relations.data();
-    placement.relation_count = relations.size();
-    placement.ranges_by_result_ordinal = result_ranges.data();
-    placement.ranges_by_source_ordinal = source_ranges.data();
+    loom_low_placement_table_t placement = {
+        .value_count = static_cast<loom_value_ordinal_t>(intervals.size()),
+        .relations = relations.data(),
+        .relation_count = relations.size(),
+        .ranges_by_result_ordinal = result_ranges.data(),
+        .ranges_by_source_ordinal = source_ranges.data(),
+    };
     placement.relation_indices_by_source_ordinal = source_indices.data();
-    loom_low_descriptor_set_t descriptor_set = {};
-    descriptor_set.reg_classes = classes_;
-    descriptor_set.reg_class_count = IREE_ARRAYSIZE(classes_);
+    loom_low_descriptor_set_t descriptor_set = {
+        .reg_classes = classes_,
+        .reg_class_count = IREE_ARRAYSIZE(classes_),
+    };
     loom_low_allocation_active_capacity_t capacity = {};
     IREE_ASSERT_OK(loom_low_allocation_active_capacity_calculate(
         &descriptor_set, &liveness, &unit_liveness, &placement, &pool_,

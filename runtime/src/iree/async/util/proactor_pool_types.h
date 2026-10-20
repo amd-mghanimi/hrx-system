@@ -40,6 +40,8 @@ typedef struct iree_async_proactor_pool_runner_factory_t {
 
   // Creates a poll runner for |proactor|.
   // |node_id| is the NUMA node for the proactor (UINT32_MAX if unspecified).
+  // A specified node must be established before polling starts; return an
+  // error if the runner cannot provide that locality.
   // Stores an opaque runner handle in |out_runner| (may be NULL if the runner
   // is self-managing). Called under pool mutex — must not call back into the
   // pool.
@@ -52,8 +54,10 @@ typedef struct iree_async_proactor_pool_runner_factory_t {
   // them.
   void (*request_stop)(void* user_data, void* runner);
 
-  // Destroys |runner|, blocking until it has fully stopped. Called after
-  // request_stop has been called for the runner.
+  // Relinquishes ownership of |runner| after request_stop has been called. A
+  // call from outside the runner blocks until it has fully stopped. A call by
+  // the runner itself may defer destruction until its current poll returns;
+  // the implementation must retain all runner state required through exit.
   void (*destroy)(void* user_data, void* runner);
 } iree_async_proactor_pool_runner_factory_t;
 

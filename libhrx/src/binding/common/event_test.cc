@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "common/event.h"
+
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -13,12 +15,16 @@
 #include <thread>
 #include <utility>
 
-#include "common/internal.h"
+#include "common/context.h"
+#include "common/device.h"
+#include "common/graph.h"
+#include "common/hrx_bridge.h"
 #include "common/stream.h"
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+#include "libhrx/src/libhrx/device.h"
 
 namespace {
 
@@ -49,9 +55,10 @@ constexpr uint64_t kKilohertz = 1000ull;
 
 iree_hal_streaming_timestamp_domain_t Domain(uint64_t frequency_hz,
                                              uint32_t valid_bits) {
-  iree_hal_streaming_timestamp_domain_t domain = {};
-  domain.frequency_hz = frequency_hz;
-  domain.valid_bits = valid_bits;
+  iree_hal_streaming_timestamp_domain_t domain = {
+      .frequency_hz = frequency_hz,
+      .valid_bits = valid_bits,
+  };
   return domain;
 }
 
@@ -147,25 +154,27 @@ constexpr iree_hal_queue_priority_t kNormalQueuePriority =
 iree_hal_queue_family_spec_t QueueFamily(
     iree_hal_physical_device_affinity_t physical_device_affinity,
     uint32_t timestamp_valid_bits, uint64_t timestamp_frequency_hz) {
-  iree_hal_queue_family_spec_t family = {};
-  family.name = iree_make_cstring_view("test");
-  family.provisioned_queue_count = 1;
-  family.priority_count = 1;
-  family.priorities = &kNormalQueuePriority;
-  family.timestamp_valid_bits = timestamp_valid_bits;
-  family.timestamp_frequency_hz = timestamp_frequency_hz;
-  family.physical_device_affinity = physical_device_affinity;
-  family.role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH;
+  iree_hal_queue_family_spec_t family = {
+      .name = iree_make_cstring_view("test"),
+      .provisioned_queue_count = 1,
+      .priority_count = 1,
+      .priorities = &kNormalQueuePriority,
+      .timestamp_valid_bits = timestamp_valid_bits,
+      .timestamp_frequency_hz = timestamp_frequency_hz,
+      .physical_device_affinity = physical_device_affinity,
+      .role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH,
+  };
   return family;
 }
 
 iree_hal_device_timing_spec_t Timing(iree_hal_device_timing_spec_flags_t flags,
                                      uint32_t timestamp_valid_bits,
                                      uint64_t timestamp_frequency_hz) {
-  iree_hal_device_timing_spec_t timing = {};
-  timing.timestamp_valid_bits = timestamp_valid_bits;
-  timing.timestamp_frequency_hz = timestamp_frequency_hz;
-  timing.flags = flags;
+  iree_hal_device_timing_spec_t timing = {
+      .timestamp_valid_bits = timestamp_valid_bits,
+      .timestamp_frequency_hz = timestamp_frequency_hz,
+      .flags = flags,
+  };
   return timing;
 }
 
@@ -173,12 +182,11 @@ iree_hal_device_timing_spec_t Timing(iree_hal_device_timing_spec_flags_t flags,
 iree_hal_streaming_timestamp_domain_t QueryDomain(
     const iree_hal_queue_family_spec_t* families, iree_host_size_t family_count,
     iree_hal_device_timing_spec_t timing) {
-  iree_hal_device_queue_spec_t queues = {};
-  queues.family_count = family_count;
-  queues.families = families;
-  iree_hal_device_spec_params_t params = {};
-  params.queues = &queues;
-  params.timing = &timing;
+  iree_hal_device_queue_spec_t queues = {
+      .family_count = family_count,
+      .families = families,
+  };
+  iree_hal_device_spec_params_t params = {.queues = &queues, .timing = &timing};
   iree_hal_device_spec_t* spec = NULL;
   IREE_EXPECT_OK(
       iree_hal_device_spec_create(&params, iree_allocator_system(), &spec));
@@ -356,8 +364,9 @@ class CpuStreamingContextTest : public ::testing::Test {
                                      iree_allocator_system(),
                                      &device_entry_.block_pool);
 
-    iree_hal_streaming_context_flags_t context_flags = {};
-    context_flags.scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO;
+    iree_hal_streaming_context_flags_t context_flags = {
+        .scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO,
+    };
     IREE_ASSERT_OK(iree_hal_streaming_context_create(
         &device_entry_, context_flags, iree_allocator_system(), &context_));
   }
@@ -543,14 +552,14 @@ TEST_F(CpuStreamingContextTest, ContextRecordWaitsForEveryCurrentStream) {
   IREE_ASSERT_OK(CreateGate(/*release_value=*/2, &second_gate));
   uint64_t gate_value = 1;
   const iree_hal_semaphore_list_t first_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&first_gate,
-      /*.payload_values=*/&gate_value,
+      .count = 1,
+      .semaphores = &first_gate,
+      .payload_values = &gate_value,
   };
   const iree_hal_semaphore_list_t second_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&second_gate,
-      /*.payload_values=*/&gate_value,
+      .count = 1,
+      .semaphores = &second_gate,
+      .payload_values = &gate_value,
   };
   IREE_ASSERT_OK(
       iree_hal_streaming_stream_wait_semaphores(first_stream, first_wait));
@@ -609,9 +618,9 @@ TEST_F(CpuStreamingContextTest, ContextWaitOrdersCurrentAndLaterStreams) {
   IREE_ASSERT_OK(CreateGate(/*release_value=*/1, &gate));
   uint64_t gate_value = 1;
   const iree_hal_semaphore_list_t gate_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&gate,
-      /*.payload_values=*/&gate_value,
+      .count = 1,
+      .semaphores = &gate,
+      .payload_values = &gate_value,
   };
   IREE_ASSERT_OK(
       iree_hal_streaming_stream_wait_semaphores(source_stream, gate_wait));
@@ -654,8 +663,9 @@ TEST_F(CpuStreamingContextTest, CrossContextWaitOrdersCurrentAndLaterStreams) {
     iree_hal_streaming_context_release(target_context);
   });
 
-  iree_hal_streaming_context_flags_t context_flags = {};
-  context_flags.scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO;
+  iree_hal_streaming_context_flags_t context_flags = {
+      .scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO,
+  };
   IREE_ASSERT_OK(iree_hal_streaming_context_create(
       &device_entry_, context_flags, iree_allocator_system(), &target_context));
   IREE_ASSERT_OK(CreateNonBlockingStream(context_, &source_stream));
@@ -665,9 +675,9 @@ TEST_F(CpuStreamingContextTest, CrossContextWaitOrdersCurrentAndLaterStreams) {
   IREE_ASSERT_OK(CreateGate(/*release_value=*/1, &gate));
   uint64_t gate_value = 1;
   const iree_hal_semaphore_list_t gate_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&gate,
-      /*.payload_values=*/&gate_value,
+      .count = 1,
+      .semaphores = &gate,
+      .payload_values = &gate_value,
   };
   IREE_ASSERT_OK(
       iree_hal_streaming_stream_wait_semaphores(source_stream, gate_wait));
@@ -718,15 +728,15 @@ TEST_F(CpuStreamingContextTest,
   IREE_ASSERT_OK(CreateGate(/*release_value=*/1, &second_gate));
   uint64_t first_gate_value = 1;
   const iree_hal_semaphore_list_t first_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&first_gate,
-      /*.payload_values=*/&first_gate_value,
+      .count = 1,
+      .semaphores = &first_gate,
+      .payload_values = &first_gate_value,
   };
   uint64_t second_gate_value = 1;
   const iree_hal_semaphore_list_t second_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&second_gate,
-      /*.payload_values=*/&second_gate_value,
+      .count = 1,
+      .semaphores = &second_gate,
+      .payload_values = &second_gate_value,
   };
   IREE_ASSERT_OK(
       iree_hal_streaming_stream_wait_semaphores(first_stream, first_wait));
@@ -823,9 +833,9 @@ TEST_F(CpuStreamingContextTest,
   IREE_ASSERT_OK(CreateGate(/*release_value=*/1, &prior_gate));
   uint64_t prior_value = 1;
   const iree_hal_semaphore_list_t prior_wait = {
-      /*.count=*/1,
-      /*.semaphores=*/&prior_gate,
-      /*.payload_values=*/&prior_value,
+      .count = 1,
+      .semaphores = &prior_gate,
+      .payload_values = &prior_value,
   };
   IREE_ASSERT_OK(iree_hal_streaming_stream_wait_semaphores(stream, prior_wait));
 
@@ -911,7 +921,11 @@ TEST_F(CpuStreamingContextTest, AGraphLaunchOnAnUntimedDeviceGoesUntimed) {
   iree_hal_streaming_graph_exec_t* exec = nullptr;
   IREE_ASSERT_OK(iree_hal_streaming_graph_instantiate(
       graph, IREE_HAL_STREAMING_GRAPH_INSTANTIATE_FLAG_NONE, &exec));
-  IREE_ASSERT_OK(iree_hal_streaming_graph_exec_launch(exec, stream));
+  iree_hal_streaming_graph_exec_launch_result_t launch_result =
+      IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_ERROR;
+  IREE_ASSERT_OK(
+      iree_hal_streaming_graph_exec_launch(exec, stream, &launch_result));
+  EXPECT_EQ(IREE_HAL_STREAMING_GRAPH_EXEC_LAUNCH_SUCCESS, launch_result);
   IREE_ASSERT_OK(iree_hal_streaming_stream_synchronize(stream));
 
   EXPECT_EQ(nullptr, context_->timestamp_pool.slabs)

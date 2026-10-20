@@ -1,5 +1,49 @@
 // RUN: pass canonicalize
 
+// Bounds survive a CFG join and a loop-carried selection before the wide
+// multiply/XOR consumer. No range is asserted on the hash itself.
+func.def @bounded_hash_after_control_flow(%input: i32, %other: i16, %choose: i1, %count: index) -> (i64, i64) {
+  %bounded = scalar.assume %input [range(%input, 0, 2147483647)] : i32
+  %wide = scalar.extui %bounded : i32 to i64
+  %other_wide = scalar.extui %other : i16 to i64
+  cfg.cond_br %choose, ^left, ^right
+^left:
+  cfg.br ^join(%wide: i64)
+^right:
+  cfg.br ^join(%other_wide: i64)
+^join(%joined: i64):
+  %start = index.constant 0 : index
+  %step = index.constant 1 : index
+  %selected = scf.for %iv = [%start to %count step %step](%carried = %joined : i64) -> (i64) {
+    %next = scf.select %choose, %carried, %other_wide : i64
+    scf.yield %next : i64
+  }
+  %multiplier = scalar.constant 4294967295 : i64
+  %product = scalar.muli %selected, %multiplier : i64
+  %hash = scalar.xori %product, %other_wide : i64
+  %lower = test.fact_range_lo %hash : i64 -> i64
+  %upper = test.fact_range_hi %hash : i64 -> i64
+  func.return %lower, %upper : i64, i64
+}
+
+// ----
+func.def @bounded_hash_after_control_flow(%input: i32, %other: i16, %choose: i1, %count: index) -> (i64, i64) {
+  %bounded = scalar.assume %input [range(%input, 0, 2147483647)] : i32
+  %wide = scalar.extui %bounded : i32 to i64
+  %other_wide = scalar.extui %other : i16 to i64
+  cfg.cond_br %choose, ^left, ^right
+^left:
+  cfg.br ^join(%wide: i64)
+^right:
+  cfg.br ^join(%other_wide: i64)
+^join(%joined: i64):
+  %lower = scalar.constant 0 : i64
+  %upper = scalar.constant 9223372036854775807 : i64
+  func.return %lower, %upper : i64, i64
+}
+
+// ====
+
 func.def @cfg_join_unknown_and_zero_is_not_exact_zero(%cond: i1, %input: buffer) -> (f32) {
   %base = index.constant 0 : offset
   %index = index.constant 0 : index
@@ -93,7 +137,7 @@ func.def @symbolic_difference_preserves_assumptions(%raw: index, %other: index, 
 // AND preserves trailing zero bits, not arbitrary divisibility. For input
 // three the masked value and remainder are both two, so the remainder is live.
 func.def @masked_multiple_remainder(%input: index) -> (index) {
-  %value = index.assume %input [range(%input, 3, 9), mul(%input, 3)] : index
+  %value = index.assume %input [range(%input, 3, 9), multiple_of(%input, 3)] : index
   %mask = index.constant 6 : index
   %masked = index.andi %value, %mask : index
   %remainder = index.rem %masked, %mask : index
@@ -112,7 +156,7 @@ func.def @negative_mask_alignment(%input: index) -> (index) {
 
 // ----
 func.def @masked_multiple_remainder(%input: index) -> (index) {
-  %value = index.assume %input [range(%input, 3, 9), mul(%input, 3)] : index
+  %value = index.assume %input [range(%input, 3, 9), multiple_of(%input, 3)] : index
   %mask = index.constant 6 : index
   %masked = index.andi %value, %mask : index
   %remainder = index.rem %masked, %mask : index
@@ -547,7 +591,7 @@ func.def @loaded_boolean_retains_logical_domain(%input: view<1xi1>) -> (i64, i64
 
 // Intersecting the type domain retains narrower ranges and divisibility.
 func.def @inferred_domain_retains_refinements(%input: i8) -> (i64, i64, i64) {
-  %bounded = scalar.assume %input [range(%input, -12, 12), mul(%input, 4)] : i8
+  %bounded = scalar.assume %input [range(%input, -12, 12), multiple_of(%input, 4)] : i8
   %wide = scalar.extsi %bounded : i8 to i64
   %lower = test.fact_range_lo %wide : i64 -> i64
   %upper = test.fact_range_hi %wide : i64 -> i64
@@ -567,11 +611,11 @@ func.def @inferred_domain_retains_refinements(%input: i8) -> (i64, i64, i64) {
 
 // RUN: with-checks pass canonicalize
 
-// Widening the loop-carried byte may discard the recurrence's range, but not
-// the type bounds consumed by an extension inside the loop body.
+// The bounded loop can wrap the carried byte, so an unwrapped additive range
+// is unavailable. Widening retains the type bounds used by the body extension.
 func.def @loop_widening_retains_byte_domain(%n: index) -> (i8, i64, i64) {
   %start = index.constant 0 : index
-  %end = index.assume %n [range(%n, 1, 8)] : index
+  %end = index.assume %n [range(%n, 1, 256)] : index
   %step = index.constant 1 : index
   %initial_byte = scalar.constant 0 : i8
   %increment = scalar.constant 1 : i8
@@ -589,3 +633,153 @@ func.def @loop_widening_retains_byte_domain(%n: index) -> (i8, i64, i64) {
 // ----
 CHECK: %body_lower = scalar.constant -128 : i64
 CHECK: %body_upper = scalar.constant 127 : i64
+
+// ====
+
+// RUN: pass canonicalize,dce
+
+// Two independently tiled coordinates identify the same element within a tile.
+func.def @same_tile_coordinate(%raw: index) -> (index, i1) {
+  %value = index.assume %raw [range(%raw, 0, 4095)] : index
+  %tile = index.constant 128 : index
+  %group = index.constant 8 : index
+  %groups = index.constant 16 : index
+  %within_tile = index.rem %value, %tile : index
+  %left = index.div %within_tile, %group : index
+  %group_index = index.div %value, %group : index
+  %right = index.rem %group_index, %groups : index
+  %difference = index.sub %left, %right : index
+  %equal = index.cmp eq, %left, %right : index
+  func.return %difference, %equal : index, i1
+}
+
+// ----
+func.def @same_tile_coordinate(%raw: index) -> (index, i1) {
+  %difference = index.constant 0 : index
+  %equal = scalar.constant true : i1
+  func.return %difference, %equal : index, i1
+}
+
+// ====
+
+// RUN: pass canonicalize,dce
+
+// A loop solver reenters fact traversal while both enclosing branches are
+// suspended. Its nested switch joins two independent result facts; completing
+// that solve must resume the enclosing branch and its following operations.
+func.def @nested_region_continuations(%outer: i1, %inner: i1, %repeat: i1, %selector: index) -> (i64, i64) {
+  %low = index.constant 2 : offset
+  %high = index.constant 8 : offset
+  %result = scf.if %outer -> (offset) {
+    %nested = scf.if %inner -> (offset) {
+      scf.while {
+        scf.condition %repeat : i1
+      } do {
+        %left, %right = scf.switch %selector -> (offset, offset) {
+          case 0 {
+            scf.yield %low, %high : offset, offset
+          }
+          default {
+            %deeper = scf.if %inner -> (offset) {
+              test.use %low : offset
+              scf.yield %low : offset
+            } else {
+              test.use %high : offset
+              scf.yield %high : offset
+            }
+            scf.yield %deeper, %low : offset, offset
+          }
+        }
+        %left_low = test.fact_range_lo %left : offset -> i64
+        %right_high = test.fact_range_hi %right : offset -> i64
+        test.use %left_low, %right_high : i64, i64
+        scf.yield
+      }
+      %resumed = index.add %low, %high : offset
+      test.use %resumed : offset
+      scf.yield %resumed : offset
+    } else {
+      test.use %high : offset
+      scf.yield %high : offset
+    }
+    scf.yield %nested : offset
+  } else {
+    test.use %low : offset
+    scf.yield %low : offset
+  }
+  %range_low = test.fact_range_lo %result : offset -> i64
+  %range_high = test.fact_range_hi %result : offset -> i64
+  func.return %range_low, %range_high : i64, i64
+}
+
+// ----
+func.def @nested_region_continuations(%outer: i1, %inner: i1, %repeat: i1, %selector: index) -> (i64, i64) {
+  %low = index.constant 2 : offset
+  %high = index.constant 8 : offset
+  scf.if %outer {
+    scf.if %inner {
+      scf.while {
+        scf.condition %repeat : i1
+      } do {
+        %left, %right = scf.switch %selector -> (offset, offset) {
+          case 0 {
+            scf.yield %low, %high : offset, offset
+          }
+          default {
+            test.use %low : offset
+            scf.yield %low, %low : offset, offset
+          }
+        }
+        %left_low = scalar.constant 2 : i64
+        %right_high = scalar.constant 8 : i64
+        test.use %left_low, %right_high : i64, i64
+        scf.yield
+      }
+      %resumed = index.constant 10 : offset
+      test.use %resumed : offset
+    } else {
+      test.use %high : offset
+    }
+  } else {
+    test.use %low : offset
+  }
+  %range_low = scalar.constant 2 : i64
+  %range_high = scalar.constant 10 : i64
+  func.return %range_low, %range_high : i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// A joined view constrains its sibling extent even when the view precedes the
+// extent in the result tuple. Publish the complete joined tuple together.
+func.def @branch_result_tuple(%condition: i1, %input: buffer, %left_size: i32, %right_size: i32) -> (i1) {
+  %base = index.constant 0 : offset
+  %view, %size = scf.if %condition -> (view<[%size]xi32>, i32) {
+    %left = buffer.view %input[%base] : buffer -> view<[%left_size]xi32>
+    scf.yield %left, %left_size : view<[%left_size]xi32>, i32
+  } else {
+    %right = buffer.view %input[%base] : buffer -> view<[%right_size]xi32>
+    scf.yield %right, %right_size : view<[%right_size]xi32>, i32
+  }
+  test.use %view : view<[%size]xi32>
+  %c0 = scalar.constant 0 : i32
+  %nonnegative = scalar.cmpi sge, %size, %c0 : i32
+  func.return %nonnegative : i1
+}
+
+// ----
+func.def @branch_result_tuple(%condition: i1, %input: buffer, %left_size: i32, %right_size: i32) -> (i1) {
+  %base = index.constant 0 : offset
+  %view, %size = scf.if %condition -> (view<[%size]xi32>, i32) {
+    %left = buffer.view %input[%base] : buffer -> view<[%left_size]xi32>
+    scf.yield %left, %left_size : view<[%left_size]xi32>, i32
+  } else {
+    %right = buffer.view %input[%base] : buffer -> view<[%right_size]xi32>
+    scf.yield %right, %right_size : view<[%right_size]xi32>, i32
+  }
+  test.use %view : view<[%size]xi32>
+  %nonnegative = scalar.constant true : i1
+  func.return %nonnegative : i1
+}

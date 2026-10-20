@@ -1,0 +1,382 @@
+// RUN: emit source-low output=low
+
+// The feature-aware contract retains the ordinary narrow scalar carrier when
+// native FP16 is absent.
+x86.target<avx512> @target {features = [-avx512vl]}
+
+func.def target(@target) @identity_without_fp16(%value: f16) -> (f16) {
+  func.return %value : f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (f16) -> (f16)}) @identity_without_fp16(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+// ====
+
+x86.target<avx512> @target {features = [-avx512vl]}
+
+func.def target(@target) @root_without_fp16(%value: f16) -> (f16) {
+  // ERROR@+1: LOWERING/036 {op_name="scalar.sqrtf", element_type="f16", constraint_key="math.element.native_float"}
+  %result = scalar.sqrtf %value : f16
+  func.return %result : f16
+}
+
+// ====
+
+// Native scalar FP16 retains XMM ownership through arithmetic, conversion,
+// selection, bitcasts, and sign legalization.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @scalar_fp16_family(%lhs: f16, %rhs: f16, %acc: f16, %wide: f32, %condition: i1) -> (f16, f32, f16, i1, f16) {
+  %add = scalar.addf %lhs, %rhs : f16
+  %sub = scalar.subf %add, %rhs : f16
+  %mul = scalar.mulf %sub, %lhs : f16
+  %div = scalar.divf %mul, %rhs : f16
+  %fma = scalar.fmaf %lhs, %rhs, %acc : f16
+  %cmp = scalar.cmpf olt, %fma, %div : f16
+  %selected = scf.select %condition, %fma, %div : f16
+  %extended = scalar.extf %selected : f16 to f32
+  %truncated = scalar.fptrunc %wide : f32 to f16
+  %bits = scalar.bitcast %selected : f16 to i16
+  %restored = scalar.bitcast %bits : i16 to f16
+  %absolute = scalar.absf %restored : f16
+  %negated = scalar.negf %absolute : f16
+  %copied = scalar.copysignf %negated, %rhs : f16
+  func.return %restored, %extended, %truncated, %cmp, %copied : f16, f32, f16, i1, f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (f16, f16, f16, f32, i1) -> (f16, f32, f16, i1, f16)}) @scalar_fp16_family(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %acc: reg<x86.xmm>, %wide: reg<x86.xmm>, %condition: reg<x86.gpr32>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.gpr32>, reg<x86.xmm>) asm {
+  %add = vaddsh.xmm %lhs, %rhs
+  %sub = vsubsh.xmm %add, %rhs
+  %mul = vmulsh.xmm %sub, %lhs
+  %div = vdivsh.xmm %mul, %rhs
+  %54 = copy %acc : reg<x86.xmm> -> reg<x86.xmm>
+  %fma = vfmadd231sh.xmm %54, %lhs, %rhs
+  %56 = vcmpsh.xmm %fma, %div, 17
+  %57 = avx512.kmovq.gpr64.k %56
+  %cmp = mov.trunc.gpr32.gpr64 %57
+  %59 = vmovd.xmm.gpr32 %condition
+  %60 = vpsllq.xmm %59, 63
+  %selected = vblendvpd.xmm %div, %fma, %60
+  %extended = vcvtsh2ss.xmm %selected, %selected
+  %truncated = vcvtss2sh.xmm %wide, %wide
+  %64 = vmovd.gpr32.xmm %selected
+  %65 = copy %64 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %66 = and.imm.gpr32 %65 {imm32 = 32767}
+  %67 = copy %66 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %68 = xor.imm.gpr32 %67 {imm32 = -32768}
+  %69 = vmovd.gpr32.xmm %rhs
+  %70 = copy %68 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %71 = and.imm.gpr32 %70 {imm32 = 32767}
+  %72 = copy %69 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %73 = and.imm.gpr32 %72 {imm32 = -32768}
+  %74 = copy %71 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %75 = or.gpr32 %74, %73
+  %copied = vmovd.xmm.gpr32 %75
+  return %selected, %extended, %truncated, %cmp, %copied
+}
+
+// ====
+
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @fp16_constant() -> (f16) {
+  %value = scalar.constant 1.5 : f16
+  func.return %value : f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = () -> (f16)}) @fp16_constant() -> (reg<x86.xmm>) asm {
+  %3 = mov.imm32 15872
+  %value = vmovd.xmm.gpr32 %3
+  return %value
+}
+
+// ====
+
+// A four-lane FP16 payload occupies the low 64 bits of one XMM register.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @identity_four_lane_fp16(%value: vector<4xf16>) -> (vector<4xf16>) {
+  func.return %value : vector<4xf16>
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf16>) -> (vector<4xf16>)}) @identity_four_lane_fp16(%value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  return %value
+}
+
+// ====
+
+// The complete four-lane family uses the low 64 bits of XMM while wider
+// arithmetic retains the ordinary YMM and ZMM paths.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @vector_fp16_family(%xmm_lhs: vector<4xf16>, %xmm_rhs: vector<4xf16>, %ymm_lhs: vector<16xf16>, %ymm_rhs: vector<16xf16>, %zmm_lhs: vector<32xf16>, %zmm_rhs: vector<32xf16>, %wide: vector<4xf32>, %scalar: f16) -> (vector<4xf16>, vector<16xf16>, vector<32xf16>, vector<4xi1>, vector<4xf32>, vector<4xf16>) {
+  %xmm_add = vector.addf %xmm_lhs, %xmm_rhs : vector<4xf16>
+  %xmm_fma = vector.fmaf %xmm_lhs, %xmm_rhs, %xmm_add : vector<4xf16>
+  %ymm_sub = vector.subf %ymm_lhs, %ymm_rhs : vector<16xf16>
+  %zmm_div = vector.divf %zmm_lhs, %zmm_rhs : vector<32xf16>
+  %cmp = vector.cmpf olt, %xmm_lhs, %xmm_rhs : vector<4xf16> -> vector<4xi1>
+  %splat = vector.splat %scalar : vector<4xf16>
+  %selected = vector.select %cmp, %xmm_fma, %splat : vector<4xf16>
+  %absolute = vector.absf %selected : vector<4xf16>
+  %negated = vector.negf %absolute : vector<4xf16>
+  %copied = vector.copysignf %negated, %xmm_rhs : vector<4xf16>
+  %c0 = vector.constant 0.0 : vector<4xf16>
+  %constant = vector.constant 1.5 : vector<4xf16>
+  %extended = vector.extf %copied : vector<4xf16> to vector<4xf32>
+  %truncated = vector.fptrunc %wide : vector<4xf32> to vector<4xf16>
+  %bits = vector.bitcast %copied : vector<4xf16> to vector<4xi16>
+  %restored = vector.bitcast %bits : vector<4xi16> to vector<4xf16>
+  %shuffled = vector.shuffle<[3, 2, 1, 0]> %restored : vector<4xf16>
+  %with_zero = vector.addf %shuffled, %c0 : vector<4xf16>
+  %result = vector.addf %with_zero, %constant : vector<4xf16>
+  func.return %result, %ymm_sub, %zmm_div, %cmp, %extended, %truncated : vector<4xf16>, vector<16xf16>, vector<32xf16>, vector<4xi1>, vector<4xf32>, vector<4xf16>
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf16>, vector<4xf16>, vector<16xf16>, vector<16xf16>, vector<32xf16>, vector<32xf16>, vector<4xf32>, f16) -> (vector<4xf16>, vector<16xf16>, vector<32xf16>, vector<4xi1>, vector<4xf32>, vector<4xf16>)}) @vector_fp16_family(%xmm_lhs: reg<x86.xmm>, %xmm_rhs: reg<x86.xmm>, %ymm_lhs: reg<x86.ymm>, %ymm_rhs: reg<x86.ymm>, %zmm_lhs: reg<x86.zmm>, %zmm_rhs: reg<x86.zmm>, %wide: reg<x86.xmm>, %scalar: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.ymm>, reg<x86.zmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %xmm_add = vaddph.xmm %xmm_lhs, %xmm_rhs
+  %64 = copy %xmm_add : reg<x86.xmm> -> reg<x86.xmm>
+  %xmm_fma = vfmadd231ph.xmm %64, %xmm_lhs, %xmm_rhs
+  %ymm_sub = vsubph.ymm %ymm_lhs, %ymm_rhs
+  %zmm_div = vdivph %zmm_lhs, %zmm_rhs
+  %68 = vcmpph.xmm %xmm_lhs, %xmm_rhs, 17
+  %cmp = avx512.vpmovm2d.xmm.k %68
+  %splat = vpbroadcastw.xmm %scalar
+  %71 = avx512.vpmovd2m.k.xmm %cmp
+  %selected = vpblendmw.xmm %71, %xmm_fma, %splat
+  %73 = mov.imm32 32767
+  %74 = vmovd.xmm.gpr32 %73
+  %75 = vpbroadcastw.xmm %74
+  %76 = vpand.xmm %selected, %75
+  %77 = mov.imm32 -32768
+  %78 = vmovd.xmm.gpr32 %77
+  %79 = vpbroadcastw.xmm %78
+  %80 = vpxor.xmm %76, %79
+  %81 = vpand.xmm %80, %75
+  %82 = vpand.xmm %xmm_rhs, %79
+  %copied = vpor.xmm %81, %82
+  %c0 = vxorps.zero.xmm
+  %85 = mov.imm32 15872
+  %86 = vmovd.xmm.gpr32 %85
+  %constant = vpbroadcastw.xmm %86
+  %extended = vcvtph2psx.xmm.xmm %copied
+  %truncated = vcvtps2phx.xmm.xmm %wide
+  %shuffled = vpshuflw.xmm %copied, 27
+  %with_zero = vaddph.xmm %shuffled, %c0
+  %result = vaddph.xmm %with_zero, %constant
+  return %result, %ymm_sub, %zmm_div, %cmp, %extended, %truncated
+}
+
+// ====
+
+// Two packed halves exercise the smallest direct FP16 family, including its
+// word predicate representation, conversions, roots, reductions, and memory.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @two_lane_fp16_family(%lhs: vector<2xf16>, %rhs: vector<2xf16>, %wide: vector<2xf32>, %scalar: f16, %input: buffer, %output: buffer) -> (vector<2xf16>, vector<2xf32>, f16, f16) {
+  %add = vector.addf %lhs, %rhs : vector<2xf16>
+  %fma = vector.fmaf %lhs, %rhs, %add : vector<2xf16>
+  %cmp = vector.cmpf olt, %lhs, %rhs : vector<2xf16> -> vector<2xi1>
+  %splat = vector.splat %scalar : vector<2xf16>
+  %selected = vector.select %cmp, %fma, %splat : vector<2xf16>
+  %extended = vector.extf %selected : vector<2xf16> to vector<2xf32>
+  %truncated = vector.fptrunc %wide : vector<2xf32> to vector<2xf16>
+  %lane = vector.extract %truncated[1] : vector<2xf16> -> f16
+  %inserted = vector.insert %lane into %selected[0] : f16, vector<2xf16>
+  %root = vector.sqrtf %inserted : vector<2xf16>
+  %dot = vector.dotf %root, %rhs, %scalar : vector<2xf16>, vector<2xf16>, f16
+  %reduced = vector.reduce<addf> %root, %scalar : vector<2xf16>, f16
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<4xf16>
+  %output_view = buffer.view %output[%base] : buffer -> view<4xf16>
+  %loaded = vector.load %input_view[0] : view<4xf16> -> vector<2xf16>
+  %result = vector.addf %loaded, %root : vector<2xf16>
+  vector.store %result, %output_view[2] : vector<2xf16>, view<4xf16>
+  func.return %result, %extended, %dot, %reduced : vector<2xf16>, vector<2xf32>, f16, f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<2xf16>, vector<2xf16>, vector<2xf32>, f16, buffer, buffer) -> (vector<2xf16>, vector<2xf32>, f16, f16)}) @two_lane_fp16_family(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %wide: reg<x86.xmm>, %scalar: reg<x86.xmm>, %input: reg<x86.gpr64>, %output: reg<x86.gpr64>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %add = vaddph.xmm %lhs, %rhs
+  %38 = copy %add : reg<x86.xmm> -> reg<x86.xmm>
+  %fma = vfmadd231ph.xmm %38, %lhs, %rhs
+  %40 = vcmpph.xmm %lhs, %rhs, 17
+  %cmp = avx512.vpmovm2w.xmm.k %40
+  %splat = vpbroadcastw.xmm %scalar
+  %43 = avx512.vpmovw2m.k.xmm %cmp
+  %selected = vpblendmw.xmm %43, %fma, %splat
+  %extended = vcvtph2psx.xmm.xmm %selected
+  %truncated = vcvtps2phx.xmm.xmm %wide
+  %47 = vpextrw.xmm %truncated, 1
+  %lane = vmovd.xmm.gpr32 %47
+  %49 = vmovd.gpr32.xmm %lane
+  %inserted = vpinsrw.xmm %selected, %49, 0
+  %root = vsqrtph.xmm %inserted
+  %52 = copy %scalar : reg<x86.xmm> -> reg<x86.xmm>
+  %53 = vfmadd231sh.xmm %52, %root, %rhs
+  %54 = vpsrldq.xmm %root, 2
+  %55 = vpsrldq.xmm %rhs, 2
+  %dot = vfmadd231sh.xmm %53, %54, %55
+  %57 = vaddsh.xmm %scalar, %root
+  %reduced = vaddsh.xmm %57, %54
+  %loaded = vmovss.load.xmm %input {disp32 = 0}
+  %result = vaddph.xmm %loaded, %root
+  vmovss.store.xmm %result, %output {disp32 = 4}
+  return %result, %extended, %dot, %reduced
+}
+
+// ====
+
+// Scalar memory moves exactly two bytes while preserving the XMM carrier.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @scalar_fp16_memory(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<4xf16>
+  %output_view = buffer.view %output[%base] : buffer -> view<4xf16>
+  %value = view.load %input_view[2] : view<4xf16> -> f16
+  %doubled = scalar.addf %value, %value : f16
+  view.store %doubled, %output_view[3] : f16, view<4xf16>
+  func.return
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) @scalar_fp16_memory(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %9 = movzx.load.u16.gpr32 %input {disp32 = 4}
+  %value = vmovd.xmm.gpr32 %9
+  %doubled = vaddsh.xmm %value, %value
+  %12 = vmovd.gpr32.xmm %doubled
+  mov.store.u16.gpr32 %12, %output {disp32 = 6}
+  return
+}
+
+// ====
+
+// Four packed halves transfer exactly eight bytes through the low half of XMM.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @low_xmm_fp16_memory(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<8xf16>
+  %output_view = buffer.view %output[%base] : buffer -> view<8xf16>
+  %value = vector.load %input_view[0] : view<8xf16> -> vector<4xf16>
+  %doubled = vector.addf %value, %value : vector<4xf16>
+  vector.store %doubled, %output_view[4] : vector<4xf16>, view<8xf16>
+  func.return
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) @low_xmm_fp16_memory(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %value = vmovsd.load.xmm %input {disp32 = 0}
+  %doubled = vaddph.xmm %value, %value
+  vmovsd.store.xmm %doubled, %output {disp32 = 8}
+  return
+}
+
+// ====
+
+// Lane operations retain scalar FP16 in XMM instead of round-tripping through
+// the ordinary GPR carrier.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @fp16_lane_transport(%values: vector<4xf16>) -> (vector<4xf16>, f16) {
+  %lane = vector.extract %values[3] : vector<4xf16> -> f16
+  %updated = vector.insert %lane into %values[1] : f16, vector<4xf16>
+  func.return %updated, %lane : vector<4xf16>, f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf16>) -> (vector<4xf16>, f16)}) @fp16_lane_transport(%values: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %8 = vpextrw.xmm %values, 3
+  %lane = vmovd.xmm.gpr32 %8
+  %10 = vmovd.gpr32.xmm %lane
+  %updated = vpinsrw.xmm %values, %10, 1
+  return %updated, %lane
+}
+
+// ====
+
+// Exact extrema preserve NaNs and signed zero. The guarded forms use the
+// native MIN/MAX instructions only when those distinctions are disabled.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @fp16_extrema(%scalar_lhs: f16, %scalar_rhs: f16, %vector_lhs: vector<4xf16>, %vector_rhs: vector<4xf16>) -> (f16, f16, vector<4xf16>, vector<4xf16>) {
+  %scalar_exact = scalar.minimumf %scalar_lhs, %scalar_rhs : f16
+  %scalar_fast = scalar.maxnumf<nnan|nsz> %scalar_lhs, %scalar_rhs : f16
+  %vector_exact = vector.maxnumf %vector_lhs, %vector_rhs : vector<4xf16>
+  %vector_fast = vector.minimumf<nnan|nsz> %vector_lhs, %vector_rhs : vector<4xf16>
+  func.return %scalar_exact, %scalar_fast, %vector_exact, %vector_fast : f16, f16, vector<4xf16>, vector<4xf16>
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (f16, f16, vector<4xf16>, vector<4xf16>) -> (f16, f16, vector<4xf16>, vector<4xf16>)}) @fp16_extrema(%scalar_lhs: reg<x86.xmm>, %scalar_rhs: reg<x86.xmm>, %vector_lhs: reg<x86.xmm>, %vector_rhs: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %20 = vcmpsh.xmm %scalar_lhs, %scalar_rhs, 17
+  %21 = vpblendmw.xmm %20, %scalar_lhs, %scalar_rhs
+  %22 = vcmpsh.xmm %scalar_lhs, %scalar_rhs, 0
+  %23 = vpor.xmm %scalar_lhs, %scalar_rhs
+  %24 = vpblendmw.xmm %22, %23, %21
+  %25 = vcmpsh.xmm %scalar_lhs, %scalar_lhs, 3
+  %26 = vpblendmw.xmm %25, %scalar_lhs, %24
+  %27 = vcmpsh.xmm %scalar_rhs, %scalar_rhs, 3
+  %scalar_exact = vpblendmw.xmm %27, %scalar_rhs, %26
+  %scalar_fast = vmaxsh.xmm %scalar_lhs, %scalar_rhs
+  %30 = vcmpph.xmm %vector_lhs, %vector_rhs, 30
+  %31 = vpblendmw.xmm %30, %vector_lhs, %vector_rhs
+  %32 = vcmpph.xmm %vector_lhs, %vector_rhs, 0
+  %33 = vpand.xmm %vector_lhs, %vector_rhs
+  %34 = vpblendmw.xmm %32, %33, %31
+  %35 = vcmpph.xmm %vector_lhs, %vector_lhs, 3
+  %36 = vpblendmw.xmm %35, %vector_rhs, %34
+  %37 = vcmpph.xmm %vector_rhs, %vector_rhs, 3
+  %vector_exact = vpblendmw.xmm %37, %vector_lhs, %36
+  %vector_fast = vminph.xmm %vector_lhs, %vector_rhs
+  return %scalar_exact, %scalar_fast, %vector_exact, %vector_fast
+}
+
+// ====
+
+// Ordered reductions and dots retain f16 intermediates. Reassociated forms
+// may use packed trees, and guarded extrema may use native MIN/MAX.
+x86.target<avx512> @target {features = [avx512fp16]}
+
+func.def target(@target) @fp16_reductions(%lhs: vector<4xf16>, %rhs: vector<4xf16>, %init: f16) -> (f16, f16, f16, f16) {
+  %ordered = vector.reduce<addf> %lhs, %init : vector<4xf16>, f16
+  %reassociated = vector.reduce<mulf, reassoc> %lhs, %init : vector<4xf16>, f16
+  %extrema = vector.reduce<maxnumf, reassoc|nnan|nsz> %lhs, %init : vector<4xf16>, f16
+  %dot = vector.dotf %lhs, %rhs, %init : vector<4xf16>, vector<4xf16>, f16
+  func.return %ordered, %reassociated, %extrema, %dot : f16, f16, f16, f16
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf16>, vector<4xf16>, f16) -> (f16, f16, f16, f16)}) @fp16_reductions(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %18 = vaddsh.xmm %init, %lhs
+  %19 = vpsrldq.xmm %lhs, 2
+  %20 = vaddsh.xmm %18, %19
+  %21 = vpsrldq.xmm %lhs, 4
+  %22 = vaddsh.xmm %20, %21
+  %23 = vpsrldq.xmm %lhs, 6
+  %ordered = vaddsh.xmm %22, %23
+  %26 = vmulph.xmm %lhs, %21
+  %27 = vpsrldq.xmm %26, 2
+  %28 = vmulph.xmm %26, %27
+  %reassociated = vmulsh.xmm %init, %28
+  %31 = vmaxph.xmm %lhs, %21
+  %32 = vpsrldq.xmm %31, 2
+  %33 = vmaxph.xmm %31, %32
+  %extrema = vmaxsh.xmm %init, %33
+  %35 = copy %init : reg<x86.xmm> -> reg<x86.xmm>
+  %36 = vfmadd231sh.xmm %35, %lhs, %rhs
+  %38 = vpsrldq.xmm %rhs, 2
+  %39 = vfmadd231sh.xmm %36, %19, %38
+  %41 = vpsrldq.xmm %rhs, 4
+  %42 = vfmadd231sh.xmm %39, %21, %41
+  %44 = vpsrldq.xmm %rhs, 6
+  %dot = vfmadd231sh.xmm %42, %23, %44
+  return %ordered, %reassociated, %extrema, %dot
+}

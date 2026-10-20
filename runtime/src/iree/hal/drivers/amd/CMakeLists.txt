@@ -9,4 +9,58 @@
 
 iree_add_all_subdirs()
 
+if(AMDF_BUILD)
+iree_cc_library(
+  NAME
+    status
+  HDRS
+    "status.h"
+  SRCS
+    "status.c"
+  DEPS
+    amdf::headers
+    iree::base
+    iree::hal
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD)
+iree_cc_test(
+  NAME
+    status_test
+  SRCS
+    "status_test.cc"
+  DEPS
+    ::status
+    amdf::headers
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=libamdf"
+)
+endif()
+
+if(AMDF_BUILD)
+iree_cc_library(
+  NAME
+    driver
+  HDRS
+    "driver.h"
+  SRCS
+    "driver.c"
+  DEPS
+    ::status
+    amdf::amdf_static
+    amdf::headers
+    iree::base
+    iree::hal
+    iree::hal::drivers::amd::fabric
+    iree::hal::drivers::amd::xdna::context
+    iree::hal::drivers::amd::xdna::device
+  PUBLIC
+)
+endif()
+
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

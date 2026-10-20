@@ -59,7 +59,7 @@ class CallableInlineTest : public ::testing::Test {
     loom_string_id_t name_id = InternString(name);
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return (loom_symbol_ref_t){/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    return loom_symbol_ref_t{.module_id = 0, .symbol_id = symbol_id};
   }
 
   loom_string_id_t InternString(iree_string_view_t string) {
@@ -95,10 +95,11 @@ class CallableInlineTest : public ::testing::Test {
                                  loom_type_t value_type) {
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), callee, &value_type, 1, &value_type, 1,
-        nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee,
+        &value_type, 1, &value_type, 1, nullptr, 0, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     uint16_t arg_count = 0;
     const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -118,10 +119,11 @@ class CallableInlineTest : public ::testing::Test {
   loom_op_t* BuildNonReturningFunction(loom_symbol_ref_t callee) {
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), callee, nullptr, 0, nullptr, 0, nullptr,
-        0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee, nullptr,
+        0, nullptr, 0, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
+        &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     loom_builder_t body_builder = BodyBuilder(func_op);
     loom_block_t* loop_block = nullptr;
@@ -143,7 +145,7 @@ class CallableInlineTest : public ::testing::Test {
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_template_def_build(
         &module_builder_, /*build_flags=*/0, family, /*visibility=*/0,
-        /*retain=*/0, /*cc=*/0, /*purity=*/0, /*temperature=*/0,
+        /*retain=*/0, /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0,
         loom_symbol_ref_null(), loom_parameterized_attr_array_empty(),
         /*priority=*/0, callee, &value_type, 1, &value_type, 1, nullptr, 0,
         nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
@@ -169,11 +171,12 @@ class CallableInlineTest : public ::testing::Test {
     loom_type_t result_types[2] = {value_type, value_type};
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), callee, arg_types,
-        IREE_ARRAYSIZE(arg_types), result_types, IREE_ARRAYSIZE(result_types),
-        nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee,
+        arg_types, IREE_ARRAYSIZE(arg_types), result_types,
+        IREE_ARRAYSIZE(result_types), nullptr, 0, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     uint16_t arg_count = 0;
     const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -195,10 +198,11 @@ class CallableInlineTest : public ::testing::Test {
                          loom_type_t value_type, loom_op_t** out_call_op) {
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), caller, &value_type, 1, &value_type, 1,
-        nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller,
+        &value_type, 1, &value_type, 1, nullptr, 0, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     uint16_t arg_count = 0;
     const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -224,10 +228,11 @@ class CallableInlineTest : public ::testing::Test {
                                  loom_op_t** out_call_op) {
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), caller, &value_type, 1, &value_type, 1,
-        nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller,
+        &value_type, 1, &value_type, 1, nullptr, 0, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     uint16_t arg_count = 0;
     const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -236,9 +241,9 @@ class CallableInlineTest : public ::testing::Test {
     loom_builder_t body_builder = BodyBuilder(func_op);
     loom_op_t* call_op = nullptr;
     IREE_CHECK_OK(loom_template_call_build(
-        &body_builder, /*build_flags=*/0, /*purity=*/0, /*temperature=*/0,
-        callee, args, 1, &value_type, 1, nullptr, 0, LOOM_LOCATION_UNKNOWN,
-        &call_op));
+        &body_builder, /*build_flags=*/0, /*effect_contract=*/0,
+        /*temperature=*/0, callee, args, 1, &value_type, 1, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &call_op));
     loom_value_id_t call_result = loom_template_call_results(call_op).values[0];
     SetValueName(call_result, IREE_SV("call_result"));
     loom_op_t* return_op = nullptr;
@@ -256,11 +261,12 @@ class CallableInlineTest : public ::testing::Test {
     loom_type_t result_types[2] = {value_type, value_type};
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-        loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-        loom_named_attr_slice_empty(), caller, arg_types,
-        IREE_ARRAYSIZE(arg_types), result_types, IREE_ARRAYSIZE(result_types),
-        nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+        &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+        loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+        LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller,
+        arg_types, IREE_ARRAYSIZE(arg_types), result_types,
+        IREE_ARRAYSIZE(result_types), nullptr, 0, nullptr, 0,
+        LOOM_LOCATION_UNKNOWN, &func_op));
     loom_func_like_t func = loom_func_like_cast(module_, func_op);
     uint16_t arg_count = 0;
     const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -332,10 +338,11 @@ TEST_F(CallableInlineTest, EmptyBodyIsNotLinear) {
   const loom_symbol_ref_t callee_ref = MakeSymbol(IREE_SV("empty"));
   loom_op_t* callee_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), callee_ref, nullptr, 0, nullptr, 0,
-      nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee_ref,
+      nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
+      &callee_op));
 
   EXPECT_FALSE(loom_callable_body_is_linear(
       module_, loom_func_like_cast(module_, callee_op)));
@@ -352,10 +359,11 @@ TEST_F(CallableInlineTest, AppendsLexicallyClosedCfgSplice) {
 
   loom_op_t* caller_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), caller_ref, nullptr, 0, nullptr, 0,
-      nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller_ref,
+      nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
+      &caller_op));
   loom_builder_t caller_builder = BodyBuilder(caller_op);
   loom_op_t* call_op = nullptr;
   IREE_ASSERT_OK(loom_func_call_build(&caller_builder, 0, 0, 0, 0, callee_ref,
@@ -410,10 +418,10 @@ TEST_F(CallableInlineTest, OrdersCfgSpliceBeforeExternalTailResultUse) {
 
   loom_op_t* caller_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), caller_ref, &f32, 1, &f32, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller_ref, &f32,
+      1, &f32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
   loom_func_like_t caller = loom_func_like_cast(module_, caller_op);
   uint16_t caller_arg_count = 0;
   const loom_value_id_t* caller_args =
@@ -462,7 +470,7 @@ TEST_F(CallableInlineTest, OrdersCfgSpliceBeforeExternalTailResultUse) {
   EXPECT_EQ(loom_func_return_operands(return_op).values[0], negated);
 
   const loom_verify_options_t verify_options = {
-      /*.sink=*/{loom_diagnostic_stderr_sink, nullptr},
+      .sink = {loom_diagnostic_stderr_sink, nullptr},
   };
   loom_verify_result_t verify_result = {};
   IREE_ASSERT_OK(loom_verify_module(module_, &verify_options, &verify_result));
@@ -479,10 +487,10 @@ TEST_F(CallableInlineTest,
 
   loom_op_t* callee_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), callee_ref, &f32, 1, &f32, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee_ref, &f32,
+      1, &f32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
   loom_func_like_t callee = loom_func_like_cast(module_, callee_op);
   uint16_t callee_arg_count = 0;
   const loom_value_id_t* callee_args =
@@ -506,10 +514,10 @@ TEST_F(CallableInlineTest,
 
   loom_op_t* caller_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), caller_ref, &tile, 1, &tile, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller_ref, &tile,
+      1, &tile, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
   loom_func_like_t caller = loom_func_like_cast(module_, caller_op);
   uint16_t caller_arg_count = 0;
   const loom_value_id_t* caller_args =
@@ -589,10 +597,10 @@ TEST_F(CallableInlineTest, InlinesFuncLikeWithDeclaredTerminator) {
 
   loom_op_t* caller_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), caller_ref, &i32, 1, &i32, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller_ref, &i32,
+      1, &i32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
   loom_func_like_t caller = loom_func_like_cast(module_, caller_op);
   uint16_t caller_arg_count = 0;
   const loom_value_id_t* caller_args =
@@ -676,10 +684,10 @@ TEST_F(CallableInlineTest, ConsumingInlineMovesCfgBlocksAndErasesCallee) {
 
   loom_op_t* callee_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), callee_ref, &i32, 1, &i32, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee_ref, &i32,
+      1, &i32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
   loom_func_like_t callee = loom_func_like_cast(module_, callee_op);
   uint16_t callee_arg_count = 0;
   const loom_value_id_t* callee_args =
@@ -772,10 +780,11 @@ TEST_F(CallableInlineTest, ConsumingInlinePreservesNonReturningLoop) {
   const loom_symbol_ref_t caller_ref = MakeSymbol(IREE_SV("caller"));
   loom_op_t* callee_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), callee_ref, nullptr, 0, nullptr, 0,
-      nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &callee_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), callee_ref,
+      nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
+      &callee_op));
   loom_func_like_t callee = loom_func_like_cast(module_, callee_op);
   loom_region_t* callee_body = loom_func_like_body(callee);
   loom_block_t* old_entry = loom_region_entry_block(callee_body);
@@ -792,10 +801,11 @@ TEST_F(CallableInlineTest, ConsumingInlinePreservesNonReturningLoop) {
 
   loom_op_t* caller_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), caller_ref, nullptr, 0, nullptr, 0,
-      nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &caller_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), caller_ref,
+      nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN,
+      &caller_op));
   loom_builder_t caller_builder = BodyBuilder(caller_op);
   loom_op_t* call_op = nullptr;
   IREE_ASSERT_OK(loom_func_call_build(&caller_builder, 0, 0, 0, 0, callee_ref,
@@ -894,10 +904,10 @@ TEST_F(CallableInlineTest, RejectsRecursiveSelfInline) {
   loom_symbol_ref_t self_ref = MakeSymbol(IREE_SV("self"));
   loom_op_t* func_op = nullptr;
   IREE_ASSERT_OK(loom_func_def_build(
-      &module_builder_, 0, 0, 0, 0, 0, 0, 0, loom_symbol_ref_null(), 0,
-      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
-      loom_named_attr_slice_empty(), self_ref, &i32, 1, &i32, 1, nullptr, 0,
-      nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
+      &module_builder_, 0, 0, /*linkage=*/0, 0, 0, 0, 0, 0,
+      loom_symbol_ref_null(), 0, loom_named_attr_slice_empty(),
+      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), self_ref, &i32, 1,
+      &i32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &func_op));
   loom_func_like_t func = loom_func_like_cast(module_, func_op);
   uint16_t arg_count = 0;
   const loom_value_id_t* args = loom_func_like_arg_ids(func, &arg_count);
@@ -970,9 +980,16 @@ TEST_F(CallableInlineTest, CloneDefinitionRemapsOnlySelfReferences) {
       LOOM_LOCATION_UNKNOWN, &source_helper_call));
 
   loom_symbol_ref_t target_ref = MakeSymbol(IREE_SV("target"));
+  loom_ir_remap_op_projection_t calls[] = {{source_self_call, nullptr},
+                                           {source_helper_call, nullptr}};
+  const loom_callable_clone_options_t options = {
+      .observer = {},
+      .op_projection = {calls, IREE_ARRAYSIZE(calls)},
+  };
   loom_func_like_t cloned = {};
-  IREE_ASSERT_OK(loom_callable_clone_definition(
-      &module_builder_, source, target_ref, &cloned, &rewriter_arena_));
+  IREE_ASSERT_OK(loom_callable_clone_definition(&module_builder_, source,
+                                                target_ref, &options, &cloned,
+                                                &rewriter_arena_));
 
   ASSERT_EQ(source_block->op_count, 3u);
   EXPECT_EQ(loom_func_call_callee(source_self_call).symbol_id,
@@ -990,6 +1007,8 @@ TEST_F(CallableInlineTest, CloneDefinitionRemapsOnlySelfReferences) {
   ASSERT_EQ(cloned_block->op_count, 3u);
   loom_op_t* cloned_self_call = loom_block_op(cloned_block, 0);
   loom_op_t* cloned_helper_call = loom_block_op(cloned_block, 1);
+  EXPECT_EQ(calls[0].target_op, cloned_self_call);
+  EXPECT_EQ(calls[1].target_op, cloned_helper_call);
   ASSERT_TRUE(loom_func_call_isa(cloned_self_call));
   ASSERT_TRUE(loom_func_call_isa(cloned_helper_call));
   EXPECT_EQ(loom_func_call_callee(cloned_self_call).symbol_id,
@@ -1083,7 +1102,7 @@ TEST_P(CallableBatchTest, PublishesBlockOrderAcrossInterleavedCallers) {
   }
   EXPECT_EQ(callee_body->block_count, 2u);
   const loom_verify_options_t verify_options = {
-      /*.sink=*/{loom_diagnostic_stderr_sink, nullptr},
+      .sink = {loom_diagnostic_stderr_sink, nullptr},
   };
   loom_verify_result_t verify_result = {};
   IREE_ASSERT_OK(loom_verify_module(module_, &verify_options, &verify_result));

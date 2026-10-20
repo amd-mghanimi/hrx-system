@@ -27,16 +27,29 @@ extern "C" {
 typedef struct loom_amdgpu_spill_lowering_result_t {
   // Number of user-facing diagnostics emitted while lowering spill traffic.
   uint32_t error_count;
-  // Scratch-arena-owned value IDs that the lowered traffic requires in
-  // registers during subsequent allocation rounds.
+  // Scratch-arena-owned helper value IDs created by spill lowering
+  // that must remain in registers during subsequent allocation rounds.
   const loom_value_id_t* required_register_value_ids;
   // Number of entries in |required_register_value_ids|.
   iree_host_size_t required_register_value_count;
+  // Scratch-arena-owned VGPR values defined while EXEC is widened beyond the
+  // surrounding program point's semantic lane mask.
+  const loom_value_id_t* expanded_execution_value_ids;
+  // Number of entries in |expanded_execution_value_ids|.
+  iree_host_size_t expanded_execution_value_count;
+  // Scratch-arena-owned register values created as single-result private setup
+  // for one consumer while lowering reloads.
+  const loom_value_id_t* per_user_placement_value_ids;
+  // Number of entries in |per_user_placement_value_ids|.
+  iree_host_size_t per_user_placement_value_count;
 } loom_amdgpu_spill_lowering_result_t;
 
 // Rewrites low.spill/low.reload in |function_op| into descriptor-backed AMDGPU
 // scratch load/store packets. The descriptor set must be the already-selected
-// target-low descriptor set for the function target.
+// target-low descriptor set for the function target. VGPR and AGPR traffic
+// retains its payload bank and execution mask; SGPR traffic broadcasts and
+// gathers a wave-wide snapshot through VGPRs. Scratch addresses use VGPRs
+// independently of the payload bank.
 iree_status_t loom_amdgpu_lower_spill_traffic(
     loom_module_t* module, loom_op_t* function_op,
     const loom_low_descriptor_set_t* descriptor_set,

@@ -23,8 +23,8 @@ enum {
   LOOM_OP_GROUP_COUNT_ = 1,
 };
 
-// LOOM_OP_GROUP_CREATE: Create a distinct scheduling group with SSA-defined cardinality. The cardinality may be specialized from workload or target queries; consumers use ordinary value facts when an exact count is required.
-// %workers = group.create %worker_count : index -> group
+// LOOM_OP_GROUP_CREATE: Create a distinct rank-one communication domain with SSA-defined cardinality. The result identifies participants; it contains no participant values, channels, or physical resources.
+// %workers = group.create %worker_count : index -> group<[%worker_count]>
 LOOM_DEFINE_ISA(loom_group_create_isa, LOOM_OP_GROUP_CREATE)
 LOOM_DEFINE_OPERAND(loom_group_create_cardinality, 0)
 LOOM_DEFINE_RESULT(loom_group_create_result, 0)

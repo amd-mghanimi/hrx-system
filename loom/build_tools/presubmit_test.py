@@ -9,6 +9,9 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,7 +37,16 @@ class LoomPresubmitTest(unittest.TestCase):
     def setUpClass(cls):
         cls.presubmit = load_presubmit_module()
 
-    def test_bazel_tests_exclude_unrunnable_tests(self):
+    def test_source_tools_and_tests_share_the_build_configuration(self):
+        source_options = self.presubmit.BAZEL_SOURCE_TOOL_ARGS
+        test_options = self.presubmit.BAZEL_TEST_CONFIGURATION_ARGS
+
+        self.assertEqual(source_options[0], "--config=locked")
+        self.assertEqual(test_options[0], "--config=presubmit")
+        self.assertEqual(source_options[1:], test_options[1:])
+        self.assertIn("--//loom/config/import:enable=cxx", source_options)
+
+    def test_bazel_tests_preserve_manual_filter_without_hardware_blacklists(self):
         command = self.presubmit.bazel_test_command()
 
         self.assertEqual(command[:3], ["bazel", "test", "--config=presubmit"])
@@ -48,16 +60,15 @@ class LoomPresubmitTest(unittest.TestCase):
         tag_filter = next(
             arg for arg in command if arg.startswith("--test_tag_filters=")
         )
-        self.assertIn("-manual", tag_filter)
-        self.assertIn("-iree-run-requirement=runtime.resource.amd_gpu", tag_filter)
-        self.assertIn("-iree-run-requirement=vulkan.resource.device", tag_filter)
-        self.assertNotIn("loom.resource", tag_filter)
+        self.assertEqual(tag_filter, "--test_tag_filters=-manual")
+        self.assertNotIn("--skip_incompatible_explicit_targets", command)
 
     def test_bazel_test_command_reads_affected_targets_from_file(self):
         target_pattern_file = Path("/tmp/loom-affected-tests")
         command = self.presubmit.bazel_test_command(target_pattern_file)
 
         self.assertEqual(command[-1], f"--target_pattern_file={target_pattern_file}")
+        self.assertIn("--skip_incompatible_explicit_targets", command)
         self.assertNotIn("//loom/...", command)
         self.assertIn("--//loom/config/import:enable=cxx", command)
 
@@ -74,6 +85,21 @@ class LoomPresubmitTest(unittest.TestCase):
             ):
                 self.assertEqual(self.presubmit.run_bazel_tests(), exit_code == 0)
                 self.assertEqual(run.call_args.args[0][-1], "//loom/...")
+
+    def test_bazel_tests_use_selected_execution_policy(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                self.presubmit.project_presubmit.BAZEL_CONFIGS_ENV: json.dumps(
+                    ["remote-execution", "local-tests"]
+                )
+            },
+            clear=True,
+        ):
+            command = self.presubmit.bazel_test_command()
+
+        self.assertIn("--config=remote-execution", command)
+        self.assertIn("--config=local-tests", command)
 
     def test_bazel_source_label_uses_nearest_build_package(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -92,46 +118,37 @@ class LoomPresubmitTest(unittest.TestCase):
                     "//loom/src/loom/example:test/example.loom-test",
                 )
 
-    def test_affected_tests_follow_configured_reverse_dependencies(self):
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            graph_path = Path(temporary_dir) / "dependencies.dot"
-            graph_path.write_text(
-                """digraph mygraph {
-  "//loom/src/loom/ops/vector:vector (cfg)" -> "//loom/src/loom/ops/vector:canonicalize.c (null)"
-  "//loom/src/loom/ops/vector/test:canonicalize (cfg)" -> "//loom/src/loom/ops/vector:vector (cfg)"
-  "//loom/src/loom/target/arch:source_low_runner (cfg)" -> "//loom/src/loom/ops/vector:vector (cfg)"
-  "//loom/src/loom/target/arch/amdgpu:source_low_memory_global (cfg)" -> "//loom/src/loom/target/arch:source_low_runner (cfg)"
-  "//loom/src/loom/unrelated:unrelated_test (cfg)" -> "//loom/src/loom/unrelated:unrelated.c (null)"
-}
-""",
-                encoding="utf-8",
-            )
+    def test_affected_query_filters_sources_in_the_configured_test_closure(self):
+        query = self.presubmit.affected_bazel_test_query(
+            {"//loom:b_test", "//loom:a_test"}, {"//loom:changed.c"}
+        )
 
-            self.assertEqual(
-                self.presubmit.affected_bazel_test_targets(
-                    {
-                        "//loom/src/loom/ops/vector/test:canonicalize",
-                        "//loom/src/loom/target/arch/amdgpu:source_low_memory_global",
-                        "//loom/src/loom/unrelated:unrelated_test",
-                    },
-                    {"//loom/src/loom/ops/vector:canonicalize.c"},
-                    graph_path,
-                ),
-                [
-                    "//loom/src/loom/ops/vector/test:canonicalize",
-                    "//loom/src/loom/target/arch/amdgpu:source_low_memory_global",
-                ],
-            )
+        self.assertEqual(
+            query,
+            "let tests = set(\n  //loom:a_test\n  //loom:b_test) in\n"
+            "let dependencies = deps($tests) in\n"
+            "$tests intersect rdeps($dependencies, "
+            'filter("^(//loom:changed\\.c)$", $dependencies))\n',
+        )
 
-    def test_affected_tests_reject_malformed_dependency_edges(self):
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            graph_path = Path(temporary_dir) / "dependencies.dot"
-            graph_path.write_text('  "//loom:a (cfg)" -> malformed\n', encoding="utf-8")
+    def test_affected_query_matches_literal_labels_without_query_string_escapes(self):
+        labels = {"//loom:input+[x].loom-test", "//loom:both'\".loom-test"}
+        query = self.presubmit.affected_bazel_test_query({"//loom:root_test"}, labels)
+        pattern = query.split('filter("', 1)[1].split('", $dependencies)', 1)[0]
 
-            with self.assertRaisesRegex(ValueError, "dependency edge at line 1"):
-                self.presubmit.affected_bazel_test_targets(
-                    {"//loom:a_test"}, {"//loom:a.c"}, graph_path
-                )
+        self.assertNotIn('"', pattern)
+        for label in labels:
+            self.assertIsNotNone(re.fullmatch(pattern, label))
+            self.assertIsNone(re.fullmatch(pattern, label + ".extra"))
+        self.assertIsNone(re.fullmatch(pattern, "//loom:inputtxXloom-test"))
+
+    def test_configured_label_preserves_target_name_and_rejects_malformed_output(self):
+        self.assertEqual(
+            self.presubmit.bazel_node_label("//loom:test (name) (cfg)"),
+            "//loom:test (name)",
+        )
+        with self.assertRaisesRegex(ValueError, "malformed configured Bazel node"):
+            self.presubmit.bazel_node_label("//loom:a_test")
 
     def test_selected_files_are_mapped_to_source_labels(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -199,21 +216,28 @@ class LoomPresubmitTest(unittest.TestCase):
                 )
                 observed_query = query_path.read_text(encoding="utf-8")
                 output_path.write_text(
-                    """digraph mygraph {
-  "//loom/src/loom/ops/vector:vector (cfg)" -> "//loom/src/loom/ops/vector:canonicalize.c (null)"
-  "//loom/src/loom/ops/vector/test:canonicalize (cfg)" -> "//loom/src/loom/ops/vector:vector (cfg)"
-  "//loom/src/loom/target/arch/amdgpu:source_low_memory_global (cfg)" -> "//loom/src/loom/ops/vector:vector (cfg)"
-}
-""",
+                    "//loom/src/loom/ops/vector/test:canonicalize (cfg)\n"
+                    "//loom/src/loom/target/arch/amdgpu:source_low_memory_global (cfg)\n"
+                    "//loom/src/loom/ops/vector/test:canonicalize (othercfg)\n",
                     encoding="utf-8",
                 )
             else:
                 self.fail(f"unexpected command: {description}")
             return True
 
-        with mock.patch.object(
-            self.presubmit, "run_command", side_effect=run_query
-        ) as run_command:
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    self.presubmit.project_presubmit.BAZEL_CONFIGS_ENV: json.dumps(
+                        ["asan", "remote-execution"]
+                    )
+                },
+            ),
+            mock.patch.object(
+                self.presubmit, "run_command", side_effect=run_query
+            ) as run_command,
+        ):
             self.assertEqual(
                 self.presubmit.query_affected_bazel_test_targets(
                     {"//loom/src/loom/ops/vector:canonicalize.c"}
@@ -236,11 +260,51 @@ class LoomPresubmitTest(unittest.TestCase):
             dependency_command,
         )
         self.assertIn("--//loom/config/import:enable=cxx", dependency_command)
-        self.assertIn("--nograph:factored", dependency_command)
+        self.assertEqual(
+            [arg for arg in dependency_command if arg.startswith("--config=")],
+            ["--config=presubmit", "--config=asan", "--config=remote-execution"],
+        )
+        self.assertIn("--experimental_explicit_aspects", dependency_command)
+        self.assertIn("--output=label", dependency_command)
         self.assertIn(
             "//loom/src/loom/target/arch/amdgpu:source_low_memory_global",
             observed_query,
         )
+
+    def test_affected_query_distinguishes_empty_and_malformed_results(self):
+        for result in ("", "not a configured target\n"):
+            with self.subTest(result=result):
+
+                def run_query(command, _description):
+                    output_path = Path(
+                        next(
+                            arg for arg in command if arg.startswith("--output_file=")
+                        ).split("=", 1)[1]
+                    )
+                    output_path.write_text(
+                        "//loom:root_test\n" if command[1] == "query" else result,
+                        encoding="utf-8",
+                    )
+                    return True
+
+                with mock.patch.object(
+                    self.presubmit, "run_command", side_effect=run_query
+                ):
+                    if result:
+                        with self.assertRaisesRegex(
+                            self.presubmit.BazelDependencyQueryError,
+                            "malformed configured Bazel node",
+                        ):
+                            self.presubmit.query_affected_bazel_test_targets(
+                                {"//loom:absent.c"}
+                            )
+                    else:
+                        self.assertEqual(
+                            self.presubmit.query_affected_bazel_test_targets(
+                                {"//loom:absent.c"}
+                            ),
+                            [],
+                        )
 
     def test_dependency_query_failure_does_not_run_a_fallback_suite(self):
         with (
@@ -441,7 +505,7 @@ class LoomPresubmitTest(unittest.TestCase):
         )
         self.assertFalse(
             self.presubmit.is_format_source_path(
-                "loom/src/loom/test/corpus/text/operations.loom"
+                "loom/src/loom/format/testdata/operations.loom"
             )
         )
         self.assertFalse(
@@ -458,7 +522,7 @@ class LoomPresubmitTest(unittest.TestCase):
     def test_loom_test_containers_are_in_formatter_contract(self):
         self.assertTrue(
             self.presubmit.is_format_source_path(
-                "loom/src/loom/test/corpus/source_low/numeric_i32_memory.loom-test"
+                "loom/build_tools/bazel/test/roundtrip.loom-test"
             )
         )
 
@@ -474,7 +538,7 @@ class LoomPresubmitTest(unittest.TestCase):
             returncode=0,
             stdout=(
                 canonical_path
-                + "\0loom/src/loom/test/corpus/text/operations.loom"
+                + "\0loom/src/loom/format/testdata/operations.loom"
                 + f"\0{test_container_path}\0"
             ),
             stderr="",
@@ -505,42 +569,6 @@ class LoomPresubmitTest(unittest.TestCase):
             text=True,
             encoding="utf-8",
         )
-
-    def test_path_commands_are_batched_below_portable_command_line_limit(self):
-        command_prefix = ["loom-format", "--check"]
-        paths = ["loom/a.loom", "loom/b.loom", "loom/c.loom"]
-        single_path_limit = self.presubmit.command_line_utf16_units(
-            [*command_prefix, paths[0]]
-        )
-
-        commands = self.presubmit.batch_path_commands(
-            command_prefix,
-            paths,
-            max_command_line_utf16_units=single_path_limit,
-        )
-
-        self.assertEqual(
-            commands,
-            [[*command_prefix, path] for path in paths],
-        )
-        for command in commands:
-            self.assertLessEqual(
-                self.presubmit.command_line_utf16_units(command),
-                single_path_limit,
-            )
-
-    def test_path_command_batching_rejects_one_oversized_path(self):
-        command_prefix = ["loom-format", "--check"]
-        prefix_limit = self.presubmit.command_line_utf16_units(command_prefix)
-
-        with self.assertRaisesRegex(
-            ValueError, "path exceeds the portable command-line limit"
-        ):
-            self.presubmit.batch_path_commands(
-                command_prefix,
-                ["loom/a.loom"],
-                max_command_line_utf16_units=prefix_limit,
-            )
 
     def test_batched_path_command_runs_every_batch_after_failure(self):
         commands = [
@@ -634,6 +662,11 @@ class LoomPresubmitTest(unittest.TestCase):
         with (
             mock.patch.object(
                 self.presubmit,
+                "validate_cmake_source_format_configuration",
+                return_value=True,
+            ),
+            mock.patch.object(
+                self.presubmit,
                 "tracked_format_source_paths",
                 return_value=["loom/a.loom"],
             ),
@@ -661,7 +694,7 @@ class LoomPresubmitTest(unittest.TestCase):
         ):
             self.assertTrue(
                 self.presubmit.run_source_format_maintenance(
-                    lane="bazel",
+                    lane="cmake",
                     files_from="paths.txt",
                     fix=False,
                 )
@@ -673,12 +706,13 @@ class LoomPresubmitTest(unittest.TestCase):
         build_and_resolve_executable.assert_called_once_with(
             "loom",
             self.presubmit.REPO_ROOT,
-            lane="bazel",
+            lane="cmake",
             bazel_target="//loom/src/loom/tools/loom-format:loom-format",
             cmake_target="loom::tools::loom-format",
             bazel_args=(
                 "--config=locked",
                 "--//loom/config/target:enable=amdgpu,spirv,vm,wasm,xdna,x86",
+                "--//loom/config/import:enable=cxx",
             ),
         )
         run_command.assert_called_once_with(
@@ -695,9 +729,7 @@ class LoomPresubmitTest(unittest.TestCase):
 
     def test_source_format_fix_rewrites_loom_test_inputs(self):
         formatter_path = Path("/tools/loom-format")
-        loom_test_path = (
-            "loom/src/loom/test/corpus/source_low/numeric_i32_memory.loom-test"
-        )
+        loom_test_path = "loom/build_tools/bazel/test/roundtrip.loom-test"
         with (
             mock.patch.object(
                 self.presubmit,
@@ -740,15 +772,6 @@ class LoomPresubmitTest(unittest.TestCase):
                 mock.call(
                     [str(formatter_path), "--in-place", loom_test_path],
                     "Canonicalize selected Loom source",
-                ),
-                mock.call(
-                    [
-                        str(formatter_path),
-                        "--check",
-                        "loom/a.loom",
-                        loom_test_path,
-                    ],
-                    "Canonical Loom source",
                 ),
             ],
         )
@@ -876,58 +899,39 @@ class LoomPresubmitTest(unittest.TestCase):
         self.assertFalse(self.presubmit.is_lint_source_path("loom/../a.loom"))
         self.assertFalse(self.presubmit.is_lint_source_path("other/a.loom"))
 
-    def test_source_lint_uses_public_tool_then_private_guardrails(self):
-        linter_path = Path("/tools/loom-lint")
-        with (
-            mock.patch.object(
-                self.presubmit,
-                "tracked_lint_source_paths",
-                return_value=["loom/a.loom", "loom/b.loom-test"],
-            ),
-            mock.patch.object(
-                self.presubmit.project_presubmit,
-                "build_and_resolve_executable",
-                return_value=linter_path,
-            ) as build_and_resolve_executable,
-            mock.patch.object(
-                self.presubmit, "run_command", return_value=True
-            ) as run_command,
+    def test_bazel_formatter_is_only_resolved_for_selected_text_mutations(self):
+        for fix, files_from in (
+            (False, None),
+            (False, "paths.txt"),
+            (True, "paths.txt"),
         ):
-            self.assertTrue(
-                self.presubmit.run_source_lint(lane="bazel", files_from=None)
-            )
-
-        build_and_resolve_executable.assert_called_once_with(
-            "loom",
-            self.presubmit.REPO_ROOT,
-            lane="bazel",
-            bazel_target="//loom/py/loom/tools:loom-lint",
-            cmake_target="loom::py::loom::tools::loom-lint",
-            bazel_args=(
-                "--config=locked",
-                "--//loom/config/target:enable=amdgpu,spirv,vm,wasm,xdna,x86",
-            ),
-        )
-        self.assertEqual(
-            run_command.call_args_list,
-            [
-                mock.call(
-                    [
-                        str(linter_path),
-                        "loom/a.loom",
-                        "loom/b.loom-test",
-                    ],
-                    "Loom authoring policy",
+            with (
+                self.subTest(fix=fix, files_from=files_from),
+                mock.patch.object(
+                    self.presubmit,
+                    "selected_files",
+                    return_value=["loom/src/loom/ir/value.c"],
                 ),
-                mock.call(
-                    [
-                        sys.executable,
-                        "loom/build_tools/linters/loom_source_lint.py",
-                    ],
-                    "Loom repository invariants",
-                ),
-            ],
-        )
+                mock.patch.object(
+                    self.presubmit, "tracked_format_source_paths"
+                ) as tracked,
+                mock.patch.object(
+                    self.presubmit.project_presubmit, "build_and_resolve_executable"
+                ) as resolve,
+                mock.patch.object(
+                    self.presubmit.project_presubmit, "stage_changed_paths"
+                ) as stage,
+            ):
+                self.assertTrue(
+                    self.presubmit.run_source_format_maintenance(
+                        lane="bazel",
+                        fix=fix,
+                        files_from=files_from,
+                    )
+                )
+                tracked.assert_not_called()
+                resolve.assert_not_called()
+                stage.assert_not_called()
 
     def test_source_lint_cmake_lane_invokes_public_python_entrypoint(self):
         with (
@@ -943,9 +947,7 @@ class LoomPresubmitTest(unittest.TestCase):
                 self.presubmit, "run_command", return_value=True
             ) as run_command,
         ):
-            self.assertTrue(
-                self.presubmit.run_source_lint(lane="cmake", files_from=None)
-            )
+            self.assertTrue(self.presubmit.run_cmake_source_lint(files_from=None))
 
         build_and_resolve_executable.assert_not_called()
         self.assertEqual(
@@ -969,82 +971,39 @@ class LoomPresubmitTest(unittest.TestCase):
             ],
         )
 
-    def test_template_checks_include_unchanged_and_new_consumers(self):
-        checker_path = Path("/tools/loom-check-test")
-        for lane in ("bazel", "cmake"):
+    def test_bazel_hygiene_uses_one_invocation_and_execution_policy(self):
+        for success in (False, True):
             with (
-                self.subTest(lane=lane),
-                mock.patch.object(
-                    self.presubmit,
-                    "tracked_lint_source_paths",
-                    return_value=["loom/corpus.loom", "loom/unchanged.loom-test"],
+                self.subTest(success=success),
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        self.presubmit.project_presubmit.BAZEL_CONFIGS_ENV: json.dumps(
+                            ["remote-execution"]
+                        )
+                    },
                 ),
                 mock.patch.object(
-                    self.presubmit,
-                    "selected_files",
-                    return_value=["loom/corpus.loom", "loom/new.loom-test"],
-                ),
-                mock.patch.object(
-                    self.presubmit,
-                    "existing_lint_source_paths",
-                    return_value=["loom/corpus.loom", "loom/new.loom-test"],
-                ),
-                mock.patch.object(
-                    self.presubmit.project_presubmit,
-                    "build_and_resolve_executable",
-                    return_value=checker_path,
-                ) as build_checker,
-                mock.patch.object(
-                    self.presubmit, "run_command", return_value=True
+                    self.presubmit, "run_command", return_value=success
                 ) as run_command,
             ):
-                self.assertTrue(
-                    self.presubmit.run_template_checks(
-                        lane=lane, files_from="paths.txt"
-                    )
-                )
-                build_checker.assert_called_once_with(
-                    "loom",
-                    self.presubmit.REPO_ROOT,
-                    lane=lane,
-                    bazel_target="//loom/src/loom/tools/loom-check:loom-check-test",
-                    cmake_target="loom::tools::loom-check::loom-check-test",
-                    bazel_args=self.presubmit.BAZEL_SOURCE_TOOL_ARGS,
+                self.assertEqual(
+                    self.presubmit.run_bazel_hygiene(),
+                    success,
                 )
                 run_command.assert_called_once_with(
                     [
-                        str(checker_path),
-                        "--check-templates",
-                        "--template-root=.",
-                        "loom/corpus.loom",
-                        "loom/new.loom-test",
-                        "loom/unchanged.loom-test",
+                        "bazel",
+                        "build",
+                        "--keep_going",
+                        *self.presubmit.BAZEL_SOURCE_TOOL_ARGS,
+                        "--config=remote-execution",
+                        "//loom/build_tools/hygiene:checks",
                     ],
-                    "Loom template freshness",
+                    "Loom source hygiene",
                 )
 
-    def test_template_checks_propagate_discovery_and_build_failures(self):
-        for paths, expected in ((None, False), ([], True), (["loom/a.loom"], False)):
-            with (
-                self.subTest(paths=paths),
-                mock.patch.object(
-                    self.presubmit, "tracked_lint_source_paths", return_value=paths
-                ),
-                mock.patch.object(
-                    self.presubmit.project_presubmit,
-                    "build_and_resolve_executable",
-                    return_value=None,
-                ) as build_checker,
-                mock.patch.object(self.presubmit, "run_command") as run_command,
-            ):
-                self.assertEqual(
-                    self.presubmit.run_template_checks(lane="bazel", files_from=None),
-                    expected,
-                )
-                self.assertEqual(build_checker.call_count, 1 if paths else 0)
-                run_command.assert_not_called()
-
-    def test_stale_template_fails_project_hygiene(self):
+    def test_bazel_hygiene_failure_fails_presubmit(self):
         args = types.SimpleNamespace(
             check=True,
             files_from=None,
@@ -1060,22 +1019,15 @@ class LoomPresubmitTest(unittest.TestCase):
             mock.patch.object(
                 self.presubmit, "run_source_format_maintenance", return_value=True
             ),
-            mock.patch.object(self.presubmit, "run_source_lint", return_value=True),
-            mock.patch.object(
-                self.presubmit,
-                "tracked_lint_source_paths",
-                return_value=["loom/a.loom"],
-            ),
-            mock.patch.object(
-                self.presubmit.project_presubmit,
-                "build_and_resolve_executable",
-                return_value=Path("/tools/loom-check-test"),
-            ),
-            mock.patch.object(self.presubmit, "run_command", return_value=False),
-            mock.patch.object(self.presubmit, "run_bazel_tests") as bazel_tests,
+            mock.patch.object(self.presubmit, "run_command", return_value=False) as run,
+            mock.patch.object(self.presubmit, "run_bazel_tests") as tests,
         ):
             self.assertEqual(self.presubmit.run_presubmit(args), 1)
-            bazel_tests.assert_not_called()
+            run.assert_called_once()
+            self.assertEqual(
+                run.call_args.args[0][-1], "//loom/build_tools/hygiene:checks"
+            )
+            tests.assert_not_called()
 
     def test_generated_artifact_drift_fails_presubmit(self):
         args = types.SimpleNamespace(
@@ -1093,14 +1045,13 @@ class LoomPresubmitTest(unittest.TestCase):
                 return_value=False,
             ) as generated_artifact_maintenance,
             mock.patch.object(
-                self.presubmit, "run_source_lint", return_value=True
+                self.presubmit, "run_bazel_hygiene", return_value=True
             ) as source_lint,
             mock.patch.object(
                 self.presubmit,
                 "run_source_format_maintenance",
                 return_value=True,
             ) as source_format_maintenance,
-            mock.patch.object(self.presubmit, "run_template_checks", return_value=True),
             mock.patch.object(
                 self.presubmit, "run_bazel_tests", return_value=True
             ) as bazel_tests,
@@ -1111,7 +1062,7 @@ class LoomPresubmitTest(unittest.TestCase):
         source_format_maintenance.assert_called_once_with(
             lane="bazel", files_from=None, fix=False
         )
-        source_lint.assert_called_once_with(lane="bazel", files_from=None)
+        source_lint.assert_called_once_with()
         bazel_tests.assert_called_once_with(None)
 
     def test_source_lint_failure_fails_project_hygiene(self):
@@ -1120,7 +1071,7 @@ class LoomPresubmitTest(unittest.TestCase):
             files_from=None,
             fix=False,
             hygiene=True,
-            lane="bazel",
+            lane="cmake",
             tests=False,
         )
         with (
@@ -1130,23 +1081,22 @@ class LoomPresubmitTest(unittest.TestCase):
                 return_value=True,
             ) as generated_artifact_maintenance,
             mock.patch.object(
-                self.presubmit, "run_source_lint", return_value=False
+                self.presubmit, "run_cmake_source_lint", return_value=False
             ) as source_lint,
             mock.patch.object(
                 self.presubmit,
                 "run_source_format_maintenance",
                 return_value=True,
             ) as source_format_maintenance,
-            mock.patch.object(self.presubmit, "run_template_checks", return_value=True),
             mock.patch.object(self.presubmit, "run_bazel_tests") as bazel_tests,
         ):
             self.assertEqual(self.presubmit.run_presubmit(args), 1)
 
         generated_artifact_maintenance.assert_called_once_with(False, None)
         source_format_maintenance.assert_called_once_with(
-            lane="bazel", files_from=None, fix=False
+            lane="cmake", files_from=None, fix=False
         )
-        source_lint.assert_called_once_with(lane="bazel", files_from=None)
+        source_lint.assert_called_once_with(files_from=None)
         bazel_tests.assert_not_called()
 
     def test_test_phase_does_not_repeat_hygiene_checks(self):
@@ -1165,8 +1115,8 @@ class LoomPresubmitTest(unittest.TestCase):
             mock.patch.object(
                 self.presubmit, "run_source_format_maintenance"
             ) as source_format_maintenance,
-            mock.patch.object(self.presubmit, "run_source_lint") as source_lint,
-            mock.patch.object(self.presubmit, "run_template_checks") as template_checks,
+            mock.patch.object(self.presubmit, "run_cmake_source_lint") as source_lint,
+            mock.patch.object(self.presubmit, "run_bazel_hygiene") as bazel_hygiene,
             mock.patch.object(
                 self.presubmit, "run_bazel_tests", return_value=True
             ) as bazel_tests,
@@ -1176,7 +1126,7 @@ class LoomPresubmitTest(unittest.TestCase):
         generated_artifact_maintenance.assert_not_called()
         source_format_maintenance.assert_not_called()
         source_lint.assert_not_called()
-        template_checks.assert_not_called()
+        bazel_hygiene.assert_not_called()
         bazel_tests.assert_called_once_with(None)
 
     def test_main_rechecks_package_initializers_after_bazel_tests(self):

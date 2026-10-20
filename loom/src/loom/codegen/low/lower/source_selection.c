@@ -13,6 +13,7 @@
 #include "loom/ops/func/ops.h"
 #include "loom/ops/func_symbol_facts.h"
 #include "loom/ops/kernel/ops.h"
+#include "loom/ops/low/ops.h"
 #include "loom/ops/target/facts.h"
 #include "loom/target/facts_builder.h"
 #include "loom/target/function_contract.h"
@@ -63,27 +64,23 @@ static bool loom_low_source_selection_snapshots_differ(
              lhs->max_workgroup_size.z, rhs->max_workgroup_size.z);
 }
 
-static void loom_low_source_selection_set_candidate_target(
-    const loom_module_t* module, const loom_target_symbol_facts_t* target_facts,
-    loom_low_source_selection_t* selection) {
-  const loom_target_bundle_t* bundle =
-      loom_target_facts_bundle(target_facts->projection);
-  selection->candidate_target_symbol_name =
-      loom_low_source_selection_symbol_ref_name(module, target_facts->symbol);
-  selection->candidate_target_bundle_name = bundle->name;
-  selection->candidate_target_snapshot_name = bundle->snapshot->name;
-  selection->candidate_target_config_name = bundle->config->name;
-  selection->candidate_target_subgroup_size = bundle->snapshot->subgroup_size;
-}
-
 static iree_status_t loom_low_source_selection_find_candidate_targets(
     const loom_module_t* module, loom_symbol_fact_table_t* fact_table,
     const loom_low_source_selection_options_t* options,
-    loom_low_source_selection_t* selection) {
-  if (!options->collect_target_candidates ||
+    iree_arena_allocator_t* arena, loom_low_source_selection_t* selection) {
+  if (selection->kind == LOOM_LOW_SOURCE_SELECTION_REPRESENTATION ||
+      !options->collect_target_candidates ||
       selection->target_source != LOOM_TARGET_BINDING_SOURCE_SPECIALIZATION) {
     return iree_ok_status();
   }
+  loom_low_source_selection_report_t* report = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_arena_allocate(arena, sizeof(*report), (void**)&report));
+  *report = (loom_low_source_selection_report_t){
+      .target_symbol_name = loom_low_source_selection_symbol_ref_name(
+          module, selection->target_ref),
+  };
+  selection->report = report;
   const loom_target_bundle_t* selected_bundle =
       loom_target_facts_bundle(selection->target_facts);
   for (iree_host_size_t i = 0; i < module->symbols.count; ++i) {
@@ -111,12 +108,15 @@ static iree_status_t loom_low_source_selection_find_candidate_targets(
             selected_bundle->snapshot)) {
       continue;
     }
-    if (selection->candidate_target_count == 0) {
-      loom_low_source_selection_set_candidate_target(module, target_facts,
-                                                     selection);
+    if (report->candidates.count == 0) {
+      report->candidates.symbol_name =
+          loom_low_source_selection_symbol_ref_name(module,
+                                                    target_facts->symbol);
+      report->candidates.bundle =
+          loom_target_facts_bundle(target_facts->projection);
     }
-    if (selection->candidate_target_count != UINT32_MAX) {
-      ++selection->candidate_target_count;
+    if (report->candidates.count != UINT32_MAX) {
+      ++report->candidates.count;
     }
   }
   return iree_ok_status();
@@ -127,7 +127,8 @@ typedef uint8_t loom_low_source_selection_filter_t;
 #define LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION ((uint8_t)1u << 0)
 #define LOOM_LOW_SOURCE_SELECTION_FILTER_DECLARATION ((uint8_t)1u << 1)
 #define LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP ((uint8_t)1u << 2)
-#define LOOM_LOW_SOURCE_SELECTION_FILTER_EXECUTION ((uint8_t)1u << 3)
+#define LOOM_LOW_SOURCE_SELECTION_FILTER_LOW_OP ((uint8_t)1u << 3)
+#define LOOM_LOW_SOURCE_SELECTION_FILTER_EXECUTION ((uint8_t)1u << 4)
 
 static iree_status_t loom_low_source_selection_try_symbol(
     const loom_module_t* module,
@@ -144,27 +145,31 @@ static iree_status_t loom_low_source_selection_try_symbol(
   if (!func_facts) {
     return iree_ok_status();
   }
-  if (iree_all_bits_set(filter, LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP) &&
-      func_facts->func_op->kind != LOOM_OP_FUNC_DEF &&
-      func_facts->func_op->kind != LOOM_OP_KERNEL_DEF &&
-      func_facts->func_op->kind != LOOM_OP_FUNC_DECL) {
+  const bool is_source = func_facts->func_op->kind == LOOM_OP_FUNC_DEF ||
+                         func_facts->func_op->kind == LOOM_OP_KERNEL_DEF ||
+                         func_facts->func_op->kind == LOOM_OP_FUNC_DECL;
+  const bool is_low = loom_low_func_def_isa(func_facts->func_op) ||
+                      loom_low_func_decl_isa(func_facts->func_op);
+  const loom_low_source_selection_filter_t operation_filter =
+      is_source ? LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP
+                : (is_low ? LOOM_LOW_SOURCE_SELECTION_FILTER_LOW_OP : 0);
+  const loom_low_source_selection_filter_t dialect_filter =
+      filter & (LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP |
+                LOOM_LOW_SOURCE_SELECTION_FILTER_LOW_OP);
+  if (dialect_filter != 0 &&
+      !iree_any_bit_set(dialect_filter, operation_filter)) {
     return iree_ok_status();
   }
-  loom_low_source_selection_kind_t kind = 0;
-  if (func_facts->has_body) {
-    kind = LOOM_LOW_SOURCE_SELECTION_FUNCTION;
-  } else {
-    kind = LOOM_LOW_SOURCE_SELECTION_DECLARATION;
-  }
-  if (kind == LOOM_LOW_SOURCE_SELECTION_FUNCTION &&
-      !iree_all_bits_set(filter, LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION)) {
+  if (func_facts->has_body
+          ? !iree_any_bit_set(filter, LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION)
+          : !iree_any_bit_set(filter,
+                              LOOM_LOW_SOURCE_SELECTION_FILTER_DECLARATION)) {
     return iree_ok_status();
   }
-  if (kind == LOOM_LOW_SOURCE_SELECTION_DECLARATION &&
-      !iree_all_bits_set(filter,
-                         LOOM_LOW_SOURCE_SELECTION_FILTER_DECLARATION)) {
-    return iree_ok_status();
-  }
+  const loom_low_source_selection_kind_t kind =
+      is_low ? LOOM_LOW_SOURCE_SELECTION_REPRESENTATION
+             : (func_facts->has_body ? LOOM_LOW_SOURCE_SELECTION_FUNCTION
+                                     : LOOM_LOW_SOURCE_SELECTION_DECLARATION);
   const loom_func_like_t function =
       loom_func_like_cast(module, func_facts->func_op);
   loom_function_version_t* version_handle =
@@ -190,7 +195,8 @@ static iree_status_t loom_low_source_selection_try_symbol(
     if (!contract_valid) {
       return iree_ok_status();
     }
-    if (iree_any_bit_set(filter, LOOM_LOW_SOURCE_SELECTION_FILTER_EXECUTION)) {
+    if (is_source &&
+        iree_any_bit_set(filter, LOOM_LOW_SOURCE_SELECTION_FILTER_EXECUTION)) {
       IREE_RETURN_IF_ERROR(loom_target_facts_builder_select_execution(
           target_facts, arena, &target_facts));
     }
@@ -214,22 +220,14 @@ static iree_status_t loom_low_source_selection_try_symbol(
   out_selection->target_source = target_source;
   out_selection->target_ref = target_ref;
   out_selection->target_facts = target_facts;
-  out_selection->target_symbol_name =
-      loom_low_source_selection_symbol_ref_name(module, target_ref);
   out_selection->policy = policy;
   IREE_RETURN_IF_ERROR(loom_low_source_selection_find_candidate_targets(
-      module, fact_table, options, out_selection));
+      module, fact_table, options, arena, out_selection));
   *out_compatible = true;
   return iree_ok_status();
 }
 
-static void loom_low_source_selection_assign(
-    const loom_low_source_selection_t* source,
-    loom_low_source_selection_t* out_selection) {
-  *out_selection = *source;
-}
-
-static iree_status_t loom_low_select_source_symbols_with_filter(
+static iree_status_t loom_low_select_symbols_with_filter(
     const loom_module_t* module,
     const loom_low_source_selection_options_t* options,
     loom_low_source_selection_filter_t filter, iree_arena_allocator_t* arena,
@@ -257,7 +255,7 @@ static iree_status_t loom_low_select_source_symbols_with_filter(
     if (!compatible) {
       continue;
     }
-    loom_low_source_selection_assign(&candidate, &selections[selection_count]);
+    selections[selection_count] = candidate;
     ++selection_count;
   }
 
@@ -266,16 +264,17 @@ static iree_status_t loom_low_select_source_symbols_with_filter(
   return iree_ok_status();
 }
 
-iree_status_t loom_low_select_source_symbols(
+iree_status_t loom_low_select_lowering_symbols(
     const loom_module_t* module,
     const loom_low_source_selection_options_t* options,
     iree_arena_allocator_t* arena,
     loom_low_source_selection_list_t* out_selection_list) {
-  return loom_low_select_source_symbols_with_filter(
+  return loom_low_select_symbols_with_filter(
       module, options,
       LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION |
           LOOM_LOW_SOURCE_SELECTION_FILTER_DECLARATION |
           LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP |
+          LOOM_LOW_SOURCE_SELECTION_FILTER_LOW_OP |
           LOOM_LOW_SOURCE_SELECTION_FILTER_EXECUTION,
       arena, out_selection_list);
 }
@@ -285,7 +284,7 @@ iree_status_t loom_low_select_source_funcs(
     const loom_low_source_selection_options_t* options,
     iree_arena_allocator_t* arena,
     loom_low_source_selection_list_t* out_selection_list) {
-  return loom_low_select_source_symbols_with_filter(
+  return loom_low_select_symbols_with_filter(
       module, options,
       LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION |
           LOOM_LOW_SOURCE_SELECTION_FILTER_SOURCE_OP,
@@ -297,12 +296,12 @@ iree_status_t loom_low_select_target_bound_funcs(
     const loom_low_source_selection_options_t* options,
     iree_arena_allocator_t* arena,
     loom_low_source_selection_list_t* out_selection_list) {
-  return loom_low_select_source_symbols_with_filter(
+  return loom_low_select_symbols_with_filter(
       module, options, LOOM_LOW_SOURCE_SELECTION_FILTER_FUNCTION, arena,
       out_selection_list);
 }
 
-static bool loom_low_source_selection_policy_seen_before(
+static bool loom_low_source_selection_has_finalizer_policy(
     const loom_low_source_selection_list_t* selection_list,
     const loom_low_lower_policy_t* policy, iree_host_size_t limit) {
   for (iree_host_size_t i = 0; i < limit; ++i) {
@@ -314,22 +313,32 @@ static bool loom_low_source_selection_policy_seen_before(
 }
 
 iree_status_t loom_low_source_selection_finalize_policies(
-    loom_module_t* module,
-    const loom_low_source_selection_list_t* selection_list,
+    loom_module_t* module, loom_low_source_selection_list_t* selection_list,
     loom_low_lower_module_state_t* module_state,
     iree_arena_allocator_t* scratch_arena) {
+  // All source plans have consumed their selection bindings. Compact distinct
+  // finalizer policies into that storage without overtaking the read cursor.
+  iree_host_size_t policy_count = 0;
   for (iree_host_size_t i = 0; i < selection_list->count; ++i) {
+    if (selection_list->values[i].kind ==
+        LOOM_LOW_SOURCE_SELECTION_REPRESENTATION) {
+      continue;
+    }
     const loom_low_lower_policy_t* policy = selection_list->values[i].policy;
-    if (policy == NULL || policy->finalize_module.fn == NULL) {
+    if (policy->finalize_module.fn == NULL) {
       continue;
     }
-    if (loom_low_source_selection_policy_seen_before(selection_list, policy,
-                                                     i)) {
+    if (loom_low_source_selection_has_finalizer_policy(selection_list, policy,
+                                                       policy_count)) {
       continue;
     }
+    selection_list->values[policy_count++].policy = policy;
+  }
+  for (iree_host_size_t i = 0; i < policy_count; ++i) {
+    const loom_low_lower_policy_t* policy = selection_list->values[i].policy;
     IREE_RETURN_IF_ERROR(
         policy->finalize_module.fn(policy->finalize_module.user_data, module,
                                    module_state, scratch_arena));
   }
-  return iree_ok_status();
+  return loom_low_lower_module_state_finalize(module_state, module);
 }

@@ -15,6 +15,10 @@
 #include "iree/hal/drivers/amdgpu/util/feedback_channel.h"
 
 typedef struct iree_thread_t iree_thread_t;
+typedef struct iree_hal_amdgpu_source_context_t
+    iree_hal_amdgpu_source_context_t;
+typedef struct iree_hal_amdgpu_source_context_registry_t
+    iree_hal_amdgpu_source_context_registry_t;
 typedef struct iree_hal_amdgpu_logical_device_options_t
     iree_hal_amdgpu_logical_device_options_t;
 typedef struct iree_hal_amdgpu_physical_device_t
@@ -80,6 +84,10 @@ typedef struct iree_hal_amdgpu_feedback_state_t {
   // Policy applied after a valid TSAN report is emitted.
   iree_hal_amdgpu_tsan_report_policy_t tsan_report_policy;
 
+  // Owned registry retaining stable source attribution for asynchronous
+  // feedback packets.
+  iree_hal_amdgpu_source_context_registry_t* source_context_registry;
+
   // Number of entries in |device_states|.
   iree_host_size_t device_state_count;
 
@@ -116,6 +124,15 @@ void iree_hal_amdgpu_feedback_state_deinitialize(
 // Returns true when |state| owns enabled feedback resources.
 bool iree_hal_amdgpu_feedback_state_is_enabled(
     const iree_hal_amdgpu_feedback_state_t* state);
+
+// Preserves |source_context| for asynchronous feedback attribution.
+//
+// The returned context is owned by |state| and remains valid until feedback
+// state deinitialization, after all service threads have stopped and drained.
+iree_status_t iree_hal_amdgpu_feedback_state_register_source_context(
+    iree_hal_amdgpu_feedback_state_t* state,
+    const iree_hal_amdgpu_source_context_t* source_context,
+    const iree_hal_amdgpu_source_context_t** out_registered_context);
 
 // Drains ready packets from the channel for |physical_device_ordinal|.
 //

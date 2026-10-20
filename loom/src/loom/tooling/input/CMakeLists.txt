@@ -11,22 +11,35 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    format
+  HDRS
+    "format.h"
+  SRCS
+    "format.c"
+  DEPS
+    iree::base
+    iree::base::internal::path
+    loom::tooling::io::source_path
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     input
   HDRS
     "input.h"
   SRCS
     "input.c"
   DEPS
+    ::format
     iree::base
     iree::base::internal::arena
-    iree::base::internal::path
     loom::error::diagnostic
     loom::error::source
     loom::format::bytecode::reader
     loom::format::low_repr
     loom::format::text::parser
     loom::ir
-    loom::tooling::io::source
     loom::tooling::io::source_path
   PUBLIC
 )
@@ -62,9 +75,63 @@ loom_cc_library(
   SRCS
     "flags.c"
   DEPS
-    ::input
+    ::format
     iree::base::tooling::flags
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    loomc
+  HDRS
+    "loomc.h"
+  SRCS
+    "loomc.c"
+  DEPS
+    ::format
+    iree::base
+    iree::base::internal::arena
+    loom::binding::c::loomc
+    loom::tooling::io::file
+    loom::tooling::io::source_path
+  PUBLIC
+)
+
+set(_loomc_configured_platform_defines "")
+if(LOOM_IMPORT_CXX)
+  list(APPEND _loomc_configured_platform_defines "LOOM_TOOLING_INPUT_LOOMC_CONFIGURED_HAVE_CXX=1")
+endif()
+set(_loomc_configured_platform_deps "")
+if(LOOM_IMPORT_CXX)
+  list(APPEND _loomc_configured_platform_deps iree::base)
+  list(APPEND _loomc_configured_platform_deps loom::import::cxx::tooling::loomc_input)
+  list(APPEND _loomc_configured_platform_deps loom::import::cxx::tooling::options)
+endif()
+loom_cc_library(
+  NAME
+    loomc_configured
+  HDRS
+    "loomc_configured.h"
+  SRCS
+    "loomc_configured.c"
+  DEPS
+    ::loomc
+    ${_loomc_configured_platform_deps}
+  DEFINES
+    ${_loomc_configured_platform_defines}
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    format_test
+  SRCS
+    "format_test.cc"
+  DEPS
+    ::format
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_test(
@@ -77,6 +144,8 @@ loom_cc_test(
     iree::base
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::ir
+    loom::ops::op_registry
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

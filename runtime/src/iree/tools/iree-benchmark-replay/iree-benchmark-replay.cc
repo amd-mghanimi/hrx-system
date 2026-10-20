@@ -17,6 +17,7 @@
 #include "iree/hal/api.h"
 #include "iree/hal/replay/execute.h"
 #include "iree/io/file_contents.h"
+#include "iree/tooling/device_profiling.h"
 #include "iree/tooling/device_util.h"
 
 IREE_FLAG_LIST(
@@ -354,8 +355,8 @@ void BenchmarkReplay(const iree_hal_replay_plan_t* replay_plan,
     IREE_TRACE_SCOPE_NAMED("BenchmarkIteration");
     IREE_TRACE_FRAME_MARK_NAMED("ReplayIteration");
     ReplayScopeTimingState scope_state = {
-        /*.selected_scope=*/selected_scope,
-        /*.match=*/{},
+        .selected_scope = selected_scope,
+        .match = {},
     };
     if (scoped_timing) {
       options.scope_event_callback.fn = ReplayScopeTimingCallback;
@@ -557,8 +558,8 @@ static int runMain(int argc, char** argv) {
 
   iree_hal_replay_plan_t* replay_plan = nullptr;
   if (iree_status_is_ok(status)) {
-    status = iree_hal_replay_plan_create(file_contents->const_buffer,
-                                         host_allocator, &replay_plan);
+    status = iree_hal_replay_plan_allocate(file_contents->const_buffer,
+                                           host_allocator, &replay_plan);
   }
 
   if (iree_status_is_ok(status)) {
@@ -587,7 +588,7 @@ static int runMain(int argc, char** argv) {
 
   status =
       iree_status_join(status, iree_hal_end_profiling_from_flags(profiling));
-  iree_hal_replay_plan_destroy(replay_plan);
+  iree_hal_replay_plan_free(replay_plan);
   ReleaseReplayExecutableSubstitutions(host_allocator,
                                        &executable_substitutions);
   iree_allocator_free(host_allocator, file_path_remaps);

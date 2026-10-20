@@ -10,15 +10,18 @@ import pytest
 
 from loom.dialect.vector import defs as vector
 from loom.target.contracts import (
+    DescriptorRule,
     EmitDescriptorOp,
+    SourceMemoryAddressLayout,
     SourceMemoryAddressMaterializer,
     SourceMemoryByteOffsetMaterializer,
     SourceMemoryConstraint,
     SourceMemoryIntegerConversion,
     SourceMemoryOperation,
     ValueRef,
+    Vector,
 )
-from loom.target.low_descriptors import Immediate, ImmediateKind
+from loom.target.low_descriptors import DescriptorOpKind, Immediate, ImmediateKind
 from loom.target.test.descriptors import (
     TEST_LOW_ADD_I32_DESCRIPTOR,
     TEST_LOW_CONST_I32_DESCRIPTOR,
@@ -31,12 +34,22 @@ from loom.target.test.descriptors import (
 )
 
 
-def _validate(conversions, *, descriptors=TEST_LOW_CORE_DESCRIPTOR_SET):
+def _validate(
+    conversions,
+    *,
+    descriptors=TEST_LOW_CORE_DESCRIPTOR_SET,
+    index_ref=None,
+    multiply_add=None,
+    static_bias=None,
+    reuse_view_base=False,
+):
+    if index_ref is None:
+        index_ref = ValueRef.source_memory_dynamic_byte_offset()
     emit = EmitDescriptorOp(
         descriptor=TEST_LOW_LOAD_INDEX_V4I32_DESCRIPTOR,
         operands={
             "address": ValueRef.operand("view"),
-            "index": ValueRef.source_memory_dynamic_byte_offset(),
+            "index": index_ref,
         },
         results={"dst": ValueRef.result("result")},
         source_memory=SourceMemoryConstraint(
@@ -48,17 +61,82 @@ def _validate(conversions, *, descriptors=TEST_LOW_CORE_DESCRIPTOR_SET):
             static_byte_offset=0,
             dynamic_term_count=None,
             dynamic_term_count_minimum=1,
+            reuse_view_base=reuse_view_base,
         ),
         source_memory_byte_offset_materializer=SourceMemoryByteOffsetMaterializer(
             constant=TEST_LOW_CONST_I32_DESCRIPTOR,
             add=TEST_LOW_ADD_I32_DESCRIPTOR,
             multiply=TEST_LOW_MUL_I32_DESCRIPTOR,
             shift_left=None,
+            multiply_add=multiply_add,
+            static_bias=static_bias,
             constant_immediate="i32_value",
             integer_conversions=conversions,
         ),
     )
     emit.validate(vector.vector_load, descriptors, set())
+    return emit
+
+
+def test_view_base_reuse_preserves_one_decomposition_across_memory_emits():
+    emit = _validate((), reuse_view_base=True)
+    rule = DescriptorRule(
+        source_op=vector.vector_load,
+        descriptor=emit.descriptor,
+        emit=(emit,),
+    )
+    rule.validate(TEST_LOW_CORE_DESCRIPTOR_SET)
+    unrelated = replace(
+        emit,
+        results={"dst": ValueRef.temporary("other")},
+        result_types={"dst": Vector("i32", lanes=4)},
+        source_memory=replace(emit.source_memory, reuse_view_base=False),
+    )
+    with pytest.raises(ValueError, match="must agree on view-base reuse"):
+        replace(rule, emit=(unrelated, emit)).validate(TEST_LOW_CORE_DESCRIPTOR_SET)
+
+
+def test_complete_byte_offset_validates_fused_arithmetic_descriptors():
+    multiply_add = replace(
+        TEST_LOW_ADD_I32_DESCRIPTOR,
+        key="test.multiply_add.i32",
+        mnemonic="test.multiply_add.i32",
+        semantic_tag="integer.multiply_add.i32",
+        operands=(
+            TEST_LOW_ADD_I32_DESCRIPTOR.operands[0],
+            replace(TEST_LOW_ADD_I32_DESCRIPTOR.operands[1], field_name="accumulator"),
+            TEST_LOW_ADD_I32_DESCRIPTOR.operands[1],
+            TEST_LOW_ADD_I32_DESCRIPTOR.operands[2],
+        ),
+        asm_forms=(),
+    )
+    static_bias = replace(
+        TEST_LOW_CONST_I32_DESCRIPTOR,
+        key="test.static_bias.i32",
+        mnemonic="test.static_bias.i32",
+        semantic_tag="integer.static_bias.i32",
+        op_kind=DescriptorOpKind.OP,
+    )
+    descriptors = replace(
+        TEST_LOW_CORE_DESCRIPTOR_SET,
+        descriptors=(
+            *TEST_LOW_CORE_DESCRIPTOR_SET.descriptors,
+            multiply_add,
+            static_bias,
+        ),
+    )
+    _validate(
+        (),
+        descriptors=descriptors,
+        index_ref=ValueRef.source_memory_byte_offset(),
+        multiply_add=multiply_add,
+        static_bias=static_bias,
+    )
+
+    with pytest.raises(ValueError, match="exactly 3 packet inputs"):
+        _validate((), multiply_add=TEST_LOW_ADD_I32_DESCRIPTOR)
+    with pytest.raises(ValueError, match=r"must use low\.op"):
+        _validate((), static_bias=TEST_LOW_CONST_I32_DESCRIPTOR)
 
 
 def test_integer_conversion_domains_are_unique_fixed_width_integers():
@@ -205,3 +283,53 @@ def test_complete_address_validates_its_canonical_integer_conversions():
                     materializer, integer_conversions=conversions
                 ),
             ).validate(vector.vector_load, TEST_LOW_CORE_DESCRIPTOR_SET, set())
+
+
+@pytest.mark.parametrize(
+    "field", ["byte_offset_unsigned_bit_count", "dynamic_offset_unsigned_bit_count"]
+)
+def test_byte_offset_widths_cover_the_integer_fact_domain(field):
+    constraint = SourceMemoryConstraint(
+        operation=SourceMemoryOperation.LOAD,
+        memory_spaces=("global",),
+        element_byte_count=4,
+        vector_lane_count=1,
+        vector_lane_byte_stride=4,
+        static_byte_offset=0,
+    )
+    for width in (0, 32, 64):
+        replace(constraint, **{field: width})
+    for width in (-1, 65):
+        with pytest.raises(ValueError, match="width must be in"):
+            replace(constraint, **{field: width})
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [SourceMemoryAddressLayout.ROW_MAJOR, SourceMemoryAddressLayout.COLUMN_MAJOR],
+)
+def test_element_stride_width_requires_a_matrix_layout(layout):
+    constraint = SourceMemoryConstraint(
+        operation=SourceMemoryOperation.LOAD,
+        memory_spaces=("global",),
+        address_layout=layout,
+        element_byte_count=4,
+        vector_lane_count=1,
+        vector_lane_byte_stride=4,
+        static_byte_offset=0,
+    )
+    for width in (0, 32, 64):
+        replace(constraint, element_stride_unsigned_bit_count=width)
+    for width in (-1, 65):
+        with pytest.raises(ValueError, match="width must be in"):
+            replace(constraint, element_stride_unsigned_bit_count=width)
+    for invalid_layout in (
+        SourceMemoryAddressLayout.ANY,
+        SourceMemoryAddressLayout.COMPACT_ROW_MAJOR,
+    ):
+        with pytest.raises(ValueError, match="requires a row/column layout"):
+            replace(
+                constraint,
+                address_layout=invalid_layout,
+                element_stride_unsigned_bit_count=32,
+            )

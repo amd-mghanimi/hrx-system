@@ -32,6 +32,26 @@ _AGENTS_MARKDOWN = """## loom-compile-report
 `loom-compile-report` turns version-zero compile report JSON into bounded views
 for one compiler checkout. Start here before querying the complete report tree.
 
+### Establish that the execution shape is worth optimizing
+
+Data reuse comes first. Before tuning, establish a known-good oracle's native
+instruction mix, controlled performance on the intended machine, and data reuse
+policy: paneling, tile and batch sizes, prefill chunks, operand residency,
+buffering, sharing, and complete-request traffic. A numerical reference or a
+single-tile correctness example cannot qualify the performance architecture.
+
+Each optimization needs an absolute end-to-end target, the measured oracle gap,
+an upper bound on recoverable cost, and a rejection condition. An unexplained
+large gap stops local tuning and reopens the algorithm and reuse policy. Small
+percentage wins against our own slow baseline do not satisfy this gate.
+
+`suggest` consumes compiler evidence, not oracle measurements or reuse policy.
+Its `guidance` appears in text and JSON even with no findings. Finding order
+and confidence do not rank performance benefit; `status: available` means an
+interpreter is available, not that the program is worth optimizing. The
+[agent authoring workflow](https://rocm.github.io/hrx-system/loom/workflows/agent-driven-kernel-development/#establish-the-oracle-and-data-reuse-policy)
+owns the oracle record and admission gate.
+
 ### Read, compare, and choose an experiment
 
 ```shell
@@ -50,11 +70,27 @@ identities with the experiment. `--comparison=target` admits target
 specialization changes within one target and backend family. `--force` retains
 identity mismatches for historical inspection; its result is observational.
 
+`show` and `suggest` flag individual source operations expanding beyond five
+operations, alongside explicit scalar lane expansion. Summary maxima cannot
+hide an expensive occurrence in an average. Counts belong to math legalization,
+target legalization, or source-to-Low selection; they are not cumulative costs
+or final hardware instructions. Inspect the cited recipe for a compact lowering
+that preserves source semantics, then check final resources and runtime.
+Fast-math flags alone do not guarantee cheap output. Source warnings remain
+useful even when later compilation fails; missing counts are not a clean bill.
+
 `show` also lists explicit source loop pipeline depths and queued SSA values;
 detailed reports include the producer/consumer operation schedule. `suggest`
 combines source policy evidence with the selected target provider's experiments.
 Pipeline depth advice keeps unrolling fixed and cites available final resources;
 a single report does not establish that pipelining increased register use.
+
+Resident pipeline inventories appear under `Pipeline` in `show`: distinct
+images, loaded worker copies, placement, and physical memory occupancy.
+Occupied bytes and address extent are separate; shared reservations count
+once. AIE2P `suggest` uses this inventory for code headroom, bank pressure,
+and local memory pressure. Missing logical channel ownership is unavailable,
+not a zero channel count. Static occupancy alone does not predict stalls.
 
 Detailed reports also show whether loop-carried vector banks were split into
 fixed components, deliberately preserved as whole values, or rejected with a
@@ -83,16 +119,23 @@ resource ceilings, and fixed launch limits. A tied next-tier transition requires
 all cited reductions together; missing counts or launch shape suppress exact
 gain advice. Higher modeled residency is a benchmark hypothesis, not a speedup.
 
+LDS findings are ordered by extra static service rounds and cite the buffer,
+instruction width, required/uncontended service, and incomplete coverage across
+that buffer's access forms. When recorded, the next residency cliff bounds LDS
+padding headroom at fixed launch and other resources. Static order is not runtime
+importance, and a report alone does not select a conflict-free pitch. Recompile
+layout candidates, compare all access directions and resources, and benchmark.
+
 ### Use the bounded JSON views
 
 ```shell
 loom-compile-report show kernel.report.json --format=json | \\
-  jq '{status, identity, workload, entries, missing_evidence}'
+  jq '{status, identity, expansions, scalarization, entries, missing_evidence}'
 loom-compile-report diff baseline.report.json candidate.report.json \\
   --format=json | \\
   jq '{identity_mismatches, changed_entry_count, entries}'
 loom-compile-report suggest kernel.report.json --format=json | \\
-  jq '{status, provider, findings}'
+  jq '{status, guidance, provider, findings}'
 ```
 
 The JSON views are smaller and more stable than the complete compiler report.
@@ -215,7 +258,14 @@ def _create_argument_parser() -> argparse.ArgumentParser:
 
     suggest_parser = subparsers.add_parser(
         "suggest",
-        help="Suggests experiments from source policies and target evidence.",
+        help="Proposes experiments from static evidence, without runtime ranking.",
+        description=(
+            "Interprets source policies and target evidence. Optimization requires "
+            "a known-good oracle's native instruction mix, controlled measurement "
+            "on the intended machine, data reuse policy, and an end-to-end "
+            "opportunity bound. Finding order and confidence do not rank "
+            "performance benefit."
+        ),
     )
     suggest_parser.add_argument("report", type=Path, help="Compile report JSON path.")
     suggest_parser.add_argument(

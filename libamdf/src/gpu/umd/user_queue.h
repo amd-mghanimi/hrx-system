@@ -30,7 +30,7 @@ typedef struct amdf_gpu_umd_queue_scratch_t {
   uint64_t byte_length;
   // Maximum private-segment bytes per workitem accepted by the queue.
   uint32_t maximum_private_segment_byte_length;
-  // Number of simultaneously scratch-backed waves.
+  // Physical scratch slot capacity, including shader-engine rounding.
   uint32_t maximum_wave_count;
 } amdf_gpu_umd_queue_scratch_t;
 
@@ -44,6 +44,8 @@ typedef struct amdf_gpu_umd_user_queue_create_info_t {
   amdf_queue_priority_t priority;
   // Selected reservation protocol.
   amdf_queue_producer_mode_t producer_mode;
+  // Enables native dispatch timestamps in each AQL completion signal.
+  bool dispatch_timestamps;
   // Direct producer operations required by the caller.
   amdf_user_queue_capabilities_t required_capabilities;
   // Semantic operations advertised for the selected family.

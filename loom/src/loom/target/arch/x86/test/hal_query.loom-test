@@ -1,0 +1,92 @@
+// RUN: emit source-low target=x86:scalar output=module
+
+// The query is ordinary Low code. Its version check and symbolic address stay
+// visible to verification, optimization, allocation, and native relocation.
+kernel.def export("empty") @empty() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch() {
+  kernel.return
+}
+
+// ----
+low.kernel.def target<x86.scalar.core>(@__loom_target_context_0_0) abi_layout({offsets = [], signature = () -> ()}) export("empty") workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @empty() asm {
+  return
+}
+
+global.rodata.decl @iree_hal_executable_library_v0
+
+low.func.def public retain target<x86.scalar.core>(@__loom_target_context_0_0) abi(object_function) @iree_hal_executable_library_query(%0: reg<x86.gpr32>, %1: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %2 = cmp.uge.imm.gpr32 %0, 9
+  low.cond_br %2, ^_bb1, ^_bb2 : reg<x86.gpr32>
+^_bb1:
+  %3 = lea.symbol.gpr64 @iree_hal_executable_library_v0
+  return %3
+^_bb2:
+  %4 = mov.imm64 0
+  return %4
+}
+
+x86.target<scalar> @__loom_target_context_0_0
+
+// ====
+
+// CPU workgroups contain one invocation and one subgroup. Every local
+// coordinate folds away before target instruction selection. Dynamic queries
+// remain entry imports even when first used after arithmetic inside a branch.
+kernel.def export("geometry") @geometry(%groups: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %enabled: i1) {
+  %x = kernel.workitem.id<x> : index
+  %y = kernel.workitem.id<y> : index
+  %z = kernel.workitem.id<z> : index
+  %subgroup = kernel.subgroup.id : index
+  %lane = kernel.subgroup.lane.id : index
+  %subgroup_size = kernel.subgroup.size : index
+  %subgroup_count = kernel.subgroup.count : index
+  %xy = index.add %x, %y : index
+  %xyz = index.add %xy, %z : index
+  %group_ids = index.add %xyz, %subgroup : index
+  %ids = index.add %group_ids, %lane : index
+  %sizes = index.mul %subgroup_size, %subgroup_count : index
+  %result = index.add %ids, %sizes : index
+  %byte = index.cast %result : index to i8
+  cfg.cond_br %enabled, ^write, ^exit
+^write:
+  %position = kernel.workgroup.id<x> : index
+  %count = kernel.workgroup.count<x> : index
+  %base = index.constant 0 : offset
+  %view = buffer.view %output[%base] : buffer -> view<[%count]xi8>
+  view.store %byte, %view[%position] : i8, view<[%count]xi8>
+  cfg.br ^exit
+^exit:
+  kernel.return
+}
+
+// ----
+low.kernel.def target<x86.scalar.core>(@__loom_target_context_0_0) abi_layout({offsets = [0, 0], signature = (buffer, i1) -> ()}) export("geometry") workgroup_size(1, 1, 1) @geometry(%output: reg<x86.gpr64>, %enabled: reg<x86.gpr32>) asm {
+  %position = live_in<task.workgroup_id_x> : reg<x86.gpr64>
+  %byte = mov.imm32 1
+  low.cond_br %enabled, ^write, ^exit : reg<x86.gpr32>
+^write:
+  mov.store.indexed.u8.gpr32 %byte, %output, %position {disp32 = 0, scale = 1}
+  low.br ^exit
+^exit:
+  return
+}
+
+global.rodata.decl @iree_hal_executable_library_v0
+
+low.func.def public retain target<x86.scalar.core>(@__loom_target_context_0_0) abi(object_function) @iree_hal_executable_library_query(%4: reg<x86.gpr32>, %5: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %6 = cmp.uge.imm.gpr32 %4, 9
+  low.cond_br %6, ^_bb1, ^_bb2 : reg<x86.gpr32>
+^_bb1:
+  %7 = lea.symbol.gpr64 @iree_hal_executable_library_v0
+  return %7
+^_bb2:
+  %8 = mov.imm64 0
+  return %8
+}
+
+x86.target<scalar> @__loom_target_context_0_0

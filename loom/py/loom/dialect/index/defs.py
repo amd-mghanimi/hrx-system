@@ -32,12 +32,14 @@ from loom.dsl import (
     INDEX,
     OFFSET,
     PURE,
+    SAFE_TO_SPECULATE,
     SCALAR,
     AttrDef,
     AttrMatchesElementType,
     Dialect,
     EnumCase,
     EnumDef,
+    ExecutionCondition,
     Op,
     Operand,
     OpPhase,
@@ -101,6 +103,7 @@ index_constant = Op(
         "%c0 = index.constant 0 : index",
         "%base = index.constant 0 : offset",
     ],
+    eager_execution_cost=1,
 )
 
 index_cast = cast_op(
@@ -159,10 +162,30 @@ index_assume = Op(
         TypesOf("results"),
     ],
     examples=[
-        "%n2 = index.assume %n [mul(%n, 16)] : index",
+        "%n2 = index.assume %n [multiple_of(%n, 16)] : index",
         "%end2 = index.assume %end [range(%end, 0, 4096)] : offset",
-        "%n2, %off2 = index.assume %n, %off [mul(%n, 16), mul(%off, 64)] : index, offset",
+        "%count2 = index.assume %count [range(%count, 0, %row_count)] : index",
+        "%n2, %off2 = index.assume %n, %off [multiple_of(%n, 16), multiple_of(%off, 64)] : index, offset",
     ],
+)
+
+index_constexpr = Op(
+    "index.constexpr",
+    group=index_ops,
+    phase=OpPhase.COMPILE_TIME_QUERY,
+    doc=(
+        "Require an index or offset value to become exact during "
+        "specialization. Configured canonicalization replaces the result with "
+        "an ordinary constant once exact facts are available; target lowering "
+        "diagnoses an unresolved requirement."
+    ),
+    operands=[Operand("input", ADDRESS)],
+    results=[Result("result", ADDRESS)],
+    constraints=[SameType("input", "result")],
+    traits=[PURE],
+    facts="loom_index_constexpr_facts",
+    format=[Ref("input"), COLON, TypeOf("result")],
+    examples=["%tile_count = index.constexpr %configured : index"],
 )
 
 # ============================================================================
@@ -174,15 +197,18 @@ index_add = binary_op(
     group=index_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=ADDRESS,
-    doc="Address-domain addition. Operands and result must all be index or all offset.",
+    doc=("Address-domain addition. Operands and result must all be index or all offset. Offset addition wraps modulo the selected target's unsigned offset carrier."),
     commutative=True,
+    execution_condition=ExecutionCondition.INTEGER_ADD,
     canonicalize="loom_index_add_canonicalize",
     facts="loom_index_add_facts",
     traits=[DISTRIBUTION_TRANSFER],
+    effective_traits="loom_index_address_arithmetic_effective_traits",
     examples=[
         "%r = index.add %lhs, %rhs : index",
         "%bytes = index.add %base, %delta : offset",
     ],
+    eager_execution_cost=1,
 )
 
 index_sub = binary_op(
@@ -190,14 +216,17 @@ index_sub = binary_op(
     group=index_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=ADDRESS,
-    doc="Address-domain subtraction. Operands and result must all be index or all offset.",
+    doc=("Address-domain subtraction. Operands and result must all be index or all offset. Offset subtraction wraps modulo the selected target's unsigned offset carrier."),
+    execution_condition=ExecutionCondition.INTEGER_SUBTRACT,
     canonicalize="loom_index_sub_canonicalize",
     facts="loom_index_sub_facts",
     traits=[DISTRIBUTION_TRANSFER],
+    effective_traits="loom_index_address_arithmetic_effective_traits",
     examples=[
         "%r = index.sub %lhs, %rhs : index",
         "%delta = index.sub %end, %base : offset",
     ],
+    eager_execution_cost=1,
 )
 
 index_mul = binary_op(
@@ -207,10 +236,12 @@ index_mul = binary_op(
     type_constraint=INDEX,
     doc="Logical coordinate multiplication. Offsets are physical byte counts and cannot be multiplied with this op.",
     commutative=True,
+    execution_condition=ExecutionCondition.INTEGER_MULTIPLY,
     canonicalize="loom_index_mul_canonicalize",
     facts="loom_index_mul_facts",
     traits=[DISTRIBUTION_TRANSFER],
     examples=["%r = index.mul %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_scale = Op(
@@ -221,7 +252,8 @@ index_scale = Op(
         "Scale a logical coordinate by a physical byte stride to produce a "
         "physical byte offset. This is the address-domain boundary for packed "
         "payload layouts: logical indices stay index values, byte strides stay "
-        "offset values, and the result feeds byte-addressed buffer/view bases."
+        "offset values, and the result feeds byte-addressed buffer/view bases. "
+        "The result wraps modulo the selected target's unsigned offset carrier."
     ),
     operands=[
         Operand("index", INDEX, doc="Logical coordinate to scale."),
@@ -232,7 +264,7 @@ index_scale = Op(
         ),
     ],
     results=[Result("result", OFFSET)],
-    traits=[PURE, DISTRIBUTION_TRANSFER],
+    traits=[PURE, DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_index_scale_canonicalize",
     facts="loom_index_scale_facts",
     format=[
@@ -247,6 +279,7 @@ index_scale = Op(
         ResultType("result"),
     ],
     examples=["%bytes = index.scale %lane, %byte_stride : index, offset -> offset"],
+    eager_execution_cost=1,
 )
 
 index_div = binary_op(
@@ -283,6 +316,21 @@ index_rem = binary_op(
     examples=["%r = index.rem %lane, %group_size : index"],
 )
 
+index_divrem = Op(
+    "index.divrem",
+    group=index_ops,
+    phase=OpPhase.EXECUTABLE,
+    doc=("Logical coordinate quotient and remainder computed together for non-negative index values with a positive divisor. Offsets are physical byte counts and cannot use this op."),
+    operands=[Operand("lhs", INDEX), Operand("rhs", INDEX)],
+    results=[Result("quotient", INDEX), Result("remainder", INDEX)],
+    constraints=[SameType("lhs", "rhs", "quotient", "remainder")],
+    canonicalize="loom_index_divrem_canonicalize",
+    facts="loom_index_divrem_facts",
+    traits=[PURE, DISTRIBUTION_TRANSFER],
+    format=[Ref("lhs"), COMMA, Ref("rhs"), COLON, TypeOf("quotient")],
+    examples=["%q, %r = index.divrem %lane, %group_size : index"],
+)
+
 index_min = binary_op(
     "index.min",
     group=index_ops,
@@ -292,8 +340,9 @@ index_min = binary_op(
     commutative=True,
     canonicalize="loom_index_min_canonicalize",
     facts="loom_index_min_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.min %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_max = binary_op(
@@ -305,8 +354,9 @@ index_max = binary_op(
     commutative=True,
     canonicalize="loom_index_max_canonicalize",
     facts="loom_index_max_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.max %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_madd = Op(
@@ -321,6 +371,7 @@ index_madd = Op(
     ],
     results=[Result("result", INDEX)],
     constraints=[SameType("a", "b", "c", "result")],
+    execution_condition=ExecutionCondition.INTEGER_MULTIPLY_ADD,
     traits=[PURE, DISTRIBUTION_TRANSFER],
     canonicalize="loom_index_madd_canonicalize",
     format=[
@@ -334,6 +385,7 @@ index_madd = Op(
     ],
     facts="loom_index_madd_facts",
     examples=["%r = index.madd %a, %b, %c : index"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -349,8 +401,9 @@ index_andi = binary_op(
     commutative=True,
     canonicalize="loom_index_andi_canonicalize",
     facts="loom_index_andi_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.andi %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_ori = binary_op(
@@ -362,8 +415,9 @@ index_ori = binary_op(
     commutative=True,
     canonicalize="loom_index_ori_canonicalize",
     facts="loom_index_ori_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.ori %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_xori = binary_op(
@@ -375,8 +429,9 @@ index_xori = binary_op(
     commutative=True,
     canonicalize="loom_index_xori_canonicalize",
     facts="loom_index_xori_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.xori %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_shli = binary_op(
@@ -385,10 +440,12 @@ index_shli = binary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=INDEX,
     doc="Left shift over logical coordinate values. Offsets are physical byte counts and cannot use this op.",
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_LEFT,
     canonicalize="loom_index_shli_canonicalize",
     facts="loom_index_shli_facts",
     traits=[DISTRIBUTION_TRANSFER],
     examples=["%r = index.shli %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_shrsi = binary_op(
@@ -397,10 +454,12 @@ index_shrsi = binary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=INDEX,
     doc="Arithmetic right shift over logical coordinate values. Offsets are physical byte counts and cannot use this op.",
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_RIGHT,
     canonicalize="loom_index_shrsi_canonicalize",
     facts="loom_index_shrsi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     examples=["%r = index.shrsi %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_shrui = binary_op(
@@ -409,10 +468,12 @@ index_shrui = binary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=INDEX,
     doc="Logical right shift over logical coordinate values. Offsets are physical byte counts and cannot use this op.",
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_RIGHT,
     canonicalize="loom_index_shrui_canonicalize",
     facts="loom_index_shrui_facts",
     traits=[DISTRIBUTION_TRANSFER],
     examples=["%r = index.shrui %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_rotli = binary_op(
@@ -420,11 +481,12 @@ index_rotli = binary_op(
     group=index_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INDEX,
-    doc="Left rotate over logical coordinate values. Offsets are physical byte counts and cannot use this op.",
+    doc="Left rotate over logical coordinate values, with the count reduced modulo the target coordinate-carrier width. Offsets are physical byte counts and cannot use this op.",
     canonicalize="loom_index_rotli_canonicalize",
     facts="loom_index_rotli_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.rotli %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_rotri = binary_op(
@@ -432,11 +494,12 @@ index_rotri = binary_op(
     group=index_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INDEX,
-    doc="Right rotate over logical coordinate values. Offsets are physical byte counts and cannot use this op.",
+    doc="Right rotate over logical coordinate values, with the count reduced modulo the target coordinate-carrier width. Offsets are physical byte counts and cannot use this op.",
     canonicalize="loom_index_rotri_canonicalize",
     facts="loom_index_rotri_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.rotri %lhs, %rhs : index"],
+    eager_execution_cost=1,
 )
 
 index_ctlzi = unary_op(
@@ -446,7 +509,9 @@ index_ctlzi = unary_op(
     type_constraint=INDEX,
     doc="Count leading zeros in a logical coordinate value.",
     facts="loom_index_ctlzi_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.ctlzi %input : index"],
+    eager_execution_cost=1,
 )
 
 index_cttzi = unary_op(
@@ -456,7 +521,9 @@ index_cttzi = unary_op(
     type_constraint=INDEX,
     doc="Count trailing zeros in a logical coordinate value.",
     facts="loom_index_cttzi_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.cttzi %input : index"],
+    eager_execution_cost=1,
 )
 
 index_ctpopi = unary_op(
@@ -466,7 +533,9 @@ index_ctpopi = unary_op(
     type_constraint=INDEX,
     doc="Count set bits in a logical coordinate value.",
     facts="loom_index_ctpopi_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%r = index.ctpopi %input : index"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -486,6 +555,7 @@ index_cmp = comparison_op(
         "%p = index.cmp slt, %i, %n : index",
         "%inside = index.cmp ule, %byte_offset, %limit : offset",
     ],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -502,6 +572,7 @@ ALL_INDEX_OPS: tuple[Op, ...] = (
     index_scale,
     index_div,
     index_rem,
+    index_divrem,
     index_min,
     index_max,
     index_madd,
@@ -517,4 +588,5 @@ ALL_INDEX_OPS: tuple[Op, ...] = (
     index_cttzi,
     index_ctpopi,
     index_cmp,
+    index_constexpr,
 )

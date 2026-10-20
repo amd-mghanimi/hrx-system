@@ -95,6 +95,7 @@ iree_amdgpu_hal_cts_testdata(
     "testdata/executable_test.c"
     "testdata/execution_queue_mask_test.c"
     "testdata/hostcall_buffer_test.c"
+    "testdata/indirect_dispatch_geometry_test.c"
   TESTONLY
 )
 endif()
@@ -169,6 +170,7 @@ iree_amdgpu_hal_cts_testdata(
     "${IREE_BINARY_DIR}/runtime/src/iree/hal/drivers/amdgpu/device/bitcode_hdrs.stamp"
   SRCS
     "testdata/asan_executable_test.c"
+    "testdata/asan_global_layout_test.c"
   TESTONLY
 )
 endif()
@@ -288,6 +290,7 @@ iree_cc_library(
   DEPS
     iree::hal::cts::sanitizer::sanitizer_test_util
     iree::hal::drivers::amdgpu::abi
+    iree::hal::drivers::amdgpu::buffer
     iree::hal::drivers::amdgpu::headers
   TESTONLY
   ALWAYSLINK
@@ -316,8 +319,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     queue_cooperative_dispatch_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::backends
     ::cooperative_testdata_amdgpu
@@ -325,6 +326,7 @@ iree_cc_test(
     iree::hal::cts::queue::queue_cooperative_dispatch_test
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -338,9 +340,100 @@ endif()
 if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
-    queue_execution_resource_tests
+    virtual_buffer_tests
   SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
+    "virtual_buffer_test.cc"
+  DEPS
+    ::backends
+    iree::hal
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    native_buffer_tests
+  SRCS
+    "buffer_test.cc"
+  DEPS
+    ::backends
+    ::testdata_amdgpu
+    iree::hal
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::hal::drivers::amdgpu::headers
+    iree::hal::memory::tlsf_pool
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU AND IREE_HAL_DRIVER_TASK)
+iree_cc_test(
+  NAME
+    heterogeneous_slab_pool_tests
+  SRCS
+    "heterogeneous_slab_pool_test.cc"
+  DEPS
+    ::backends
+    ::testdata_amdgpu
+    iree::hal::cts::util::pool_test_util
+    iree::hal::cts::util::profile_test_util
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::hal::drivers::task::registration
+    iree::hal::memory::fixed_block_pool
+    iree::hal::memory::slab_cache
+    iree::hal::memory::tlsf_pool
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    slab_pool_tests
+  SRCS
+    "slab_pool_test.cc"
+  DEPS
+    ::backends
+    ::testdata_amdgpu
+    iree::hal::cts::util::pool_test_util
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::hal::memory::fixed_block_pool
+    iree::hal::memory::slab_cache
+    iree::hal::memory::tlsf_pool
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    queue_execution_resource_tests
   DEPS
     ::backends
     ::queue_execution_resource_test
@@ -348,6 +441,7 @@ iree_cc_test(
     iree::base::tooling::flags
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -362,8 +456,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     asan_executable_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::asan_executable_enabled_testdata_amdgpu
     ::asan_executable_test
@@ -371,6 +463,7 @@ iree_cc_test(
     iree::base::tooling::flags
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -401,8 +494,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     sanitizer_executable_load_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::asan_executable_testdata_amdgpu
     ::backends
@@ -412,6 +503,7 @@ iree_cc_test(
     iree::base::tooling::flags
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -443,8 +535,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     tsan_executable_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::sanitizer_backends
     ::tsan_executable_enabled_testdata_amdgpu
@@ -452,6 +542,7 @@ iree_cc_test(
     iree::base::tooling::flags
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -484,8 +575,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     asan_allocation_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::asan_testdata_amdgpu
     ::sanitizer_backends
@@ -493,6 +582,7 @@ iree_cc_test(
     iree::hal::cts::sanitizer::asan_allocation_test
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
@@ -507,8 +597,6 @@ if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_test(
   NAME
     manual_asan_executable_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::asan_testdata_amdgpu
     ::manual_asan_executable_test
@@ -516,6 +604,7 @@ iree_cc_test(
     iree::base::tooling::flags
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
     iree::testing::gtest
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"

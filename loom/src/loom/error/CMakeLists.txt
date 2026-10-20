@@ -28,7 +28,7 @@ loom_cc_library(
     "diagnostic.c"
   DEPS
     ::emitter
-    ::error_defs
+    ::parameter
     ::renderer
     iree::base
     loom::util::stream
@@ -42,7 +42,7 @@ loom_cc_test(
     "diagnostic_test.cc"
   DEPS
     ::diagnostic
-    ::error_defs
+    ::parameter
     ::renderer
     iree::testing::gtest
     iree::testing::gtest_main
@@ -59,6 +59,7 @@ loom_cc_library(
   DEPS
     ::diagnostic
     iree::base
+    iree::base::internal::arena
     iree::base::internal::unicode
     loom::ir
   PUBLIC
@@ -70,12 +71,14 @@ loom_cc_test(
   SRCS
     "source_test.cc"
   DEPS
+    ::parameter
     ::source
     iree::base
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ir
+    loom::link::linker
 )
 
 loom_generated_cc_library(
@@ -104,9 +107,29 @@ loom_generated_cc_library(
   EXTRA_OUTPUTS
     "error_catalog.json"
   DEPS
-    ::emitter
     iree::base
-    loom::ir
+  LINKABLE_MORE_THAN_ONCE
+)
+
+loom_generated_cc_library(
+  NAME
+    x86_error_defs
+  GENERATOR
+    loom::py::loom::gen::error::c_errors
+  SOURCE
+    "x86_error_catalog.c"
+  GENERATED_HDR_FLAGS
+    "--header"
+  GENERATED_HDRS
+    "x86_error_catalog.h"
+  ARGS
+    "--catalog-symbol=loom_x86_error_catalog"
+    "--fallback-catalog-symbol=loom_error_catalog_core"
+    "--fallback-public-header=loom/error/error_catalog.h"
+    "--public-header=loom/error/x86_error_catalog.h"
+    "--shard=x86"
+  DEPS
+    ::error_defs
 )
 
 loom_cc_test(
@@ -143,8 +166,8 @@ loom_cc_test(
   SRCS
     "json_sink_test.cc"
   DEPS
-    ::error_defs
     ::json_sink
+    ::parameter
     iree::testing::gtest
     iree::testing::gtest_main
     loom::util::stream
@@ -158,7 +181,7 @@ loom_cc_library(
   SRCS
     "renderer.c"
   DEPS
-    ::error_defs
+    ::parameter
     iree::base
     loom::util::stream
   PUBLIC
@@ -175,6 +198,19 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::util::stream
+)
+
+loom_cc_library(
+  NAME
+    parameter
+  HDRS
+    "parameter.h"
+  DEPS
+    ::emitter
+    ::error_defs
+    iree::base
+    loom::ir
+  PUBLIC
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

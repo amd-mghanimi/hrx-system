@@ -20,12 +20,14 @@ extern "C" {
 typedef enum loom_amdgpu_scalar_conversion_op_group_e {
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_TRUNCI = 0,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_EXTF,
+  LOOM_AMDGPU_SCALAR_CONVERSION_OP_FPTRUNC,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_EXTSI,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_EXTUI,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_SITOFP,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_UITOFP,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_FPTOSI,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_FPTOUI,
+  LOOM_AMDGPU_SCALAR_CONVERSION_OP_BITCAST,
   LOOM_AMDGPU_SCALAR_CONVERSION_OP_COUNT_,
 } loom_amdgpu_scalar_conversion_op_group_t;
 
@@ -33,10 +35,31 @@ typedef enum loom_amdgpu_scalar_conversion_op_group_e {
 loom_amdgpu_scalar_conversion_op_group_t loom_amdgpu_scalar_conversion_op_group(
     loom_op_kind_t op_kind);
 
+// Queries callback-owned scalar conversion capability and retains the exact
+// semantic plan for source lowering. Generated descriptor-owned conversions
+// remain unhandled so their source contracts keep precedence.
+iree_status_t loom_amdgpu_query_scalar_conversion_contract(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op,
+    loom_target_contract_query_result_t* out_result);
+
 // Selects an AMDGPU scalar conversion plan.
 iree_status_t loom_amdgpu_select_scalar_conversion_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_scalar_conversion_plan_t* out_plan, bool* out_selected);
+
+// Publishes identity carriers and retains selected source materializations.
+iree_status_t loom_amdgpu_finalize_scalar_conversion_plan(
+    loom_low_lower_context_t* context,
+    loom_amdgpu_scalar_conversion_plan_t* plan);
+
+// Retains bit zero of an integer source in the result's planned predicate
+// representation: SCC, a durable SGPR Boolean, or a native lane mask.
+// Shared by scalar truncation and numeric index casts.
+iree_status_t loom_amdgpu_lower_integer_to_predicate(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    loom_value_id_t source, loom_value_id_t result, loom_type_t result_type);
 
 // Lowers an AMDGPU scalar conversion plan.
 iree_status_t loom_amdgpu_lower_scalar_conversion(

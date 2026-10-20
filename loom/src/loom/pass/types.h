@@ -19,14 +19,14 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
 #include "loom/error/emitter.h"
-#include "loom/ir/function_version.h"
-#include "loom/ir/ir.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct loom_module_t loom_module_t;
+typedef struct loom_func_like_t loom_func_like_t;
+typedef struct loom_function_version_t loom_function_version_t;
 typedef struct loom_pass_environment_t loom_pass_environment_t;
 typedef struct loom_pass_decoded_options_t loom_pass_decoded_options_t;
 typedef struct loom_pass_report_detail_t loom_pass_report_detail_t;
@@ -209,6 +209,8 @@ struct loom_pass_t {
   // Caller-owned execution environment capabilities.
   const loom_pass_environment_t* environment;
   // Concrete compiler function version active for a function pass, or NULL.
+  // A replacing pass updates this handle and the module symbol definition
+  // before returning. Later callbacks and predicates observe the replacement.
   loom_function_version_t* function_version;
   // Interpreter-owned scoped value-fact workspace for this module execution.
   loom_pass_value_fact_owner_t* value_facts;

@@ -8,6 +8,7 @@
 
 #include "loom/analysis/contract.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ir/scalar_type.h"
@@ -177,9 +178,10 @@ static loom_value_id_t loom_vector_to_scalar_memory_payload_value(
   return loom_memory_access_value(access);
 }
 
-static iree_status_t loom_vector_to_scalar_lower_memory_store_op(
+static iree_status_t
+loom_vector_to_scalar_lower_memory_store_op_with_value_mode(
     loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
-    bool* out_handled) {
+    loom_vector_to_scalar_store_value_mode_t value_mode, bool* out_handled) {
   *out_handled = true;
   loom_value_id_t value = loom_vector_to_scalar_memory_payload_value(
       rewriter->module, op, LOOM_MEMORY_ACCESS_OPERATION_STORE);
@@ -194,11 +196,20 @@ static iree_status_t loom_vector_to_scalar_lower_memory_store_op(
       .location = op->location,
   };
   loom_vector_to_scalar_state_initialize(&state, pass);
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_memory_store(&state));
+  IREE_RETURN_IF_ERROR(
+      loom_vector_to_scalar_lower_memory_store(&state, value_mode));
   if (loom_pass_has_error_diagnostics(pass)) {
     return iree_ok_status();
   }
   return loom_vector_to_scalar_erase_lowered_op(&state);
+}
+
+static iree_status_t loom_vector_to_scalar_lower_memory_store_op(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    bool* out_handled) {
+  return loom_vector_to_scalar_lower_memory_store_op_with_value_mode(
+      pass, rewriter, op, LOOM_VECTOR_TO_SCALAR_STORE_VALUE_MODE_REMATERIALIZE,
+      out_handled);
 }
 
 static iree_status_t loom_vector_to_scalar_lower_fragment_store_op(
@@ -395,87 +406,6 @@ static iree_status_t loom_vector_to_scalar_lower_scalar_extract(
   return loom_vector_to_scalar_replace_one_result(&state, replacement);
 }
 
-// Re-expresses a multidimensional static vector lane access as a linear
-// register-vector access. Targets whose register files do not retain logical
-// vector shape can then select the bitcast as an alias and the rank-one extract
-// directly.
-static iree_status_t loom_vector_to_scalar_flatten_static_extract(
-    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op) {
-  const loom_value_id_t source = loom_vector_extract_source(op);
-  const loom_type_t source_type =
-      loom_module_value_type(rewriter->module, source);
-  if (!loom_type_is_all_static(source_type) ||
-      loom_type_rank(source_type) <= 1) {
-    return iree_ok_status();
-  }
-
-  uint64_t element_count = 0;
-  if (!loom_type_static_element_count(source_type, &element_count) ||
-      element_count == 0 || element_count > LOOM_DIM_MAX_STATIC_SIZE) {
-    return iree_ok_status();
-  }
-
-  const loom_type_t result_type =
-      loom_module_value_type(rewriter->module, loom_vector_extract_result(op));
-  loom_vector_to_scalar_state_t state = {
-      .pass = pass,
-      .rewriter = rewriter,
-      .op = op,
-      .value_checkpoint = loom_rewriter_value_checkpoint(rewriter),
-      .vector_type = source_type,
-      .result_scalar_type = result_type,
-      .location = op->location,
-  };
-  loom_vector_to_scalar_state_initialize(&state, pass);
-
-  loom_vector_to_scalar_index_term_t* source_terms = NULL;
-  uint8_t source_term_count = 0;
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_terms_from_explicit_indices(
-      &state, loom_vector_extract_static_indices(op),
-      loom_vector_extract_indices(op), &source_terms, &source_term_count));
-  loom_vector_to_scalar_index_list_t source_indices = {0};
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_terms_to_index_list(
-      &state, source_terms, source_term_count, &source_indices));
-  loom_vector_to_scalar_index_term_t linear_ordinal = {0};
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_linear_ordinal_term(
-      &state, source_type, source_indices, &linear_ordinal));
-  loom_vector_to_scalar_index_list_t linear_indices = {0};
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_terms_to_index_list(
-      &state, &linear_ordinal, 1, &linear_indices));
-
-  const loom_type_t linear_type = loom_type_shaped_1d(
-      LOOM_TYPE_VECTOR, loom_type_element_type(source_type),
-      loom_dim_pack_static((int64_t)element_count), /*encoding_id=*/0);
-  loom_op_t* bitcast_op = NULL;
-  IREE_RETURN_IF_ERROR(loom_vector_bitcast_build(&rewriter->builder, source,
-                                                 source_type, linear_type,
-                                                 op->location, &bitcast_op));
-  loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_build_terminal_extract(
-      &state, loom_vector_bitcast_result(bitcast_op), linear_indices,
-      &replacement));
-  return loom_vector_to_scalar_replace_one_result(&state, replacement);
-}
-
-iree_status_t loom_vector_extract_flatten_static_shape_rewrite_op(
-    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
-    bool* out_rewritten) {
-  *out_rewritten = false;
-  if (!loom_vector_extract_isa(op)) {
-    return iree_ok_status();
-  }
-  const loom_type_t result_type =
-      loom_module_value_type(rewriter->module, loom_vector_extract_result(op));
-  if (loom_type_is_vector(result_type)) {
-    return iree_ok_status();
-  }
-  loom_builder_set_before(&rewriter->builder, op);
-  IREE_RETURN_IF_ERROR(
-      loom_vector_to_scalar_flatten_static_extract(pass, rewriter, op));
-  *out_rewritten = iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD);
-  return iree_ok_status();
-}
-
 static iree_status_t loom_vector_to_scalar_lower_static_constant(
     loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
     bool* out_handled) {
@@ -660,8 +590,9 @@ static iree_status_t loom_vector_to_scalar_lower_reduce_op(
   };
   loom_vector_to_scalar_state_initialize(&state, pass);
   loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_vector_to_scalar_lower_reduce(&state, &replacement));
+  IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_reduce(
+      &state, LOOM_VECTOR_TO_SCALAR_REDUCE_INPUT_MODE_REMATERIALIZE,
+      &replacement));
   if (loom_pass_has_error_diagnostics(pass)) {
     return iree_ok_status();
   }
@@ -830,10 +761,6 @@ static iree_status_t loom_vector_to_scalar_try_direct_lowerer(
 
 static iree_status_t loom_vector_to_scalar_lower_descriptor_op(
     loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op) {
-  if (op->result_count != 1) {
-    return iree_ok_status();
-  }
-
   loom_vector_to_scalar_descriptor_t descriptor = {0};
   if (!loom_vector_to_scalar_resolve_descriptor(op->kind, &descriptor)) {
     return iree_ok_status();
@@ -853,6 +780,19 @@ static iree_status_t loom_vector_to_scalar_lower_descriptor_op(
       loom_vector_to_scalar_encoding_rejection_bits(&state) !=
           LOOM_CONTRACT_REJECTION_NONE) {
     return iree_ok_status();
+  }
+  if (op->result_count > 1) {
+    loom_value_id_t* replacements = NULL;
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        rewriter->arena, op->result_count, sizeof(*replacements),
+        (void**)&replacements));
+    IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_aggregates(
+        &state, op->result_count, replacements));
+    if (loom_pass_has_error_diagnostics(pass)) {
+      return iree_ok_status();
+    }
+    return loom_vector_to_scalar_replace_results(&state, replacements,
+                                                 op->result_count);
   }
   loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(
@@ -887,10 +827,15 @@ static iree_status_t loom_vector_reduce_axes_to_scalar_lower_op(
                                                     &handled);
 }
 
-iree_status_t loom_vector_reduce_to_scalar_rewrite_op(loom_pass_t* pass,
-                                                      loom_rewriter_t* rewriter,
-                                                      loom_op_t* op,
-                                                      bool* out_rewritten) {
+static void loom_vector_to_scalar_record_rewrite(loom_rewriter_t* rewriter,
+                                                 bool* out_rewritten) {
+  ++rewriter->scalarized_op_count;
+  *out_rewritten = true;
+}
+
+static iree_status_t loom_vector_reduce_to_scalar_rewrite_op_with_input_mode(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    loom_vector_to_scalar_reduce_input_mode_t input_mode, bool* out_rewritten) {
   *out_rewritten = false;
   if (!loom_vector_reduce_isa(op)) {
     return iree_ok_status();
@@ -910,7 +855,7 @@ iree_status_t loom_vector_reduce_to_scalar_rewrite_op(loom_pass_t* pass,
   loom_vector_to_scalar_state_initialize(&state, pass);
   loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(
-      loom_vector_to_scalar_lower_reduce(&state, &replacement));
+      loom_vector_to_scalar_lower_reduce(&state, input_mode, &replacement));
   if (loom_pass_has_error_diagnostics(pass)) {
     return iree_ok_status();
   }
@@ -918,8 +863,25 @@ iree_status_t loom_vector_reduce_to_scalar_rewrite_op(loom_pass_t* pass,
       rewriter, op, &replacement, 1, state.value_checkpoint));
   IREE_RETURN_IF_ERROR(
       loom_rewriter_replace_all_uses_and_erase(rewriter, op, &replacement, 1));
-  *out_rewritten = true;
+  loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   return iree_ok_status();
+}
+
+iree_status_t loom_vector_reduce_to_scalar_rewrite_op(loom_pass_t* pass,
+                                                      loom_rewriter_t* rewriter,
+                                                      loom_op_t* op,
+                                                      bool* out_rewritten) {
+  return loom_vector_reduce_to_scalar_rewrite_op_with_input_mode(
+      pass, rewriter, op, LOOM_VECTOR_TO_SCALAR_REDUCE_INPUT_MODE_REMATERIALIZE,
+      out_rewritten);
+}
+
+iree_status_t loom_vector_reduce_captured_to_scalar_rewrite_op(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    bool* out_rewritten) {
+  return loom_vector_reduce_to_scalar_rewrite_op_with_input_mode(
+      pass, rewriter, op, LOOM_VECTOR_TO_SCALAR_REDUCE_INPUT_MODE_CAPTURED,
+      out_rewritten);
 }
 
 iree_status_t loom_vector_reduce_axes_to_scalar_rewrite_op(
@@ -957,7 +919,7 @@ iree_status_t loom_vector_reduce_axes_to_scalar_rewrite_op(
       rewriter, op, &replacement, 1, state.value_checkpoint));
   IREE_RETURN_IF_ERROR(
       loom_rewriter_replace_all_uses_and_erase(rewriter, op, &replacement, 1));
-  *out_rewritten = true;
+  loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   return iree_ok_status();
 }
 
@@ -975,7 +937,7 @@ iree_status_t loom_vector_dotf_to_scalar_rewrite_op(loom_pass_t* pass,
       loom_vector_to_scalar_lower_dotf_op(pass, rewriter, op, &handled));
   if (handled && !loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -993,7 +955,7 @@ iree_status_t loom_vector_transform_to_scalar_rewrite_op(
       loom_vector_to_scalar_lower_transform_op(pass, rewriter, op, &handled));
   if (handled && !loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1017,7 +979,7 @@ iree_status_t loom_vector_to_scalar_rewrite_op(loom_pass_t* pass,
   IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_op(pass, rewriter, op));
   if (!loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1031,7 +993,7 @@ iree_status_t loom_vector_descriptor_to_scalar_rewrite_op(
       loom_vector_to_scalar_lower_descriptor_op(pass, rewriter, op));
   if (!loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1057,7 +1019,7 @@ iree_status_t loom_vector_atomic_to_scalar_rewrite_op(loom_pass_t* pass,
   }
   if (handled && !loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1075,7 +1037,7 @@ iree_status_t loom_vector_decode_to_scalar_rewrite_op(loom_pass_t* pass,
       loom_vector_to_scalar_lower_descriptor_op(pass, rewriter, op));
   if (!loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1136,6 +1098,7 @@ iree_status_t loom_vector_mma_to_scalar_rewrite_op(
       rewriter, op, &replacement, 1, state.value_checkpoint));
   IREE_RETURN_IF_ERROR(
       loom_rewriter_replace_all_uses_and_erase(rewriter, op, &replacement, 1));
+  loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   return iree_ok_status();
 }
 
@@ -1196,7 +1159,26 @@ iree_status_t loom_vector_store_to_scalar_rewrite_op(loom_pass_t* pass,
   IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_memory_store_op(
       pass, rewriter, op, &handled));
   if (handled && !loom_pass_has_error_diagnostics(pass)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
+  }
+  return iree_ok_status();
+}
+
+iree_status_t loom_vector_store_captured_to_scalar_rewrite_op(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    bool* out_rewritten) {
+  *out_rewritten = false;
+  if (!loom_vector_store_isa(op)) {
+    return iree_ok_status();
+  }
+  loom_builder_set_before(&rewriter->builder, op);
+  bool handled = false;
+  IREE_RETURN_IF_ERROR(
+      loom_vector_to_scalar_lower_memory_store_op_with_value_mode(
+          pass, rewriter, op, LOOM_VECTOR_TO_SCALAR_STORE_VALUE_MODE_CAPTURED,
+          &handled));
+  if (handled && !loom_pass_has_error_diagnostics(pass)) {
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1213,7 +1195,7 @@ iree_status_t loom_vector_fragment_store_to_scalar_rewrite_op(
   IREE_RETURN_IF_ERROR(loom_vector_to_scalar_lower_fragment_store_op(
       pass, rewriter, op, &handled));
   if (handled && !loom_pass_has_error_diagnostics(pass)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1250,7 +1232,7 @@ iree_status_t loom_vector_extract_to_scalar_rewrite_op(
       loom_vector_to_scalar_lower_scalar_extract(pass, rewriter, op, &handled));
   if (handled && !loom_pass_has_error_diagnostics(pass) &&
       iree_any_bit_set(op->flags, LOOM_OP_FLAG_DEAD)) {
-    *out_rewritten = true;
+    loom_vector_to_scalar_record_rewrite(rewriter, out_rewritten);
   }
   return iree_ok_status();
 }
@@ -1316,6 +1298,8 @@ static iree_status_t loom_vector_to_scalar_run_with_lowerer(
           loom_target_math_pass_capability_from_pass(pass)),
       loom_target_facts_bundle(
           loom_target_function_version_target_facts(pass->function_version)));
+  rewriter.math_target_bundle = loom_target_facts_bundle(
+      loom_target_function_version_target_facts(pass->function_version));
   loom_value_fact_table_t* facts = NULL;
   iree_status_t status = loom_pass_value_facts_prepare(
       pass, module,

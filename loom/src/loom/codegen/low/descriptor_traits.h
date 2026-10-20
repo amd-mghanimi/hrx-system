@@ -24,21 +24,34 @@ extern "C" {
 // memory accesses remain reads and writes, ordering barriers become memory
 // fences, and target effects without a generic semantic remain unknown. Unknown
 // effects subsume the generic read/write traits when both kinds are present.
+// When non-NULL, |out_intrinsic_write_spaces| receives the instruction's
+// operand-independent write-space bound from the same descriptor projection.
 loom_trait_flags_t loom_low_descriptor_effective_traits(
     const loom_low_descriptor_set_t* descriptor_set,
-    const loom_low_descriptor_t* descriptor);
+    const loom_low_descriptor_t* descriptor,
+    loom_memory_space_mask_t* out_intrinsic_write_spaces);
 
 // Returns true when |descriptor| permits cloning |result_index| near each use
 // instead of preserving the original producer live range.
 //
 // Rematerialization is deliberately opt-in per result. The descriptor generator
-// validates the unary constraint, dead-removability, effects, and target-state
+// validates the result constraint, dead-removability, effects, and target-state
 // behavior, then projects the result into an operand flag for this O(1) query.
 // This is narrower than the generic effective-trait projection: descriptors
 // such as explicit SCC compares still carry target state-write rows for
 // scheduling, but replaying that state write is the same act as producing the
 // rematerialized SSA value.
+// |result_index| must name a result row in |descriptor|.
 bool loom_low_descriptor_result_can_rematerialize(
+    const loom_low_descriptor_set_t* descriptor_set,
+    const loom_low_descriptor_t* descriptor, uint16_t result_index);
+
+// Returns the packet operand whose producer joins |result_index|'s
+// rematerialization recipe, or LOOM_LOW_ID_NONE when replay uses the original
+// packet operands. The descriptor generator validates an authored source and
+// projects its packet index directly into the result operand row.
+// |result_index| must name a result row in |descriptor|.
+uint16_t loom_low_descriptor_result_rematerialization_source_operand(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint16_t result_index);
 

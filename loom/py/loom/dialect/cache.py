@@ -67,12 +67,20 @@ CacheTemporal = EnumDef(
 CacheScope = EnumDef(
     "CacheScope",
     [
-        EnumCase("cu", 0, doc="Cache/coherency scope is the compute unit."),
-        EnumCase("se", 1, doc="Cache/coherency scope is the shader engine."),
-        EnumCase("device", 2, doc="Cache/coherency scope is the current device."),
-        EnumCase("system", 3, doc="Cache/coherency scope is the full system."),
+        EnumCase(
+            "workgroup",
+            0,
+            doc="Cache-policy scope is the current workgroup.",
+        ),
+        EnumCase(
+            "cluster",
+            1,
+            doc="Cache-policy scope is the current workgroup cluster.",
+        ),
+        EnumCase("device", 2, doc="Cache-policy scope is the current device."),
+        EnumCase("system", 3, doc="Cache-policy scope is the full system."),
     ],
-    doc="Target-independent cache scope for memory operations.",
+    doc="Target-independent logical cache-policy scope for memory operations.",
     c_type="loom_cache_scope_t",
     c_const_prefix="LOOM_CACHE_SCOPE",
     c_include="loom/ops/cache.h",

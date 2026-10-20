@@ -25,13 +25,30 @@ from loom.dialect.vector import defs as vector
 from loom.dialect.view import ALL_VIEW_OPS
 from loom.dialect.view import defs as view
 from loom.dsl import Op
+from loom.target.arch.spirv.barrier import (
+    CONTROL_BARRIER_CASES,
+    ControlBarrierCase,
+)
 from loom.target.arch.spirv.builtins import (
     BUILTIN_DIMENSIONS,
     BUILTIN_INDEX_QUERIES,
+    BUILTIN_SCALAR_INDEX_QUERIES,
     BuiltinDimension,
-    BuiltinIndexQuery,
+    BuiltinQuery,
 )
 from loom.target.arch.spirv.contracts.atomic import SPIRV_ATOMIC_CONTRACT_CASES
+from loom.target.arch.spirv.contracts.bfloat import (
+    bfloat_carrier_from_i16_rule,
+    bfloat_carrier_memory_rules,
+    bfloat_carrier_to_i16_rule,
+    bfloat_narrow_rules,
+    bfloat_widen_rules,
+)
+from loom.target.arch.spirv.contracts.cooperative_matrix import (
+    COOPERATIVE_INITIALIZER_MATERIALIZER,
+    COOPERATIVE_MATRIX_INITIALIZER_RULES,
+    COOPERATIVE_MATRIX_MEMORY_RULES,
+)
 from loom.target.arch.spirv.contracts.descriptor_rule import (
     descriptor_feature_guards as _feature_guards,
 )
@@ -41,9 +58,22 @@ from loom.target.arch.spirv.contracts.descriptor_rule import (
 from loom.target.arch.spirv.contracts.descriptor_rule import (
     logical_core_descriptor as _descriptor,
 )
+from loom.target.arch.spirv.contracts.extended_math import (
+    SPIRV_EXTENDED_MATH_CONTRACT_CASES,
+)
+from loom.target.arch.spirv.contracts.extrema import extrema_rules
+from loom.target.arch.spirv.contracts.float8 import float8_narrow_rules
+from loom.target.arch.spirv.contracts.float_width import (
+    float_width_narrow_rules,
+    float_width_widen_rules,
+)
 from loom.target.arch.spirv.contracts.index import (
     SPIRV_INDEX_CONVERSION_RULES,
     SPIRV_INDEX_NUMERIC_RULES,
+)
+from loom.target.arch.spirv.contracts.integer_bits import (
+    bit_count_rules,
+    rotation_rules,
 )
 from loom.target.arch.spirv.contracts.memory import (
     STORAGE_BUFFER_MEMORY_SPACES as _STORAGE_BUFFER_MEMORY_SPACES,
@@ -58,10 +88,10 @@ from loom.target.arch.spirv.contracts.memory import (
     storage_buffer_address_materializer as _storage_buffer_address_materializer,
 )
 from loom.target.arch.spirv.contracts.memory import (
-    storage_buffer_alignment_diagnostic as _storage_buffer_alignment_diagnostic,
+    storage_buffer_source_memory as _storage_buffer_source_memory,
 )
 from loom.target.arch.spirv.contracts.memory import (
-    storage_buffer_source_memory as _storage_buffer_source_memory,
+    storage_element_format_guards as _storage_element_format_guards,
 )
 from loom.target.arch.spirv.contracts.memory import (
     workgroup_address_materializer as _workgroup_address_materializer,
@@ -75,16 +105,27 @@ from loom.target.arch.spirv.contracts.memory import (
 from loom.target.arch.spirv.contracts.ordinary_vector import (
     SPIRV_ORDINARY_VECTOR_CONTRACT_CASES,
 )
-from loom.target.arch.spirv.cooperative_matrix import (
-    COOPERATIVE_MATRIX_CASES,
-    CooperativeMatrixCase,
+from loom.target.arch.spirv.contracts.ordinary_vector_alu import (
+    SPIRV_ORDINARY_VECTOR_ALU_CONTRACT_CASES,
 )
+from loom.target.arch.spirv.contracts.predicate import integer_to_boolean_rule
+from loom.target.arch.spirv.contracts.reference_fallback import (
+    SPIRV_REFERENCE_FALLBACK_CONTRACT_CASES,
+)
+from loom.target.arch.spirv.contracts.rounding import rounding_rules
+from loom.target.arch.spirv.contracts.subgroup import SPIRV_SUBGROUP_CONTRACT_CASES
 from loom.target.arch.spirv.descriptors import SPIRV_LOGICAL_CORE_DESCRIPTOR_SET
+from loom.target.arch.spirv.ordinary_vector import NATIVE_ORDINARY_VECTOR_LANE_COUNTS
+from loom.target.arch.spirv.ordinary_vector_conversion import (
+    NATIVE_VECTOR_SCALAR_CONVERSIONS,
+)
 from loom.target.arch.spirv.scalar_alu import (
     BFLOAT16_SCALAR_TYPE,
     BOOLEAN_BINARY_OPERATIONS,
     BOOLEAN_CONSTANTS,
     FLOAT_BINARY_OPERATIONS,
+    FLOAT_COMPARE_PREDICATES,
+    FLOAT_COMPARE_TYPES,
     FLOAT_SCALAR_ALU_TYPES,
     INTEGER_BITWISE_BINARY_OPERATIONS,
     INTEGER_SCALAR_ALU_TYPE_PAIRS,
@@ -95,8 +136,8 @@ from loom.target.arch.spirv.scalar_alu import (
     UNSIGNED_INTEGER_BINARY_OPERATIONS,
     UNSIGNED_ORDERED_INTEGER_COMPARE_PREDICATES,
     BooleanConstant,
+    ComparePredicate,
     IntegerAluTypePair,
-    IntegerComparePredicate,
     ScalarAluType,
     ScalarBinaryOperation,
 )
@@ -127,15 +168,10 @@ from loom.target.contracts import (
     DescriptorRule,
     EmitDescriptorOp,
     Guard,
-    GuardDiagnostic,
     ResultTypeBinding,
     Scalar,
     SourceMemoryAddressCoordinateType,
-    SourceMemoryAddressLayout,
-    SourceMemoryConstraint,
-    SourceMemoryDynamicIndexSource,
     SourceMemoryOperation,
-    SourceMemoryRootKind,
     SourceValueKind,
     TypePattern,
     ValueAliasRule,
@@ -242,6 +278,44 @@ def _boolean_constant_rule(row: BooleanConstant) -> DescriptorRule:
     )
 
 
+def _float_payload_constant_rule(
+    source_types: tuple[str, ...], carrier_suffix: str
+) -> DescriptorRule:
+    # Raw FP8 payloads span 0..255, beyond the signed-i8 constant immediate.
+    # An i32 literal followed by integer narrowing preserves every payload bit.
+    constant = _descriptor("spirv.op_constant.i32")
+    result = ValueRef.result("result")
+    payload = result if carrier_suffix == "i32" else ValueRef.temporary("payload")
+    emits = [
+        EmitDescriptorOp(
+            descriptor=constant,
+            results={"dst": payload},
+            result_types={"dst": _I32},
+            immediates={"i32_value": ValueProject.float_bits("result")},
+            form=DescriptorEmitForm.CONST,
+        )
+    ]
+    if carrier_suffix != "i32":
+        emits.append(
+            _descriptor_emit(
+                descriptor=_descriptor(f"spirv.op_s_convert.i32.{carrier_suffix}"),
+                operands={"input": payload},
+                results={"dst": result},
+            )
+        )
+    return DescriptorRule(
+        source_op=scalar_conversion.scalar_constant,
+        descriptor=emits[-1].descriptor,
+        guards=(
+            Guard.attr_kind("value", "f64"),
+            Guard.value_type("result", Scalar(source_types)),
+            Guard.value_exact_float("result"),
+            *_feature_guards(*(step.descriptor for step in emits)),
+        ),
+        emit=tuple(emits),
+    )
+
+
 def _scalar_constant_rules() -> tuple[DescriptorRule, ...]:
     return (
         tuple(_boolean_constant_rule(row) for row in BOOLEAN_CONSTANTS)
@@ -250,6 +324,10 @@ def _scalar_constant_rules() -> tuple[DescriptorRule, ...]:
             for scalar_pair in INTEGER_SCALAR_ALU_TYPE_PAIRS
         )
         + tuple(_float_constant_rule(scalar) for scalar in FLOAT_CONSTANT_TYPES)
+        + (
+            _float_payload_constant_rule(("f8E4M3", "f8E5M2"), "i8"),
+            _float_payload_constant_rule(("bf16",), "i32"),
+        )
     )
 
 
@@ -279,23 +357,84 @@ def _binary_rule(
     )
 
 
-def _conversion_rule(row: ScalarConversion) -> DescriptorRule:
-    descriptor = _descriptor(row.key)
+def _numeric_type_pattern(
+    scalar: ScalarAluType, lane_count: int | None = None
+) -> TypePattern:
+    if lane_count is None:
+        return Scalar(scalar.source_type)
+    return Vector(scalar.source_type, lanes=lane_count)
+
+
+def _value_type_suffix(scalar: ScalarAluType, lane_count: int | None) -> str:
+    if lane_count is None or lane_count == 1:
+        return scalar.suffix
+    return f"v{lane_count}{scalar.suffix}"
+
+
+def _conversion_rule(
+    row: ScalarConversion, lane_count: int | None = None
+) -> DescriptorRule:
+    source_suffix = _value_type_suffix(row.source_type, lane_count)
+    result_suffix = _value_type_suffix(row.result_type, lane_count)
+    descriptor = _descriptor(
+        f"spirv.op_{row.descriptor_suffix}.{source_suffix}.{result_suffix}"
+    )
+    emits: list[EmitDescriptorOp] = []
+    input_ref = ValueRef.operand("input")
+    result_ref = ValueRef.result("result")
+    if row.source_op_key in ("extui", "uitofp"):
+        source_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.source_type.source_type]
+        input_ref = ValueRef.temporary("unsigned_input")
+        emits.append(
+            _integer_view_emit(
+                source_type=source_pair.signed,
+                result_type=source_pair.unsigned,
+                input_ref=ValueRef.operand("input"),
+                output_ref=input_ref,
+                lane_count=lane_count,
+            )
+        )
+    if row.source_op_key in ("extui", "fptoui"):
+        result_ref = ValueRef.temporary("unsigned_result")
+    result_types = None
+    if result_ref.kind == SourceValueKind.TEMPORARY:
+        result_types = {"dst": DescriptorResultType()}
+    emits.append(
+        _descriptor_emit(
+            descriptor=descriptor,
+            operands={"input": input_ref},
+            results={"dst": result_ref},
+            result_types=result_types,
+        )
+    )
+    if row.source_op_key in ("extui", "fptoui"):
+        result_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.result_type.source_type]
+        emits.append(
+            _integer_view_emit(
+                source_type=result_pair.unsigned,
+                result_type=result_pair.signed,
+                input_ref=result_ref,
+                output_ref=ValueRef.result("result"),
+                lane_count=lane_count,
+            )
+        )
     return DescriptorRule(
-        source_op=_CONVERSION_SOURCE_OPS[row.source_op_key],
+        source_op=(
+            _CONVERSION_SOURCE_OPS[row.source_op_key]
+            if lane_count is None
+            else getattr(vector, f"vector_{row.source_op_key}")
+        ),
         descriptor=descriptor,
         guards=(
-            Guard.value_type("input", Scalar(row.source_type.source_type)),
-            Guard.value_type("result", Scalar(row.result_type.source_type)),
+            Guard.value_type(
+                "input", _numeric_type_pattern(row.source_type, lane_count)
+            ),
+            Guard.value_type(
+                "result", _numeric_type_pattern(row.result_type, lane_count)
+            ),
             *_feature_guards(descriptor),
         ),
-        emit=(
-            _descriptor_emit(
-                descriptor=descriptor,
-                operands={"input": ValueRef.operand("input")},
-                results={"dst": ValueRef.result("result")},
-            ),
-        ),
+        emit=tuple(emits),
     )
 
 
@@ -315,22 +454,15 @@ def _conversion_alias_rule(
     )
 
 
-_KERNEL_BUILTIN_SOURCE_OPS = {
-    "workgroup_id": kernel.kernel_workgroup_id,
-    "workitem_id": kernel.kernel_workitem_id,
-    "workitem_dispatch_id": kernel.kernel_workitem_dispatch_id,
-}
-
-
 def _builtin_index_rule(
-    query: BuiltinIndexQuery,
+    query: BuiltinQuery,
     dimension: BuiltinDimension,
 ) -> DescriptorRule:
     descriptor = _descriptor(
         f"spirv.op_load_builtin.{query.descriptor_suffix}.{dimension.source_keyword}"
     )
     return DescriptorRule(
-        source_op=_KERNEL_BUILTIN_SOURCE_OPS[query.source_op_key],
+        source_op=getattr(kernel, f"kernel_{query.source_op_key}"),
         descriptor=descriptor,
         guards=(
             Guard.enum_attr_equals("dimension", dimension.source_keyword),
@@ -354,8 +486,38 @@ def _builtin_index_rules() -> tuple[DescriptorRule, ...]:
     )
 
 
-def _integer_view_key(source_type: ScalarAluType, result_type: ScalarAluType) -> str:
-    return f"spirv.op_bitcast.{source_type.suffix}.{result_type.suffix}"
+def _builtin_scalar_index_rule(query: BuiltinQuery) -> DescriptorRule:
+    descriptor = _descriptor(f"spirv.op_load_builtin.{query.descriptor_suffix}")
+    return DescriptorRule(
+        source_op=getattr(kernel, f"kernel_{query.source_op_key}"),
+        descriptor=descriptor,
+        guards=(
+            Guard.value_type("result", _INDEX),
+            *_feature_guards(descriptor),
+        ),
+        emit=(
+            _descriptor_emit(
+                descriptor=descriptor,
+                results={"dst": ValueRef.result("result")},
+            ),
+        ),
+    )
+
+
+def _builtin_scalar_index_rules() -> tuple[DescriptorRule, ...]:
+    return tuple(
+        _builtin_scalar_index_rule(query) for query in BUILTIN_SCALAR_INDEX_QUERIES
+    )
+
+
+def _bitcast_key(
+    source_type: ScalarAluType,
+    result_type: ScalarAluType,
+    lane_count: int | None = None,
+) -> str:
+    source_suffix = _value_type_suffix(source_type, lane_count)
+    result_suffix = _value_type_suffix(result_type, lane_count)
+    return f"spirv.op_bitcast.{source_suffix}.{result_suffix}"
 
 
 def _integer_view_emit(
@@ -364,12 +526,15 @@ def _integer_view_emit(
     result_type: ScalarAluType,
     input_ref: ValueRef,
     output_ref: ValueRef,
+    lane_count: int | None = None,
 ) -> EmitDescriptorOp:
-    result_type_binding: ResultTypeBinding = Scalar(result_type.source_type)
+    result_type_binding: ResultTypeBinding = _numeric_type_pattern(
+        result_type, lane_count
+    )
     if output_ref.kind == SourceValueKind.TEMPORARY:
         result_type_binding = DescriptorResultType()
     return _descriptor_emit(
-        descriptor=_descriptor(_integer_view_key(source_type, result_type)),
+        descriptor=_descriptor(_bitcast_key(source_type, result_type, lane_count)),
         operands={"input": input_ref},
         results={"dst": output_ref},
         result_types={"dst": result_type_binding},
@@ -423,96 +588,9 @@ def _unsigned_binary_rule(
     )
 
 
-def _unsigned_conversion_rule(row: ScalarConversion) -> DescriptorRule:
-    descriptor = _descriptor(row.key)
-    source_op = _CONVERSION_SOURCE_OPS[row.source_op_key]
-    if row.source_op_key == "extui":
-        source_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.source_type.source_type]
-        result_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.result_type.source_type]
-        return DescriptorRule(
-            source_op=source_op,
-            descriptor=descriptor,
-            guards=(
-                Guard.value_type("input", Scalar(row.source_type.source_type)),
-                Guard.value_type("result", Scalar(row.result_type.source_type)),
-                *_feature_guards(descriptor),
-            ),
-            emit=(
-                _integer_view_emit(
-                    source_type=source_pair.signed,
-                    result_type=source_pair.unsigned,
-                    input_ref=ValueRef.operand("input"),
-                    output_ref=ValueRef.temporary("unsigned_input"),
-                ),
-                _descriptor_emit(
-                    descriptor=descriptor,
-                    operands={"input": ValueRef.temporary("unsigned_input")},
-                    results={"dst": ValueRef.temporary("unsigned_result")},
-                    result_types={"dst": DescriptorResultType()},
-                ),
-                _integer_view_emit(
-                    source_type=result_pair.unsigned,
-                    result_type=result_pair.signed,
-                    input_ref=ValueRef.temporary("unsigned_result"),
-                    output_ref=ValueRef.result("result"),
-                ),
-            ),
-        )
-    if row.source_op_key == "uitofp":
-        source_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.source_type.source_type]
-        return DescriptorRule(
-            source_op=source_op,
-            descriptor=descriptor,
-            guards=(
-                Guard.value_type("input", Scalar(row.source_type.source_type)),
-                Guard.value_type("result", Scalar(row.result_type.source_type)),
-                *_feature_guards(descriptor),
-            ),
-            emit=(
-                _integer_view_emit(
-                    source_type=source_pair.signed,
-                    result_type=source_pair.unsigned,
-                    input_ref=ValueRef.operand("input"),
-                    output_ref=ValueRef.temporary("unsigned_input"),
-                ),
-                _descriptor_emit(
-                    descriptor=descriptor,
-                    operands={"input": ValueRef.temporary("unsigned_input")},
-                    results={"dst": ValueRef.result("result")},
-                ),
-            ),
-        )
-    if row.source_op_key == "fptoui":
-        result_pair = _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE[row.result_type.source_type]
-        return DescriptorRule(
-            source_op=source_op,
-            descriptor=descriptor,
-            guards=(
-                Guard.value_type("input", Scalar(row.source_type.source_type)),
-                Guard.value_type("result", Scalar(row.result_type.source_type)),
-                *_feature_guards(descriptor),
-            ),
-            emit=(
-                _descriptor_emit(
-                    descriptor=descriptor,
-                    operands={"input": ValueRef.operand("input")},
-                    results={"dst": ValueRef.temporary("unsigned_result")},
-                    result_types={"dst": DescriptorResultType()},
-                ),
-                _integer_view_emit(
-                    source_type=result_pair.unsigned,
-                    result_type=result_pair.signed,
-                    input_ref=ValueRef.temporary("unsigned_result"),
-                    output_ref=ValueRef.result("result"),
-                ),
-            ),
-        )
-    raise ValueError(f"unsupported unsigned SPIR-V scalar conversion {row.key}")
-
-
 def _compare_rule(
     source_op: Op,
-    predicate: IntegerComparePredicate,
+    predicate: ComparePredicate,
     type_pattern: TypePattern,
     descriptor_key: str,
 ) -> DescriptorRule:
@@ -541,7 +619,7 @@ def _compare_rule(
 
 def _unsigned_compare_rule(
     source_op: Op,
-    predicate: IntegerComparePredicate,
+    predicate: ComparePredicate,
     scalar_pair: IntegerAluTypePair,
 ) -> DescriptorRule:
     descriptor = _descriptor(
@@ -613,23 +691,6 @@ def _storage_source_types(scalar: StorageBufferScalar) -> tuple[str, ...]:
     if scalar.source_type == "i8":
         return ("i8", "f8E4M3", "f8E5M2")
     return (scalar.source_type,)
-
-
-def _storage_element_format_guards(
-    field: str,
-    scalar: StorageBufferScalar,
-) -> tuple[Guard, ...]:
-    if not scalar.source_type.startswith("i"):
-        return ()
-    numeric_format = scalar.numeric_format_c_expression
-    if numeric_format is None:
-        return ()
-    return (
-        Guard.value_storage_element_format(
-            field,
-            numeric_format,
-        ),
-    )
 
 
 def _buffer_view_rule(
@@ -789,231 +850,6 @@ def _float_integer_carrier(
     return float_type, integer_type, integer_storage_scalar
 
 
-def _cooperative_matrix_memory(
-    operation: SourceMemoryOperation,
-    *,
-    element_byte_width: int,
-    lane_count: int,
-    minimum_alignment: int,
-) -> SourceMemoryConstraint:
-    return SourceMemoryConstraint(
-        operation=operation,
-        root_kind=SourceMemoryRootKind.ANY,
-        address_layout=SourceMemoryAddressLayout.COMPACT_ROW_MAJOR,
-        memory_spaces=_STORAGE_BUFFER_MEMORY_SPACES,
-        element_byte_count=element_byte_width,
-        vector_lane_count=lane_count,
-        vector_lane_byte_stride=element_byte_width,
-        static_byte_offset_minimum=0,
-        static_byte_offset_maximum=(2**63) - 1,
-        minimum_alignment=minimum_alignment,
-        dynamic_term_count=None,
-        dynamic_index_source=SourceMemoryDynamicIndexSource.NONE,
-        address_layout_diagnostic=_cooperative_matrix_compact_tile_diagnostic(),
-        diagnostic=_storage_buffer_alignment_diagnostic(minimum_alignment),
-    )
-
-
-def _cooperative_matrix_zero_indices_guards() -> tuple[Guard, ...]:
-    return (
-        Guard.operand_segment_count("indices", 0),
-        Guard.i64_array_count("static_indices", 2),
-        Guard.i64_array_element_range("static_indices", 0, 0, 0),
-        Guard.i64_array_element_range("static_indices", 1, 0, 0),
-    )
-
-
-def _cooperative_matrix_compact_tile_diagnostic() -> GuardDiagnostic:
-    return GuardDiagnostic(
-        subject_role="value",
-        subject_name="view",
-        constraint_key="cooperative_matrix.compact_storage_tile",
-    )
-
-
-def _cooperative_matrix_view_guard(
-    scalar: StorageBufferScalar,
-    *,
-    rows: int,
-    columns: int,
-) -> Guard:
-    # Cooperative matrix packets encode a compact row stride. Exact dimensions
-    # constrain the tile footprint while the source-memory row separately
-    # requires a proven compact row-major layout.
-    return Guard.value_type(
-        "view",
-        View(scalar.source_type, dims=(rows, columns)),
-        diagnostic=_cooperative_matrix_compact_tile_diagnostic(),
-    )
-
-
-def _cooperative_matrix_shape_guards(
-    *,
-    rows: int,
-    columns: int,
-) -> tuple[Guard, ...]:
-    return (
-        Guard.value_i64_range("rows", rows, rows),
-        Guard.value_i64_range("columns", columns, columns),
-    )
-
-
-def _cooperative_matrix_load_rule(
-    *,
-    role: str,
-    case: CooperativeMatrixCase,
-    scalar: StorageBufferScalar,
-    result_element: str,
-    result_lanes: int,
-    rows: int,
-    columns: int,
-) -> DescriptorRule:
-    descriptor = _descriptor(
-        case.descriptor_key(
-            "op_cooperative_matrix_load_khr",
-            role=role,
-            layout="row_major",
-        )
-    )
-    address_materializer = _storage_buffer_address_materializer(scalar)
-    return DescriptorRule(
-        source_op=vector.vector_fragment_load,
-        descriptor=descriptor,
-        guards=(
-            Guard.enum_attr_equals("role", role),
-            _cooperative_matrix_view_guard(
-                scalar,
-                rows=rows,
-                columns=columns,
-            ),
-            *_storage_element_format_guards("view", scalar),
-            Guard.value_type("result", Vector(result_element, lanes=result_lanes)),
-            *_cooperative_matrix_shape_guards(rows=rows, columns=columns),
-            *_cooperative_matrix_zero_indices_guards(),
-            *_source_memory_address_feature_guards(address_materializer),
-            *_feature_guards(descriptor),
-        ),
-        emit=(
-            _descriptor_emit(
-                descriptor=descriptor,
-                operands={"ptr": ValueRef.source_memory_address()},
-                results={"dst": ValueRef.result("result")},
-                source_memory=_cooperative_matrix_memory(
-                    SourceMemoryOperation.LOAD,
-                    element_byte_width=scalar.byte_width,
-                    lane_count=result_lanes,
-                    minimum_alignment=16,
-                ),
-                source_memory_address_materializer=address_materializer,
-            ),
-        ),
-    )
-
-
-def _cooperative_matrix_store_rule(
-    *,
-    case: CooperativeMatrixCase,
-    scalar: StorageBufferScalar,
-    value_element: str,
-    value_lanes: int,
-    rows: int,
-    columns: int,
-) -> DescriptorRule:
-    descriptor = _descriptor(
-        case.descriptor_key(
-            "op_cooperative_matrix_store_khr",
-            role="result",
-            layout="row_major",
-        )
-    )
-    address_materializer = _storage_buffer_address_materializer(scalar)
-    return DescriptorRule(
-        source_op=vector.vector_fragment_store,
-        descriptor=descriptor,
-        guards=(
-            Guard.enum_attr_equals("role", "result"),
-            _cooperative_matrix_view_guard(
-                scalar,
-                rows=rows,
-                columns=columns,
-            ),
-            *_storage_element_format_guards("view", scalar),
-            Guard.value_type("value", Vector(value_element, lanes=value_lanes)),
-            *_cooperative_matrix_shape_guards(rows=rows, columns=columns),
-            *_cooperative_matrix_zero_indices_guards(),
-            *_source_memory_address_feature_guards(address_materializer),
-            *_feature_guards(descriptor),
-        ),
-        emit=(
-            _descriptor_emit(
-                descriptor=descriptor,
-                operands={
-                    "ptr": ValueRef.source_memory_address(),
-                    "value": ValueRef.operand("value"),
-                },
-                source_memory=_cooperative_matrix_memory(
-                    SourceMemoryOperation.STORE,
-                    element_byte_width=scalar.byte_width,
-                    lane_count=value_lanes,
-                    minimum_alignment=16,
-                ),
-                source_memory_address_materializer=address_materializer,
-            ),
-        ),
-    )
-
-
-def _cooperative_matrix_rules_for_case(
-    case: CooperativeMatrixCase,
-) -> tuple[DescriptorRule, ...]:
-    return (
-        _cooperative_matrix_load_rule(
-            role="lhs",
-            case=case,
-            scalar=case.lhs_scalar,
-            result_element=case.lhs_source_type,
-            result_lanes=case.lhs_vector_lanes,
-            rows=case.lhs_rows,
-            columns=case.lhs_columns,
-        ),
-        _cooperative_matrix_load_rule(
-            role="rhs",
-            case=case,
-            scalar=case.rhs_scalar,
-            result_element=case.rhs_source_type,
-            result_lanes=case.rhs_vector_lanes,
-            rows=case.rhs_rows,
-            columns=case.rhs_columns,
-        ),
-        _cooperative_matrix_load_rule(
-            role="init",
-            case=case,
-            scalar=case.accumulator_scalar,
-            result_element=case.accumulator_source_type,
-            result_lanes=case.accumulator_vector_lanes,
-            rows=case.accumulator_rows,
-            columns=case.accumulator_columns,
-        ),
-        _cooperative_matrix_store_rule(
-            case=case,
-            scalar=case.result_scalar,
-            value_element=case.result_source_type,
-            value_lanes=case.accumulator_vector_lanes,
-            rows=case.accumulator_rows,
-            columns=case.accumulator_columns,
-        ),
-    )
-
-
-def _cooperative_matrix_rules() -> tuple[DescriptorRule, ...]:
-    rules: list[DescriptorRule] = []
-    for case in COOPERATIVE_MATRIX_CASES:
-        if not case.source_rule_enabled:
-            continue
-        rules.extend(_cooperative_matrix_rules_for_case(case))
-    return tuple(rules)
-
-
 def _view_load_rule(scalar: StorageBufferScalar) -> DescriptorRule:
     scalar_type = Scalar(_storage_source_types(scalar))
     view_type = View(_storage_source_types(scalar))
@@ -1080,7 +916,7 @@ def _view_load_workgroup_integer_carrier_rule(
 ) -> DescriptorRule:
     float_type, integer_type, integer_scalar = _float_integer_carrier(scalar)
     descriptor = _descriptor(f"spirv.op_load.workgroup.{integer_scalar.suffix}")
-    bitcast_descriptor = _descriptor(_integer_view_key(integer_type, float_type))
+    bitcast_descriptor = _descriptor(_bitcast_key(integer_type, float_type))
     address_materializer = _workgroup_address_materializer(
         integer_scalar, coordinate_type
     )
@@ -1123,7 +959,7 @@ def _view_store_workgroup_integer_carrier_rule(
 ) -> DescriptorRule:
     float_type, integer_type, integer_scalar = _float_integer_carrier(scalar)
     descriptor = _descriptor(f"spirv.op_store.workgroup.{integer_scalar.suffix}")
-    bitcast_descriptor = _descriptor(_integer_view_key(float_type, integer_type))
+    bitcast_descriptor = _descriptor(_bitcast_key(float_type, integer_type))
     address_materializer = _workgroup_address_materializer(
         integer_scalar, coordinate_type
     )
@@ -1262,25 +1098,22 @@ def _storage_buffer_rules() -> tuple[ContractCase, ...]:
     return tuple(rules)
 
 
-def _control_barrier_rule(scope: str) -> DescriptorRule:
-    descriptor = _descriptor(f"spirv.op_control_barrier.{scope}.workgroup.acq_rel")
+def _control_barrier_rule(case: ControlBarrierCase) -> DescriptorRule:
+    descriptor = _descriptor(case.descriptor_key)
     return DescriptorRule(
         source_op=kernel.kernel_barrier,
         descriptor=descriptor,
         guards=(
-            Guard.enum_attr_equals("memory_space", "workgroup"),
-            Guard.enum_attr_equals("ordering", "acq_rel"),
-            Guard.enum_attr_equals("scope", scope),
+            Guard.enum_attr_equals("memory_space", case.memory_space.source_keyword),
+            Guard.enum_attr_equals("ordering", case.ordering.source_keyword),
+            Guard.enum_attr_equals("scope", case.scope.source_keyword),
         ),
         emit=(_descriptor_emit(descriptor=descriptor),),
     )
 
 
 def _control_barrier_rules() -> tuple[DescriptorRule, ...]:
-    return (
-        _control_barrier_rule("subgroup"),
-        _control_barrier_rule("workgroup"),
-    )
+    return tuple(_control_barrier_rule(case) for case in CONTROL_BARRIER_CASES)
 
 
 _INTEGER_BINARY_SOURCE_OPS = {
@@ -1329,10 +1162,6 @@ _INTEGER_ALU_TYPE_PAIR_BY_SOURCE_TYPE = {
 }
 
 
-def _scalar_type_pattern(scalar: ScalarAluType) -> TypePattern:
-    return Scalar(scalar.source_type)
-
-
 def _scalar_binary_rule(
     scalar: ScalarAluType,
     operation: ScalarBinaryOperation,
@@ -1340,7 +1169,7 @@ def _scalar_binary_rule(
 ) -> DescriptorRule:
     return _binary_rule(
         source_ops[operation.source_op_key],
-        _scalar_type_pattern(scalar),
+        _numeric_type_pattern(scalar),
         f"spirv.op_{operation.descriptor_suffix}.{scalar.suffix}",
     )
 
@@ -1391,9 +1220,68 @@ def _vector_float_binary_rules() -> tuple[DescriptorRule, ...]:
     )
 
 
+def _vector_float_scale_rules() -> tuple[DescriptorRule, ...]:
+    rules = []
+    for scalar in FLOAT_SCALAR_ALU_TYPES:
+        for lane_count in NATIVE_ORDINARY_VECTOR_LANE_COUNTS:
+            descriptor = _descriptor(
+                f"spirv.op_vector_times_scalar.v{lane_count}{scalar.suffix}"
+            )
+            vector_type = Vector(scalar.source_type, lanes=lane_count)
+            for broadcast, lanes in (("rhs", "lhs"), ("lhs", "rhs")):
+                rules.append(
+                    DescriptorRule(
+                        source_op=vector.vector_mulf,
+                        descriptor=descriptor,
+                        guards=(
+                            *_typed_guards(("lhs", "rhs", "result"), vector_type),
+                            *_feature_guards(descriptor),
+                            Guard.uniform_element_origin_type(
+                                broadcast, Scalar(scalar.source_type)
+                            ),
+                        ),
+                        emit=(
+                            _descriptor_emit(
+                                descriptor=descriptor,
+                                operands={
+                                    "vector": ValueRef.operand(lanes),
+                                    "scalar": ValueRef.uniform_element_origin_operand(
+                                        broadcast
+                                    ),
+                                },
+                                results={"dst": ValueRef.result("result")},
+                            ),
+                        ),
+                    )
+                )
+    return tuple(rules)
+
+
 def _conversion_rules() -> tuple[DescriptorRule, ...]:
-    rules = [_conversion_rule(row) for row in DIRECT_SCALAR_CONVERSIONS]
-    rules.extend(_unsigned_conversion_rule(row) for row in UNSIGNED_SCALAR_CONVERSIONS)
+    rules = [
+        _conversion_rule(row)
+        for row in DIRECT_SCALAR_CONVERSIONS
+        if not (
+            row.source_op_key == "fptrunc" and row.result_type.source_type == "bf16"
+        )
+    ]
+    rules.extend(float_width_narrow_rules())
+    rules.extend(bfloat_narrow_rules())
+    rules.extend(bfloat_widen_rules())
+    rules.append(bfloat_carrier_from_i16_rule())
+    rules.append(bfloat_carrier_to_i16_rule())
+    rules.extend(float8_narrow_rules())
+    rules.extend(_conversion_rule(row) for row in UNSIGNED_SCALAR_CONVERSIONS)
+    rules.extend(
+        _conversion_rule(row, lane_count)
+        for row in NATIVE_VECTOR_SCALAR_CONVERSIONS
+        for lane_count in (1, *NATIVE_ORDINARY_VECTOR_LANE_COUNTS)
+    )
+    rules.extend(float_width_widen_rules())
+    rules.extend(
+        integer_to_boolean_rule(scalar_conversion.scalar_trunci, scalar.source_type)
+        for scalar in SIGNED_INTEGER_SCALAR_ALU_TYPES
+    )
     return tuple(rules)
 
 
@@ -1402,7 +1290,7 @@ def _compare_rules() -> tuple[DescriptorRule, ...]:
         _compare_rule(
             scalar_comparison.scalar_cmpi,
             predicate,
-            _scalar_type_pattern(scalar),
+            _numeric_type_pattern(scalar),
             f"spirv.op_{predicate.descriptor_suffix}.{scalar.suffix}",
         )
         for scalar in SIGNED_INTEGER_SCALAR_ALU_TYPES
@@ -1417,15 +1305,27 @@ def _compare_rules() -> tuple[DescriptorRule, ...]:
         for scalar_pair in INTEGER_SCALAR_ALU_TYPE_PAIRS
         for predicate in UNSIGNED_ORDERED_INTEGER_COMPARE_PREDICATES
     )
+    rules.extend(
+        _compare_rule(
+            scalar_comparison.scalar_cmpf,
+            predicate,
+            _numeric_type_pattern(compare_type.scalar),
+            f"spirv.op_{predicate.descriptor_suffix}.{compare_type.scalar.suffix}",
+        )
+        for compare_type in FLOAT_COMPARE_TYPES
+        for predicate in FLOAT_COMPARE_PREDICATES
+    )
     return tuple(rules)
 
 
 def _select_rules() -> tuple[DescriptorRule, ...]:
     rules = [
-        _select_rule(_scalar_type_pattern(scalar), f"spirv.op_select.{scalar.suffix}")
+        _select_rule(_numeric_type_pattern(scalar), f"spirv.op_select.{scalar.suffix}")
         for scalar in SCALAR_ALU_TYPES
     ]
     rules.append(_select_rule(Scalar("bf16"), "spirv.op_select.bf16"))
+    rules.append(_select_rule(Scalar(("f8E4M3", "f8E5M2")), "spirv.op_select.i8"))
+    rules.append(_select_rule(Scalar("bf16"), "spirv.op_select.i32"))
     rules.append(_select_rule(_I1, "spirv.op_select.bool"))
     rules.append(_select_rule(Buffer(), "spirv.op_select.storage_buffer"))
     return tuple(rules)
@@ -1445,30 +1345,43 @@ SPIRV_LOGICAL_CORE_CONTRACT_FRAGMENT = ContractFragment(
     name="spirv.logical.core",
     descriptor_set=SPIRV_LOGICAL_CORE_DESCRIPTOR_SET,
     public_header="loom/target/arch/spirv/contracts/logical_core.h",
+    materializers=(COOPERATIVE_INITIALIZER_MATERIALIZER,),
     cases=(
         *_scalar_constant_rules(),
         *SPIRV_INDEX_CONVERSION_RULES,
         *SPIRV_INDEX_NUMERIC_RULES,
         *_builtin_index_rules(),
+        *_builtin_scalar_index_rules(),
         _conversion_alias_rule(scalar_conversion.scalar_bitcast, _F8E4M3, _I8),
         _conversion_alias_rule(scalar_conversion.scalar_bitcast, _I8, _F8E4M3),
         _conversion_alias_rule(scalar_conversion.scalar_bitcast, _F8E5M2, _I8),
         _conversion_alias_rule(scalar_conversion.scalar_bitcast, _I8, _F8E5M2),
         *_conversion_rules(),
         *_scalar_binary_rules(),
+        *_vector_float_scale_rules(),
         *_vector_float_binary_rules(),
+        *SPIRV_EXTENDED_MATH_CONTRACT_CASES,
+        *extrema_rules(),
+        *rounding_rules(),
+        *bit_count_rules(),
+        *rotation_rules(),
         *SPIRV_ORDINARY_VECTOR_CONTRACT_CASES,
+        *SPIRV_ORDINARY_VECTOR_ALU_CONTRACT_CASES,
         *_compare_rules(),
         *_select_rules(),
         _raw_storage_buffer_byte_load_rule(),
         _raw_storage_buffer_byte_store_rule(),
         *_storage_buffer_rules(),
+        *bfloat_carrier_memory_rules(),
         *SPIRV_ATOMIC_CONTRACT_CASES,
+        *SPIRV_SUBGROUP_CONTRACT_CASES,
         *_control_barrier_rules(),
-        *_cooperative_matrix_rules(),
+        *COOPERATIVE_MATRIX_MEMORY_RULES,
+        *COOPERATIVE_MATRIX_INITIALIZER_RULES,
         DescriptorMatrixRule(
             source_op=vector.vector_mma,
             source="vector_mma",
         ),
+        *SPIRV_REFERENCE_FALLBACK_CONTRACT_CASES,
     ),
 )

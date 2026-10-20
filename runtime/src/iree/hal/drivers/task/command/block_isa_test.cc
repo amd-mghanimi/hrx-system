@@ -36,11 +36,11 @@ TEST(BlockISATest, CommandStreamWalk) {
 
   uint8_t* cursor = buffer;
 
-  // Command 0: DISPATCH (64 bytes fixed + 0 constants).
+  // Command 0: DISPATCH with no constants.
   auto* dispatch = reinterpret_cast<iree_hal_cmd_dispatch_t*>(cursor);
   init_header(&dispatch->header, IREE_HAL_CMD_DISPATCH,
               sizeof(iree_hal_cmd_dispatch_t));
-  dispatch->constant_count = 0;
+  dispatch->constant_byte_length = 0;
   dispatch->binding_count = 3;
   dispatch->binding_data_base = 0;
   dispatch->workgroup_size[0] = 64;
@@ -107,9 +107,9 @@ TEST(BlockISATest, CommandStreamWalk) {
 
 // Verify a DISPATCH with trailing constants is navigable.
 TEST(BlockISATest, DispatchWithConstants) {
-  // Dispatch with 4 push constants: 60 + 4*4 = 76 bytes, aligned to 80.
-  const size_t dispatch_size = iree_host_align(
-      offsetof(iree_hal_cmd_dispatch_t, constants) + 4 * sizeof(uint32_t), 8);
+  // Dispatch with 4 constant bytes, followed by command alignment padding.
+  const size_t dispatch_size =
+      iree_host_align(offsetof(iree_hal_cmd_dispatch_t, constants) + 4, 8);
   ASSERT_EQ(dispatch_size % 8, 0);
 
   alignas(8) uint8_t buffer[128];
@@ -118,14 +118,14 @@ TEST(BlockISATest, DispatchWithConstants) {
   auto* dispatch = reinterpret_cast<iree_hal_cmd_dispatch_t*>(buffer);
   init_header(&dispatch->header, IREE_HAL_CMD_DISPATCH,
               static_cast<uint8_t>(dispatch_size));
-  dispatch->constant_count = 4;
+  dispatch->constant_byte_length = 4;
   dispatch->binding_count = 2;
 
   // Write constants via the FAM.
   dispatch->constants[0] = 100;
   dispatch->constants[1] = 200;
-  dispatch->constants[2] = 300;
-  dispatch->constants[3] = 400;
+  dispatch->constants[2] = 30;
+  dispatch->constants[3] = 40;
 
   // Place a RETURN after the dispatch.
   auto* ret = reinterpret_cast<iree_hal_cmd_header_t*>(buffer + dispatch_size);
@@ -142,8 +142,8 @@ TEST(BlockISATest, DispatchWithConstants) {
       reinterpret_cast<const iree_hal_cmd_dispatch_t*>(buffer);
   EXPECT_EQ(read_dispatch->constants[0], 100);
   EXPECT_EQ(read_dispatch->constants[1], 200);
-  EXPECT_EQ(read_dispatch->constants[2], 300);
-  EXPECT_EQ(read_dispatch->constants[3], 400);
+  EXPECT_EQ(read_dispatch->constants[2], 30);
+  EXPECT_EQ(read_dispatch->constants[3], 40);
 }
 
 //===----------------------------------------------------------------------===//
@@ -488,19 +488,19 @@ TEST(BlockISATest, DispatchConstantAccess) {
   memset(buffer, 0, sizeof(buffer));
 
   auto* dispatch = reinterpret_cast<iree_hal_cmd_dispatch_t*>(buffer);
-  dispatch->constant_count = 3;
+  dispatch->constant_byte_length = 3;
 
-  dispatch->constants[0] = 0xDEAD;
-  dispatch->constants[1] = 0xBEEF;
-  dispatch->constants[2] = 0xCAFE;
+  dispatch->constants[0] = 0xAD;
+  dispatch->constants[1] = 0xBE;
+  dispatch->constants[2] = 0xCA;
 
   // FAM starts at the offsetof, not sizeof (which includes trailing padding).
   EXPECT_EQ(reinterpret_cast<uintptr_t>(dispatch->constants),
             reinterpret_cast<uintptr_t>(buffer) +
                 offsetof(iree_hal_cmd_dispatch_t, constants));
-  EXPECT_EQ(dispatch->constants[0], 0xDEAD);
-  EXPECT_EQ(dispatch->constants[1], 0xBEEF);
-  EXPECT_EQ(dispatch->constants[2], 0xCAFE);
+  EXPECT_EQ(dispatch->constants[0], 0xAD);
+  EXPECT_EQ(dispatch->constants[1], 0xBE);
+  EXPECT_EQ(dispatch->constants[2], 0xCA);
 }
 
 //===----------------------------------------------------------------------===//

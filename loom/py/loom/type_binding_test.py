@@ -14,6 +14,7 @@ from loom.ir import (
     DynamicDim,
     DynamicEncoding,
     FunctionType,
+    GroupType,
     ParameterizedAttrArray,
     PoolType,
     Predicate,
@@ -43,8 +44,13 @@ def test_nested_type_and_attribute_bindings_translate_together() -> None:
         TypeKind.VIEW, F32, (DynamicDim(1), StaticDim(4)), DynamicEncoding(3)
     )
     register = RegisterType(1, 2, 4, value_type=array)
-    roots = [DialectType("test.ref", (register,)), view, PoolType(DynamicDim(2))]
-    mapped, mapped_view, mapped_pool = remap_value_bindings(
+    roots = [
+        DialectType("test.ref", (register,)),
+        view,
+        PoolType(),
+        GroupType((DynamicDim(1), StaticDim(8))),
+    ]
+    mapped, mapped_view, mapped_pool, mapped_group = remap_value_bindings(
         roots, {1: 11, 2: 12, 3: 13}
     )
     mapped_array = mapped.params[0].value_type
@@ -61,7 +67,8 @@ def test_nested_type_and_attribute_bindings_translate_together() -> None:
     )
     assert not mapped_array.has("alignment")
     assert mapped_view.encoding == DynamicEncoding(13)
-    assert mapped_pool.block_size == DynamicDim(12)
+    assert mapped_pool is roots[2]
+    assert mapped_group.dims == (DynamicDim(11), StaticDim(8))
     assert vector.dims == (DynamicDim(1),)
     assert (
         mapped.params[0].descriptor_set_stable_id == register.descriptor_set_stable_id

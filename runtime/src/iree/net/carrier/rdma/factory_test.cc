@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "iree/async/platform/io_uring/api.h"
@@ -88,7 +89,9 @@ struct Attempt {
   }
 };
 
-class FactoryTest : public ::testing::TestWithParam<const char*> {
+class FactoryTest
+    : public ::testing::TestWithParam<
+          std::tuple<const char*, iree_net_rdma_completion_queue_mode_t>> {
  protected:
   enum Flag : uint32_t {
     kStopping = 1u << 0,
@@ -107,7 +110,7 @@ class FactoryTest : public ::testing::TestWithParam<const char*> {
     IREE_ASSERT_OK(TestContextEnvironment::Acquire(0, &context_));
     for (auto& proactor : proactors_) {
       auto options = iree_async_proactor_options_default();
-      if (strcmp(GetParam(), "io_uring") == 0) {
+      if (strcmp(std::get<0>(GetParam()), "io_uring") == 0) {
         IREE_ASSERT_OK(iree_async_proactor_create_io_uring(
             options, iree_allocator_system(), &proactor));
       } else {
@@ -116,6 +119,7 @@ class FactoryTest : public ::testing::TestWithParam<const char*> {
       }
     }
     auto options = iree_net_rdma_factory_options_default();
+    options.connection.completion_mode = std::get<1>(GetParam());
     options.max_pending_connections = 1;
     options.connection.control.service_batch_size = 1;
     options.connection.control.resolution_timeout_ms = INT_MAX;
@@ -410,8 +414,12 @@ TEST_P(FactoryTest, ListenerAllocationFailureUnwindsSynchronously) {
   EXPECT_TRUE(succeeded);
 }
 
-INSTANTIATE_TEST_SUITE_P(Native, FactoryTest,
-                         ::testing::Values("io_uring", "posix"));
+INSTANTIATE_TEST_SUITE_P(
+    Native, FactoryTest,
+    ::testing::Combine(
+        ::testing::Values("io_uring", "posix"),
+        ::testing::Values(IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS,
+                          IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL)));
 
 }  // namespace
 }  // namespace iree::net::rdma

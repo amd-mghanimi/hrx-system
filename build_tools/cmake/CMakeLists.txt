@@ -87,9 +87,23 @@ _iree_cmake_integration_test(
 
 _iree_cmake_integration_test(
   NAME
+    cmake_dependency_downloads_test
+  SRCS
+    cmake_dependency_downloads_test.py
+)
+
+_iree_cmake_integration_test(
+  NAME
     cmake_dependency_patches_test
   SRCS
     cmake_dependency_patches_test.py
+)
+
+_iree_cmake_integration_test(
+  NAME
+    cmake_external_c_library_test
+  SRCS
+    cmake_external_c_library_test.py
 )
 
 _iree_cmake_integration_test(
@@ -104,6 +118,22 @@ _iree_cmake_integration_test(
     cmake_library_dependencies_test
   SRCS
     cmake_library_dependencies_test.py
+)
+
+_iree_cmake_integration_test(
+  NAME
+    cmake_loom_binary_test
+  SRCS
+    cmake_loom_binary_test.py
+)
+
+_iree_cmake_integration_test(
+  NAME
+    cmake_loom_corpus_test
+  SRCS
+    cmake_loom_corpus_test.py
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/build_tools/bazel_to_cmake"
 )
 
 _iree_cmake_integration_test(

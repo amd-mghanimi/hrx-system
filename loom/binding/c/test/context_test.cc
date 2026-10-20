@@ -25,9 +25,23 @@ TEST(ContextTest, CreatesRetainsAndReleases) {
 
 TEST(ContextTest, RejectsUnknownOptions) {
   loomc_context_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+  };
+  loomc_context_t* context = reinterpret_cast<loomc_context_t*>(0x1);
+  loomc_status_t status =
+      loomc_context_create(&options, loomc_allocator_system(), &context);
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT, status);
+  EXPECT_EQ(context, nullptr);
+}
+
+TEST(ContextTest, RejectsUnknownSourceRetention) {
+  loomc_context_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .source_retention = static_cast<loomc_source_retention_t>(0x7FFFFFFF),
   };
   loomc_context_t* context = reinterpret_cast<loomc_context_t*>(0x1);
   loomc_status_t status =

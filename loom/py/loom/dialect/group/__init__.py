@@ -6,12 +6,12 @@
 
 """Group dialect: named SSA scheduling identities."""
 
+from loom.builtin_types import group_type
 from loom.dialect.group.defs import (
     ALL_GROUP_OPS,
     ALL_GROUP_TYPES,
     group_create,
     group_ops,
-    group_type,
 )
 
 __all__ = [

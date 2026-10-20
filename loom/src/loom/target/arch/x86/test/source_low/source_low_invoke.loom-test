@@ -1,7 +1,7 @@
 // RUN: emit source-low output=low
 
-// x86 has no Low call ABI, so its target policy flattens an ordinary
-// low.invoke after source-to-Low normalizes the edge to low.func.call.
+// Source invocation preserves the native callable boundary after translating
+// semantic operands to the callee's Low register representation.
 x86.target<scalar> @target
 
 low.func.def target<x86.scalar.core>(@target) @identity(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
@@ -14,14 +14,18 @@ func.def target(@target) @caller(%value: i32) -> (i32) {
 }
 
 // ----
-low.func.def target<x86.scalar.core>(@target) abi(object_function) @caller(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.scalar.core>(@target) @identity(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   return %value
+}
+
+low.func.def target<x86.scalar.core>(@target) abi(object_function) @caller(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call pure @identity(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
 }
 
 // ====
 
-// A user-authored noinline boundary conflicts with x86 emission rather than
-// silently leaving an unsupported Low call in the output.
+// An authored noinline boundary survives source normalization unchanged.
 x86.target<scalar> @target
 
 low.func.def target<x86.scalar.core>(@target) @identity(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
@@ -29,7 +33,66 @@ low.func.def target<x86.scalar.core>(@target) @identity(%value: reg<x86.gpr32>) 
 }
 
 func.def target(@target) @noinline_caller(%value: i32) -> (i32) {
-  // ERROR@+1: LOWERING/044 {op_name="low.func.call", phase_name="inline-callables", callee_name="identity", failure_code="target_requires_inline"}
   %result = low.invoke noinline @identity(%value) : (i32) -> (i32)
   func.return %result : i32
+}
+
+// ----
+low.func.def target<x86.scalar.core>(@target) @identity(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.def target<x86.scalar.core>(@target) abi(object_function) @noinline_caller(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call pure noinline @identity(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+// ====
+
+// An ordinary supported vector call remains a platform ABI boundary. Target
+// policy only requires inlining when the source signature is not representable.
+x86.target<avx2> @target
+
+func.def @identity_vector(%value: vector<4xi32>) -> (vector<4xi32>) {
+  func.return %value : vector<4xi32>
+}
+
+func.def target(@target) @vector_caller(%value: vector<4xi32>) -> (vector<4xi32>) {
+  %result = func.call @identity_vector(%value) : (vector<4xi32>) -> (vector<4xi32>)
+  func.return %result : vector<4xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi_layout({signature = (vector<4xi32>) -> (vector<4xi32>)}) @identity_vector(%value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  return %value
+}
+
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi32>) -> (vector<4xi32>)}) @vector_caller(%value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %result = low.func.call pure @identity_vector(%value) : (reg<x86.xmm>) -> (reg<x86.xmm>)
+  return %result
+}
+
+// ====
+
+// Narrow direct calls retain the source signature that distinguishes their
+// normalized carrier from an ordinary i32 in the same GPR32 representation.
+x86.target<avx2> @target
+
+func.def @identity_i8(%value: i8) -> (i8) {
+  func.return %value : i8
+}
+
+func.def target(@target) @narrow_caller(%value: i8) -> (i8) {
+  %result = func.call @identity_i8(%value) : (i8) -> (i8)
+  func.return %result : i8
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi_layout({signature = (i8) -> (i8)}) @identity_i8(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i8) -> (i8)}) @narrow_caller(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call pure @identity_i8(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
 }

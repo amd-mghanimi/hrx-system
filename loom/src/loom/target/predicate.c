@@ -10,6 +10,7 @@
 #include "loom/ir/module.h"
 #include "loom/ops/func_symbol_facts.h"
 #include "loom/ops/pass/ops.h"
+#include "loom/ops/target/facts.h"
 #include "loom/target/function_contract.h"
 #include "loom/target/function_version.h"
 #include "loom/target/types.h"
@@ -149,12 +150,22 @@ static iree_status_t loom_target_pass_predicate_resolve_facts(
       &fact_table, context->target_module, symbol_id, &base_facts));
   const loom_func_symbol_facts_t* func_facts =
       loom_func_symbol_facts_cast(base_facts);
-  if (func_facts == NULL) {
+  if (func_facts == NULL ||
+      !loom_symbol_ref_is_valid(func_facts->target_symbol)) {
     return iree_ok_status();
   }
 
-  return loom_target_function_contract_resolve_facts(
-      context->target_module, &fact_table, func_facts,
+  const loom_symbol_facts_base_t* target_base_facts = NULL;
+  IREE_RETURN_IF_ERROR(loom_symbol_fact_table_lookup_ref(
+      &fact_table, context->target_module, func_facts->target_symbol,
+      &target_base_facts));
+  const loom_target_symbol_facts_t* target =
+      loom_target_symbol_facts_cast(target_base_facts);
+  if (target == NULL) {
+    return iree_ok_status();
+  }
+  return loom_target_function_contract_refine_facts(
+      context->target_module, func_facts, target->name, target->projection,
       (iree_diagnostic_emitter_t){0}, arena, out_valid, out_facts);
 }
 

@@ -19,23 +19,23 @@ namespace loom {
 namespace {
 
 static const loom_target_fact_type_t kTestTargetFactType = {
-    /*.name=*/IREE_SVL("test"),
-    /*.storage_size=*/sizeof(loom_target_facts_t),
+    .name = IREE_SVL("test"),
+    .storage_size = sizeof(loom_target_facts_t),
 };
 
 static void InitializeTestTargetFacts(iree_string_view_t name,
                                       loom_target_facts_t* out_facts) {
   *out_facts = {
-      /*.fact_type=*/&kTestTargetFactType,
-      /*.selector=*/0,
-      /*.explicit_fields=*/0,
-      /*.storage=*/
-      {
-          /*.snapshot=*/{/*.name=*/name},
-          /*.export_plan=*/{/*.name=*/name},
-          /*.config=*/{/*.name=*/name},
-          /*.bundle=*/{/*.name=*/name},
-      },
+      .fact_type = &kTestTargetFactType,
+      .selector = 0,
+      .explicit_fields = 0,
+      .storage =
+          {
+              .snapshot = {.name = name},
+              .export_plan = {.name = name},
+              .config = {.name = name},
+              .bundle = {.name = name},
+          },
   };
   loom_target_bundle_storage_rebind(&out_facts->storage);
 }
@@ -144,6 +144,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
   const loom_pass_value_fact_scope_t none_scope =
       loom_pass_value_fact_scope_none();
   EXPECT_EQ(none_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_NONE);
+  EXPECT_EQ(none_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(none_scope.function.op, nullptr);
   EXPECT_EQ(none_scope.function.vtable, nullptr);
   EXPECT_EQ(none_scope.region, nullptr);
@@ -153,6 +154,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
   const loom_pass_value_fact_scope_t function_scope =
       loom_pass_value_fact_scope_function(function);
   EXPECT_EQ(function_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_FUNCTION);
+  EXPECT_EQ(function_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(function_scope.function.op, function.op);
   EXPECT_EQ(function_scope.function.vtable, function.vtable);
   EXPECT_EQ(function_scope.region, nullptr);
@@ -162,6 +164,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
   const loom_pass_value_fact_scope_t target_function_scope =
       loom_pass_value_fact_scope_function_for_target(function, &target_facts);
   EXPECT_EQ(target_function_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_FUNCTION);
+  EXPECT_EQ(target_function_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(target_function_scope.function.op, function.op);
   EXPECT_EQ(target_function_scope.function.vtable, function.vtable);
   EXPECT_EQ(target_function_scope.region, nullptr);
@@ -171,6 +174,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
   const loom_pass_value_fact_scope_t region_scope =
       loom_pass_value_fact_scope_region(function, region, function.op);
   EXPECT_EQ(region_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_REGION);
+  EXPECT_EQ(region_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(region_scope.function.op, function.op);
   EXPECT_EQ(region_scope.function.vtable, function.vtable);
   EXPECT_EQ(region_scope.region, region);
@@ -181,6 +185,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
       loom_pass_value_fact_scope_region_for_target(function, region,
                                                    function.op, &target_facts);
   EXPECT_EQ(target_region_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_REGION);
+  EXPECT_EQ(target_region_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(target_region_scope.function.op, function.op);
   EXPECT_EQ(target_region_scope.function.vtable, function.vtable);
   EXPECT_EQ(target_region_scope.region, region);
@@ -190,6 +195,7 @@ TEST_F(PassValueFactsTest, ScopeConstructorsPopulateNamedFields) {
   const loom_pass_value_fact_scope_t module_scope =
       loom_pass_value_fact_scope_module();
   EXPECT_EQ(module_scope.kind, LOOM_PASS_VALUE_FACT_SCOPE_MODULE);
+  EXPECT_EQ(module_scope.minimum_value_capacity, 0u);
   EXPECT_EQ(module_scope.function.op, nullptr);
   EXPECT_EQ(module_scope.function.vtable, nullptr);
   EXPECT_EQ(module_scope.region, nullptr);
@@ -294,10 +300,12 @@ TEST_F(PassValueFactsTest, RegionScopeComputesRequestedProjection) {
   const loom_value_id_t appended_value =
       loom_test_constant_result(appended_constant);
   ASSERT_GT(loom_value_table_capacity(&module->values), initial_capacity);
+  loom_pass_value_fact_scope_t config_scope =
+      loom_pass_value_fact_scope_region(function, config, function.op);
+  // Storage hints do not change an already-computed scope or its borrows.
+  config_scope.minimum_value_capacity = appended_value + 1;
   IREE_ASSERT_OK(loom_pass_value_fact_owner_acquire(
-      &owner, module,
-      loom_pass_value_fact_scope_region(function, config, function.op),
-      &reused_facts));
+      &owner, module, config_scope, &reused_facts));
   EXPECT_EQ(reused_facts->entries, entries);
   EXPECT_EQ(reused_facts->capacity, initial_capacity);
   EXPECT_EQ(counts.recomputation_count, 1u);
@@ -307,9 +315,11 @@ TEST_F(PassValueFactsTest, RegionScopeComputesRequestedProjection) {
   EXPECT_FALSE(loom_value_fact_table_has_entry(reused_facts, appended_value));
 
   loom_value_fact_table_t* body_facts = nullptr;
-  IREE_ASSERT_OK(loom_pass_value_fact_owner_acquire(
-      &owner, module, loom_pass_value_fact_scope_function(function),
-      &body_facts));
+  loom_pass_value_fact_scope_t body_scope =
+      loom_pass_value_fact_scope_function(function);
+  body_scope.minimum_value_capacity = appended_value + 1;
+  IREE_ASSERT_OK(loom_pass_value_fact_owner_acquire(&owner, module, body_scope,
+                                                    &body_facts));
   EXPECT_EQ(body_facts, facts);
   EXPECT_EQ(loom_value_fact_table_lookup(body_facts, body_value).range_lo, 42);
   EXPECT_EQ(loom_value_fact_table_lookup(body_facts, config_value).range_lo, 7);
@@ -331,6 +341,14 @@ TEST_F(PassValueFactsTest, RegionScopeComputesRequestedProjection) {
   EXPECT_EQ(counts.cleared_value_count, touched_count + body_touched_count);
   EXPECT_FALSE(loom_value_fact_table_has_entry(reused_facts, appended_value));
   EXPECT_FALSE(loom_value_fact_table_has_entry(reused_facts, config_value));
+
+  // Preparation reserves storage without publishing any computed facts.
+  body_scope.minimum_value_capacity = 2 * body_scope.minimum_value_capacity;
+  IREE_ASSERT_OK(loom_pass_value_fact_owner_prepare(&owner, module, body_scope,
+                                                    &reused_facts));
+  EXPECT_GE(reused_facts->capacity, body_scope.minimum_value_capacity);
+  EXPECT_EQ(reused_facts->touched_count, 0u);
+  EXPECT_FALSE(loom_value_fact_table_has_entry(reused_facts, appended_value));
 
   loom_pass_value_fact_owner_deinitialize(&owner);
 }
@@ -455,6 +473,149 @@ TEST_F(PassValueFactsTest,
   EXPECT_EQ(counts.scope_clear_count, 1u);
 
   owner.lifecycle_counts = nullptr;
+  loom_pass_value_fact_owner_deinitialize(&owner);
+}
+
+TEST_F(PassValueFactsTest, SeededScopesPreserveInputsAndSeparateInvocations) {
+  loom_module_t* module = AllocateModule();
+  loom_builder_t builder;
+  loom_builder_initialize(module, &module->arena, loom_module_block(module),
+                          &builder);
+  loom_string_id_t name;
+  IREE_ASSERT_OK(loom_module_intern_string(module, IREE_SV("worker"), &name));
+  loom_symbol_id_t symbol;
+  IREE_ASSERT_OK(loom_module_add_symbol(module, name, &symbol));
+  const loom_type_t type = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
+  loom_op_t* definition = nullptr;
+  IREE_ASSERT_OK(loom_test_func_build(&builder, 0, 0, 0, {0, symbol}, &type, 1,
+                                      nullptr, 0, nullptr, 0, nullptr, 0,
+                                      LOOM_LOCATION_UNKNOWN, &definition));
+  const loom_func_like_t function = loom_func_like_cast(module, definition);
+  loom_region_t* body = loom_func_like_body(function);
+  body->flags |= LOOM_REGION_INSTANCE_FLAG_CFG;
+  const loom_value_id_t argument =
+      loom_block_arg_id(loom_region_entry_block(body), 0);
+  loom_builder_enter_region(&builder, definition, body);
+  loom_op_t* add = nullptr;
+  IREE_ASSERT_OK(loom_test_addi_build(&builder, argument, argument, type,
+                                      LOOM_LOCATION_UNKNOWN, &add));
+  const loom_value_id_t result = loom_test_addi_result(add);
+  loom_op_t* terminator = nullptr;
+  IREE_ASSERT_OK(loom_test_yield_build(&builder, nullptr, 0,
+                                       LOOM_LOCATION_UNKNOWN, &terminator));
+
+  loom_value_fact_table_t first_inputs;
+  loom_value_fact_table_t second_inputs;
+  IREE_ASSERT_OK(
+      loom_value_fact_table_initialize(&first_inputs, scratch_arena(), 0));
+  IREE_ASSERT_OK(
+      loom_value_fact_table_initialize(&second_inputs, scratch_arena(), 0));
+  IREE_ASSERT_OK(loom_value_fact_table_define(&first_inputs, argument,
+                                              loom_value_facts_exact_i64(7)));
+  IREE_ASSERT_OK(loom_value_fact_table_define(&second_inputs, argument,
+                                              loom_value_facts_exact_i64(11)));
+
+  loom_pass_value_fact_owner_t owner;
+  loom_pass_value_fact_owner_initialize(block_pool(), &owner);
+  loom_pass_value_fact_lifecycle_counts_t counts = {};
+  owner.lifecycle_counts = &counts;
+  loom_pass_value_fact_scope_t scope =
+      loom_pass_value_fact_scope_function(function);
+  scope.seed_facts = {&first_inputs, &argument, 1};
+  loom_value_fact_table_t* facts = nullptr;
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, result).range_lo, 14);
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_EQ(counts.cache_hit_count, 1u);
+  EXPECT_EQ(counts.recomputation_count, 1u);
+
+  scope.kind = LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION;
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, result).range_lo, 14);
+  EXPECT_EQ(counts.scope_clear_count, 0u);
+
+  scope.seed_facts = {&second_inputs, &argument, 1};
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, result).range_lo, 22);
+  EXPECT_EQ(counts.scope_clear_count, 1u);
+
+  loom_pass_value_fact_owner_invalidate(&owner);
+  IREE_ASSERT_OK(loom_value_fact_table_define(&second_inputs, argument,
+                                              loom_value_facts_exact_i64(17)));
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, result).range_lo, 34);
+
+  scope = loom_pass_value_fact_scope_region(function, body, definition);
+  scope.seed_facts = {&first_inputs, &argument, 1};
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_prepare(&owner, module, scope, &facts));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, argument).range_lo, 7);
+  EXPECT_FALSE(loom_value_fact_table_has_entry(facts, result));
+  IREE_ASSERT_OK(loom_value_fact_table_compute_region(facts, module, function,
+                                                      body, definition));
+  EXPECT_EQ(loom_value_fact_table_lookup(facts, result).range_lo, 14);
+
+  scope = loom_pass_value_fact_scope_function(function);
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  EXPECT_FALSE(
+      loom_value_facts_is_exact(loom_value_fact_table_lookup(facts, result)));
+  loom_pass_value_fact_owner_deinitialize(&owner);
+}
+
+TEST_F(PassValueFactsTest, NativeDomainsPreserveSeededWideArguments) {
+  loom_module_t* module = AllocateModule();
+  loom_builder_t builder;
+  loom_builder_initialize(module, &module->arena, loom_module_block(module),
+                          &builder);
+  loom_string_id_t name;
+  IREE_ASSERT_OK(loom_module_intern_string(module, IREE_SV("worker"), &name));
+  loom_symbol_id_t symbol;
+  IREE_ASSERT_OK(loom_module_add_symbol(module, name, &symbol));
+  const loom_type_t types[] = {loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
+                               loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET)};
+  loom_op_t* definition = nullptr;
+  IREE_ASSERT_OK(loom_test_func_build(&builder, 0, 0, 0, {0, symbol}, types, 2,
+                                      nullptr, 0, nullptr, 0, nullptr, 0,
+                                      LOOM_LOCATION_UNKNOWN, &definition));
+  const loom_func_like_t function = loom_func_like_cast(module, definition);
+  loom_region_t* body = loom_func_like_body(function);
+  loom_builder_enter_region(&builder, definition, body);
+  loom_op_t* terminator = nullptr;
+  IREE_ASSERT_OK(loom_test_yield_build(&builder, nullptr, 0,
+                                       LOOM_LOCATION_UNKNOWN, &terminator));
+  const loom_value_id_t arguments[] = {
+      loom_block_arg_id(loom_region_entry_block(body), 0),
+      loom_block_arg_id(loom_region_entry_block(body), 1)};
+  const loom_value_facts_t wide_range =
+      loom_value_facts_make(INT64_C(4294967296), INT64_C(4294967300), 4);
+  loom_value_fact_table_t inputs;
+  IREE_ASSERT_OK(loom_value_fact_table_initialize(&inputs, scratch_arena(), 0));
+  for (loom_value_id_t argument : arguments) {
+    IREE_ASSERT_OK(loom_value_fact_table_define(&inputs, argument, wide_range));
+  }
+
+  loom_target_facts_t target;
+  InitializeTestTargetFacts(IREE_SV("native32"), &target);
+  target.storage.snapshot.index_bitwidth = 32;
+  target.storage.snapshot.offset_bitwidth = 32;
+  loom_pass_value_fact_owner_t owner;
+  loom_pass_value_fact_owner_initialize(block_pool(), &owner);
+  loom_pass_value_fact_scope_t scope =
+      loom_pass_value_fact_scope_function_for_target(function, &target);
+  scope.seed_facts = {&inputs, arguments, IREE_ARRAYSIZE(arguments)};
+  loom_value_fact_table_t* facts = nullptr;
+  IREE_ASSERT_OK(
+      loom_pass_value_fact_owner_acquire(&owner, module, scope, &facts));
+  for (loom_value_id_t argument : arguments) {
+    EXPECT_TRUE(loom_value_facts_equal(
+        loom_value_fact_table_lookup(facts, argument), wide_range));
+  }
   loom_pass_value_fact_owner_deinitialize(&owner);
 }
 

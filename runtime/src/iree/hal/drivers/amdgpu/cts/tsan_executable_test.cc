@@ -56,6 +56,9 @@ class TsanExecutableTest : public ::testing::TestWithParam<BackendInfo> {
     IREE_ASSERT_OK(iree_hal_executable_load(iree_hal_queue_family(queue()),
                                             target_result.target, &load_params,
                                             executable_.out()));
+    const iree_hal_pool_export_classes_t exports = {};
+    IREE_ASSERT_OK(SanitizerCreateDevicePool(tsan_device_.device_group(),
+                                             queue(), exports, pool_.out()));
   }
 
   void TearDown() override {
@@ -68,7 +71,7 @@ class TsanExecutableTest : public ::testing::TestWithParam<BackendInfo> {
 
   iree_hal_queue_t* queue() const { return tsan_device_.queue(); }
 
-  iree_hal_allocator_t* allocator() const { return tsan_device_.allocator(); }
+  iree_hal_pool_t* pool() const { return pool_; }
 
   SanitizerDeviceEventRecorder* recorder() const {
     return tsan_device_.recorder();
@@ -76,6 +79,7 @@ class TsanExecutableTest : public ::testing::TestWithParam<BackendInfo> {
 
   SanitizerCachedBackendDevice tsan_device_;
   Ref<iree_hal_executable_t> executable_;
+  Ref<iree_hal_pool_t> pool_;
 };
 
 TEST_P(TsanExecutableTest, PublishesTsanConfigGlobal) {
@@ -98,33 +102,22 @@ TEST_P(TsanExecutableTest, PublishesTsanConfigGlobal) {
   ASSERT_NE(global_buffer, nullptr);
 
   std::vector<iree_hal_amdgpu_tsan_config_t> configs;
-  IREE_ASSERT_OK(SanitizerReadBufferData(device(), queue(), allocator(),
-                                         global_buffer, &configs));
+  IREE_ASSERT_OK(
+      SanitizerReadBufferData(device(), queue(), global_buffer, &configs));
   ASSERT_EQ(configs.size(), 1u);
   const iree_hal_amdgpu_tsan_config_t& config = configs[0];
   EXPECT_EQ(config.record_length, sizeof(config));
   EXPECT_EQ(config.abi_version, IREE_HAL_AMDGPU_TSAN_CONFIG_ABI_VERSION_0);
   EXPECT_NE(config.flags & IREE_HAL_AMDGPU_TSAN_CONFIG_FLAG_ENABLED, 0u);
-  EXPECT_NE(config.flags & IREE_HAL_AMDGPU_TSAN_CONFIG_FLAG_QUEUE_STATE, 0u);
+  EXPECT_NE(config.flags & IREE_HAL_AMDGPU_TSAN_CONFIG_FLAG_QUEUE_SHADOW, 0u);
   EXPECT_NE(config.shadow_base, 0u);
   EXPECT_NE(config.shadow_size, 0u);
-  EXPECT_EQ(config.memory_granule_shift,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_MEMORY_GRANULE_SHIFT);
-  EXPECT_EQ(config.workgroup_capacity,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_CAPACITY);
-  EXPECT_EQ(config.shadow_entry_size, IREE_HAL_AMDGPU_TSAN_SHADOW_ENTRY_SIZE);
-  EXPECT_EQ(config.shadow_slot_count,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SLOT_COUNT);
-  EXPECT_NE(config.workgroup_shadow_stride, 0u);
-  EXPECT_NE(config.queue_aql_base, 0u);
-  EXPECT_NE(config.queue_aql_slot_mask, 0u);
-  EXPECT_NE(config.queue_state_base, 0u);
 
   Ref<iree_hal_buffer_t> output_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(allocator(), 12 * sizeof(uint64_t),
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool(), 4 * sizeof(uint64_t),
                                              output_buffer.out()));
   Ref<iree_hal_buffer_t> fallback_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(allocator(), sizeof(uint64_t),
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool(), sizeof(uint64_t),
                                              fallback_buffer.out()));
 
   iree_hal_buffer_ref_t binding_refs[2];
@@ -134,8 +127,8 @@ TEST_P(TsanExecutableTest, PublishesTsanConfigGlobal) {
       iree_hal_make_buffer_ref(fallback_buffer, /*offset=*/0,
                                iree_hal_buffer_byte_length(fallback_buffer));
   iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   const uint32_t constant_data[] = {0x5453414Eu, 0x43464721u};
@@ -148,26 +141,18 @@ TEST_P(TsanExecutableTest, PublishesTsanConfigGlobal) {
       queue(), empty_wait, dispatch_signal, executable_,
       iree_hal_executable_function_from_index(0),
       iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
-      IREE_HAL_DISPATCH_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       dispatch_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 
   std::vector<uint64_t> output_data;
-  IREE_ASSERT_OK(SanitizerReadBufferData(device(), queue(), allocator(),
-                                         output_buffer, &output_data));
-  ASSERT_EQ(output_data.size(), 12u);
+  IREE_ASSERT_OK(
+      SanitizerReadBufferData(device(), queue(), output_buffer, &output_data));
+  ASSERT_EQ(output_data.size(), 4u);
   EXPECT_EQ(output_data[0], config.record_length);
   EXPECT_EQ(output_data[1], config.flags);
   EXPECT_EQ(output_data[2], config.shadow_base);
   EXPECT_EQ(output_data[3], config.shadow_size);
-  EXPECT_EQ(output_data[4], config.workgroup_shadow_stride);
-  EXPECT_EQ(output_data[5], config.workgroup_capacity);
-  EXPECT_EQ(output_data[6], config.shadow_entry_size);
-  EXPECT_EQ(output_data[7], config.memory_granule_shift);
-  EXPECT_EQ(output_data[8], config.queue_aql_base);
-  EXPECT_EQ(output_data[9], config.queue_aql_slot_mask);
-  EXPECT_EQ(output_data[10], config.queue_state_base);
-  EXPECT_EQ(output_data[11], config.shadow_slot_count);
 }
 
 TEST_P(TsanExecutableTest, EnablesFeedbackConfigGlobal) {
@@ -190,8 +175,8 @@ TEST_P(TsanExecutableTest, EnablesFeedbackConfigGlobal) {
   ASSERT_NE(global_buffer, nullptr);
 
   std::vector<iree_hal_amdgpu_feedback_config_t> configs;
-  IREE_ASSERT_OK(SanitizerReadBufferData(device(), queue(), allocator(),
-                                         global_buffer, &configs));
+  IREE_ASSERT_OK(
+      SanitizerReadBufferData(device(), queue(), global_buffer, &configs));
   ASSERT_EQ(configs.size(), 1u);
   const iree_hal_amdgpu_feedback_config_t& config = configs[0];
   EXPECT_EQ(config.record_length, sizeof(config));
@@ -204,10 +189,10 @@ TEST_P(TsanExecutableTest, EnablesFeedbackConfigGlobal) {
 
 TEST_P(TsanExecutableTest, ReportsTsanPacketThroughFeedback) {
   Ref<iree_hal_buffer_t> output_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(allocator(), sizeof(uint64_t),
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool(), sizeof(uint64_t),
                                              output_buffer.out()));
   Ref<iree_hal_buffer_t> fallback_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(allocator(), sizeof(uint64_t),
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool(), sizeof(uint64_t),
                                              fallback_buffer.out()));
 
   iree_hal_buffer_ref_t binding_refs[2];
@@ -217,8 +202,8 @@ TEST_P(TsanExecutableTest, ReportsTsanPacketThroughFeedback) {
       iree_hal_make_buffer_ref(fallback_buffer, /*offset=*/0,
                                iree_hal_buffer_byte_length(fallback_buffer));
   iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   recorder()->Reset();
@@ -232,7 +217,7 @@ TEST_P(TsanExecutableTest, ReportsTsanPacketThroughFeedback) {
       queue(), empty_wait, dispatch_signal, executable_,
       iree_hal_executable_function_from_index(0),
       iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
-      IREE_HAL_DISPATCH_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       dispatch_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 
@@ -241,8 +226,8 @@ TEST_P(TsanExecutableTest, ReportsTsanPacketThroughFeedback) {
   EXPECT_EQ(recorder()->tsan_report_count(), 1u);
 
   std::vector<uint64_t> output_data;
-  IREE_ASSERT_OK(SanitizerReadBufferData(device(), queue(), allocator(),
-                                         output_buffer, &output_data));
+  IREE_ASSERT_OK(
+      SanitizerReadBufferData(device(), queue(), output_buffer, &output_data));
   ASSERT_EQ(output_data.size(), 1u);
   EXPECT_EQ(output_data[0], 1u);
 
@@ -253,27 +238,30 @@ TEST_P(TsanExecutableTest, ReportsTsanPacketThroughFeedback) {
   EXPECT_EQ(report.flags,
             IREE_HAL_DEVICE_TSAN_REPORT_FLAG_CURRENT_WORKITEM_LINEAR |
                 IREE_HAL_DEVICE_TSAN_REPORT_FLAG_PRIOR_WORKITEM_LINEAR);
-  EXPECT_EQ(report.memory_space, IREE_HAL_DEVICE_TSAN_MEMORY_SPACE_WORKGROUP);
-  EXPECT_EQ(report.current_access_kind, IREE_HAL_DEVICE_TSAN_ACCESS_KIND_WRITE);
-  EXPECT_EQ(report.prior_access_kind, IREE_HAL_DEVICE_TSAN_ACCESS_KIND_READ);
-  EXPECT_EQ(report.access_length, 4u);
-  EXPECT_EQ(report.current_site_id, 0x5453414E00000002ull);
-  EXPECT_EQ(report.prior_site_id, 0x5453414E00000001ull);
-  EXPECT_EQ(report.memory_address, 0x20u);
-  EXPECT_EQ(report.shadow_address, 0xABC0u);
-  EXPECT_EQ(report.shadow_value, 0x12345678u);
-  EXPECT_EQ(report.current_workgroup_id[0], 0u);
-  EXPECT_EQ(report.current_workgroup_id[1], 0u);
-  EXPECT_EQ(report.current_workgroup_id[2], 0u);
-  EXPECT_EQ(report.current_workitem_id[0], 5u);
-  EXPECT_EQ(report.current_workitem_id[1], 0u);
-  EXPECT_EQ(report.current_workitem_id[2], 0u);
-  EXPECT_EQ(report.prior_workgroup_id[0], 0u);
-  EXPECT_EQ(report.prior_workgroup_id[1], 0u);
-  EXPECT_EQ(report.prior_workgroup_id[2], 0u);
-  EXPECT_EQ(report.prior_workitem_id[0], 3u);
-  EXPECT_EQ(report.prior_workitem_id[1], 0u);
-  EXPECT_EQ(report.prior_workitem_id[2], 0u);
+  const auto& data_race = report.detail.data_race;
+  EXPECT_EQ(data_race.memory_space,
+            IREE_HAL_DEVICE_TSAN_MEMORY_SPACE_WORKGROUP);
+  EXPECT_EQ(data_race.current_access_kind,
+            IREE_HAL_DEVICE_TSAN_ACCESS_KIND_WRITE);
+  EXPECT_EQ(data_race.prior_access_kind, IREE_HAL_DEVICE_TSAN_ACCESS_KIND_READ);
+  EXPECT_EQ(data_race.access_length, 4u);
+  EXPECT_EQ(data_race.current_site_id, 0x5453414E00000002ull);
+  EXPECT_EQ(data_race.prior_site_id, 0x5453414E00000001ull);
+  EXPECT_EQ(data_race.memory_address, 0x20u);
+  EXPECT_EQ(data_race.shadow_address, 0xABC0u);
+  EXPECT_EQ(data_race.shadow_value, 0x12345678u);
+  EXPECT_EQ(data_race.current_workgroup_id[0], 0u);
+  EXPECT_EQ(data_race.current_workgroup_id[1], 0u);
+  EXPECT_EQ(data_race.current_workgroup_id[2], 0u);
+  EXPECT_EQ(data_race.current_workitem_id[0], 5u);
+  EXPECT_EQ(data_race.current_workitem_id[1], 0u);
+  EXPECT_EQ(data_race.current_workitem_id[2], 0u);
+  EXPECT_EQ(data_race.prior_workgroup_id[0], 0u);
+  EXPECT_EQ(data_race.prior_workgroup_id[1], 0u);
+  EXPECT_EQ(data_race.prior_workgroup_id[2], 0u);
+  EXPECT_EQ(data_race.prior_workitem_id[0], 3u);
+  EXPECT_EQ(data_race.prior_workitem_id[1], 0u);
+  EXPECT_EQ(data_race.prior_workitem_id[2], 0u);
 
   iree_hal_device_event_source_t source = recorder()->last_source();
   EXPECT_TRUE(iree_string_view_equal(source.driver_id, IREE_SV("amdgpu")));

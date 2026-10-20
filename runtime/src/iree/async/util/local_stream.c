@@ -7,6 +7,7 @@
 #include "iree/async/util/local_stream.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "iree/async/operations/scheduling.h"
@@ -533,8 +534,24 @@ static iree_status_t iree_async_local_stream_cancel_native(
 //===----------------------------------------------------------------------===//
 
 #if defined(IREE_PLATFORM_WINDOWS)
-static void iree_async_local_stream_unobserved(void* user_data) {
+static void iree_async_local_stream_unobserved(void* user_data,
+                                               iree_status_t status) {
   iree_async_local_stream_t* stream = user_data;
+  if (!iree_status_is_ok(status)) {
+    // Native observer reachability remains unproven. Complete any admitted
+    // transfer with the cleanup failure, but withhold deactivation so the
+    // stream, channel, and proactor remain alive.
+    if (stream->transfer.kind != IREE_ASYNC_LOCAL_STREAM_TRANSFER_NONE) {
+      stream->transfer.status =
+          iree_status_join(stream->transfer.status, status);
+      stream->flags |= IREE_ASYNC_LOCAL_STREAM_FLAG_COMPLETE;
+      iree_async_local_stream_schedule(stream);
+    } else {
+      iree_status_fprint(stderr, status);
+      iree_status_free(status);
+    }
+    return;
+  }
   stream->state = IREE_ASYNC_LOCAL_STREAM_STATE_CLOSED;
   iree_async_local_stream_schedule(stream);
 }
@@ -633,7 +650,7 @@ static iree_status_t iree_async_local_stream_progress(
   return iree_ok_status();
 }
 
-iree_status_t iree_async_local_stream_create(
+iree_status_t iree_async_local_stream_allocate(
     iree_async_proactor_t* proactor, iree_async_primitive_t channel,
     iree_host_size_t handle_capacity, iree_allocator_t host_allocator,
     iree_async_local_stream_t** out_stream) {
@@ -864,7 +881,7 @@ iree_status_t iree_async_local_stream_deactivate(
   return iree_ok_status();
 }
 
-void iree_async_local_stream_destroy(iree_async_local_stream_t* stream) {
+void iree_async_local_stream_free(iree_async_local_stream_t* stream) {
   if (!stream) {
     return;
   }

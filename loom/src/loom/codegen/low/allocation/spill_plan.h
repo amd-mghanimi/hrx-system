@@ -56,22 +56,25 @@ bool loom_low_allocation_spill_plan_use_full_slice_reload(
     uint32_t slice_count, uint64_t narrow_reload_bytes,
     uint32_t spill_byte_size);
 
-// Computes the predicted memory traffic for spilling |value_id|.
+// Computes the predicted memory traffic for spilling |assignment|. Block
+// arguments must belong to |cfg_graph|'s region; nested-region arguments are
+// excluded by spill-register requirement classification before planning.
 iree_status_t loom_low_allocation_spill_plan_traffic(
     const loom_module_t* module, const loom_cfg_graph_t* cfg_graph,
     const loom_low_allocation_assignment_t* assignment,
     uint16_t alloc_unit_bits,
     loom_low_allocation_spill_plan_traffic_t* out_traffic);
 
-// Appends the spill materialization plan for |assignment| and accumulates its
-// predicted store and reload bytes in |inout_traffic_bytes|.
-iree_status_t loom_low_allocation_spill_plan_record(
-    const loom_module_t* module, const loom_cfg_graph_t* cfg_graph,
+// Appends the spill materialization plan for |assignment| using its previously
+// computed |traffic|. The traffic fact must describe the same assignment and
+// allocation-unit width passed here.
+iree_status_t loom_low_allocation_spill_plan_append(
     const loom_low_allocation_assignment_t* assignment,
     uint32_t assignment_index, uint16_t alloc_unit_bits,
     loom_low_spill_slot_space_t spill_slot_space,
+    const loom_low_allocation_spill_plan_traffic_t* traffic,
     loom_low_allocation_spill_plan_t* spill_plans,
-    iree_host_size_t* inout_spill_plan_count, uint64_t* inout_traffic_bytes);
+    iree_host_size_t* inout_spill_plan_count);
 
 // Appends a spill remark for |assignment_index|.
 void loom_low_allocation_spill_remark_record(

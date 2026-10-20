@@ -8,8 +8,8 @@ func.def target(@test_target) @unanswered_select_contract_preserves_native_selec
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=1 rows=1
-CHECK: COMPILE-REPORT: target_legalization[*] * source_op=scf.select mode=eager policy=prefer-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=1 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[*] * source_op=scf.select mode=eager policy=prefer-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * scalarized=false source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
 // RUN: with-checks compile-report target-legalize{policy=require-native}
@@ -22,7 +22,7 @@ func.def target(@test_target) @unanswered_select_contract_does_not_reject_native
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=1 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=1 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=scf.select mode=eager policy=require-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -36,8 +36,8 @@ func.def target(@test_target) @reference_policy_requests_whole_vector_scalarizat
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1
-CHECK: COMPILE-REPORT: target_legalization[*] * source_op=scf.select mode=eager policy=reference-only action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[*] * source_op=scf.select mode=eager policy=reference-only action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
 // RUN: with-checks compile-report target-legalize
@@ -50,8 +50,38 @@ func.def target(@test_target) @records_reduce_axes_reference_rewrite(%v: vector<
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1
-CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.reduce.axes mode=eager policy=prefer-native action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.reduce.axes mode=eager policy=prefer-native action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
+
+// ====
+// RUN: with-checks compile-report target-legalize{mode=complete}
+
+test.target<low_core> @test_target
+
+// The source rewrite preserves a vector-shaped result. Generated combining
+// operations stay in its report lineage when later visits scalarize them.
+func.def target(@test_target) @records_static_partial_reduce_axes_vector_rewrite(%values: vector<2x3xi32>, %init: vector<3xi32>) -> (vector<3xi32>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [0] : vector<2x3xi32>, vector<3xi32>
+  func.return %result : vector<3xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=records_static_partial_reduce_axes_vector_rewrite source_op=vector.reduce.axes * action=rewritten outcome=reference-fallback * legalizer=vector strategy=reference * scalarized=true *
+
+// ====
+// RUN: with-checks compile-report target-legalize
+
+test.target<low_core> @test_target
+
+func.def target(@test_target) @records_dynamic_partial_reduce_axes_scalar_rewrite(%m: index, %n: index, %values: vector<[%m]x[%n]xi32>, %init: vector<[%m]xi32>) -> (vector<[%m]xi32>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [1] : vector<[%m]x[%n]xi32>, vector<[%m]xi32>
+  func.return %result : vector<[%m]xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=records_dynamic_partial_reduce_axes_scalar_rewrite source_op=vector.reduce.axes * action=rewritten outcome=reference-fallback * legalizer=vector strategy=reference * scalarized=true *
 
 // ====
 // RUN: with-checks compile-report target-legalize
@@ -59,13 +89,13 @@ CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.reduce.axes mod
 test.target<low_core> @test_target
 
 func.def target(@test_target) @records_decode_reference_rewrite(%payload: vector<2xf8E4M3>, %scale: vector<1xf32>) -> (vector<2xf32>) {
-  %schema = encoding.define #encoding.f8e4m3<affine=scale_only, payload_elements=2, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=2, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
   %decoded = vector.decode %payload using %schema {scale = %scale : vector<1xf32>} : vector<2xf8E4M3>, encoding<schema> -> vector<2xf32>
   func.return %decoded : vector<2xf32>
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.decode mode=eager policy=prefer-native action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -82,7 +112,7 @@ func.def target(@test_target) @reports_vector_store_deferred_to_later_phase(%out
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 target_rewritten=0 reference_rewritten=0 deferred=1 invalid_ir=0 unsupported=0 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=1 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.store mode=eager policy=prefer-native action=deferred outcome=deferred contract=unsupported legalizer=vector strategy=reference * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -97,7 +127,7 @@ func.def target(@test_target) @reports_require_native_reduce_axes_reference_reje
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=1 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=1 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.reduce.axes mode=final policy=require-native action=reject-unsupported-final outcome=reject-unsupported contract=unhandled legalizer=vector strategy=reference * source_rejections=0x00000040 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -118,7 +148,7 @@ func.def target(@test_target) @reports_target_shaped_mma_fragment_rejection(%lhs
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=1 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=1 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.mma mode=final policy=prefer-native action=reject-unsupported-final outcome=reject-unsupported contract=unhandled legalizer=vector strategy=reference * source_rejections=0x00000010 source_rejection_detail=1 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -138,7 +168,7 @@ func.def target(@test_target) @reports_matrix_descriptor_reference_fallback(%lhs
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.mma mode=final policy=prefer-native action=rewritten outcome=reference-fallback contract=unsupported legalizer=vector strategy=reference * source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
 
 // ====
@@ -158,57 +188,65 @@ func.def target(@test_target) @reports_reference_only_matrix_override(%lhs_data:
 }
 
 // ----
-CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
 CHECK: COMPILE-REPORT: target_legalization[*] * source_op=vector.mma mode=final policy=reference-only action=rewritten outcome=reference-fallback contract=legal legalizer=vector strategy=reference * descriptor_key=test.mma.i32.2x2x2 source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 *
-
-// ====
-// RUN: with-checks compile-report target-legalize{policy=prefer-native}
-
-test.target<low_core> @test_target
-
-// These types have no applicable reference rule. They neither query a native
-// contract nor contribute a reference-policy decision to the report.
-func.def target(@test_target) @inapplicable_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
-  %sum = scalar.addi %left, %right : i32
-  %wide_sum = scalar.addi %wide_left, %wide_right : i64
-  %predicate = scalar.andi %condition, %other_condition : i1
-  %signed_values = vector.extsi %bytes : vector<4xi8> to vector<4xi32>
-  %unsigned_values = vector.extui %halfwords : vector<4xi16> to vector<4xi32>
-  func.return %sum, %wide_sum, %predicate, %signed_values, %unsigned_values : i32, i64, i1, vector<4xi32>, vector<4xi32>
-}
-
-// ----
-CHECK: COMPILE-REPORT: summary artifact=none status=OK *
-CHECK-NOT: COMPILE-REPORT: target_legalization*
-
-// ====
-// RUN: with-checks compile-report target-legalize{policy=require-native}
-
-test.target<low_core> @test_target
-
-// These types have no applicable reference rule. They neither query a native
-// contract nor contribute a reference-policy decision to the report.
-func.def target(@test_target) @inapplicable_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
-  %sum = scalar.addi %left, %right : i32
-  %wide_sum = scalar.addi %wide_left, %wide_right : i64
-  %predicate = scalar.andi %condition, %other_condition : i1
-  %signed_values = vector.extsi %bytes : vector<4xi8> to vector<4xi32>
-  %unsigned_values = vector.extui %halfwords : vector<4xi16> to vector<4xi32>
-  func.return %sum, %wide_sum, %predicate, %signed_values, %unsigned_values : i32, i64, i1, vector<4xi32>, vector<4xi32>
-}
-
-// ----
-CHECK: COMPILE-REPORT: summary artifact=none status=OK *
-CHECK-NOT: COMPILE-REPORT: target_legalization*
 
 // ====
 // RUN: with-checks compile-report target-legalize{policy=reference-only}
 
 test.target<low_core> @test_target
 
-// These types have no applicable reference rule. They neither query a native
-// contract nor contribute a reference-policy decision to the report.
-func.def target(@test_target) @inapplicable_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
+// The combining vocabulary is one reference family. This report surface
+// records selection without checking in the lane-by-lane reference IR.
+func.def target(@test_target) @integer_combining_reference_family(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>) {
+  %sum = vector.addi %lhs, %rhs : vector<2xi64>
+  %product = vector.muli %lhs, %rhs : vector<2xi64>
+  %signed_minimum = vector.minsi %lhs, %rhs : vector<2xi64>
+  %signed_maximum = vector.maxsi %lhs, %rhs : vector<2xi64>
+  %unsigned_minimum = vector.minui %lhs, %rhs : vector<2xi64>
+  %unsigned_maximum = vector.maxui %lhs, %rhs : vector<2xi64>
+  %bitwise_and = vector.andi %lhs, %rhs : vector<2xi64>
+  %bitwise_or = vector.ori %lhs, %rhs : vector<2xi64>
+  %bitwise_xor = vector.xori %lhs, %rhs : vector<2xi64>
+  func.return %sum, %product, %signed_minimum, %signed_maximum, %unsigned_minimum, %unsigned_maximum, %bitwise_and, %bitwise_or, %bitwise_xor : vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>
+}
+
+func.def target(@test_target) @float_combining_reference_family(%lhs: vector<2xf64>, %rhs: vector<2xf64>) -> (vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>) {
+  %sum = vector.addf %lhs, %rhs : vector<2xf64>
+  %product = vector.mulf %lhs, %rhs : vector<2xf64>
+  %minimum = vector.minimumf %lhs, %rhs : vector<2xf64>
+  %maximum = vector.maximumf %lhs, %rhs : vector<2xf64>
+  %min_number = vector.minnumf %lhs, %rhs : vector<2xf64>
+  %max_number = vector.maxnumf %lhs, %rhs : vector<2xf64>
+  func.return %sum, %product, %minimum, %maximum, %min_number, %max_number : vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>, vector<2xf64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=15 scalarized=15 target_rewritten=0 reference_rewritten=15 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=15 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.addi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.muli * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.minsi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.maxsi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.minui * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.maxui * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.andi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.ori * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_combining_reference_family source_op=vector.xori * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.addf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.mulf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.minimumf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.maximumf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.minnumf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_combining_reference_family source_op=vector.maxnumf * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+
+// ====
+// RUN: with-checks compile-report target-legalize{policy=prefer-native}
+
+test.target<low_core> @test_target
+
+// The scalar operations remain outside the applicable reference domains. The
+// vector casts contribute rows so rejected native contracts remain visible.
+func.def target(@test_target) @cast_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
   %sum = scalar.addi %left, %right : i32
   %wide_sum = scalar.addi %wide_left, %wide_right : i64
   %predicate = scalar.andi %condition, %other_condition : i1
@@ -219,4 +257,95 @@ func.def target(@test_target) @inapplicable_reference_domains(%left: i32, %right
 
 // ----
 CHECK: COMPILE-REPORT: summary artifact=none status=OK *
-CHECK-NOT: COMPILE-REPORT: target_legalization*
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=2 rows=2 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extsi mode=eager policy=prefer-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * scalarized=false *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extui mode=eager policy=prefer-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * scalarized=false *
+
+// ====
+// RUN: with-checks compile-report target-legalize{policy=require-native}
+
+test.target<low_core> @test_target
+
+// The scalar operations remain outside the applicable reference domains. The
+// vector casts contribute rows so rejected native contracts remain visible.
+func.def target(@test_target) @cast_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
+  %sum = scalar.addi %left, %right : i32
+  %wide_sum = scalar.addi %wide_left, %wide_right : i64
+  %predicate = scalar.andi %condition, %other_condition : i1
+  %signed_values = vector.extsi %bytes : vector<4xi8> to vector<4xi32>
+  %unsigned_values = vector.extui %halfwords : vector<4xi16> to vector<4xi32>
+  func.return %sum, %wide_sum, %predicate, %signed_values, %unsigned_values : i32, i64, i1, vector<4xi32>, vector<4xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: summary artifact=none status=OK *
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=2 rows=2 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extsi mode=eager policy=require-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * scalarized=false *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extui mode=eager policy=require-native action=unhandled outcome=unhandled contract=unhandled legalizer=- strategy=none * scalarized=false *
+
+// ====
+// RUN: with-checks compile-report target-legalize{policy=reference-only}
+
+test.target<low_core> @test_target
+
+// The scalar operations remain outside the applicable reference domains. The
+// vector casts contribute rows and reference policy records their scalarization.
+func.def target(@test_target) @cast_reference_domains(%left: i32, %right: i32, %wide_left: i64, %wide_right: i64, %condition: i1, %other_condition: i1, %bytes: vector<4xi8>, %halfwords: vector<4xi16>) -> (i32, i64, i1, vector<4xi32>, vector<4xi32>) {
+  %sum = scalar.addi %left, %right : i32
+  %wide_sum = scalar.addi %wide_left, %wide_right : i64
+  %predicate = scalar.andi %condition, %other_condition : i1
+  %signed_values = vector.extsi %bytes : vector<4xi8> to vector<4xi32>
+  %unsigned_values = vector.extui %halfwords : vector<4xi16> to vector<4xi32>
+  func.return %sum, %wide_sum, %predicate, %signed_values, %unsigned_values : i32, i64, i1, vector<4xi32>, vector<4xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: summary artifact=none status=OK *
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=2 scalarized=2 target_rewritten=0 reference_rewritten=2 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=2 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extsi mode=eager policy=reference-only action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=cast_reference_domains source_op=vector.extui mode=eager policy=reference-only action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+
+// ====
+// RUN: with-checks compile-report target-legalize{mode=complete}
+
+test.target<low_core> @test_target
+
+// The source coordinate vocabulary is one reference family. Distinct function
+// names keep every accepted coordinate type visible in the report contract.
+func.def target(@test_target) @range_mask_index(%lower: index, %upper: index, %step: index) {
+  %mask = vector.mask.range [%lower to %upper step %step] : index -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+func.def target(@test_target) @range_mask_i8(%lower: i8, %upper: i8, %step: i8) {
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+func.def target(@test_target) @range_mask_i16(%lower: i16, %upper: i16, %step: i16) {
+  %mask = vector.mask.range [%lower to %upper step %step] : i16 -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+func.def target(@test_target) @range_mask_i32(%lower: i32, %upper: i32, %step: i32) {
+  %mask = vector.mask.range [%lower to %upper step %step] : i32 -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+func.def target(@test_target) @range_mask_i64(%lower: i64, %upper: i64, %step: i64) {
+  %mask = vector.mask.range [%lower to %upper step %step] : i64 -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=5 scalarized=5 target_rewritten=0 reference_rewritten=5 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=5 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=range_mask_index source_op=vector.mask.range * action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=range_mask_i8 source_op=vector.mask.range * action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=range_mask_i16 source_op=vector.mask.range * action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=range_mask_i32 source_op=vector.mask.range * action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=range_mask_i64 source_op=vector.mask.range * action=rewritten outcome=reference-fallback contract=unhandled legalizer=vector strategy=reference * scalarized=true *

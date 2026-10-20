@@ -1,0 +1,266 @@
+// Fact refinement changes the required width without moving the source value.
+// Address arithmetic keeps the integer/address boundary observable after cleanup.
+func.def device inline @refine_address(%input: i64) -> (i64, i64, i64) {
+  %address_input = scalar.assume %input [range(%input, 0, 9223372036854775807)] : i64
+  %address = index.cast %address_input : i64 to offset
+  %increment = index.constant 1 : offset
+  %next = index.add %address, %increment : offset
+  %bounded = index.assume %next [range(%next, 0, 4294967295)] : offset
+  %word = index.cast %bounded : offset to i32
+  %signed = scalar.extsi %word : i32 to i64
+  %unsigned = scalar.extui %word : i32 to i64
+  %wide = index.cast %bounded : offset to i64
+  func.return %signed, %unsigned, %wide : i64, i64, i64
+}
+
+kernel.def @refined_address_casts() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi64>
+  %varying = view.load %inputs[%lane] : view<64xi64> -> i64
+  %uniform_signed, %uniform_unsigned, %uniform_wide = func.call pure @refine_address(%uniform) : (i64) -> (i64, i64, i64)
+  %varying_signed, %varying_unsigned, %varying_wide = func.call pure @refine_address(%varying) : (i64) -> (i64, i64, i64)
+  %uniform_signed_base = index.constant 0 : offset
+  %uniform_signed_view = buffer.view %output[%uniform_signed_base] : buffer -> view<64xi64>
+  view.store %uniform_signed, %uniform_signed_view[%lane] : i64, view<64xi64>
+  %uniform_unsigned_base = index.constant 512 : offset
+  %uniform_unsigned_view = buffer.view %output[%uniform_unsigned_base] : buffer -> view<64xi64>
+  view.store %uniform_unsigned, %uniform_unsigned_view[%lane] : i64, view<64xi64>
+  %uniform_wide_base = index.constant 1024 : offset
+  %uniform_wide_view = buffer.view %output[%uniform_wide_base] : buffer -> view<64xi64>
+  view.store %uniform_wide, %uniform_wide_view[%lane] : i64, view<64xi64>
+  %varying_signed_base = index.constant 1536 : offset
+  %varying_signed_view = buffer.view %output[%varying_signed_base] : buffer -> view<64xi64>
+  view.store %varying_signed, %varying_signed_view[%lane] : i64, view<64xi64>
+  %varying_unsigned_base = index.constant 2048 : offset
+  %varying_unsigned_view = buffer.view %output[%varying_unsigned_base] : buffer -> view<64xi64>
+  view.store %varying_unsigned, %varying_unsigned_view[%lane] : i64, view<64xi64>
+  %varying_wide_base = index.constant 2560 : offset
+  %varying_wide_view = buffer.view %output[%varying_wide_base] : buffer -> view<64xi64>
+  view.store %varying_wide, %varying_wide_view[%lane] : i64, view<64xi64>
+  kernel.return
+}
+
+// The oracle applies the same address semantics sequentially so the target
+// kernel's uniform and per-work-item carrier choices remain observable.
+func.def @refined_address_casts_oracle(%uniform: i64, %input: buffer, %output: buffer) {
+  %input_base = index.constant 0 : offset
+  %inputs = buffer.view %input[%input_base] : buffer -> view<64xi64>
+  %uniform_signed_base = index.constant 0 : offset
+  %uniform_signed_view = buffer.view %output[%uniform_signed_base] : buffer -> view<64xi64>
+  %uniform_unsigned_base = index.constant 512 : offset
+  %uniform_unsigned_view = buffer.view %output[%uniform_unsigned_base] : buffer -> view<64xi64>
+  %uniform_wide_base = index.constant 1024 : offset
+  %uniform_wide_view = buffer.view %output[%uniform_wide_base] : buffer -> view<64xi64>
+  %varying_signed_base = index.constant 1536 : offset
+  %varying_signed_view = buffer.view %output[%varying_signed_base] : buffer -> view<64xi64>
+  %varying_unsigned_base = index.constant 2048 : offset
+  %varying_unsigned_view = buffer.view %output[%varying_unsigned_base] : buffer -> view<64xi64>
+  %varying_wide_base = index.constant 2560 : offset
+  %varying_wide_view = buffer.view %output[%varying_wide_base] : buffer -> view<64xi64>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  %uniform_signed, %uniform_unsigned, %uniform_wide = func.call pure @refine_address(%uniform) : (i64) -> (i64, i64, i64)
+  scf.for %lane = [%begin to %end step %step] {
+    %varying = view.load %inputs[%lane] : view<64xi64> -> i64
+    %varying_signed, %varying_unsigned, %varying_wide = func.call pure @refine_address(%varying) : (i64) -> (i64, i64, i64)
+    view.store %uniform_signed, %uniform_signed_view[%lane] : i64, view<64xi64>
+    view.store %uniform_unsigned, %uniform_unsigned_view[%lane] : i64, view<64xi64>
+    view.store %uniform_wide, %uniform_wide_view[%lane] : i64, view<64xi64>
+    view.store %varying_signed, %varying_signed_view[%lane] : i64, view<64xi64>
+    view.store %varying_unsigned, %varying_unsigned_view[%lane] : i64, view<64xi64>
+    view.store %varying_wide, %varying_wide_view[%lane] : i64, view<64xi64>
+  }
+  func.return
+}
+
+check.scenario @refined_address_casts_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %uniform = check.literal value(0) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<416xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<416xi64> -> tensor<384xi64>
+    check.compare<@refined_address_casts, @refined_address_casts_oracle>(%uniform, %input, %output) : (i64, tensor<64xi64>, tensor<384xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<416xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %uniform = check.literal value(2147483648) : i64
+    %input = check.generate.iota offset(2147483648) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<416xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<416xi64> -> tensor<384xi64>
+    check.compare<@refined_address_casts, @refined_address_casts_oracle>(%uniform, %input, %output) : (i64, tensor<64xi64>, tensor<384xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<416xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %uniform = check.literal value(4294967294) : i64
+    %input = check.generate.iota offset(4294967231) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<416xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<416xi64> -> tensor<384xi64>
+    check.compare<@refined_address_casts, @refined_address_casts_oracle>(%uniform, %input, %output) : (i64, tensor<64xi64>, tensor<384xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<416xi64>
+    }
+  }
+  check.return
+}
+
+// Casting out of the address domain keeps the low destination bits even when
+// the source's high word is nonzero. The sign bit belongs to the i32 result.
+kernel.def @truncate_wide_address() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: i64, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  %lane_integer = index.cast %lane : index to i64
+  %base = scalar.assume %input [range(%input, 0, 9223372036854775743)] : i64
+  %varying = scalar.addi %base, %lane_integer : i64
+  %address = index.cast %varying : i64 to offset
+  %increment = index.constant 1 : offset
+  %next = index.add %address, %increment : offset
+  %word = index.cast %next : offset to i32
+  %signed = scalar.extsi %word : i32 to i64
+  %unsigned = scalar.extui %word : i32 to i64
+  %signed_base = index.constant 0 : offset
+  %unsigned_base = index.constant 512 : offset
+  %signed_view = buffer.view %output[%signed_base] : buffer -> view<64xi64>
+  %unsigned_view = buffer.view %output[%unsigned_base] : buffer -> view<64xi64>
+  view.store %signed, %signed_view[%lane] : i64, view<64xi64>
+  view.store %unsigned, %unsigned_view[%lane] : i64, view<64xi64>
+  kernel.return
+}
+
+// The oracle enumerates work-items as a sequential loop while retaining the
+// wide address source and narrow signed and unsigned observations.
+func.def @truncate_wide_address_oracle(%input: i64, %output: buffer) {
+  %signed_base = index.constant 0 : offset
+  %unsigned_base = index.constant 512 : offset
+  %signed_view = buffer.view %output[%signed_base] : buffer -> view<64xi64>
+  %unsigned_view = buffer.view %output[%unsigned_base] : buffer -> view<64xi64>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  %base = scalar.assume %input [range(%input, 0, 9223372036854775743)] : i64
+  scf.for %lane = [%begin to %end step %step] {
+    %lane_integer = index.cast %lane : index to i64
+    %varying = scalar.addi %base, %lane_integer : i64
+    %address = index.cast %varying : i64 to offset
+    %increment = index.constant 1 : offset
+    %next = index.add %address, %increment : offset
+    %word = index.cast %next : offset to i32
+    %signed = scalar.extsi %word : i32 to i64
+    %unsigned = scalar.extui %word : i32 to i64
+    view.store %signed, %signed_view[%lane] : i64, view<64xi64>
+    view.store %unsigned, %unsigned_view[%lane] : i64, view<64xi64>
+  }
+  func.return
+}
+
+check.scenario @truncate_wide_address_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.literal value(4294967296) : i64
+    %storage = check.generate.fill value(-123) : tensor<160xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<160xi64> -> tensor<128xi64>
+    check.compare<@truncate_wide_address, @truncate_wide_address_oracle>(%input, %output) : (i64, tensor<128xi64>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.literal value(6442450944) : i64
+    %storage = check.generate.fill value(-123) : tensor<160xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<160xi64> -> tensor<128xi64>
+    check.compare<@truncate_wide_address, @truncate_wide_address_oracle>(%input, %output) : (i64, tensor<128xi64>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.literal value(8589934527) : i64
+    %storage = check.generate.fill value(-123) : tensor<160xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<160xi64> -> tensor<128xi64>
+    check.compare<@truncate_wide_address, @truncate_wide_address_oracle>(%input, %output) : (i64, tensor<128xi64>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi64>
+    }
+  }
+  check.return
+}
+
+// Refining a signed index as nonnegative can select a wider result while its
+// existing physical carrier still holds one word.
+kernel.def @widen_refined_index() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%uniform: index, %input: buffer, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi32>
+  %varying = view.load %inputs[%lane] : view<64xi32> -> i32
+  %varying_index = index.cast %varying : i32 to index
+  %uniform_bounded = index.assume %uniform [range(%uniform, 0, 9223372036854775807)] : index
+  %varying_bounded = index.assume %varying_index [range(%varying_index, 0, 9223372036854775807)] : index
+  %uniform_result = index.cast %uniform_bounded : index to i64
+  %varying_result = index.cast %varying_bounded : index to i64
+  %varying_base = index.constant 512 : offset
+  %uniform_output = buffer.view %output[%base] : buffer -> view<64xi64>
+  %varying_output = buffer.view %output[%varying_base] : buffer -> view<64xi64>
+  view.store %uniform_result, %uniform_output[%lane] : i64, view<64xi64>
+  view.store %varying_result, %varying_output[%lane] : i64, view<64xi64>
+  kernel.return
+}
+
+// The oracle applies the index refinement to each logical lane without a
+// target work-item carrier.
+func.def @widen_refined_index_oracle(%uniform: index, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi32>
+  %varying_base = index.constant 512 : offset
+  %uniform_output = buffer.view %output[%base] : buffer -> view<64xi64>
+  %varying_output = buffer.view %output[%varying_base] : buffer -> view<64xi64>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  %uniform_bounded = index.assume %uniform [range(%uniform, 0, 9223372036854775807)] : index
+  %uniform_result = index.cast %uniform_bounded : index to i64
+  scf.for %lane = [%begin to %end step %step] {
+    %varying = view.load %inputs[%lane] : view<64xi32> -> i32
+    %varying_index = index.cast %varying : i32 to index
+    %varying_bounded = index.assume %varying_index [range(%varying_index, 0, 9223372036854775807)] : index
+    %varying_result = index.cast %varying_bounded : index to i64
+    view.store %uniform_result, %uniform_output[%lane] : i64, view<64xi64>
+    view.store %varying_result, %varying_output[%lane] : i64, view<64xi64>
+  }
+  func.return
+}
+
+check.scenario @widen_refined_index_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %uniform = check.literal value(0) : index
+    %input = check.generate.iota offset(0) step(1) : tensor<64xi32>
+    %storage = check.generate.fill value(-123) : tensor<160xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<160xi64> -> tensor<128xi64>
+    check.compare<@widen_refined_index, @widen_refined_index_oracle>(%uniform, %input, %output) : (index, tensor<64xi32>, tensor<128xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %uniform = check.literal value(2147483647) : index
+    %input = check.generate.iota offset(2147483584) step(1) : tensor<64xi32>
+    %storage = check.generate.fill value(-123) : tensor<160xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<160xi64> -> tensor<128xi64>
+    check.compare<@widen_refined_index, @widen_refined_index_oracle>(%uniform, %input, %output) : (index, tensor<64xi32>, tensor<128xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi64>
+    }
+  }
+  check.return
+}

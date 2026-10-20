@@ -16,7 +16,7 @@ loom_cc_library(
     "util.h"
   DEPS
     iree::testing::gtest
-    loom::binding::c::loomc
+    loom::binding::c::base
   TESTONLY
   INCLUDES
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>"
@@ -40,6 +40,38 @@ endif()
 
 loom_cc_test(
   NAME
+    module_config_test
+  SRCS
+    "module_config_test.cc"
+  DEPS
+    ::test_util
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
+    loom::config::schema
+    loom::util::stream
+)
+
+loom_cc_test(
+  NAME
+    interop_test
+  SRCS
+    "interop_test.cc"
+  DEPS
+    ::test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::interop
+    loom::binding::c::loomc
+    loom::error::parameter
+    loom::pass::registry
+    loom::pass::report
+    loom::target::math_policy
+)
+
+loom_cc_test(
+  NAME
     base_test
   SRCS
     "base_test.cc"
@@ -47,7 +79,7 @@ loom_cc_test(
     ::test_util
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::binding::c::loomc
+    loom::binding::c::base
 )
 
 loom_cc_test(
@@ -59,7 +91,7 @@ loom_cc_test(
     ::test_util
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::binding::c::loomc
+    loom::binding::c::base
 )
 
 loom_cc_test(
@@ -71,7 +103,7 @@ loom_cc_test(
     iree::base
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::binding::c::loomc
+    loom::binding::c::base
 )
 
 loom_cc_test(
@@ -99,6 +131,24 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::binding::c::loomc
+    loom::binding::c::test::testdata::diagnostic_testdata
+    loom::error::parameter
+    loom::ir
+)
+
+loom_cc_test(
+  NAME
+    diagnostic_test
+  SRCS
+    "diagnostic_test.cc"
+  DEPS
+    ::test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
+    loom::error::json_sink
+    loom::error::parameter
+    loom::util::stream
 )
 
 loom_cc_test(
@@ -130,6 +180,18 @@ loom_cc_test(
     loom::format::text::parser
     loom::ir
     loom::ops::op_registry
+)
+
+loom_cc_test(
+  NAME
+    link_index_module_test
+  SRCS
+    "link_index_module_test.cc"
+  DEPS
+    ::test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
 )
 
 loom_cc_test(
@@ -174,6 +236,18 @@ loom_cc_test(
     loom::format::bytecode::format
     loom::ir
     loom::link::testdata::template_selection
+)
+
+loom_cc_test(
+  NAME
+    link_options_test
+  SRCS
+    "link_options_test.cc"
+  DEPS
+    ::test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
 )
 
 loom_cc_test(
@@ -226,6 +300,7 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::binding::c::loomc
+    loom::binding::c::test::testdata::diagnostic_types
 )
 
 loom_cc_test(
@@ -275,7 +350,7 @@ loom_cc_test(
     iree::base
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::binding::c::loomc
+    loom::binding::c::base
 )
 
 loom_cc_test(
@@ -290,6 +365,7 @@ loom_cc_test(
     iree::testing::gtest_main
     iree::testing::temp_file
     loom::binding::c::loomc
+    loom::error::parameter
     loom::ops::op_defs
     loom::ops::test
     loom::target::function_version

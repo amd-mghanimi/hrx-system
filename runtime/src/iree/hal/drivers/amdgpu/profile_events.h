@@ -37,13 +37,10 @@ typedef struct iree_hal_amdgpu_profile_event_stream_t {
 
 // Host-side profiling event streams owned by an AMDGPU logical device.
 typedef struct iree_hal_amdgpu_profile_event_streams_t {
-  // Memory lifecycle event stream and allocation id state.
+  // Memory lifecycle event stream.
   struct {
     // Lossy ring for iree_hal_profile_memory_event_t records.
     iree_hal_amdgpu_profile_event_stream_t stream;
-
-    // Next nonzero allocation id assigned to profiled memory objects.
-    uint64_t next_allocation_id;
   } memory;
 
   // Queue operation event stream.
@@ -80,18 +77,13 @@ iree_status_t iree_hal_amdgpu_profile_event_streams_ensure_queue_storage(
     iree_hal_amdgpu_profile_event_streams_t* streams,
     iree_host_size_t event_capacity, iree_allocator_t host_allocator);
 
-// Clears the memory event stream and resets memory event/allocation ids.
+// Clears the memory event stream and resets memory event ids.
 void iree_hal_amdgpu_profile_event_streams_clear_memory(
     iree_hal_amdgpu_profile_event_streams_t* streams);
 
 // Clears the queue event stream and resets queue event ids.
 void iree_hal_amdgpu_profile_event_streams_clear_queue(
     iree_hal_amdgpu_profile_event_streams_t* streams);
-
-// Allocates a memory allocation id for |active_session_id|.
-uint64_t iree_hal_amdgpu_profile_event_streams_allocate_memory_allocation_id(
-    iree_hal_amdgpu_profile_event_streams_t* streams,
-    uint64_t active_session_id, uint64_t* out_session_id);
 
 // Records one memory event if |session_id| matches |active_session_id|.
 bool iree_hal_amdgpu_profile_event_streams_record_memory_event(

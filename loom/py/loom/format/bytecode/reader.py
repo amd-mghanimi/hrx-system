@@ -31,6 +31,9 @@ from loom.format.bytecode.op_decls import (
     func_like_interface_for_op,
     symbol_def_for_op,
 )
+from loom.format.bytecode.symbol_references import (
+    symbol_reference_dependency_contract_parts,
+)
 from loom.format.bytecode.writer import (
     BYTECODE_IR_KIND_BY_TYPE_KIND,
     FORMAT_VERSION,
@@ -58,7 +61,9 @@ from loom.ir import (
     ATTR_AGGREGATE_MAX_NESTING_DEPTH,
     BUFFER_TYPE,
     ENCODING_TYPE,
+    LOCATION_FLAG_SYNTHETIC,
     NONE_TYPE,
+    PREDICATE_KINDS,
     REGION_SOURCE_FLAG_MASK,
     SYMBOL_FLAG_DECLARATION,
     SYMBOL_FLAG_IMPORT,
@@ -77,6 +82,7 @@ from loom.ir import (
     FileLocation,
     FunctionType,
     FusedLocation,
+    GroupType,
     Module,
     OpaqueLocation,
     Operation,
@@ -96,6 +102,7 @@ from loom.ir import (
     StaticDim,
     StorageSpace,
     StorageType,
+    StringArrayAttr,
     Symbol,
     SymbolKind,
     SymbolName,
@@ -127,8 +134,8 @@ _FUNC_CC_BYTES: list[str | None] = [
     "deinitializer",
 ]
 
-# Maps the purity byte to a purity attribute string.
-_FUNC_PURITY_BYTES: list[str | None] = [None, "pure"]
+# Maps the callable effect-contract byte to its attribute spelling.
+_FUNC_EFFECT_CONTRACT_BYTES: list[str | None] = [None, "pure", "readonly"]
 
 # Bytecode-only flag bit recording whether an import explicitly wrote its
 # source symbol, even when the source name matches the local symbol name.
@@ -773,6 +780,7 @@ class BytecodeReader:
             TypeKind.VECTOR,
             TypeKind.VIEW,
             TypeKind.POOL,
+            TypeKind.GROUP,
             TypeKind.FUNCTION,
             TypeKind.DIALECT,
             TypeKind.REGISTER,
@@ -855,21 +863,29 @@ class BytecodeReader:
                     else EncodingType(role)
                 )
             case TypeKind.POOL:
-                if values is not None:
-                    reference, offset = decode_varint(data, offset)
-                    value_id = (
-                        self._map_value_ref(reference - 1, values)
-                        if reference
-                        else None
-                    )
-                    return PoolType(DynamicDim(value_id)), offset
-                is_dynamic = data[offset]
-                offset += 1
-                if is_dynamic:
-                    ir_type = PoolType(block_size=DynamicDim())
-                else:
-                    size, offset = decode_varint(data, offset)
-                    ir_type = PoolType(block_size=StaticDim(size))
+                ir_type = PoolType()
+            case TypeKind.GROUP:
+                rank, offset = self._read_type_field(data, offset, values)
+                if rank == 0 or rank > 15:
+                    raise BytecodeError(f"group type rank must be in [1, 15]: {rank}")
+                dimensions: list[StaticDim | DynamicDim] = []
+                for _ in range(rank):
+                    is_dynamic, offset = self._read_type_field(data, offset, values)
+                    if is_dynamic not in (0, 1):
+                        raise BytecodeError(
+                            f"invalid group dimension kind: {is_dynamic}"
+                        )
+                    if is_dynamic:
+                        value_id = None
+                        if values is not None:
+                            reference, offset = decode_varint(data, offset)
+                            if reference:
+                                value_id = self._map_value_ref(reference - 1, values)
+                        dimensions.append(DynamicDim(value_id))
+                    else:
+                        size, offset = decode_varint(data, offset)
+                        dimensions.append(StaticDim(size))
+                ir_type = GroupType(tuple(dimensions))
             case TypeKind.BUFFER:
                 ir_type = BUFFER_TYPE
             case _:
@@ -891,24 +907,28 @@ class BytecodeReader:
         _, data = section
         offset = 0
         count, offset = decode_varint(data, offset)
-        for _ in range(count):
+        for index in range(count):
             kind = data[offset]
             offset += 1
             flags = data[offset]
             offset += 1
+            if flags & ~LOCATION_FLAG_SYNTHETIC:
+                raise BytecodeError("location has unsupported flag bits")
+            if index == 0 and (kind != 0 or flags != 0):
+                raise BytecodeError("location 0 must be the unflagged none location")
+            if index != 0 and kind == 0:
+                raise BytecodeError("only location 0 may be the none location")
             match kind:
                 case 0:  # NONE
-                    module.locations.add(None)
+                    continue
                 case 1:  # FILE
                     source_id, offset = decode_varint(data, offset)
                     start_line, offset = decode_varint(data, offset)
                     start_col, offset = decode_varint(data, offset)
                     end_line, offset = decode_varint(data, offset)
                     end_col, offset = decode_varint(data, offset)
-                    module.locations.add(
-                        FileLocation(
-                            source_id, start_line, start_col, end_line, end_col, flags
-                        )
+                    location = FileLocation(
+                        source_id, start_line, start_col, end_line, end_col, flags
                     )
                 case 2:  # FUSED
                     child_count, offset = decode_varint(data, offset)
@@ -916,24 +936,27 @@ class BytecodeReader:
                     for _ in range(child_count):
                         child, offset = decode_varint(data, offset)
                         children.append(child)
-                    module.locations.add(FusedLocation(tuple(children), flags))
+                    location = FusedLocation(tuple(children), flags)
                 case 3:  # OPAQUE
                     source_id, offset = decode_varint(data, offset)
                     data_length, offset = decode_varint(data, offset)
                     opaque_data = data[offset : offset + data_length]
                     offset += data_length
-                    module.locations.add(OpaqueLocation(source_id, opaque_data, flags))
+                    location = OpaqueLocation(source_id, opaque_data, flags)
                 case 4:  # TAGGED
                     tag, offset = decode_varint(data, offset)
                     child, offset = decode_varint(data, offset)
                     data_length, offset = decode_varint(data, offset)
                     tagged_data = data[offset : offset + data_length]
                     offset += data_length
-                    module.locations.add(
-                        TaggedLocation(
-                            tag=tag, child=child, data=tagged_data, flags=flags
-                        )
+                    location = TaggedLocation(
+                        tag=tag, child=child, data=tagged_data, flags=flags
                     )
+                case _:
+                    raise BytecodeError(f"unsupported location kind: {kind}")
+            module.locations.append(location)
+        if offset != len(data):
+            raise BytecodeError("LOCATIONS section has trailing bytes")
 
     def _read_source_trivia(
         self, data: bytes, offset: int
@@ -1190,7 +1213,7 @@ class BytecodeReader:
 
                 cc_byte = sym_data[offset]
                 offset += 1
-                purity_byte = sym_data[offset]
+                effect_contract_byte = sym_data[offset]
                 offset += 1
                 workload_arg_count, offset = decode_varint(sym_data, offset)
                 arg_count, offset = decode_varint(sym_data, offset)
@@ -1296,13 +1319,13 @@ class BytecodeReader:
                 )
                 if cc_str is not None:
                     op_attrs["cc"] = cc_str
-                purity_str = (
-                    _FUNC_PURITY_BYTES[purity_byte]
-                    if purity_byte < len(_FUNC_PURITY_BYTES)
+                effect_contract_str = (
+                    _FUNC_EFFECT_CONTRACT_BYTES[effect_contract_byte]
+                    if effect_contract_byte < len(_FUNC_EFFECT_CONTRACT_BYTES)
                     else None
                 )
-                if purity_str is not None:
-                    op_attrs["purity"] = purity_str
+                if effect_contract_str is not None:
+                    op_attrs["effect_contract"] = effect_contract_str
                 if predicates_attr_name is not None:
                     op_attrs[predicates_attr_name] = predicates
                 if source_module:
@@ -1509,9 +1532,15 @@ class BytecodeReader:
                 dependency, offset = decode_varint(data, offset)
                 if dependency >= symbol_count:
                     raise BytecodeError("dependency symbol index is out of range")
-                target_interfaces, offset = decode_varint(data, offset)
+                dependency_contract, offset = decode_varint(data, offset)
+                try:
+                    target_interfaces, _ = symbol_reference_dependency_contract_parts(
+                        dependency_contract
+                    )
+                except ValueError as exc:
+                    raise BytecodeError("dependency contract is invalid") from exc
                 if target_interfaces & ~SYMBOL_INTERFACE_FLAG_MASK:
-                    raise BytecodeError("dependency target interfaces are invalid")
+                    raise BytecodeError("dependency contract is invalid")
                 decoded_dependency_count += 1
             return offset
 
@@ -1682,7 +1711,7 @@ class BytecodeReader:
         }
         func_like = func_like_interface_for_op(self._op_decls_by_name, op_name)
         if func_like is not None:
-            for field_name in ("visibility", "cc", "purity", "predicates"):
+            for field_name in ("visibility", "cc", "effect_contract", "predicates"):
                 attr_name = getattr(func_like, field_name, None)
                 if attr_name is not None:
                     keys.add(attr_name)
@@ -2303,8 +2332,35 @@ class BytecodeReader:
                 return self._read_symbol_collection(
                     data, offset, attr_def, "symbol_set"
                 )
+            case 19:  # STRING_ARRAY
+                return self._read_string_array_attr(data, offset, attr_def)
             case _:
                 raise BytecodeError(f"unknown attr value kind: {kind}")
+
+    def _read_string_array_attr(
+        self, data: bytes, offset: int, attr_def: Any | None
+    ) -> tuple[StringArrayAttr, int]:
+        if getattr(attr_def, "attr_type", None) not in (
+            None,
+            "any",
+            "string_array",
+        ):
+            raise BytecodeError(
+                "string-array attribute does not match the field contract"
+            )
+        count, offset = decode_varint(data, offset)
+        if count > 0xFFFF:
+            raise BytecodeError(f"string-array length {count} exceeds UINT16_MAX")
+        values: list[str] = []
+        for index in range(count):
+            string_id, offset = decode_varint(data, offset)
+            if string_id >= len(self._strings):
+                raise BytecodeError(
+                    f"string-array element {index} string_id {string_id} out of "
+                    f"range (string table has {len(self._strings)} entries)"
+                )
+            values.append(self._strings[string_id])
+        return StringArrayAttr(values), offset
 
     def _read_signed_enum_set_attr(
         self, data: bytes, offset: int, attr_def: Any | None
@@ -2490,22 +2546,7 @@ class BytecodeReader:
         return value
 
     # Predicate kind byte → name mapping (inverse of writer).
-    _PRED_KIND_NAMES: ClassVar[list[str]] = [
-        "eq",
-        "ne",
-        "lt",
-        "le",
-        "gt",
-        "ge",
-        "mul",
-        "min",
-        "max",
-        "pow2",
-        "range",
-        "not_nan",
-        "not_inf",
-        "finite",
-    ]
+    _PRED_KIND_NAMES: ClassVar[list[str]] = list(PREDICATE_KINDS)
 
     def _read_predicate_list(
         self,

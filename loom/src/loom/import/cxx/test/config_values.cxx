@@ -5,8 +5,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include <loomcxx/check.h>
+#include <loomcxx/index.h>
 
-[[loom::config("tuning.factor")]] extern const unsigned factor;
+[[loom::config("tuning.factor")]] extern const loom::type::index factor;
 [[loom::config("tuning.count")]] extern const unsigned count;
 [[loom::config("tuning.enabled")]] extern const bool enabled;
 
@@ -14,7 +15,7 @@ unsigned configured_sum(unsigned start) {
   unsigned result = start;
   [[loom::unroll(factor)]]
   for (unsigned index = 0; index < count; ++index) {
-    result += enabled ? index * factor : index;
+    result += enabled ? index * static_cast<long long>(factor) : index;
   }
   return result;
 }

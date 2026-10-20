@@ -23,6 +23,8 @@
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/link/module_index.h"
+#include "loom/link/testdata/config_providers_testdata.h"
+#include "loom/ops/config/ops.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/op_registry.h"
 #include "loom/ops/test/ops.h"
@@ -44,6 +46,17 @@ enum class ProviderForm {
   kText,
   kBytecode,
 };
+
+static iree_string_view_t ConfigFixture(iree_string_view_t name) {
+  const auto* files = loom_link_config_providers_testdata_create();
+  for (size_t i = 0; i < loom_link_config_providers_testdata_size(); ++i) {
+    if (iree_string_view_equal(iree_make_cstring_view(files[i].name), name)) {
+      return iree_make_string_view(files[i].data, files[i].size);
+    }
+  }
+  ADD_FAILURE() << "config fixture not embedded";
+  return iree_string_view_empty();
+}
 
 class LinkIndexMaterializerTest : public ::testing::Test {
  protected:
@@ -104,8 +117,8 @@ class LinkIndexMaterializerTest : public ::testing::Test {
                                    iree_string_view_t name,
                                    loom_link_provider_role_t role) {
     const loom_link_module_index_add_options_t options = {
-        /*.provider_name=*/name,
-        /*.role=*/role,
+        .provider_name = name,
+        .role = role,
     };
     iree_host_size_t provider_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL;
     IREE_CHECK_OK(loom_link_module_index_add_materialized(
@@ -118,8 +131,8 @@ class LinkIndexMaterializerTest : public ::testing::Test {
                                iree_string_view_t name,
                                loom_link_provider_role_t role) {
     const loom_link_module_index_add_options_t options = {
-        /*.provider_name=*/name,
-        /*.role=*/role,
+        .provider_name = name,
+        .role = role,
     };
     iree_host_size_t provider_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL;
     IREE_CHECK_OK(loom_link_module_index_add_bytecode(
@@ -132,8 +145,8 @@ class LinkIndexMaterializerTest : public ::testing::Test {
                            iree_string_view_t source, iree_string_view_t name,
                            loom_link_provider_role_t role) {
     const loom_link_module_index_add_options_t options = {
-        /*.provider_name=*/name,
-        /*.role=*/role,
+        .provider_name = name,
+        .role = role,
     };
     loom_text_parse_options_t parse_options = {};
     parse_options.diagnostic_sink.fn = loom_diagnostic_stderr_sink;
@@ -166,10 +179,11 @@ class LinkIndexMaterializerTest : public ::testing::Test {
       const loom_link_module_index_t* index,
       const loom_link_plan_options_t* plan_options,
       loom_link_index_materialization_t* out_materialization) {
-    loom_link_plan_materialization_environment_t environment = {};
-    environment.context = &context_;
-    environment.block_pool = &block_pool_;
-    environment.allocator = iree_allocator_system();
+    loom_link_plan_materialization_environment_t environment = {
+        .context = &context_,
+        .block_pool = &block_pool_,
+        .allocator = iree_allocator_system(),
+    };
     return loom_link_index_materialize(index, plan_options, &environment,
                                        IREE_SV("linked"), out_materialization);
   }
@@ -180,13 +194,15 @@ class LinkIndexMaterializerTest : public ::testing::Test {
       loom_link_plan_unresolved_policy_t unresolved_policy,
       loom_link_index_materialization_t* out_materialization) {
     const iree_string_view_t roots[] = {root};
-    loom_link_plan_options_t plan_options = {};
-    plan_options.mode = mode;
-    plan_options.root_symbols = {
-        /*.count=*/IREE_ARRAYSIZE(roots),
-        /*.values=*/roots,
+    loom_link_plan_options_t plan_options = {
+        .mode = mode,
+        .root_symbols =
+            {
+                .count = IREE_ARRAYSIZE(roots),
+                .values = roots,
+            },
+        .unresolved_policy = unresolved_policy,
     };
-    plan_options.unresolved_policy = unresolved_policy;
     return TryMaterializeWithOptions(index, &plan_options, out_materialization);
   }
 
@@ -194,7 +210,7 @@ class LinkIndexMaterializerTest : public ::testing::Test {
       const loom_link_module_index_t* index,
       loom_link_index_materialization_t* out_materialization) {
     const loom_link_plan_options_t plan_options = {
-        /*.mode=*/LOOM_LINK_PLAN_MERGE,
+        .mode = LOOM_LINK_PLAN_MERGE,
     };
     return TryMaterializeWithOptions(index, &plan_options, out_materialization);
   }
@@ -312,7 +328,7 @@ class LinkIndexMaterializerTest : public ::testing::Test {
 TEST_F(LinkIndexMaterializerTest,
        SelectsBytecodeProviderWithoutReadingRejectedBody) {
   loom_module_t* root = Parse(IREE_SV(R"(
-template.decl @demo.choose(%x: i32) -> (i32) where [mul(%x, 16)]
+template.decl @demo.choose(%x: i32) -> (i32) where [multiple_of(%x, 16)]
 
 func.def public @entry(%x: i32) -> (i32) where [range(%x, 32, 32)] {
   %result = template.apply<@demo.choose>(%x) : (i32) -> (i32)
@@ -420,7 +436,7 @@ template.def<@demo.choose> priority(30) @wrong_predicate(%x: i32) -> (i32) where
   template.return %x : i32
 }
 
-template.def<@demo.choose> target(@matching_target) requires [#target.subgroup.size<64>] priority(20) @selected(%x: i32) -> (i32) where [mul(%x, 16)] {
+template.def<@demo.choose> target(@matching_target) requires [#target.subgroup.size<64>] priority(20) @selected(%x: i32) -> (i32) where [multiple_of(%x, 16)] {
   template.return %x : i32
 }
 
@@ -490,7 +506,7 @@ template.def<@demo.choose> priority(1) @fallback(%x: i32) -> (i32) {
 TEST_F(LinkIndexMaterializerTest,
        RejectedFamilyDoesNotReadBytecodeProviderBody) {
   loom_module_t* root = Parse(IREE_SV(R"(
-template.decl @demo.choose(%x: i32) -> (i32) where [mul(%x, 16)]
+template.decl @demo.choose(%x: i32) -> (i32) where [multiple_of(%x, 16)]
 
 func.def public @entry(%x: i32) -> (i32) where [range(%x, 15, 15)] {
   %result = template.apply<@demo.choose>(%x) : (i32) -> (i32)
@@ -499,7 +515,7 @@ func.def public @entry(%x: i32) -> (i32) where [range(%x, 15, 15)] {
 )"),
                               IREE_SV("root.loom"));
   loom_module_t* library = Parse(IREE_SV(R"(
-template.decl @demo.choose(%x: i32) -> (i32) where [mul(%x, 16)]
+template.decl @demo.choose(%x: i32) -> (i32) where [multiple_of(%x, 16)]
 
 template.def<@demo.choose> @implementation(%x: i32) -> (i32) {
   template.return %x : i32
@@ -696,6 +712,158 @@ func.def public @same(%x: i32) -> (i32) {
                         TryMerge(index.get(), &materialization));
   EXPECT_EQ(materialization.plan, nullptr);
   EXPECT_EQ(materialization.product.module, nullptr);
+}
+
+TEST_F(LinkIndexMaterializerTest,
+       MergeResolvesPrivateOwnerIndependentOfProviderOrder) {
+  const iree_string_view_t owner_source = IREE_SV(R"(
+func.def @helper(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+
+func.def @local(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)");
+  const iree_string_view_t requester_source = IREE_SV(R"(
+func.decl @helper(%x: i32) -> (i32)
+
+func.def @local(%x: i32) -> (i32) {
+  %sum = scalar.addi %x, %x : i32
+  func.return %sum : i32
+}
+
+func.def public @entry(%x: i32) -> (i32) {
+  %result = func.call @helper(%x) : (i32) -> (i32)
+  func.return %result : i32
+}
+)");
+  const iree_string_view_t companion_source = IREE_SV(R"(
+func.def @sentinel(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)");
+  loom_module_t* owner = Parse(owner_source, IREE_SV("owner.loom"));
+  loom_module_t* requester = Parse(requester_source, IREE_SV("requester.loom"));
+  loom_module_t* companion = Parse(companion_source, IREE_SV("companion.loom"));
+  const std::vector<uint8_t> owner_bytecode = WriteModule(owner);
+  const std::vector<uint8_t> requester_bytecode = WriteModule(requester);
+  const std::vector<uint8_t> companion_bytecode = WriteModule(companion);
+
+  enum ProviderId {
+    kOwner,
+    kRequester,
+    kCompanion,
+  };
+  struct Variant {
+    const char* name;
+    std::array<ProviderId, 3> insertion_order;
+    std::array<ProviderForm, 3> provider_forms;
+  };
+  const Variant variants[] = {
+      {
+          "owner-first",
+          {kOwner, kCompanion, kRequester},
+          {ProviderForm::kMaterialized, ProviderForm::kText,
+           ProviderForm::kBytecode},
+      },
+      {
+          "requester-first",
+          {kRequester, kOwner, kCompanion},
+          {ProviderForm::kMaterialized, ProviderForm::kText,
+           ProviderForm::kBytecode},
+      },
+      {
+          "owner-last",
+          {kCompanion, kRequester, kOwner},
+          {ProviderForm::kMaterialized, ProviderForm::kText,
+           ProviderForm::kBytecode},
+      },
+  };
+
+  std::vector<LinkedSymbolShape> reference_symbols;
+  for (const Variant& variant : variants) {
+    SCOPED_TRACE(variant.name);
+    IndexPtr index = CreateIndex();
+    iree_host_size_t owner_provider = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL;
+    iree_host_size_t requester_provider =
+        LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL;
+    for (iree_host_size_t i = 0; i < variant.insertion_order.size(); ++i) {
+      switch (variant.insertion_order[i]) {
+        case kOwner:
+          owner_provider = AddProvider(
+              index.get(), variant.provider_forms[i], owner_source, owner,
+              owner_bytecode, IREE_SV("owner"), LOOM_LINK_PROVIDER_ROLE_INPUT);
+          break;
+        case kRequester:
+          requester_provider =
+              AddProvider(index.get(), variant.provider_forms[i],
+                          requester_source, requester, requester_bytecode,
+                          IREE_SV("requester"), LOOM_LINK_PROVIDER_ROLE_INPUT);
+          break;
+        case kCompanion:
+          AddProvider(index.get(), variant.provider_forms[i], companion_source,
+                      companion, companion_bytecode, IREE_SV("companion"),
+                      LOOM_LINK_PROVIDER_ROLE_INPUT);
+          break;
+      }
+    }
+    ASSERT_NE(owner_provider, LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL);
+    ASSERT_NE(requester_provider, LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL);
+
+    loom_link_index_materialization_t merged = {};
+    IREE_ASSERT_OK(TryMerge(index.get(), &merged));
+    Verify(merged.product.module);
+    ASSERT_EQ(merged.product.module->symbols.count, 5u);
+    const loom_symbol_t* helper =
+        FindSymbol(merged.product.module, IREE_SV("helper"));
+    ASSERT_NE(helper, nullptr);
+    EXPECT_FALSE(loom_symbol_definition_is_declaration(helper->definition));
+    EXPECT_EQ(FindSymbol(merged.product.module, IREE_SV("helper$link0")),
+              nullptr);
+    EXPECT_NE(FindSymbol(merged.product.module, IREE_SV("local")), nullptr);
+    EXPECT_NE(FindSymbol(merged.product.module, IREE_SV("local$link0")),
+              nullptr);
+    EXPECT_NE(FindSymbol(merged.product.module, IREE_SV("entry")), nullptr);
+    EXPECT_NE(FindSymbol(merged.product.module, IREE_SV("sentinel")), nullptr);
+
+    const loom_link_module_index_symbol_t* source_definition =
+        FindIndexedProviderSymbol(index.get(), owner_provider,
+                                  IREE_SV("helper"));
+    const loom_link_module_index_symbol_t* source_declaration =
+        FindIndexedProviderSymbol(index.get(), requester_provider,
+                                  IREE_SV("helper"));
+    ASSERT_NE(source_definition, nullptr);
+    ASSERT_NE(source_declaration, nullptr);
+    const loom_symbol_ref_t definition_target =
+        merged.product.target_symbols.values[source_definition->ordinal];
+    const loom_symbol_ref_t declaration_target =
+        merged.product.target_symbols.values[source_declaration->ordinal];
+    EXPECT_EQ(declaration_target.module_id, definition_target.module_id);
+    EXPECT_EQ(declaration_target.symbol_id, definition_target.symbol_id);
+
+    const std::vector<LinkedSymbolShape> merged_symbols =
+        CaptureSymbolShapes(merged.product.module);
+    if (reference_symbols.empty()) {
+      reference_symbols = merged_symbols;
+    } else {
+      EXPECT_EQ(merged_symbols, reference_symbols);
+    }
+
+    const std::vector<uint8_t> merged_bytecode =
+        WriteModule(merged.product.module);
+    IndexPtr linked_index = CreateIndex();
+    AddBytecode(linked_index.get(), merged_bytecode, IREE_SV("merged.loombc"),
+                LOOM_LINK_PROVIDER_ROLE_INPUT);
+    loom_link_index_materialization_t linked =
+        Materialize(linked_index.get(), IREE_SV("@entry"));
+    Verify(linked.product.module);
+    EXPECT_EQ(linked.product.module->symbols.count, 2u);
+    EXPECT_NE(FindSymbol(linked.product.module, IREE_SV("helper")), nullptr);
+    EXPECT_NE(FindSymbol(linked.product.module, IREE_SV("entry")), nullptr);
+    loom_link_index_materialization_deinitialize(&linked);
+    loom_link_index_materialization_deinitialize(&merged);
+  }
 }
 
 TEST_F(LinkIndexMaterializerTest,
@@ -1270,14 +1438,14 @@ func.def public export("partial_unused") @partial_unused(%x: i32) -> (i32) {
         IREE_SV("@private_root"),
     };
     loom_link_plan_options_t options = {
-        /*.mode=*/LOOM_LINK_PLAN_LINK,
-        /*.root_symbols=*/
-        {
-            /*.count=*/IREE_ARRAYSIZE(explicit_roots),
-            /*.values=*/explicit_roots,
-        },
-        /*.include_input_exports=*/true,
-        /*.unresolved_policy=*/LOOM_LINK_PLAN_UNRESOLVED_ALLOW,
+        .mode = LOOM_LINK_PLAN_LINK,
+        .root_symbols =
+            {
+                .count = IREE_ARRAYSIZE(explicit_roots),
+                .values = explicit_roots,
+            },
+        .include_input_exports = true,
+        .unresolved_policy = LOOM_LINK_PLAN_UNRESOLVED_ALLOW,
     };
     loom_link_index_materialization_t materialization = {};
     IREE_ASSERT_OK(
@@ -1416,6 +1584,124 @@ func.def public export("partial_unused") @partial_unused(%x: i32) -> (i32) {
     }
 
     loom_link_index_materialization_deinitialize(&materialization);
+  }
+}
+
+TEST_F(LinkIndexMaterializerTest, ConfigProvidersPreserveValuesAndConstraints) {
+  const auto requester_source = ConfigFixture(IREE_SV("requester.loom"));
+  const auto defaults_source = ConfigFixture(IREE_SV("defaults.loom"));
+  const auto equal_source = ConfigFixture(IREE_SV("equal.loom"));
+  auto* requester = Parse(requester_source, IREE_SV("requester.loom"));
+  auto* defaults = Parse(defaults_source, IREE_SV("defaults.loom"));
+  auto* equal = Parse(equal_source, IREE_SV("equal.loom"));
+  ASSERT_NE(requester, nullptr);
+  ASSERT_NE(defaults, nullptr);
+  ASSERT_NE(equal, nullptr);
+  const auto requester_bytecode = WriteModule(requester);
+  const auto defaults_bytecode = WriteModule(defaults);
+  const auto equal_bytecode = WriteModule(equal);
+  for (auto requester_form : {ProviderForm::kMaterialized, ProviderForm::kText,
+                              ProviderForm::kBytecode}) {
+    for (auto provider_form : {ProviderForm::kMaterialized, ProviderForm::kText,
+                               ProviderForm::kBytecode}) {
+      for (bool overlay_request : {false, true}) {
+        IndexPtr library = CreateIndex();
+        if (!overlay_request) {
+          AddProvider(library.get(), requester_form, requester_source,
+                      requester, requester_bytecode, IREE_SV("requester"),
+                      LOOM_LINK_PROVIDER_ROLE_INPUT);
+        }
+        AddProvider(library.get(), provider_form, defaults_source, defaults,
+                    defaults_bytecode, IREE_SV("defaults"),
+                    LOOM_LINK_PROVIDER_ROLE_LIBRARY);
+        AddProvider(library.get(), provider_form, equal_source, equal,
+                    equal_bytecode, IREE_SV("equal"),
+                    LOOM_LINK_PROVIDER_ROLE_LIBRARY);
+        IndexPtr overlay;
+        if (overlay_request) {
+          loom_link_module_index_t* index = nullptr;
+          IREE_ASSERT_OK(loom_link_module_index_allocate_overlay(
+              library.get(), &block_pool_, iree_allocator_system(), &index));
+          overlay.reset(index);
+          AddProvider(overlay.get(), requester_form, requester_source,
+                      requester, requester_bytecode, IREE_SV("requester"),
+                      LOOM_LINK_PROVIDER_ROLE_INPUT);
+        }
+        const auto* index = overlay ? overlay.get() : library.get();
+        auto linked = Materialize(index, IREE_SV("entry"));
+        auto* module = linked.product.module;
+        Verify(module);
+        const auto* count = FindSymbol(module, IREE_SV("count"));
+        ASSERT_NE(count, nullptr);
+        ASSERT_TRUE(loom_config_def_isa(count->defining_op));
+        EXPECT_EQ(loom_attr_as_i64(loom_config_def_value(count->defining_op)),
+                  8);
+        const auto predicates = loom_config_def_predicates(count->defining_op);
+        EXPECT_EQ(predicates.count, 3);
+        for (uint16_t i = 0; i < predicates.count; ++i) {
+          EXPECT_EQ(predicates.predicate_list[i].args[0],
+                    loom_config_def_type(count->defining_op));
+        }
+        EXPECT_EQ(linked.product.target_source_definitions
+                      .values[count - module->symbols.entries],
+                  LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL);
+        for (auto name :
+             {IREE_SV("enabled"), IREE_SV("scale"), IREE_SV("layout")}) {
+          const auto* symbol = FindSymbol(module, name);
+          ASSERT_NE(symbol, nullptr);
+          EXPECT_TRUE(loom_config_def_isa(symbol->defining_op));
+        }
+        EXPECT_EQ(FindSymbol(module, IREE_SV("unused")), nullptr);
+        loom_link_index_materialization_deinitialize(&linked);
+
+        // Relocatable merge still ignores library-provided definitions.
+        loom_link_index_materialization_t merged = {};
+        IREE_ASSERT_OK(TryMerge(index, &merged));
+        EXPECT_TRUE(loom_config_decl_isa(
+            FindSymbol(merged.product.module, IREE_SV("count"))->defining_op));
+        loom_link_index_materialization_deinitialize(&merged);
+      }
+    }
+  }
+}
+
+TEST_F(LinkIndexMaterializerTest, ConfigProvidersRejectIncompatibleContracts) {
+  const auto requester_source = ConfigFixture(IREE_SV("requester.loom"));
+  const auto defaults_source = ConfigFixture(IREE_SV("defaults.loom"));
+  auto* requester = Parse(requester_source, IREE_SV("requester.loom"));
+  auto* defaults = Parse(defaults_source, IREE_SV("defaults.loom"));
+  ASSERT_NE(requester, nullptr);
+  ASSERT_NE(defaults, nullptr);
+  const auto requester_bytecode = WriteModule(requester);
+  const auto defaults_bytecode = WriteModule(defaults);
+  for (auto name : {IREE_SV("conflict.loom"), IREE_SV("invalid.loom"),
+                    IREE_SV("wrong_type.loom")}) {
+    const auto source = ConfigFixture(name);
+    auto* provider = Parse(source, name);
+    ASSERT_NE(provider, nullptr);
+    const auto bytecode = WriteModule(provider);
+    for (auto form : {ProviderForm::kMaterialized, ProviderForm::kText,
+                      ProviderForm::kBytecode}) {
+      IndexPtr index = CreateIndex();
+      AddProvider(index.get(), form, requester_source, requester,
+                  requester_bytecode, IREE_SV("requester"),
+                  LOOM_LINK_PROVIDER_ROLE_INPUT);
+      if (iree_string_view_equal(name, IREE_SV("conflict.loom"))) {
+        AddProvider(index.get(), form, defaults_source, defaults,
+                    defaults_bytecode, IREE_SV("defaults"),
+                    LOOM_LINK_PROVIDER_ROLE_LIBRARY);
+      }
+      AddProvider(index.get(), form, source, provider, bytecode, name,
+                  LOOM_LINK_PROVIDER_ROLE_LIBRARY);
+      loom_link_index_materialization_t linked = {};
+      IREE_EXPECT_STATUS_IS(
+          iree_string_view_equal(name, IREE_SV("conflict.loom"))
+              ? IREE_STATUS_ALREADY_EXISTS
+              : IREE_STATUS_INVALID_ARGUMENT,
+          TryMaterialize(index.get(), IREE_SV("entry"), LOOM_LINK_PLAN_LINK,
+                         LOOM_LINK_PLAN_UNRESOLVED_ERROR, &linked));
+      loom_link_index_materialization_deinitialize(&linked);
+    }
   }
 }
 

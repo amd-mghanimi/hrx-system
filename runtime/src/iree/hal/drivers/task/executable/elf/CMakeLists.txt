@@ -41,6 +41,7 @@ iree_cc_binary(
     iree::hal::drivers::task::executable::elf::testdata::compat_data
     iree::hal::drivers::task::executable::environment
     iree::hal::drivers::task::executable::library::abi
+    iree::hal::drivers::task::executable::library::util
   TESTONLY
 )
 
@@ -67,6 +68,7 @@ iree_cc_binary(
     iree::hal::drivers::task::executable::elf::testdata::initializers_native
     iree::hal::drivers::task::executable::environment
     iree::hal::drivers::task::executable::library::abi
+    iree::hal::drivers::task::executable::library::util
   TESTONLY
 )
 endif()
@@ -119,8 +121,8 @@ if(WIN32 AND IREE_ARCH STREQUAL "x86_64")
   # CMake + MASM does not work well and CMake ends up passing all our C/C++
   # flags confusing MASM. We invoke MASM directly (ml.exe/ml64.exe) to keep it
   # quiet.
-  target_sources(iree_hal_drivers_task_executable_elf_arch PRIVATE
-    "arch/x86_64_msvc.obj")
+  iree_cc_library_add_external_objects(iree_hal_drivers_task_executable_elf_arch
+    "${CMAKE_CURRENT_BINARY_DIR}/arch/x86_64_msvc.obj")
   add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/arch/x86_64_msvc.obj
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64_msvc.asm

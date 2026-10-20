@@ -28,22 +28,24 @@ enum {
   LOOM_OP_INDEX_SCALE = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 6),
   LOOM_OP_INDEX_DIV = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 7),
   LOOM_OP_INDEX_REM = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 8),
-  LOOM_OP_INDEX_MIN = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 9),
-  LOOM_OP_INDEX_MAX = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 10),
-  LOOM_OP_INDEX_MADD = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 11),
-  LOOM_OP_INDEX_ANDI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 12),
-  LOOM_OP_INDEX_ORI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 13),
-  LOOM_OP_INDEX_XORI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 14),
-  LOOM_OP_INDEX_SHLI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 15),
-  LOOM_OP_INDEX_SHRSI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 16),
-  LOOM_OP_INDEX_SHRUI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 17),
-  LOOM_OP_INDEX_ROTLI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 18),
-  LOOM_OP_INDEX_ROTRI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 19),
-  LOOM_OP_INDEX_CTLZI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 20),
-  LOOM_OP_INDEX_CTTZI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 21),
-  LOOM_OP_INDEX_CTPOPI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 22),
-  LOOM_OP_INDEX_CMP = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 23),
-  LOOM_OP_INDEX_COUNT_ = 24,
+  LOOM_OP_INDEX_DIVREM = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 9),
+  LOOM_OP_INDEX_MIN = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 10),
+  LOOM_OP_INDEX_MAX = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 11),
+  LOOM_OP_INDEX_MADD = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 12),
+  LOOM_OP_INDEX_ANDI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 13),
+  LOOM_OP_INDEX_ORI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 14),
+  LOOM_OP_INDEX_XORI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 15),
+  LOOM_OP_INDEX_SHLI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 16),
+  LOOM_OP_INDEX_SHRSI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 17),
+  LOOM_OP_INDEX_SHRUI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 18),
+  LOOM_OP_INDEX_ROTLI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 19),
+  LOOM_OP_INDEX_ROTRI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 20),
+  LOOM_OP_INDEX_CTLZI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 21),
+  LOOM_OP_INDEX_CTTZI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 22),
+  LOOM_OP_INDEX_CTPOPI = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 23),
+  LOOM_OP_INDEX_CMP = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 24),
+  LOOM_OP_INDEX_CONSTEXPR = LOOM_OP_KIND(LOOM_DIALECT_INDEX, 25),
+  LOOM_OP_INDEX_COUNT_ = 26,
 };
 
 // Address-domain comparison predicates.
@@ -98,7 +100,7 @@ iree_status_t loom_index_cast_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_INDEX_ASSUME: Identity with predicate constraints on index or offset results.
-// %n2 = index.assume %n [mul(%n, 16)] : index
+// %n2 = index.assume %n [multiple_of(%n, 16)] : index
 LOOM_DEFINE_ISA(loom_index_assume_isa, LOOM_OP_INDEX_ASSUME)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_index_assume_values, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_index_assume_results, 0)
@@ -122,7 +124,7 @@ iree_status_t loom_index_assume_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_INDEX_ADD: Address-domain addition. Operands and result must all be index or all offset.
+// LOOM_OP_INDEX_ADD: Address-domain addition. Operands and result must all be index or all offset. Offset addition wraps modulo the selected target's unsigned offset carrier.
 // %r = index.add %lhs, %rhs : index
 LOOM_DEFINE_ISA(loom_index_add_isa, LOOM_OP_INDEX_ADD)
 LOOM_DEFINE_OPERAND(loom_index_add_lhs, 0)
@@ -133,13 +135,15 @@ iree_status_t loom_index_add_build(
     loom_value_id_t rhs, loom_type_t result_type,
     loom_location_id_t location, loom_op_t** out_op);
 iree_status_t loom_index_add_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+loom_trait_flags_t loom_index_address_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_index_add_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_INDEX_SUB: Address-domain subtraction. Operands and result must all be index or all offset.
+// LOOM_OP_INDEX_SUB: Address-domain subtraction. Operands and result must all be index or all offset. Offset subtraction wraps modulo the selected target's unsigned offset carrier.
 // %r = index.sub %lhs, %rhs : index
 LOOM_DEFINE_ISA(loom_index_sub_isa, LOOM_OP_INDEX_SUB)
 LOOM_DEFINE_OPERAND(loom_index_sub_lhs, 0)
@@ -150,6 +154,8 @@ iree_status_t loom_index_sub_build(
     loom_value_id_t rhs, loom_type_t result_type,
     loom_location_id_t location, loom_op_t** out_op);
 iree_status_t loom_index_sub_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+loom_trait_flags_t loom_index_address_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_index_sub_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -175,7 +181,7 @@ iree_status_t loom_index_mul_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_INDEX_SCALE: Scale a logical coordinate by a physical byte stride to produce a physical byte offset. This is the address-domain boundary for packed payload layouts: logical indices stay index values, byte strides stay offset values, and the result feeds byte-addressed buffer/view bases.
+// LOOM_OP_INDEX_SCALE: Scale a logical coordinate by a physical byte stride to produce a physical byte offset. This is the address-domain boundary for packed payload layouts: logical indices stay index values, byte strides stay offset values, and the result feeds byte-addressed buffer/view bases. The result wraps modulo the selected target's unsigned offset carrier.
 // %bytes = index.scale %lane, %byte_stride : index, offset -> offset
 LOOM_DEFINE_ISA(loom_index_scale_isa, LOOM_OP_INDEX_SCALE)
 LOOM_DEFINE_OPERAND(loom_index_scale_index, 0)
@@ -228,6 +234,26 @@ iree_status_t loom_index_rem_build(
     loom_op_t** out_op);
 iree_status_t loom_index_rem_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
 iree_status_t loom_index_rem_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_INDEX_DIVREM: Logical coordinate quotient and remainder computed together for non-negative index values with a positive divisor. Offsets are physical byte counts and cannot use this op.
+// %q, %r = index.divrem %lane, %group_size : index
+LOOM_DEFINE_ISA(loom_index_divrem_isa, LOOM_OP_INDEX_DIVREM)
+LOOM_DEFINE_OPERAND(loom_index_divrem_lhs, 0)
+LOOM_DEFINE_OPERAND(loom_index_divrem_rhs, 1)
+LOOM_DEFINE_RESULT(loom_index_divrem_quotient, 0)
+LOOM_DEFINE_RESULT(loom_index_divrem_remainder, 1)
+iree_status_t loom_index_divrem_build(
+    loom_builder_t* builder,
+    loom_value_id_t lhs,
+    loom_value_id_t rhs,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_index_divrem_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+iree_status_t loom_index_divrem_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,
@@ -406,7 +432,7 @@ iree_status_t loom_index_shrui_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_INDEX_ROTLI: Left rotate over logical coordinate values. Offsets are physical byte counts and cannot use this op.
+// LOOM_OP_INDEX_ROTLI: Left rotate over logical coordinate values, with the count reduced modulo the target coordinate-carrier width. Offsets are physical byte counts and cannot use this op.
 // %r = index.rotli %lhs, %rhs : index
 LOOM_DEFINE_ISA(loom_index_rotli_isa, LOOM_OP_INDEX_ROTLI)
 LOOM_DEFINE_OPERAND(loom_index_rotli_lhs, 0)
@@ -425,7 +451,7 @@ iree_status_t loom_index_rotli_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_INDEX_ROTRI: Right rotate over logical coordinate values. Offsets are physical byte counts and cannot use this op.
+// LOOM_OP_INDEX_ROTRI: Right rotate over logical coordinate values, with the count reduced modulo the target coordinate-carrier width. Offsets are physical byte counts and cannot use this op.
 // %r = index.rotri %lhs, %rhs : index
 LOOM_DEFINE_ISA(loom_index_rotri_isa, LOOM_OP_INDEX_ROTRI)
 LOOM_DEFINE_OPERAND(loom_index_rotri_lhs, 0)
@@ -508,6 +534,21 @@ iree_status_t loom_index_cmp_build(
     loom_op_t** out_op);
 iree_status_t loom_index_cmp_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
 iree_status_t loom_index_cmp_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_INDEX_CONSTEXPR: Require an index or offset value to become exact during specialization. Configured canonicalization replaces the result with an ordinary constant once exact facts are available; target lowering diagnoses an unresolved requirement.
+// %tile_count = index.constexpr %configured : index
+LOOM_DEFINE_ISA(loom_index_constexpr_isa, LOOM_OP_INDEX_CONSTEXPR)
+LOOM_DEFINE_OPERAND(loom_index_constexpr_input, 0)
+LOOM_DEFINE_RESULT(loom_index_constexpr_result, 0)
+iree_status_t loom_index_constexpr_build(
+    loom_builder_t* builder, loom_value_id_t input,
+    loom_type_t result_type, loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_index_constexpr_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,

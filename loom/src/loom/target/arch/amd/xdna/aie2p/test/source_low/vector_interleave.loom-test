@@ -1,0 +1,125 @@
+// RUN: with-checks compile-report source-to-low,low-dce
+
+aie2p.target<core> @target
+
+func.def target(@target) @interleave_i16x32(%even: vector<32xi16>, %odd: vector<32xi16>) -> (vector<64xi16>) {
+  %result = vector.interleave<0> %even, %odd : vector<32xi16>, vector<32xi16> -> vector<64xi16>
+  func.return %result : vector<64xi16>
+}
+
+func.def target(@target) @deinterleave_i16x64(%source: vector<64xi16>) -> (vector<32xi16>, vector<32xi16>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<64xi16> -> vector<32xi16>, vector<32xi16>
+  func.return %even, %odd : vector<32xi16>, vector<32xi16>
+}
+
+func.def target(@target) @interleave_i8_8x8_axis0(%even: vector<8x8xi8>, %odd: vector<8x8xi8>) -> (vector<16x8xi8>) {
+  %result = vector.interleave<0> %even, %odd : vector<8x8xi8>, vector<8x8xi8> -> vector<16x8xi8>
+  func.return %result : vector<16x8xi8>
+}
+
+func.def target(@target) @deinterleave_i8_16x8_axis0(%source: vector<16x8xi8>) -> (vector<8x8xi8>, vector<8x8xi8>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<16x8xi8> -> vector<8x8xi8>, vector<8x8xi8>
+  func.return %even, %odd : vector<8x8xi8>, vector<8x8xi8>
+}
+
+func.def target(@target) @interleave_i8_4x16_axis0(%even: vector<4x16xi8>, %odd: vector<4x16xi8>) -> (vector<8x16xi8>) {
+  %result = vector.interleave<0> %even, %odd : vector<4x16xi8>, vector<4x16xi8> -> vector<8x16xi8>
+  func.return %result : vector<8x16xi8>
+}
+
+func.def target(@target) @deinterleave_i8_8x16_axis0(%source: vector<8x16xi8>) -> (vector<4x16xi8>, vector<4x16xi8>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<8x16xi8> -> vector<4x16xi8>, vector<4x16xi8>
+  func.return %even, %odd : vector<4x16xi8>, vector<4x16xi8>
+}
+
+func.def target(@target) @interleave_i8_2x32_axis0(%even: vector<2x32xi8>, %odd: vector<2x32xi8>) -> (vector<4x32xi8>) {
+  %result = vector.interleave<0> %even, %odd : vector<2x32xi8>, vector<2x32xi8> -> vector<4x32xi8>
+  func.return %result : vector<4x32xi8>
+}
+
+func.def target(@target) @deinterleave_i8_4x32_axis0(%source: vector<4x32xi8>) -> (vector<2x32xi8>, vector<2x32xi8>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<4x32xi8> -> vector<2x32xi8>, vector<2x32xi8>
+  func.return %even, %odd : vector<2x32xi8>, vector<2x32xi8>
+}
+
+func.def target(@target) @interleave_f32x32(%even: vector<32xf32>, %odd: vector<32xf32>) -> (vector<64xf32>) {
+  %result = vector.interleave<0> %even, %odd : vector<32xf32>, vector<32xf32> -> vector<64xf32>
+  func.return %result : vector<64xf32>
+}
+
+func.def target(@target) @deinterleave_f32x64(%source: vector<64xf32>) -> (vector<32xf32>, vector<32xf32>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<64xf32> -> vector<32xf32>, vector<32xf32>
+  func.return %even, %odd : vector<32xf32>, vector<32xf32>
+}
+
+func.def target(@target) @interleave_i32x32(%even: vector<32xi32>, %odd: vector<32xi32>) -> (vector<64xi32>) {
+  %result = vector.interleave<0> %even, %odd : vector<32xi32>, vector<32xi32> -> vector<64xi32>
+  func.return %result : vector<64xi32>
+}
+
+func.def target(@target) @deinterleave_i32x64(%source: vector<64xi32>) -> (vector<32xi32>, vector<32xi32>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<64xi32> -> vector<32xi32>, vector<32xi32>
+  func.return %even, %odd : vector<32xi32>, vector<32xi32>
+}
+
+func.def target(@target) @interleave_i1x64(%even: vector<64xi1>, %odd: vector<64xi1>) -> (vector<128xi1>) {
+  %result = vector.interleave<0> %even, %odd : vector<64xi1>, vector<64xi1> -> vector<128xi1>
+  func.return %result : vector<128xi1>
+}
+
+func.def target(@target) @deinterleave_i1x128(%source: vector<128xi1>) -> (vector<64xi1>, vector<64xi1>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<128xi1> -> vector<64xi1>, vector<64xi1>
+  func.return %even, %odd : vector<64xi1>, vector<64xi1>
+}
+
+func.def target(@target) @interleave_i8_3x21_axis0(%even: vector<3x21xi8>, %odd: vector<3x21xi8>) -> (vector<6x21xi8>) {
+  %result = vector.interleave<0> %even, %odd : vector<3x21xi8>, vector<3x21xi8> -> vector<6x21xi8>
+  func.return %result : vector<6x21xi8>
+}
+
+func.def target(@target) @deinterleave_i8_6x21_axis0(%source: vector<6x21xi8>) -> (vector<3x21xi8>, vector<3x21xi8>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<6x21xi8> -> vector<3x21xi8>, vector<3x21xi8>
+  func.return %even, %odd : vector<3x21xi8>, vector<3x21xi8>
+}
+
+func.def target(@target) @interleave_i1_3x21_axis0(%even: vector<3x21xi1>, %odd: vector<3x21xi1>) -> (vector<6x21xi1>) {
+  %result = vector.interleave<0> %even, %odd : vector<3x21xi1>, vector<3x21xi1> -> vector<6x21xi1>
+  func.return %result : vector<6x21xi1>
+}
+
+func.def target(@target) @deinterleave_i1_6x21_axis0(%source: vector<6x21xi1>) -> (vector<3x21xi1>, vector<3x21xi1>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<6x21xi1> -> vector<3x21xi1>, vector<3x21xi1>
+  func.return %even, %odd : vector<3x21xi1>, vector<3x21xi1>
+}
+
+func.def target(@target) @interleave_i8_1x64_axis0(%even: vector<1x64xi8>, %odd: vector<1x64xi8>) -> (vector<2x64xi8>) {
+  %result = vector.interleave<0> %even, %odd : vector<1x64xi8>, vector<1x64xi8> -> vector<2x64xi8>
+  func.return %result : vector<2x64xi8>
+}
+
+func.def target(@target) @deinterleave_i8_2x64_axis0(%source: vector<2x64xi8>) -> (vector<1x64xi8>, vector<1x64xi8>) {
+  %even, %odd = vector.deinterleave<0> %source : vector<2x64xi8> -> vector<1x64xi8>, vector<1x64xi8>
+  func.return %even, %odd : vector<1x64xi8>, vector<1x64xi8>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i16x32 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i16x64 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i8_8x8_axis0 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i8_16x8_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i8_4x16_axis0 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i8_8x16_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i8_2x32_axis0 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i8_4x32_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_f32x32 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_f32x64 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i32x32 source_op=vector.interleave selection=plan plan_key=interleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i32x64 source_op=vector.deinterleave selection=plan plan_key=deinterleave.vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i1x64 source_op=vector.interleave selection=plan plan_key=interleave.predicate-vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i1x128 source_op=vector.deinterleave selection=plan plan_key=deinterleave.predicate-vshuffle *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i8_3x21_axis0 source_op=vector.interleave selection=plan plan_key=interleave.block-route *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i8_6x21_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.block-route *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i1_3x21_axis0 source_op=vector.interleave selection=plan plan_key=interleave.predicate-block-route *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i1_6x21_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.predicate-block-route *
+CHECK: COMPILE-REPORT: source_low[*] function=interleave_i8_1x64_axis0 source_op=vector.interleave selection=plan plan_key=interleave.block-route *
+CHECK: COMPILE-REPORT: source_low[*] function=deinterleave_i8_2x64_axis0 source_op=vector.deinterleave selection=plan plan_key=deinterleave.block-route *

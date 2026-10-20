@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -21,6 +22,160 @@ from build_tools.devtools import bazel as bazel_dev
 
 
 class BazelTest(unittest.TestCase):
+    def test_try_dependency_finds_generated_header_before_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "pkg"
+            package.mkdir()
+            (package / "BUILD.bazel").write_text(
+                'genrule(name="generate", outs=["generated.h"], cmd="touch $@")\n'
+                'cc_library(name="definitions", hdrs=["generated.h"])\n'
+            )
+            header = package / "generated.h"
+            self.assertFalse(header.exists())
+            with (
+                mock.patch.object(bazel_dev, "REPO_ROOT", root),
+                mock.patch.object(
+                    bazel_dev,
+                    "run_captured",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, stdout="//pkg:definitions\n", stderr=""
+                    ),
+                ) as query,
+            ):
+                dependency = bazel_dev.infer_dep_for_header_path(
+                    "bazel", header, env=None
+                )
+            self.assertEqual(dependency, "//pkg:definitions")
+            self.assertIn(
+                r'attr("hdrs", "(\[|, )//pkg:generated\.h(,|\])", //pkg:*)',
+                query.call_args.args[0][2],
+            )
+
+    def test_try_dependency_prefers_public_header_owner(self):
+        with mock.patch.object(
+            bazel_dev,
+            "run_captured",
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout="//pkg:public\n", stderr=""
+            ),
+        ) as query:
+            labels = bazel_dev.query_rules_with_header(
+                "bazel", header_label="//pkg:api.h", target_pattern="//pkg:*", env=None
+            )
+        self.assertEqual(labels, ["//pkg:public"])
+        self.assertEqual(query.call_count, 1)
+        self.assertIn('attr("hdrs",', query.call_args.args[0][2])
+
+    def test_try_dependency_matches_complete_header_label(self):
+        headers = {
+            "//pkg:function_projection_reader": "[//pkg:function_projection_reader.h]",
+            "//pkg:reader": "[//pkg:index.h, //pkg:reader.h]",
+            "//pkg:reader_cpp": "[//pkg:reader.hpp]",
+            "//pkg:selected_reader": "[//pkg:selected_reader.h]",
+            "//pkg:sub_reader": "[//pkg:sub/reader.h]",
+        }
+
+        def query_rules(command, **_kwargs):
+            # Model Bazel's documented regexp match against a label-list value.
+            pattern = command[2].split('attr("hdrs", "', 1)[1].split('",', 1)[0]
+            owners = [
+                owner for owner, value in headers.items() if re.search(pattern, value)
+            ]
+            return subprocess.CompletedProcess(command, 0, stdout="\n".join(owners))
+
+        with mock.patch.object(bazel_dev, "run_captured", side_effect=query_rules):
+            labels = bazel_dev.query_rules_with_header(
+                "bazel",
+                header_label="//pkg:reader.h",
+                target_pattern="//pkg:*",
+                env=None,
+            )
+        self.assertEqual(labels, ["//pkg:reader"])
+
+    def test_try_dependency_finds_private_source_header_owner(self):
+        owner = "//loom/src/loom/target/arch/amd/xdna/aie2p:array_plan"
+        with mock.patch.object(
+            bazel_dev,
+            "run_captured",
+            side_effect=[
+                subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                subprocess.CompletedProcess([], 0, stdout=owner + "\n", stderr=""),
+            ],
+        ) as query:
+            labels = bazel_dev.query_rules_with_header(
+                "bazel",
+                header_label="//loom/src/loom/target/arch/amd/xdna/aie2p:array/route.h",
+                target_pattern="//loom/src/loom/target/arch/amd/xdna/aie2p:*",
+                env=None,
+            )
+        self.assertEqual(labels, [owner])
+        self.assertEqual(query.call_count, 2)
+        self.assertIn(
+            r'attr("srcs", "(\[|, )//loom/src/loom/target/arch/amd/xdna/aie2p:array/route\.h(,|\])",',
+            query.call_args.args[0][2],
+        )
+
+    def test_try_dependency_query_failure_is_not_a_missing_owner(self):
+        with mock.patch.object(
+            bazel_dev,
+            "run_captured",
+            return_value=subprocess.CompletedProcess(
+                [], 7, stdout="", stderr="package loading failed"
+            ),
+        ) as query:
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                bazel_dev.query_rules_with_header(
+                    "bazel",
+                    header_label="//pkg:api.h",
+                    target_pattern="//pkg:*",
+                    env=None,
+                )
+        self.assertEqual(raised.exception.returncode, 7)
+        self.assertEqual(raised.exception.stderr, "package loading failed")
+        self.assertEqual(query.call_count, 1)
+
+    def test_try_dependency_failure_reports_status_and_cleans_scratch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "runtime/src/iree/base"
+            package.mkdir(parents=True)
+            (package / "BUILD.bazel").write_text(
+                'cc_library(name="base", hdrs=["api.h"])\n'
+            )
+            (package / "api.h").write_text("// Dependency inference fixture.\n")
+            scratch = root / "try"
+            scratch.mkdir()
+            command = bazel_dev.BazelTryCommand(
+                inline_sources=[
+                    '#include "iree/base/api.h"\nint main(void) { return 0; }'
+                ]
+            )
+            step = bazel_dev.BazelTryStep(bazel="bazel", command=command)
+            output = io.StringIO()
+            with (
+                mock.patch.object(bazel_dev, "REPO_ROOT", root),
+                mock.patch.object(
+                    bazel_dev, "HEADER_ROOTS", (("iree/", root / "runtime/src"),)
+                ),
+                mock.patch.object(bazel_dev, "BAZEL_TRY_ROOT", scratch),
+                mock.patch.object(
+                    bazel_dev,
+                    "run_captured",
+                    return_value=subprocess.CompletedProcess(
+                        [], 7, stdout="", stderr="package loading failed"
+                    ),
+                ) as query,
+                contextlib.redirect_stderr(output),
+            ):
+                result = step.run()
+            self.assertEqual(result, 7)
+            self.assertIn("Bazel dependency query failed", output.getvalue())
+            self.assertIn("package loading failed", output.getvalue())
+            self.assertEqual(query.call_count, 1)
+            self.assertEqual(query.call_args.args[0][1], "query")
+            self.assertEqual(list(scratch.iterdir()), [])
+
     def test_try_cleanup_removes_all_configurations_but_preserves_other_packages(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

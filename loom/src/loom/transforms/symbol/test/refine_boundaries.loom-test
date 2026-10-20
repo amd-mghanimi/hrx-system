@@ -325,7 +325,7 @@ kernel.def @exported_kernel(%workload: index) {
 }
 
 func.def public @launch_exported_kernel(%workload: index, %aligned: index, %apparently_dead: index) {
-  %assumed = index.assume %aligned [mul(%aligned, 16)] : index
+  %assumed = index.assume %aligned [multiple_of(%aligned, 16)] : index
   kernel.launch @exported_kernel[%workload](%assumed, %apparently_dead) : [index](index, index)
   func.return
 }
@@ -342,7 +342,7 @@ kernel.def @exported_kernel(%workload: index) {
 }
 
 func.def public @launch_exported_kernel(%workload: index, %aligned: index, %apparently_dead: index) {
-  %assumed = index.assume %aligned [mul(%aligned, 16)] : index
+  %assumed = index.assume %aligned [multiple_of(%aligned, 16)] : index
   kernel.launch @exported_kernel[%workload](%assumed, %apparently_dead) : [index](index, index)
   func.return
 }
@@ -1190,12 +1190,12 @@ low.func.def target<test.low.core>(@register_target) @register_helper(%value: re
 }
 
 low.func.def public target<test.low.core>(@register_target) @register_caller(%value: reg<test.i32>, %unused: reg<test.i32>) -> (reg<test.i32>) asm {
-  %result = low.func.call @register_helper(%value, %unused) : (reg<test.i32>, reg<test.i32>) -> (reg<test.i32>)
+  %result = low.func.call pure @register_helper(%value, %unused) : (reg<test.i32>, reg<test.i32>) -> (reg<test.i32>)
   return %result
 }
 
 func.def public @source_invoker(%value: i32, %unused: i32) -> (i32) {
-  %result = low.invoke @register_helper(%value, %unused) : (i32, i32) -> (i32)
+  %result = low.invoke pure @register_helper(%value, %unused) : (i32, i32) -> (i32)
   func.return %result : i32
 }
 

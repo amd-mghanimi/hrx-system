@@ -141,7 +141,8 @@ CHECK: *low.func.call* @callee*
 
 // ====
 
-// RUN: with-checks emit vm-dis target=vm:core
+// An explicit compile root becomes part of the module deployment ABI.
+// RUN: with-checks emit vm-dis @private_entry target=vm:core
 
 func.def @private_entry(%value: i32) -> (i32) {
   func.return %value : i32
@@ -149,8 +150,9 @@ func.def @private_entry(%value: i32) -> (i32) {
 
 // ----
 CHECK: vm.module core(0.0) {
+CHECK: *string* = "private_entry"
 CHECK: *control.return
-CHECK-NOT: *section exports*
+CHECK: *section exports*
 
 // ====
 

@@ -12,7 +12,7 @@ from loom.assembly import (
     ResultType,
     TypeOf,
 )
-from loom.dialect.scalar import scalar_ops
+from loom.dialect.scalar import FloatConversionFlags, scalar_ops
 from loom.dsl import (
     CONSTANT_LIKE,
     DISTRIBUTION_TRANSFER,
@@ -49,7 +49,9 @@ scalar_sitofp = cast_op(
     to_constraint=FLOAT,
     doc="Signed integer to floating-point.",
     facts="loom_scalar_sitofp_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.sitofp %input : i32 to f32"],
+    eager_execution_cost=1,
 )
 scalar_uitofp = cast_op(
     "scalar.uitofp",
@@ -59,7 +61,9 @@ scalar_uitofp = cast_op(
     to_constraint=FLOAT,
     doc="Unsigned integer to floating-point.",
     facts="loom_scalar_uitofp_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.uitofp %input : i32 to f32"],
+    eager_execution_cost=1,
 )
 scalar_fptosi = cast_op(
     "scalar.fptosi",
@@ -92,11 +96,20 @@ scalar_extf = cast_op(
     phase=OpPhase.EXECUTABLE,
     from_constraint=FLOAT,
     to_constraint=FLOAT,
-    doc="Float precision extension to a strictly wider format: e.g. f16 to f32.",
+    doc=(
+        "Float precision extension to a strictly wider format. Without flags, "
+        "the conversion preserves subnormal inputs and results. `daz` "
+        "permits replacing a subnormal input with its signed zero before "
+        "conversion; `ftz` permits replacing a subnormal result with "
+        "its signed zero."
+    ),
+    flags=("subnormal", FloatConversionFlags),
     constraints=[ElementWidthGreaterThan("result", "input")],
     input_role=OperandRole.FLOAT_EXTENSION_SOURCE,
     facts="loom_scalar_extf_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.extf %input : f16 to f32"],
+    eager_execution_cost=1,
 )
 scalar_fptrunc = cast_op(
     "scalar.fptrunc",
@@ -110,11 +123,18 @@ scalar_fptrunc = cast_op(
         "Special values follow the destination format: f8E4M3 saturates "
         "finite overflow and infinities to its signed maximum finite value "
         "while preserving NaNs; IEEE formats preserve infinities and NaNs."
+        " Without flags, the conversion preserves subnormal inputs and results."
+        " `daz` permits replacing a subnormal input with its signed zero before"
+        " conversion; `ftz` permits replacing a subnormal result"
+        " with its signed zero."
     ),
+    flags=("subnormal", FloatConversionFlags),
     constraints=[ElementWidthLessThan("result", "input")],
     canonicalize="loom_scalar_fptrunc_canonicalize",
     facts="loom_scalar_fptrunc_facts",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.fptrunc %input : f32 to f16"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -132,6 +152,7 @@ scalar_extsi = cast_op(
     facts="loom_scalar_extsi_facts",
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.extsi %input : i8 to i32"],
+    eager_execution_cost=1,
 )
 scalar_extui = cast_op(
     "scalar.extui",
@@ -144,6 +165,7 @@ scalar_extui = cast_op(
     facts="loom_scalar_extui_facts",
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.extui %input : i8 to i32"],
+    eager_execution_cost=1,
 )
 scalar_trunci = cast_op(
     "scalar.trunci",
@@ -157,6 +179,7 @@ scalar_trunci = cast_op(
     facts="loom_scalar_trunci_facts",
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.trunci %input : i32 to i8"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -175,6 +198,7 @@ scalar_bitcast = cast_op(
     facts="loom_scalar_bitcast_facts",
     traits=[SAFE_TO_SPECULATE],
     examples=["%result = scalar.bitcast %input : f32 to i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -202,6 +226,7 @@ scalar_constant = Op(
         "%pi = scalar.constant 3.14159265358979 : f32",
         "%true = scalar.constant 1 : i1",
     ],
+    eager_execution_cost=1,
 )
 
 scalar_poison = Op(

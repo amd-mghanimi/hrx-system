@@ -36,8 +36,15 @@ iree_status_t loom_target_facts_builder_select_execution(
     const loom_target_facts_t* source, iree_arena_allocator_t* arena,
     const loom_target_facts_t** out_facts);
 
-// Applies every explicit common field in |requirement| to |effective| and
-// unions the explicit field sets.
+// Projects the environment selected at an independent execution boundary.
+// Unresolved environments remain NULL; ordinary worker targets retain their
+// identity. This does not select optional execution modes for reusable source.
+iree_status_t loom_target_facts_builder_project_worker(
+    const loom_target_facts_t* source, iree_arena_allocator_t* arena,
+    const loom_target_facts_t** out_facts);
+
+// Applies every explicit common field in |requirement| to |effective|, unions
+// the explicit field sets, and completes family-owned and derived facts.
 //
 // The caller must first prove that |effective| satisfies |requirement|.
 void loom_target_facts_builder_apply_requirement(
@@ -46,6 +53,14 @@ void loom_target_facts_builder_apply_requirement(
 // Replaces the common target bundle while preserving family-owned facts.
 void loom_target_facts_builder_replace_bundle(
     const loom_target_bundle_t* bundle, loom_target_facts_t* facts);
+
+// Changes a cloned device environment to a worker's compilation contract.
+// Numeric widths, capacity, memory-space facts and family data are retained.
+// Artifact format, codegen, ABI, linkage and instruction contract come from
+// |bundle|; explicit constraints on the enclosing artifact do not transfer.
+void loom_target_facts_builder_set_worker_contract(
+    uint8_t selector, const loom_target_bundle_t* bundle,
+    loom_target_facts_t* facts);
 
 #ifdef __cplusplus
 }  // extern "C"

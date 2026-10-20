@@ -1,9 +1,3 @@
-// Copyright 2026 The IREE Authors
-//
-// Licensed under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-
 // RUN: emit amdgpu-assembly @guarded_suffix_gfx1151 strategy=source
 
 // The issue path preserves its younger load at the old-only add. Both
@@ -47,10 +41,10 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @guarded_suffix_gfx1151(%addre
 amdgpu.target<gfx942> @target
 
 low.func.def target<amdgpu.cdna3.core>(@target) @guarded_suffix_gfx942(%address: reg<amdgpu.vgpr>, %base: reg<amdgpu.sgpr x2>, %condition: reg<amdgpu.scc>) -> (reg<amdgpu.vgpr>) asm {
-  %old = global_load_dword_saddr %address, %base
+  %old = global_load_dword_saddr %address, %base : reg<amdgpu.vgpr>
   low.cond_br %condition, ^issue, ^skip : reg<amdgpu.scc>
 ^issue:
-  %younger = global_load_dword_saddr %address, %base {offset = 4}
+  %younger = global_load_dword_saddr %address, %base {offset = 4} : reg<amdgpu.vgpr>
   %used = v_add_u32 %old, %address
   %result = v_add_u32 %used, %younger
   return %result
@@ -230,7 +224,7 @@ CHECK-NOT: s_waitcnt *lgkmcnt(1)
 amdgpu.target<gfx942> @target
 
 low.func.def target<amdgpu.cdna3.core>(@target) @legacy_flat_suffix_is_not_ordered(%address: reg<amdgpu.vgpr>, %base: reg<amdgpu.sgpr x2>, %flat_address: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr x2>) asm {
-  %old = global_load_dword_saddr %address, %base
+  %old = global_load_dword_saddr %address, %base : reg<amdgpu.vgpr>
   low.br ^consume
 ^consume:
   %younger = flat_load_dwordx2 %flat_address : reg<amdgpu.vgpr x2>
@@ -331,7 +325,7 @@ low.func.def target<amdgpu.cdna3.core>(@target) @incoming_flat_result_is_not_ord
   %old = flat_load_dwordx2 %flat_address : reg<amdgpu.vgpr x2>
   low.br ^consume
 ^consume:
-  %younger = global_load_dword_saddr %address, %base
+  %younger = global_load_dword_saddr %address, %base : reg<amdgpu.vgpr>
   %first = slice %old[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
   %result = v_add_u32 %first, %address
   return %result, %old

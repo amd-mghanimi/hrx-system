@@ -41,6 +41,20 @@ typedef struct PipelineRunCounts {
   int last_source_combination_ordinal = 0;
   // First target legalization pass that selects physical representations.
   int first_target_legalization_ordinal = 0;
+  // First complete source-reference legalization, before boundary projection.
+  int first_complete_target_legalization_ordinal = 0;
+  // Number of common-buffer view-transport decomposition pass runs.
+  int view_transport_decomposition = 0;
+  // Lexical pass position of common-buffer view-origin materialization.
+  int view_transport_decomposition_ordinal = 0;
+  // Number of sanitizer-driven vector-memory scalarization pass runs.
+  int vector_memory_to_scalar = 0;
+  // Lexical pass-run ordinal of vector-memory scalarization.
+  int vector_memory_to_scalar_ordinal = 0;
+  // Lexical pass position of pipeline-only source preparation.
+  int pipeline_preparation_ordinal = 0;
+  // Lexical pass position of worker outlining.
+  int worker_outlining_ordinal = 0;
   // Number of source-loop unrolling pass runs.
   int source_loop_unrolling = 0;
   // Lexical pass-run ordinal of source-loop unrolling.
@@ -125,21 +139,36 @@ iree_status_t InspectPipelineRun(void* user_data, loom_op_t* op,
                                  loom_walk_result_t* out_result) {
   (void)context;
   *out_result = LOOM_WALK_CONTINUE;
+  PipelineRunCountContext* count_context =
+      static_cast<PipelineRunCountContext*>(user_data);
+  if (loom_pass_where_isa(op) &&
+      iree_string_view_equal(
+          loom_string_table_get(&count_context->module->strings,
+                                loom_pass_where_predicate(op)),
+          IREE_SV("op")) &&
+      iree_string_view_equal(
+          FindStringOption(count_context->module, loom_pass_where_attrs(op),
+                           IREE_SV("name")),
+          IREE_SV("pipeline.def"))) {
+    count_context->counts.pipeline_preparation_ordinal =
+        ++count_context->current_run_ordinal;
+    *out_result = LOOM_WALK_SKIP;
+    return iree_ok_status();
+  }
   if (!loom_pass_run_isa(op)) {
     return iree_ok_status();
   }
-
-  PipelineRunCountContext* count_context =
-      static_cast<PipelineRunCountContext*>(user_data);
   ++count_context->current_run_ordinal;
   PipelineRunCounts* counts = &count_context->counts;
   iree_string_view_t key = loom_string_table_get(
       &count_context->module->strings, loom_pass_run_key(op));
-  if (iree_string_view_equal(key, IREE_SV("select-templates")) &&
-      iree_string_view_equal(
-          FindStringOption(count_context->module, loom_pass_run_options(op),
-                           IREE_SV("mode")),
-          IREE_SV("final"))) {
+  if (iree_string_view_equal(key, IREE_SV("outline-pipeline-strands"))) {
+    counts->worker_outlining_ordinal = count_context->current_run_ordinal;
+  } else if (iree_string_view_equal(key, IREE_SV("select-templates")) &&
+             iree_string_view_equal(
+                 FindStringOption(count_context->module,
+                                  loom_pass_run_options(op), IREE_SV("mode")),
+                 IREE_SV("final"))) {
     ++counts->final_template_selection;
     counts->final_template_selection_ordinal =
         count_context->current_run_ordinal;
@@ -168,6 +197,23 @@ iree_status_t InspectPipelineRun(void* user_data, loom_op_t* op,
       counts->first_target_legalization_ordinal =
           count_context->current_run_ordinal;
     }
+    if (counts->first_complete_target_legalization_ordinal == 0 &&
+        iree_string_view_equal(
+            FindStringOption(count_context->module, loom_pass_run_options(op),
+                             IREE_SV("mode")),
+            IREE_SV("complete"))) {
+      counts->first_complete_target_legalization_ordinal =
+          count_context->current_run_ordinal;
+    }
+  } else if (iree_string_view_equal(key,
+                                    IREE_SV("decompose-view-transports"))) {
+    ++counts->view_transport_decomposition;
+    counts->view_transport_decomposition_ordinal =
+        count_context->current_run_ordinal;
+  } else if (iree_string_view_equal(key, IREE_SV("vector-memory-to-scalar"))) {
+    ++counts->vector_memory_to_scalar;
+    counts->vector_memory_to_scalar_ordinal =
+        count_context->current_run_ordinal;
   } else if (iree_string_view_equal(key, IREE_SV("unroll-scf-for"))) {
     ++counts->source_loop_unrolling;
     counts->source_loop_unrolling_ordinal = count_context->current_run_ordinal;
@@ -195,7 +241,8 @@ iree_status_t InspectPipelineRun(void* user_data, loom_op_t* op,
     counts->source_to_low_sanitizer_reporting =
         FindStringOption(count_context->module, loom_pass_run_options(op),
                          IREE_SV("sanitizer-reporting"));
-  } else if (iree_string_view_equal(key, IREE_SV("symbol-dce"))) {
+  } else if (iree_string_view_equal(key, IREE_SV("symbol-dce")) &&
+             counts->source_to_low != 0) {
     ++counts->symbol_dce;
     counts->symbol_dce_ordinal = count_context->current_run_ordinal;
   } else if (iree_string_view_equal(key,
@@ -252,22 +299,19 @@ class TargetPipelineTest : public ::testing::Test {
                                       loom_op_t* pipeline_op) {
     PipelineRunCounts counts = {};
     PipelineRunCountContext count_context = {
-        /*.module=*/module,
+        .module = module,
     };
-    iree_arena_allocator_t arena;
-    iree_arena_initialize(&block_pool_, &arena);
     loom_walk_result_t walk_result = LOOM_WALK_CONTINUE;
     IREE_EXPECT_OK(loom_walk_region(
         module, loom_pass_pipeline_body(pipeline_op), LOOM_WALK_PRE_ORDER,
-        (loom_walk_callback_t){InspectPipelineRun, &count_context}, &arena,
+        (loom_walk_callback_t){InspectPipelineRun, &count_context},
         &walk_result));
     EXPECT_EQ(walk_result, LOOM_WALK_CONTINUE);
     counts = count_context.counts;
-    iree_arena_deinitialize(&arena);
     return counts;
   }
 
-  // Block pool backing test modules and walk scratch arenas.
+  // Block pool backing test modules.
   iree_arena_block_pool_t block_pool_;
   // IR context with all dialects registered.
   loom_context_t context_;
@@ -302,11 +346,24 @@ TEST_F(TargetPipelineTest, ZeroChecksStillMaterializesAuthoredAssertions) {
             counts.last_source_combination_ordinal);
   EXPECT_LT(counts.last_source_combination_ordinal,
             counts.first_target_legalization_ordinal);
+  EXPECT_LT(counts.first_target_inlining_ordinal,
+            counts.pipeline_preparation_ordinal);
+  EXPECT_LT(counts.pipeline_preparation_ordinal,
+            counts.worker_outlining_ordinal);
+  EXPECT_LT(counts.worker_outlining_ordinal,
+            counts.first_target_legalization_ordinal);
+  EXPECT_EQ(counts.view_transport_decomposition, 1);
+  EXPECT_LT(counts.worker_outlining_ordinal,
+            counts.view_transport_decomposition_ordinal);
+  EXPECT_LT(counts.view_transport_decomposition_ordinal,
+            counts.first_target_legalization_ordinal);
   EXPECT_EQ(counts.source_loop_unrolling, 1);
   EXPECT_EQ(counts.vector_bank_sroa, 1);
   EXPECT_EQ(counts.sink_single_use_reads, 1);
   EXPECT_GT(counts.scf_to_cfg, 0);
   EXPECT_LT(counts.source_loop_unrolling_ordinal,
+            counts.first_complete_target_legalization_ordinal);
+  EXPECT_LT(counts.first_complete_target_legalization_ordinal,
             counts.vector_bank_sroa_ordinal);
   EXPECT_LT(counts.vector_bank_sroa_ordinal,
             counts.sink_single_use_reads_ordinal);
@@ -320,6 +377,7 @@ TEST_F(TargetPipelineTest, ZeroChecksStillMaterializesAuthoredAssertions) {
   EXPECT_TRUE(iree_string_view_is_empty(counts.source_to_low_diagnostics));
   EXPECT_TRUE(
       iree_string_view_is_empty(counts.source_to_low_sanitizer_reporting));
+  EXPECT_EQ(counts.vector_memory_to_scalar, 0);
   EXPECT_EQ(counts.sanitizer_insert_assertions, 0);
   EXPECT_EQ(counts.sanitizer_insert_race_observations, 0);
   EXPECT_EQ(counts.sanitizer_materialize_assertions, 1);
@@ -330,24 +388,25 @@ TEST_F(TargetPipelineTest, ZeroChecksStillMaterializesAuthoredAssertions) {
   EXPECT_EQ(counts.other_sanitizer_runs, 0);
 }
 
-TEST_F(TargetPipelineTest, ExpandedSourceStopsBeforeCallgraphSpecialization) {
+TEST_F(TargetPipelineTest, StructuredControlFlowExpandsSourceLoopPolicies) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
+  const loom_target_pipeline_options_t options = {
+      .control_flow_lowering = LOOM_TARGET_CONTROL_FLOW_LOWERING_STRUCTURED_LOW,
+  };
 
   loom_op_t* pipeline_op = nullptr;
-  IREE_ASSERT_OK(loom_target_pipeline_build_to_expanded_source(
-      module.get(), IREE_SV("compile"), /*options=*/nullptr, &environment_,
+  IREE_ASSERT_OK(loom_target_pipeline_build_to_prepared_low(
+      module.get(), IREE_SV("compile"), &options, &environment_,
       loom_pass_environment_empty(), &pipeline_op));
 
   const PipelineRunCounts counts = CountPipelineRuns(module.get(), pipeline_op);
-  EXPECT_EQ(counts.final_template_selection, 1);
-  EXPECT_TRUE(
-      iree_string_view_equal(counts.final_template_rewrite, IREE_SV("inline")));
-  EXPECT_EQ(counts.target_callgraph_specialization, 0);
-  EXPECT_EQ(counts.first_target_inlining_ordinal, 0);
-  EXPECT_EQ(counts.boundary_projection, 0);
-  EXPECT_EQ(counts.source_to_low, 0);
-  EXPECT_EQ(counts.symbol_dce, 0);
-  EXPECT_EQ(counts.sanitizer_materialize_assertions, 0);
+  EXPECT_EQ(counts.source_loop_unrolling, 1);
+  EXPECT_LT(counts.source_loop_unrolling_ordinal,
+            counts.first_complete_target_legalization_ordinal);
+  EXPECT_LT(counts.first_complete_target_legalization_ordinal,
+            counts.boundary_projection_ordinal);
+  EXPECT_LT(counts.source_loop_unrolling_ordinal, counts.source_to_low_ordinal);
+  EXPECT_EQ(counts.scf_to_cfg, 0);
 }
 
 TEST_F(TargetPipelineTest, DiagnosticArtifactsPreserveRawSourceBoundary) {
@@ -376,9 +435,9 @@ TEST_F(TargetPipelineTest, DiagnosticArtifactsPreserveRawSourceBoundary) {
 TEST_F(TargetPipelineTest, OperandFormDiagnosticsBuildsSourceToLowOption) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/
-      LOOM_TARGET_LOW_LEGALITY_DIAGNOSTIC_OPERAND_FORM,
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags =
+          LOOM_TARGET_LOW_LEGALITY_DIAGNOSTIC_OPERAND_FORM,
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -399,15 +458,15 @@ TEST_F(TargetPipelineTest, OperandFormDiagnosticsBuildsSourceToLowOption) {
 TEST_F(TargetPipelineTest, TrapReportingBuildsSourceToLowOption) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/0,
-          /*.flags=*/0,
-          /*.reporting_mode=*/LOOM_SANITIZER_REPORTING_MODE_TRAP,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = 0,
+              .flags = 0,
+              .reporting_mode = LOOM_SANITIZER_REPORTING_MODE_TRAP,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -428,15 +487,15 @@ TEST_F(TargetPipelineTest, TrapReportingBuildsSourceToLowOption) {
 TEST_F(TargetPipelineTest, ReportOnlyBuildsSourceToLowOption) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/0,
-          /*.flags=*/0,
-          /*.reporting_mode=*/LOOM_SANITIZER_REPORTING_MODE_REPORT_ONLY,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = 0,
+              .flags = 0,
+              .reporting_mode = LOOM_SANITIZER_REPORTING_MODE_REPORT_ONLY,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -456,14 +515,15 @@ TEST_F(TargetPipelineTest, ReportOnlyBuildsSourceToLowOption) {
 TEST_F(TargetPipelineTest, EnabledChecksBuildSanitizerPassSlots) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/LOOM_SANITIZER_CHECK_ACCESS | LOOM_SANITIZER_CHECK_VALUE |
-              LOOM_SANITIZER_CHECK_OPERATION,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = LOOM_SANITIZER_CHECK_ACCESS |
+                        LOOM_SANITIZER_CHECK_VALUE |
+                        LOOM_SANITIZER_CHECK_OPERATION,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -475,6 +535,7 @@ TEST_F(TargetPipelineTest, EnabledChecksBuildSanitizerPassSlots) {
   EXPECT_EQ(counts.source_to_low, 1);
   EXPECT_TRUE(
       iree_string_view_is_empty(counts.source_to_low_sanitizer_reporting));
+  EXPECT_EQ(counts.vector_memory_to_scalar, 1);
   EXPECT_EQ(counts.sanitizer_insert_assertions, 1);
   EXPECT_TRUE(iree_string_view_equal(counts.sanitizer_insert_checks,
                                      IREE_SV("access|value|operation")));
@@ -482,6 +543,8 @@ TEST_F(TargetPipelineTest, EnabledChecksBuildSanitizerPassSlots) {
   EXPECT_EQ(counts.sanitizer_materialize_assertions, 1);
   EXPECT_LT(counts.sanitizer_insert_assertions_ordinal,
             counts.sanitizer_materialize_assertions_ordinal);
+  EXPECT_LT(counts.vector_memory_to_scalar_ordinal,
+            counts.sanitizer_insert_assertions_ordinal);
   EXPECT_LT(counts.sanitizer_materialize_assertions_ordinal,
             counts.source_to_low_ordinal);
   EXPECT_EQ(counts.other_sanitizer_runs, 0);
@@ -490,13 +553,13 @@ TEST_F(TargetPipelineTest, EnabledChecksBuildSanitizerPassSlots) {
 TEST_F(TargetPipelineTest, RaceChecksBuildRaceObservationPassSlot) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/LOOM_SANITIZER_CHECK_RACE,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = LOOM_SANITIZER_CHECK_RACE,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -506,6 +569,7 @@ TEST_F(TargetPipelineTest, RaceChecksBuildRaceObservationPassSlot) {
 
   const PipelineRunCounts counts = CountPipelineRuns(module.get(), pipeline_op);
   EXPECT_EQ(counts.source_to_low, 1);
+  EXPECT_EQ(counts.vector_memory_to_scalar, 1);
   EXPECT_EQ(counts.sanitizer_insert_assertions, 0);
   EXPECT_EQ(counts.sanitizer_insert_race_observations, 1);
   EXPECT_TRUE(iree_string_view_equal(counts.sanitizer_insert_race_checks,
@@ -517,13 +581,13 @@ TEST_F(TargetPipelineTest, RaceChecksBuildRaceObservationPassSlot) {
 TEST_F(TargetPipelineTest, UnknownCheckBitsFailValidation) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/1ull << 63,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = 1ull << 63,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;
@@ -538,15 +602,15 @@ TEST_F(TargetPipelineTest, UnknownCheckBitsFailValidation) {
 TEST_F(TargetPipelineTest, UnknownReportingModeFailsValidation) {
   ModulePtr module = AllocateModule(IREE_SV("pipeline"));
   const loom_target_pipeline_options_t options = {
-      /*.source_to_low_max_errors=*/{},
-      /*.source_to_low_legality_diagnostic_flags=*/{},
-      /*.control_flow_lowering=*/{},
-      /*.sanitizer=*/
-      {
-          /*.checks=*/0,
-          /*.flags=*/0,
-          /*.reporting_mode=*/(loom_sanitizer_reporting_mode_t)99,
-      },
+      .source_to_low_max_errors = {},
+      .source_to_low_legality_diagnostic_flags = {},
+      .control_flow_lowering = {},
+      .sanitizer =
+          {
+              .checks = 0,
+              .flags = 0,
+              .reporting_mode = (loom_sanitizer_reporting_mode_t)99,
+          },
   };
 
   loom_op_t* pipeline_op = nullptr;

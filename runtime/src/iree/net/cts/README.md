@@ -398,6 +398,20 @@ exercise ordinary and deliberately small native request extents. Their descripto
 counts cross 31/32/33, 63/64/65 and 127/128/129 independently of logical payload
 length and native queue depth.
 
+`IREE_NET_RDMA_CTS_COMPLETION_MODE=busy_poll` selects the public factory's
+dedicated-core completion policy for all RDMA CTS workloads, both copied messages
+and registered transfers. The default (or explicit `readiness`) keeps native
+notification service. Busy-mode benchmark rows use carrier name `rdma_busy_poll`
+so saved results retain the policy choice; ordinary rows remain `rdma`. Other
+values fail configuration. Device contexts remain fixed for the entire executable
+in either mode. Compare identical workloads and process CPU as well as wall time:
+one active busy CQ prevents its poll owner from sleeping even when idle.
+For dedicated-core measurements, assign each poll thread its own core; a shared
+process affinity mask alone can leave both owners time-sharing one core.
+The `busy_poll_transfer_trial_tests`, `busy_poll_direct_transfer_trial_tests`
+and `busy_poll_collective_trial_tests` targets run the same checked workloads
+with that environment setting, without another executable or workload copy.
+
 For optimized measurements, build
 `//runtime/src/iree/net/carrier/rdma/cts:direct_transfer_benchmarks` with the same
 optimization flags shown above, then run with the device/address environment:

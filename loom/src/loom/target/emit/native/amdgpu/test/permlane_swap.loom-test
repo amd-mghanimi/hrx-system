@@ -1,0 +1,164 @@
+// The compact and e64 encodings share one destructive two-register contract.
+// Named controls remain independent in Low and use LLVM's canonical spelling.
+// RUN: emit amdgpu-assembly @permlane_swap_forms strategy=source waits=none fixed=%lhs:physical_register:11:1 fixed=%rhs:physical_register:13:1
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane_swap_forms(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %v16c0, %v16c1 = v_permlane16_swap_b32 %lhs, %rhs
+  %v16d0, %v16d1 = v_permlane16_swap_b32_e64 %v16c0, %v16c1
+  %v16b0, %v16b1 = v_permlane16_swap_b32_e64 %v16d0, %v16d1 {bound_ctrl = 1}
+  %v16f0, %v16f1 = v_permlane16_swap_b32_e64 %v16b0, %v16b1 {fi = 1}
+  %v16a0, %v16a1 = v_permlane16_swap_b32_e64 %v16f0, %v16f1 {bound_ctrl = 1, fi = 1}
+  %v32c0, %v32c1 = v_permlane32_swap_b32 %v16a0, %v16a1
+  %v32d0, %v32d1 = v_permlane32_swap_b32_e64 %v32c0, %v32c1
+  %v32b0, %v32b1 = v_permlane32_swap_b32_e64 %v32d0, %v32d1 {bound_ctrl = 1}
+  %v32f0, %v32f1 = v_permlane32_swap_b32_e64 %v32b0, %v32b1 {fi = 1}
+  %v32a0, %v32a1 = v_permlane32_swap_b32_e64 %v32f0, %v32f1 {bound_ctrl = 1, fi = 1}
+  return %v32a0, %v32a1
+}
+
+// ----
+  v_permlane16_swap_b32 v11, v13
+  v_permlane16_swap_b32_e64 v11, v13
+  v_permlane16_swap_b32_e64 v11, v13 bound_ctrl:1
+  v_permlane16_swap_b32_e64 v11, v13 fi:1
+  v_permlane16_swap_b32_e64 v11, v13 bound_ctrl:1 fi:1
+  v_permlane32_swap_b32 v11, v13
+  v_permlane32_swap_b32_e64 v11, v13
+  v_permlane32_swap_b32_e64 v11, v13 bound_ctrl:1
+  v_permlane32_swap_b32_e64 v11, v13 fi:1
+  v_permlane32_swap_b32_e64 v11, v13 bound_ctrl:1 fi:1
+  s_endpgm
+
+// ====
+
+// Native words distinguish both opcodes and every OP_SEL control combination.
+// RUN: emit amdgpu-native-words @permlane_swap_words strategy=source waits=none fixed=%lhs:physical_register:11:1 fixed=%rhs:physical_register:13:1
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane_swap_words(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %v16c0, %v16c1 = v_permlane16_swap_b32 %lhs, %rhs
+  %v16d0, %v16d1 = v_permlane16_swap_b32_e64 %v16c0, %v16c1
+  %v16b0, %v16b1 = v_permlane16_swap_b32_e64 %v16d0, %v16d1 {bound_ctrl = 1}
+  %v16f0, %v16f1 = v_permlane16_swap_b32_e64 %v16b0, %v16b1 {fi = 1}
+  %v16a0, %v16a1 = v_permlane16_swap_b32_e64 %v16f0, %v16f1 {bound_ctrl = 1, fi = 1}
+  %v32c0, %v32c1 = v_permlane32_swap_b32 %v16a0, %v16a1
+  %v32d0, %v32d1 = v_permlane32_swap_b32_e64 %v32c0, %v32c1
+  %v32b0, %v32b1 = v_permlane32_swap_b32_e64 %v32d0, %v32d1 {bound_ctrl = 1}
+  %v32f0, %v32f1 = v_permlane32_swap_b32_e64 %v32b0, %v32b1 {fi = 1}
+  %v32a0, %v32a1 = v_permlane32_swap_b32_e64 %v32f0, %v32f1 {bound_ctrl = 1, fi = 1}
+  return %v32a0, %v32a1
+}
+
+// ----
+0x7E16B30D
+0xD199000B
+0x0000010D
+0xD199100B
+0x0000010D
+0xD199080B
+0x0000010D
+0xD199180B
+0x0000010D
+0x7E16B50D
+0xD19A000B
+0x0000010D
+0xD19A100B
+0x0000010D
+0xD19A080B
+0x0000010D
+0xD19A180B
+0x0000010D
+0xBF810000
+
+// ====
+
+// A write immediately consumed through the first destructive input needs the
+// full two-cycle gfx950 lane-permute forwarding distance.
+// RUN: emit amdgpu-wait-state-plan @permlane16_first_input_hazard strategy=source
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane16_first_input_hazard(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %fresh = v_mov_b32_copy %lhs
+  %left, %right = v_permlane16_swap_b32 %fresh, %rhs
+  return %left, %right
+}
+
+// ----
+amdgpu.wait_state_plan states=1 progress=3 hazards=1
+state[0] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n1/o1 producer=n0 consumer=n1 required=2 observed=0 residual=2
+
+// ====
+
+// The final assembly realizes the planner requirement as an s_nop 1.
+// RUN: emit amdgpu-assembly @permlane16_first_input_assembly strategy=source
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane16_first_input_assembly(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %fresh = v_mov_b32_copy %lhs
+  %left, %right = v_permlane16_swap_b32 %fresh, %rhs
+  return %left, %right
+}
+
+// ----
+  v_mov_b32 v0, v0
+  s_nop 1
+  v_permlane16_swap_b32 v0, v1
+  s_endpgm
+
+// ====
+
+// The second destructive input has the same forwarding restriction.
+// RUN: emit amdgpu-wait-state-plan @permlane32_second_input_hazard strategy=source
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane32_second_input_hazard(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %fresh = v_mov_b32_copy %rhs
+  %left, %right = v_permlane32_swap_b32 %lhs, %fresh
+  return %left, %right
+}
+
+// ----
+amdgpu.wait_state_plan states=1 progress=3 hazards=1
+state[0] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n1/o1 producer=n0 consumer=n1 required=2 observed=0 residual=2
+
+// ====
+
+// One intervening VALU instruction leaves one cycle of the e64 hazard.
+// RUN: emit amdgpu-wait-state-plan @permlane16_partial_progress strategy=source
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane16_partial_progress(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>, %other: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %fresh = v_mov_b32_copy %lhs
+  %gap = v_mov_b32_copy %other
+  %left, %right = v_permlane16_swap_b32_e64 %fresh, %rhs {bound_ctrl = 1}
+  return %left, %right, %gap
+}
+
+// ----
+amdgpu.wait_state_plan states=1 progress=4 hazards=1
+state[0] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n2/o2 producer=n0 consumer=n2 required=2 observed=1 residual=1
+
+// ====
+
+// Two intervening instructions satisfy the e64 forwarding distance exactly.
+// RUN: emit amdgpu-wait-state-plan @permlane32_sufficient_progress strategy=source
+
+amdgpu.target<gfx950> @target
+
+low.func.def target<amdgpu.cdna4.core>(@target) @permlane32_sufficient_progress(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>, %other: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %fresh = v_mov_b32_copy %lhs
+  %first = v_mov_b32_copy %other
+  %second = v_mov_b32_copy %first
+  %left, %right = v_permlane32_swap_b32_e64 %fresh, %rhs {fi = 1}
+  return %left, %right, %second
+}
+
+// ----
+amdgpu.wait_state_plan states=0 progress=5 hazards=0

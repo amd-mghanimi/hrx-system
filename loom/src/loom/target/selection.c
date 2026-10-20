@@ -55,18 +55,12 @@ iree_status_t loom_target_environment_select_profile(
   const loom_target_provider_set_t* provider_set = environment->provider_set;
   for (iree_host_size_t i = 0; i < provider_set->provider_count; ++i) {
     const loom_target_provider_t* provider = provider_set->providers[i];
-    if (provider == NULL || provider->profile_type == NULL ||
-        !iree_string_view_equal(provider->profile_type->name,
-                                specification->family)) {
-      continue;
+    if (provider->profile_type != NULL &&
+        iree_string_view_equal(provider->profile_type->name,
+                               specification->family)) {
+      selected_provider = provider;
+      break;
     }
-    if (selected_provider != NULL) {
-      return iree_make_status(
-          IREE_STATUS_FAILED_PRECONDITION,
-          "target family '%.*s' has multiple configured providers",
-          (int)specification->family.size, specification->family.data);
-    }
-    selected_provider = provider;
   }
   if (selected_provider == NULL) {
     return iree_make_status(
@@ -93,4 +87,57 @@ iree_status_t loom_target_environment_select_profile(
   }
   *out_profile = profile;
   return iree_ok_status();
+}
+
+iree_status_t loom_target_environment_select_cpu_profile(
+    const loom_target_environment_t* environment,
+    const iree_cpu_data_t* cpu_data, const loom_target_facts_t* requirement,
+    const loom_target_profile_t* profile,
+    loom_target_profile_selection_t* out_selection,
+    iree_allocator_t allocator) {
+  *out_selection = (loom_target_profile_selection_t){0};
+  const loom_target_provider_set_t* providers = environment->provider_set;
+  loom_target_profile_selection_t selected = {0};
+  iree_status_t status = iree_ok_status();
+  for (iree_host_size_t i = 0; i < providers->provider_count; ++i) {
+    const loom_target_provider_t* provider = providers->providers[i];
+    if (!provider->select_cpu_profile) {
+      continue;
+    }
+    loom_target_profile_selection_t candidate = {0};
+    status = provider->select_cpu_profile(cpu_data, requirement, profile,
+                                          &candidate, allocator);
+    if (!iree_status_is_ok(status)) {
+      break;
+    }
+    if (candidate.profile == NULL) {
+      continue;
+    }
+    if (selected.profile != NULL) {
+      loom_target_profile_selection_release(&candidate, allocator);
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "multiple compiler providers accept this CPU");
+      break;
+    }
+    selected = candidate;
+  }
+  if (iree_status_is_ok(status) && selected.profile == NULL) {
+    const iree_string_view_t architecture =
+        iree_cpu_architecture_name(cpu_data->architecture);
+    const iree_string_view_t requested =
+        profile       ? profile->target_bundle->name
+        : requirement ? loom_target_facts_identity_name(requirement)
+                      : IREE_SV("automatic");
+    status = iree_make_status(
+        IREE_STATUS_UNAVAILABLE,
+        "no native CPU profile for '%.*s' satisfies target '%.*s'",
+        (int)architecture.size, architecture.data, (int)requested.size,
+        requested.data);
+  }
+  if (iree_status_is_ok(status)) {
+    *out_selection = selected;
+    selected = (loom_target_profile_selection_t){0};
+  }
+  loom_target_profile_selection_release(&selected, allocator);
+  return status;
 }

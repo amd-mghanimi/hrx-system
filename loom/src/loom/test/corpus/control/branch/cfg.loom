@@ -1,0 +1,166 @@
+// Reusable bounds checks compose through shared, branch-containing helpers.
+// The caller retains every intermediate row so incorrect captures or return
+// continuations cannot hide behind the final clamped value.
+func.def inline @cfg_composition_clamp_row(%row: i32, %length: i32) -> (i32) {
+  %c0 = scalar.constant 0 : i32
+  %negative = scalar.cmpi slt, %row, %c0 : i32
+  cfg.cond_br %negative, ^lower, ^upper_check
+^lower:
+  func.return %c0 : i32
+^upper_check:
+  %too_large = scalar.cmpi sge, %row, %length : i32
+  cfg.cond_br %too_large, ^upper, ^inside
+^upper:
+  %c1 = scalar.constant 1 : i32
+  %last = scalar.subi %length, %c1 : i32
+  func.return %last : i32
+^inside:
+  func.return %row : i32
+}
+
+func.def inline @cfg_composition_advance_row(%row: i32, %delta: i32, %length: i32) -> (i32) {
+  %next = scalar.addi %row, %delta : i32
+  %bounded = func.call @cfg_composition_clamp_row(%next, %length) : (i32, i32) -> (i32)
+  func.return %bounded : i32
+}
+
+kernel.def @cfg_composition_walk_rows() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%start_bits: i64, %delta_bits: i64, %length: i32, %output: buffer) {
+  func.call @compute_cfg_composition_walk_rows(%start_bits, %delta_bits, %length, %output) : (i64, i64, i32, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_cfg_composition_walk_rows(%start_bits: i64, %delta_bits: i64, %length: i32, %output: buffer) {
+  %start = scalar.trunci %start_bits : i64 to i32
+  %delta = scalar.trunci %delta_bits : i64 to i32
+  %first = func.call @cfg_composition_advance_row(%start, %delta, %length) : (i32, i32, i32) -> (i32)
+  %second = func.call @cfg_composition_advance_row(%first, %delta, %length) : (i32, i32, i32) -> (i32)
+  %third = func.call @cfg_composition_advance_row(%second, %delta, %length) : (i32, i32, i32) -> (i32)
+  %fourth = func.call @cfg_composition_advance_row(%third, %delta, %length) : (i32, i32, i32) -> (i32)
+  %base = index.constant 0 : offset
+  %aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %rows = buffer.view %aligned[%base] : buffer -> view<4xi32>
+  view.store %first, %rows[0] : i32, view<4xi32>
+  view.store %second, %rows[1] : i32, view<4xi32>
+  view.store %third, %rows[2] : i32, view<4xi32>
+  view.store %fourth, %rows[3] : i32, view<4xi32>
+  func.return
+}
+
+func.def @cfg_composition_walk_rows_oracle(%start_bits: i64, %delta_bits: i64, %length: i32, %output: buffer) {
+  func.call @compute_cfg_composition_walk_rows(%start_bits, %delta_bits, %length, %output) : (i64, i64, i32, buffer)
+  func.return
+}
+
+check.scenario @cfg_composition_walk_rows_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %start = check.literal value(-5) : i64
+    %delta = check.literal value(3) : i64
+    %length = check.literal value(7) : i32
+    %storage = check.generate.fill value(-1) : tensor<12xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@cfg_composition_walk_rows, @cfg_composition_walk_rows_oracle>(%start, %delta, %length, %output) : (i64, i64, i32, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<12xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %start = check.literal value(8) : i64
+    %delta = check.literal value(-3) : i64
+    %length = check.literal value(7) : i32
+    %storage = check.generate.fill value(-1) : tensor<12xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@cfg_composition_walk_rows, @cfg_composition_walk_rows_oracle>(%start, %delta, %length, %output) : (i64, i64, i32, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<12xi32>
+    }
+  }
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %start_bits = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %delta_entropy = check.entropy.fork %entropy name("delta") : check.entropy
+    %delta_bits = check.entropy.read %delta_entropy[%trial] : check.entropy -> i64
+    %length = check.literal value(1) : i32
+    %storage = check.generate.fill value(-1) : tensor<12xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@cfg_composition_walk_rows, @cfg_composition_walk_rows_oracle>(%start_bits, %delta_bits, %length, %output) : (i64, i64, i32, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<12xi32>
+    }
+  }
+  check.return
+}
+
+// A reference constructed between nested decisions is used to evaluate the
+// inner decision and remains live in its success successor. The failure block
+// is shared with the outer decision, so target control-flow convergence must
+// preserve the reference's dominance without inventing an inactive reference.
+kernel.def @cfg_shared_failure_live_view() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %expected_first: i32, %output: buffer) {
+  func.call @compute_cfg_shared_failure_live_view(%input, %expected_first, %output) : (buffer, i32, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_cfg_shared_failure_live_view(%input: buffer, %expected_first: i32, %output: buffer) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<2xi32>
+  %first = view.load %input_view[0] : view<2xi32> -> i32
+  %first_bad = scalar.cmpi ne, %first, %expected_first : i32
+  cfg.cond_br %first_bad, ^failure, ^check_second
+^check_second:
+  %second_offset = index.constant 4 : offset
+  %second_view = buffer.view %input[%second_offset] : buffer -> view<1xi32>
+  %second = view.load %second_view[0] : view<1xi32> -> i32
+  %c0 = scalar.constant 0 : i32
+  %second_bad = scalar.cmpi sgt, %second, %c0 : i32
+  cfg.cond_br %second_bad, ^failure, ^success
+^failure:
+  %failure_view = buffer.view %output[%base] : buffer -> view<2xi32>
+  %failure = scalar.constant -1 : i32
+  view.store %failure, %failure_view[0] : i32, view<2xi32>
+  cfg.br ^done
+^success:
+  %success_second = view.load %second_view[0] : view<1xi32> -> i32
+  %twice = scalar.addi %second, %success_second : i32
+  %success_view = buffer.view %output[%base] : buffer -> view<2xi32>
+  view.store %twice, %success_view[0] : i32, view<2xi32>
+  cfg.br ^done
+^done:
+  func.return
+}
+
+func.def @cfg_shared_failure_live_view_oracle(%input: buffer, %expected_first: i32, %output: buffer) {
+  func.call @compute_cfg_shared_failure_live_view(%input, %expected_first, %output) : (buffer, i32, buffer)
+  func.return
+}
+
+check.scenario @cfg_shared_failure_live_view_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(4) step(-6) : tensor<2xi32>
+    %expected_first = check.literal value(5) : i32
+    %output = check.generate.fill value(-123) : tensor<2xi32>
+    check.compare<@cfg_shared_failure_live_view, @cfg_shared_failure_live_view_oracle>(%input, %expected_first, %output) : (tensor<2xi32>, i32, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(5) step(-2) : tensor<2xi32>
+    %expected_first = check.literal value(5) : i32
+    %output = check.generate.fill value(-123) : tensor<2xi32>
+    check.compare<@cfg_shared_failure_live_view, @cfg_shared_failure_live_view_oracle>(%input, %expected_first, %output) : (tensor<2xi32>, i32, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(5) step(-8) : tensor<2xi32>
+    %expected_first = check.literal value(5) : i32
+    %output = check.generate.fill value(-123) : tensor<2xi32>
+    check.compare<@cfg_shared_failure_live_view, @cfg_shared_failure_live_view_oracle>(%input, %expected_first, %output) : (tensor<2xi32>, i32, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.return
+}

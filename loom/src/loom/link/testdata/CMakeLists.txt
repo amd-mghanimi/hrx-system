@@ -9,6 +9,23 @@
 
 iree_add_all_subdirs()
 
+file(GLOB _GLOB_CONFIG_PROVIDERS_X_LOOM LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS config_providers/*.loom)
+iree_c_embed_data(
+  NAME
+    config_providers
+  SRCS
+    "${_GLOB_CONFIG_PROVIDERS_X_LOOM}"
+  C_FILE_OUTPUT
+    "config_providers_testdata.c"
+  H_FILE_OUTPUT
+    "config_providers_testdata.h"
+  IDENTIFIER
+    "loom_link_config_providers_testdata"
+  TESTONLY
+  FLATTEN
+  PUBLIC
+)
+
 file(GLOB _GLOB_PROVIDER_ROOTS_X_LOOM LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS provider_roots/*.loom)
 iree_c_embed_data(
   NAME
@@ -106,6 +123,40 @@ iree_c_embed_data(
     "planner_testdata.h"
   IDENTIFIER
     "loom_link_planner_testdata"
+  TESTONLY
+  FLATTEN
+  PUBLIC
+)
+
+file(GLOB _GLOB_PIPELINE_CONTRACTS_X_LOOM LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS pipeline_contracts/*.loom)
+iree_c_embed_data(
+  NAME
+    pipeline_contracts
+  SRCS
+    "${_GLOB_PIPELINE_CONTRACTS_X_LOOM}"
+  C_FILE_OUTPUT
+    "pipeline_contracts_testdata.c"
+  H_FILE_OUTPUT
+    "pipeline_contracts_testdata.h"
+  IDENTIFIER
+    "loom_link_pipeline_contracts_testdata"
+  TESTONLY
+  FLATTEN
+  PUBLIC
+)
+
+file(GLOB _GLOB_KERNEL_CONTRACTS_X_LOOM LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS kernel_contracts/*.loom)
+iree_c_embed_data(
+  NAME
+    kernel_contracts
+  SRCS
+    "${_GLOB_KERNEL_CONTRACTS_X_LOOM}"
+  C_FILE_OUTPUT
+    "kernel_contracts_testdata.c"
+  H_FILE_OUTPUT
+    "kernel_contracts_testdata.h"
+  IDENTIFIER
+    "loom_link_kernel_contracts_testdata"
   TESTONLY
   FLATTEN
   PUBLIC

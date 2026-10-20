@@ -12,6 +12,7 @@
 #include "iree/base/internal/arena.h"
 #include "iree/base/internal/math.h"
 #include "iree/hal/api.h"
+#include "iree/hal/memory/heap_pool.h"
 #include "iree/io/memory_stream.h"
 #include "iree/io/vec_stream.h"
 #include "iree/testing/gtest.h"
@@ -37,14 +38,18 @@ class ValueMaterializerTest : public ::testing::Test {
     RegisterDialect(LOOM_DIALECT_CHECK, loom_check_dialect_vtables);
     IREE_ASSERT_OK(loom_context_finalize(&context_));
 
-    IREE_ASSERT_OK(
-        iree_hal_allocator_create_heap(IREE_SV("testbench"), host_allocator_,
-                                       host_allocator_, &device_allocator_));
+    const iree_hal_pool_host_access_t host_access = {
+        .access = IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE,
+        .modes =
+            IREE_HAL_MAPPING_MODE_SCOPED | IREE_HAL_MAPPING_MODE_PERSISTENT,
+    };
+    IREE_ASSERT_OK(iree_hal_heap_pool_create(host_access, host_allocator_,
+                                             host_allocator_, &pool_));
   }
 
   void TearDown() override {
     iree_io_stream_release(written_stream_);
-    iree_hal_allocator_release(device_allocator_);
+    iree_hal_pool_release(pool_);
     iree_arena_deinitialize(&plan_arena_);
     loom_context_deinitialize(&context_);
     iree_arena_block_pool_deinitialize(&block_pool_);
@@ -61,8 +66,9 @@ class ValueMaterializerTest : public ::testing::Test {
   }
 
   loom_module_t* ParseModule(const char* source) {
-    loom_text_parse_options_t options = {};
-    options.max_errors = 20;
+    loom_text_parse_options_t options = {
+        .max_errors = 20,
+    };
     loom_module_t* module = nullptr;
     IREE_EXPECT_OK(loom_text_parse(iree_make_cstring_view(source),
                                    IREE_SV("value_materializer_test.loom"),
@@ -81,7 +87,7 @@ class ValueMaterializerTest : public ::testing::Test {
   loom_testbench_value_materializer_options_t MaterializerOptions() {
     loom_testbench_value_materializer_options_t options = {};
     loom_testbench_value_materializer_options_initialize(&options);
-    options.device_allocator = device_allocator_;
+    options.target_pool = pool_;
     options.open_read_file.fn = ValueMaterializerTest::OpenReadFile;
     options.open_read_file.user_data = this;
     options.open_write_file.fn = ValueMaterializerTest::OpenWriteFile;
@@ -179,7 +185,7 @@ class ValueMaterializerTest : public ::testing::Test {
   iree_arena_block_pool_t block_pool_;
   iree_arena_allocator_t plan_arena_;
   loom_context_t context_;
-  iree_hal_allocator_t* device_allocator_ = nullptr;
+  iree_hal_pool_t* pool_ = nullptr;
   iree_io_stream_t* written_stream_ = nullptr;
   std::string written_path_;
 };
@@ -220,14 +226,15 @@ TEST_F(ValueMaterializerTest, MaterializesNarrowScalarLiterals) {
     sources[i].literal.value = loom_attr_f64(literals[i].value);
   }
 
-  loom_testbench_case_plan_t case_plan = {};
-  case_plan.value_sources = sources;
-  case_plan.value_source_count = IREE_ARRAYSIZE(sources);
-  case_plan.cartesian_sample_count = 1;
-  case_plan.sample_count = 1;
+  loom_testbench_case_plan_t case_plan = {
+      .value_sources = sources,
+      .value_source_count = IREE_ARRAYSIZE(sources),
+      .cartesian_sample_count = 1,
+      .sample_count = 1,
+  };
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
@@ -236,6 +243,186 @@ TEST_F(ValueMaterializerTest, MaterializesNarrowScalarLiterals) {
   for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(literals); ++i) {
     ExpectRawU32Scalar(&table, sources[i].value_id, literals[i].expected_bits);
   }
+
+  loom_testbench_value_table_deinitialize(&table);
+  loom_module_free(module);
+}
+
+TEST_F(ValueMaterializerTest, ResolvesBufferFootprint) {
+  loom_module_t* module = nullptr;
+  IREE_ASSERT_OK(loom_module_allocate(&context_, IREE_SV("buffer_footprint"),
+                                      &block_pool_, nullptr, host_allocator_,
+                                      &module));
+
+  const loom_type_t first_storage_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I8, 8, /*alignment=*/0);
+  const loom_type_t first_alias_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I8, 4, /*alignment=*/0);
+  const loom_type_t first_byte_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I8, 1, /*alignment=*/0);
+  const loom_type_t empty_alias_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I8, 0, /*alignment=*/0);
+  const loom_type_t second_storage_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I32, 3, /*alignment=*/0);
+  const loom_type_t unused_storage_type = loom_type_shaped_1d(
+      LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I8, 5, /*alignment=*/0);
+  loom_value_id_t first_storage = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t first_alias = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t first_overlap = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t first_disjoint = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t first_adjacent = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t empty_alias = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t second_storage = LOOM_VALUE_ID_INVALID;
+  loom_value_id_t unused_storage = LOOM_VALUE_ID_INVALID;
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, first_storage_type, &first_storage));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, first_alias_type, &first_alias));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, first_alias_type, &first_overlap));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, first_byte_type, &first_disjoint));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, first_byte_type, &first_adjacent));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, empty_alias_type, &empty_alias));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, second_storage_type, &second_storage));
+  IREE_ASSERT_OK(
+      loom_module_define_value(module, unused_storage_type, &unused_storage));
+
+  const loom_testbench_value_source_plan_t sources[] = {
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_FILL,
+          .value_id = first_storage,
+          .type = first_storage_type,
+          .fill = {.value = loom_attr_i64(0)},
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW,
+          .value_id = first_alias,
+          .type = first_alias_type,
+          .tensor_view =
+              {
+                  .source_value_id = first_storage,
+                  .byte_offset = 2,
+              },
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW,
+          .value_id = first_overlap,
+          .type = first_alias_type,
+          .tensor_view =
+              {
+                  .source_value_id = first_storage,
+                  .byte_offset = 4,
+              },
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW,
+          .value_id = first_disjoint,
+          .type = first_byte_type,
+          .tensor_view =
+              {
+                  .source_value_id = first_storage,
+                  .byte_offset = 0,
+              },
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW,
+          .value_id = first_adjacent,
+          .type = first_byte_type,
+          .tensor_view =
+              {
+                  .source_value_id = first_storage,
+                  .byte_offset = 1,
+              },
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW,
+          .value_id = empty_alias,
+          .type = empty_alias_type,
+          .tensor_view =
+              {
+                  .source_value_id = first_storage,
+                  .byte_offset = 8,
+              },
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_FILL,
+          .value_id = second_storage,
+          .type = second_storage_type,
+          .fill = {.value = loom_attr_i64(0)},
+      },
+      {
+          .kind = LOOM_TESTBENCH_VALUE_SOURCE_FILL,
+          .value_id = unused_storage,
+          .type = unused_storage_type,
+          .fill = {.value = loom_attr_i64(0)},
+      },
+  };
+  const loom_testbench_case_plan_t case_plan = {
+      .value_sources = sources,
+      .value_source_count = IREE_ARRAYSIZE(sources),
+      .cartesian_sample_count = 1,
+      .sample_count = 1,
+  };
+
+  loom_testbench_value_table_t table = {};
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
+      module, &case_plan, host_allocator_, &table));
+  loom_testbench_value_materializer_options_t options = MaterializerOptions();
+  IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
+      &options, &case_plan, /*sample_ordinal=*/0, &table));
+
+  const loom_value_id_t values[] = {
+      first_disjoint, first_alias, first_alias,
+      first_overlap,  empty_alias, second_storage,
+  };
+  loom_testbench_buffer_footprint_t footprint = {};
+  IREE_ASSERT_OK(loom_testbench_value_table_resolve_buffer_footprint(
+      &table, IREE_ARRAYSIZE(values), values, &footprint));
+  EXPECT_EQ(footprint.storage_allocation_count, 2u);
+  EXPECT_EQ(footprint.storage_byte_length, 8u + 3u * sizeof(int32_t));
+  EXPECT_EQ(footprint.binding_range_count, 3u);
+  EXPECT_EQ(footprint.binding_range_byte_length, 7u + 3u * sizeof(int32_t));
+
+  const loom_value_id_t adjacent_values[] = {
+      first_disjoint, first_adjacent, first_alias,
+      first_overlap,  second_storage,
+  };
+  IREE_ASSERT_OK(loom_testbench_value_table_resolve_buffer_footprint(
+      &table, IREE_ARRAYSIZE(adjacent_values), adjacent_values, &footprint));
+  EXPECT_EQ(footprint.storage_allocation_count, 2u);
+  EXPECT_EQ(footprint.storage_byte_length, 8u + 3u * sizeof(int32_t));
+  EXPECT_EQ(footprint.binding_range_count, 2u);
+  EXPECT_EQ(footprint.binding_range_byte_length, 8u + 3u * sizeof(int32_t));
+
+  std::vector<loom_value_id_t> many_values(65, first_alias);
+  many_values.push_back(first_disjoint);
+  many_values.push_back(first_overlap);
+  many_values.push_back(empty_alias);
+  many_values.push_back(second_storage);
+  IREE_ASSERT_OK(loom_testbench_value_table_resolve_buffer_footprint(
+      &table, many_values.size(), many_values.data(), &footprint));
+  EXPECT_EQ(footprint.storage_allocation_count, 2u);
+  EXPECT_EQ(footprint.storage_byte_length, 8u + 3u * sizeof(int32_t));
+  EXPECT_EQ(footprint.binding_range_count, 3u);
+  EXPECT_EQ(footprint.binding_range_byte_length, 7u + 3u * sizeof(int32_t));
+
+  IREE_ASSERT_OK(loom_testbench_value_table_resolve_buffer_footprint(
+      &table, /*value_id_count=*/0, /*value_ids=*/nullptr, &footprint));
+  EXPECT_EQ(footprint.storage_allocation_count, 0u);
+  EXPECT_EQ(footprint.storage_byte_length, 0u);
+  EXPECT_EQ(footprint.binding_range_count, 0u);
+  EXPECT_EQ(footprint.binding_range_byte_length, 0u);
+
+  IREE_ASSERT_OK(loom_testbench_value_table_resolve_buffer_footprint(
+      &table, /*value_id_count=*/1, &empty_alias, &footprint));
+  EXPECT_EQ(footprint.storage_allocation_count, 1u);
+  EXPECT_EQ(footprint.storage_byte_length, 8u);
+  EXPECT_EQ(footprint.binding_range_count, 0u);
+  EXPECT_EQ(footprint.binding_range_byte_length, 0u);
 
   loom_testbench_value_table_deinitialize(&table);
   loom_module_free(module);
@@ -256,6 +443,10 @@ check.case @generated {
   %fill = check.generate.fill value(1.5) : tensor<3xf32>
   %bf16 = check.generate.fill value(0.25) : tensor<2xbf16>
   %uniform = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<4xf32>
+  %wide_up = check.generate.iota offset(-9223372036854775808) step(9223372036854775807) period(3) : tensor<5xi64>
+  %wide_down = check.generate.iota offset(9223372036854775807) step(-9223372036854775807) period(3) : tensor<5xi64>
+  %minimum_step = check.generate.iota offset(9223372036854775807) step(-9223372036854775808) period(2) : tensor<5xi64>
+  %wide_zero = check.generate.iota offset(-9223372036854775808) step(0) : tensor<5xi64>
   check.return
 }
 )");
@@ -266,14 +457,14 @@ check.case @generated {
   const loom_testbench_case_plan_t& case_plan = plan.cases[0];
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
       &options, &case_plan, /*sample_ordinal=*/1, &table));
 
   ASSERT_EQ(case_plan.parameter_count, 2u);
-  ASSERT_EQ(case_plan.value_source_count, 10u);
+  ASSERT_EQ(case_plan.value_source_count, 14u);
   loom_testbench_value_t scalar = {};
   IREE_ASSERT_OK(loom_testbench_value_table_lookup_retain(
       &table, case_plan.value_sources[0].value_id, &scalar));
@@ -287,6 +478,13 @@ check.case @generated {
       LookupBufferView(&table, case_plan.value_sources[1].value_id, &i8);
   ExpectBufferViewContents<int8_t>(i8_view, {4}, IREE_HAL_ELEMENT_TYPE_SINT_8,
                                    {-2, -1, 0, 1});
+  iree_hal_buffer_mapping_t persistent_mapping = {};
+  IREE_ASSERT_OK(iree_hal_buffer_map_range(
+      iree_hal_buffer_view_buffer(i8_view), IREE_HAL_MAPPING_MODE_PERSISTENT,
+      IREE_HAL_MEMORY_ACCESS_READ, IREE_HAL_BUFFER_MAP_FLAG_MAY_ALIAS, 0,
+      IREE_HAL_WHOLE_BUFFER, &persistent_mapping));
+  EXPECT_EQ(persistent_mapping.contents.data_length, 4u);
+  IREE_ASSERT_OK(iree_hal_buffer_unmap_range(&persistent_mapping));
   loom_testbench_value_deinitialize(&i8);
 
   loom_testbench_value_t i8_down = {};
@@ -359,6 +557,120 @@ check.case @generated {
   }
   loom_testbench_value_deinitialize(&uniform);
 
+  const std::vector<int64_t> expected_iotas[] = {
+      {INT64_MIN, -1, INT64_MAX - 1, INT64_MIN, -1},
+      {INT64_MAX, 0, -INT64_MAX, INT64_MAX, 0},
+      {INT64_MAX, -1, INT64_MAX, -1, INT64_MAX},
+      {INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN, INT64_MIN},
+  };
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(expected_iotas); ++i) {
+    loom_testbench_value_t value = {};
+    iree_hal_buffer_view_t* view = LookupBufferView(
+        &table, case_plan.value_sources[10 + i].value_id, &value);
+    ExpectBufferViewContents<int64_t>(view, {5}, IREE_HAL_ELEMENT_TYPE_SINT_64,
+                                      expected_iotas[i]);
+    loom_testbench_value_deinitialize(&value);
+  }
+
+  loom_testbench_value_table_deinitialize(&table);
+  loom_module_free(module);
+}
+
+TEST_F(ValueMaterializerTest, RejectsIotaOutsideElementRange) {
+  loom_module_t* module = ParseModule(R"(
+check.case @overflow_up {
+  %values = check.generate.iota offset(9223372036854775807) step(1) : tensor<2xi64>
+  check.return
+}
+check.case @overflow_down {
+  %values = check.generate.iota offset(-9223372036854775808) step(-1) : tensor<2xi64>
+  check.return
+}
+check.case @overflow_byte {
+  %values = check.generate.iota offset(-128) step(-1) : tensor<2xi8>
+  check.return
+}
+check.case @overflow_period {
+  %values = check.generate.iota offset(126) step(1) period(3) : tensor<4xi8>
+  check.return
+}
+)");
+  ASSERT_NE(module, nullptr);
+  loom_testbench_module_plan_t plan = PlanModule(module);
+  ASSERT_EQ(plan.case_count, 4u);
+  ASSERT_EQ(plan.issue_count, 0u);
+  loom_testbench_value_materializer_options_t options = MaterializerOptions();
+  for (iree_host_size_t i = 0; i < plan.case_count; ++i) {
+    loom_testbench_value_table_t table = {};
+    IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
+        module, &plan.cases[i], host_allocator_, &table));
+    IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
+                          loom_testbench_materialize_case_sample(
+                              &options, &plan.cases[i], 0, &table));
+    loom_testbench_value_table_deinitialize(&table);
+  }
+  loom_module_free(module);
+}
+
+TEST_F(ValueMaterializerTest, MaterializesFullWidthRandomIntegers) {
+  loom_module_t* module = ParseModule(R"(
+check.case @wide_random {
+  %seed = check.param.seed base(7) count(1) : i64
+  %full = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<128xi64>
+  %crossing = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 1) : tensor<128xi64>
+  %positive = check.generate.random.uniform seed(%seed) range(-1 to 9223372036854775807) : tensor<128xi64>
+  %minimum = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to -9223372036854775808) : tensor<128xi64>
+  %maximum = check.generate.random.uniform seed(%seed) range(9223372036854775807 to 9223372036854775807) : tensor<128xi64>
+  %small = check.generate.random.uniform seed(%seed) range(-3 to 3) : tensor<128xi64>
+  check.return
+}
+)");
+  ASSERT_NE(module, nullptr);
+  loom_testbench_module_plan_t plan = PlanModule(module);
+  ASSERT_EQ(plan.case_count, 1u);
+  ASSERT_EQ(plan.issue_count, 0u);
+  const loom_testbench_case_plan_t& case_plan = plan.cases[0];
+  ASSERT_EQ(case_plan.value_source_count, 6u);
+  const int64_t lower[] = {INT64_MIN, INT64_MIN, -1, INT64_MIN, INT64_MAX, -3};
+  const int64_t upper[] = {INT64_MAX, 1, INT64_MAX, INT64_MIN, INT64_MAX, 3};
+  std::vector<std::vector<int64_t>> first_realization(6);
+
+  loom_testbench_value_table_t table = {};
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
+      module, &case_plan, host_allocator_, &table));
+  loom_testbench_value_materializer_options_t options = MaterializerOptions();
+  for (int realization = 0; realization < 2; ++realization) {
+    loom_testbench_value_table_reset(&table);
+    IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
+        &options, &case_plan, /*sample_ordinal=*/0, &table));
+    for (iree_host_size_t i = 0; i < case_plan.value_source_count; ++i) {
+      loom_testbench_value_t value = {};
+      iree_hal_buffer_view_t* view =
+          LookupBufferView(&table, case_plan.value_sources[i].value_id, &value);
+      std::vector<int64_t> contents(128);
+      IREE_ASSERT_OK(iree_hal_buffer_map_read(
+          iree_hal_buffer_view_buffer(view), /*source_offset=*/0,
+          contents.data(), contents.size() * sizeof(int64_t)));
+      bool has_negative = false;
+      bool has_positive = false;
+      for (int64_t element : contents) {
+        EXPECT_GE(element, lower[i]);
+        EXPECT_LE(element, upper[i]);
+        has_negative |= element < 0;
+        has_positive |= element > 0;
+      }
+      if (i == 0) {
+        EXPECT_TRUE(has_negative);
+        EXPECT_TRUE(has_positive);
+      }
+      if (realization == 0) {
+        first_realization[i] = contents;
+      } else {
+        EXPECT_EQ(contents, first_realization[i]);
+      }
+      loom_testbench_value_deinitialize(&value);
+    }
+  }
   loom_testbench_value_table_deinitialize(&table);
   loom_module_free(module);
 }
@@ -379,7 +691,7 @@ check.case @tensor_view {
   const loom_testbench_case_plan_t& case_plan = plan.cases[0];
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
@@ -421,7 +733,7 @@ check.case @tensor_view_out_of_range {
   const loom_testbench_case_plan_t& case_plan = plan.cases[0];
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_EXPECT_STATUS_IS(
@@ -458,7 +770,7 @@ check.case @sweep {
   EXPECT_TRUE(case_plan.sample_count_truncated);
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
@@ -499,7 +811,7 @@ check.case @file_io {
   const loom_testbench_case_plan_t& case_plan = plan.cases[0];
 
   loom_testbench_value_table_t table = {};
-  IREE_ASSERT_OK(loom_testbench_value_table_initialize(
+  IREE_ASSERT_OK(loom_testbench_value_table_initialize_case(
       module, &case_plan, host_allocator_, &table));
   loom_testbench_value_materializer_options_t options = MaterializerOptions();
   IREE_ASSERT_OK(loom_testbench_materialize_case_sample(
@@ -520,13 +832,9 @@ check.case @file_io {
   IREE_ASSERT_OK(
       iree_io_stream_seek(written_stream_, IREE_IO_STREAM_SEEK_SET, 0));
   iree_hal_buffer_view_t* written_buffer_view = nullptr;
-  iree_hal_buffer_params_t buffer_params = {};
-  buffer_params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER;
-  buffer_params.access = IREE_HAL_MEMORY_ACCESS_READ;
-  buffer_params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL;
   IREE_ASSERT_OK(iree_numpy_npy_load_ndarray(
-      written_stream_, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT, buffer_params,
-      device_allocator_, &written_buffer_view));
+      written_stream_, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT, pool_,
+      /*min_alignment=*/0, &written_buffer_view));
   ExpectBufferViewContents<float>(written_buffer_view, {3},
                                   IREE_HAL_ELEMENT_TYPE_FLOAT_32,
                                   {1.1f, 2.2f, 3.3f});

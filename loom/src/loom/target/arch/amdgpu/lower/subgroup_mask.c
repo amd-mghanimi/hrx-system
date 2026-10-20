@@ -241,7 +241,11 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_active_mask_plan(
   out_plan->mask_bit_count = mask_bit_count;
   out_plan->wavefront_size = wavefront_size;
   *out_selected = true;
-  return iree_ok_status();
+  return loom_low_lower_plan_value_type(
+      context, mask,
+      loom_low_register_type(
+          loom_low_lower_context_descriptor_set(context)->stable_id,
+          LOOM_AMDGPU_REG_CLASS_ID_SGPR, mask_bit_count / 32));
 }
 
 iree_status_t loom_amdgpu_select_kernel_subgroup_ballot_plan(
@@ -282,7 +286,11 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_ballot_plan(
   out_plan->mask_bit_count = mask_bit_count;
   out_plan->wavefront_size = wavefront_size;
   *out_selected = true;
-  return iree_ok_status();
+  return loom_low_lower_plan_value_type(
+      context, mask,
+      loom_low_register_type(
+          loom_low_lower_context_descriptor_set(context)->stable_id,
+          LOOM_AMDGPU_REG_CLASS_ID_SGPR, mask_bit_count / 32));
 }
 
 iree_status_t loom_amdgpu_select_kernel_subgroup_vote_any_plan(
@@ -317,7 +325,11 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_vote_any_plan(
   out_plan->result = loom_kernel_subgroup_vote_any_result(source_op);
   out_plan->wavefront_size = wavefront_size;
   *out_selected = true;
-  return iree_ok_status();
+  return loom_low_lower_plan_value_type(
+      context, out_plan->result,
+      loom_low_register_type(
+          loom_low_lower_context_descriptor_set(context)->stable_id,
+          LOOM_AMDGPU_REG_CLASS_ID_SCC, 1));
 }
 
 iree_status_t loom_amdgpu_select_kernel_subgroup_vote_all_plan(
@@ -353,7 +365,11 @@ iree_status_t loom_amdgpu_select_kernel_subgroup_vote_all_plan(
   out_plan->result = loom_kernel_subgroup_vote_all_result(source_op);
   out_plan->wavefront_size = wavefront_size;
   *out_selected = true;
-  return iree_ok_status();
+  return loom_low_lower_plan_value_type(
+      context, out_plan->result,
+      loom_low_register_type(
+          loom_low_lower_context_descriptor_set(context)->stable_id,
+          LOOM_AMDGPU_REG_CLASS_ID_SCC, 1));
 }
 
 static iree_status_t loom_amdgpu_emit_subgroup_exec_mask(
@@ -498,9 +514,8 @@ iree_status_t loom_amdgpu_lower_kernel_subgroup_active_mask(
 iree_status_t loom_amdgpu_lower_kernel_subgroup_ballot(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_subgroup_ballot_plan_t* plan) {
-  loom_value_id_t low_predicate = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->predicate, &low_predicate));
+  loom_value_id_t low_predicate =
+      loom_low_lower_lookup_value(context, plan->predicate);
   loom_value_id_t exec_mask = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_active_predicate(
       context, source_op, &plan->active, low_predicate, &low_predicate,
@@ -513,9 +528,8 @@ iree_status_t loom_amdgpu_lower_kernel_subgroup_ballot(
 iree_status_t loom_amdgpu_lower_kernel_subgroup_vote_any(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_subgroup_vote_any_plan_t* plan) {
-  loom_value_id_t low_predicate = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->predicate, &low_predicate));
+  loom_value_id_t low_predicate =
+      loom_low_lower_lookup_value(context, plan->predicate);
   loom_value_id_t exec_mask = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_active_predicate(
       context, source_op, &plan->active, low_predicate, &low_predicate,
@@ -540,9 +554,8 @@ iree_status_t loom_amdgpu_lower_kernel_subgroup_vote_any(
 iree_status_t loom_amdgpu_lower_kernel_subgroup_vote_all(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_subgroup_vote_all_plan_t* plan) {
-  loom_value_id_t low_predicate = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->predicate, &low_predicate));
+  loom_value_id_t low_predicate =
+      loom_low_lower_lookup_value(context, plan->predicate);
   loom_value_id_t exec_mask = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_amdgpu_emit_subgroup_active_predicate(
       context, source_op, &plan->active, low_predicate, &low_predicate,

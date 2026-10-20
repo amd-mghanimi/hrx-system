@@ -173,9 +173,9 @@ class SourceMemoryPlanTest : public ::testing::Test {
     return op;
   }
 
-  loom_value_id_t BuildIndexAssumeRange(loom_value_id_t source,
-                                        int64_t minimum_value,
-                                        int64_t maximum_value) {
+  loom_value_id_t BuildAssumeRange(loom_value_id_t source,
+                                   int64_t minimum_value,
+                                   int64_t maximum_value) {
     loom_predicate_t* predicate = nullptr;
     IREE_EXPECT_OK(iree_arena_allocate_array(
         &module_->arena, 1, sizeof(*predicate), (void**)&predicate));
@@ -187,12 +187,24 @@ class SourceMemoryPlanTest : public ::testing::Test {
         /*.reserved=*/{},
         /*.args=*/{source, minimum_value, maximum_value},
     };
-    const loom_type_t result_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+    const loom_type_t result_type = loom_module_value_type(module_, source);
     loom_op_t* op = nullptr;
     IREE_EXPECT_OK(loom_index_assume_build(&builder_, &source, 1, predicate, 1,
                                            &result_type, 1,
                                            LOOM_LOCATION_UNKNOWN, &op));
     return loom_index_assume_results(op).values[0];
+  }
+
+  loom_value_id_t BuildIndexAssumeRange(loom_value_id_t source,
+                                        int64_t minimum_value,
+                                        int64_t maximum_value) {
+    return BuildAssumeRange(source, minimum_value, maximum_value);
+  }
+
+  loom_value_id_t BuildOffsetAssumeRange(loom_value_id_t source,
+                                         int64_t minimum_value,
+                                         int64_t maximum_value) {
+    return BuildAssumeRange(source, minimum_value, maximum_value);
   }
 
   loom_value_id_t BuildDenseLayout() {
@@ -312,9 +324,11 @@ class SourceMemoryPlanTest : public ::testing::Test {
         loom_value_fact_table_compute(out_facts, module_, function_));
   }
 
-  bool BuildPlan(loom_value_fact_table_t* facts, const loom_op_t* op,
-                 loom_low_source_memory_access_plan_t* out_plan,
-                 loom_low_source_memory_access_diagnostic_t* out_diagnostic) {
+  bool BuildPlan(
+      loom_value_fact_table_t* facts, const loom_op_t* op,
+      loom_low_source_memory_access_plan_t* out_plan,
+      loom_low_source_memory_access_diagnostic_t* out_diagnostic,
+      loom_low_source_memory_axis_byte_stride_t* axis_byte_strides = nullptr) {
     loom_local_value_domain_t value_domain = {};
     IREE_EXPECT_OK(loom_local_value_domain_acquire_for_region(
         module_, loom_func_like_body(function_), &analysis_arena_,
@@ -327,7 +341,7 @@ class SourceMemoryPlanTest : public ::testing::Test {
         &value_domain, &expression_context, &view_regions));
     IREE_EXPECT_OK(loom_view_region_table_analyze(&view_regions));
     const bool built = loom_low_source_memory_access_plan_build(
-        &view_regions, op, out_plan, out_diagnostic);
+        &view_regions, op, axis_byte_strides, out_plan, out_diagnostic);
     loom_local_value_domain_release(&value_domain);
     return built;
   }

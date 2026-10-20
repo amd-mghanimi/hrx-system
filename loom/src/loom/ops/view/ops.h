@@ -31,7 +31,8 @@ enum {
   LOOM_OP_VIEW_PREFETCH = LOOM_OP_KIND(LOOM_DIALECT_VIEW, 7),
   LOOM_OP_VIEW_ATOMIC_LOAD = LOOM_OP_KIND(LOOM_DIALECT_VIEW, 8),
   LOOM_OP_VIEW_ATOMIC_STORE = LOOM_OP_KIND(LOOM_DIALECT_VIEW, 9),
-  LOOM_OP_VIEW_COUNT_ = 10,
+  LOOM_OP_VIEW_BITCAST = LOOM_OP_KIND(LOOM_DIALECT_VIEW, 10),
+  LOOM_OP_VIEW_COUNT_ = 11,
 };
 
 // Intended future access kind for a prefetch hint.
@@ -87,7 +88,7 @@ iree_status_t loom_view_refine_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
-iree_status_t loom_view_refine_facts(
+iree_status_t loom_view_reinterpret_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,
@@ -128,7 +129,8 @@ iree_status_t loom_view_load_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_memory_access_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_memory_access_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_view_load_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -167,7 +169,8 @@ iree_status_t loom_view_store_build(
     loom_optional uint8_t cache_temporal,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_memory_access_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_memory_access_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_view_store_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
@@ -248,6 +251,11 @@ iree_status_t loom_view_atomic_rmw_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
+iree_status_t loom_view_atomic_observation_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
 iree_status_t loom_view_atomic_rmw_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
@@ -289,6 +297,11 @@ iree_status_t loom_view_atomic_cmpxchg_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
+iree_status_t loom_view_atomic_observation_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
 iree_status_t loom_view_atomic_cmpxchg_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
@@ -347,7 +360,13 @@ iree_status_t loom_view_atomic_load_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_view_atomic_load_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_view_atomic_load_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
+iree_status_t loom_view_atomic_observation_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
 iree_status_t loom_view_atomic_load_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
@@ -383,8 +402,29 @@ iree_status_t loom_view_atomic_store_build(
     loom_optional uint8_t cache_temporal,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_view_atomic_store_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_view_atomic_store_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_view_atomic_store_verify(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter);
+
+// LOOM_OP_VIEW_BITCAST: Reinterpret a dense contiguous byte span with another view type. Source and result must have no encoding, byte-addressable scalar elements, and provably equal total bit counts. Shapes may differ, including common SSA dimension factors. The storage root, byte origin, memory space, access rights, and borrowed lifetime are unchanged; this operation allocates, copies, and synchronizes nothing. Element accesses use the target's memory byte order. Result alignment qualifiers govern executed accesses and establish no address facts.
+// %bytes = view.bitcast %words : view<7168xi32> -> view<28672xi8>
+LOOM_DEFINE_ISA(loom_view_bitcast_isa, LOOM_OP_VIEW_BITCAST)
+LOOM_DEFINE_OPERAND(loom_view_bitcast_source, 0)
+LOOM_DEFINE_RESULT(loom_view_bitcast_result, 0)
+iree_status_t loom_view_bitcast_build(
+    loom_builder_t* builder,
+    loom_may_consume loom_value_id_t source,
+    loom_type_t result_type,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_view_reinterpret_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+iree_status_t loom_view_bitcast_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 

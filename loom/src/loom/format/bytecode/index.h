@@ -130,8 +130,8 @@ typedef struct loom_bytecode_symbol_metadata_t {
   uint32_t defining_op_ordinal;
   // Function-like calling convention byte, or zero for non-function symbols.
   uint8_t calling_convention;
-  // Function-like purity byte, or zero for non-function symbols.
-  uint8_t purity;
+  // Function-like effect-contract byte, or zero for non-function symbols.
+  uint8_t effect_contract;
   // Kernel workload argument count, or zero for ordinary functions.
   uint16_t kernel_workload_argument_count;
   // Function-like argument count, or zero for non-function symbols.
@@ -274,9 +274,8 @@ typedef struct loom_bytecode_module_metadata_t {
   // The module-root slice begins at zero; symbol slices are described by
   // symbol_references. Targets may repeat within a slice.
   uint32_t* dependency_symbol_indices;
-  // Arena-owned target interface constraints parallel to
-  // dependency_symbol_indices. Zero accepts any target interface.
-  loom_symbol_interface_flags_t* dependency_target_interfaces;
+  // Arena-owned dependency contracts parallel to dependency_symbol_indices.
+  loom_symbol_reference_contract_t* dependency_contracts;
   // Arena-owned source root region indices plus one parallel to
   // dependency_symbol_indices. Zero identifies a source symbol contract or
   // module-root occurrence.

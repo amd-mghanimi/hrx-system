@@ -150,9 +150,13 @@ static iree_status_t iree_io_parameter_index_provider_resolve(
   // NOTE: file is retained!
   iree_hal_file_t* file = NULL;
   if (entry->type == IREE_IO_PARAMETER_INDEX_ENTRY_STORAGE_TYPE_FILE) {
+    // Keep the cached file on its native I/O path. Load operations select and
+    // import the exact parameter range through their caller-provided pool;
+    // attaching the entire backing allocation here would duplicate that route
+    // and give the cache a different memory contract from the emitted buffer.
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_hal_file_cache_lookup(
-                provider->file_cache, device,
+                provider->file_cache, device, /*storage_pool=*/NULL,
                 iree_io_parameter_queue_family_affinity(queue), access,
                 entry->storage.file.handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE,
                 &file));
@@ -185,8 +189,7 @@ static iree_status_t iree_io_validate_parameter_range(
       if (iree_all_bits_set(
               iree_io_file_handle_access(entry->storage.file.handle),
               IREE_IO_FILE_ACCESS_WRITE)) {
-        allowed_access |=
-            IREE_HAL_MEMORY_ACCESS_WRITE | IREE_HAL_MEMORY_ACCESS_DISCARD;
+        allowed_access |= IREE_HAL_MEMORY_ACCESS_WRITE;
       }
       break;
     default:
@@ -513,7 +516,7 @@ static iree_status_t iree_io_parameter_op_batch_advance_timeline(
 // operation are serialized and the wait has a higher chance of being elided.
 static iree_status_t iree_io_parameter_op_batch_enqueue_alloca(
     iree_io_parameter_op_batch_t* batch, iree_hal_pool_t* pool,
-    iree_hal_buffer_params_t params, iree_device_size_t allocation_size,
+    iree_device_size_t min_alignment, iree_device_size_t allocation_size,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   IREE_ASSERT_ARGUMENT(batch);
   IREE_ASSERT_ARGUMENT(out_buffer);
@@ -531,8 +534,8 @@ static iree_status_t iree_io_parameter_op_batch_enqueue_alloca(
                                         batch, /*op_byte_length=*/0, &step));
 
   const iree_hal_pool_reservation_request_t request = {
-      .params = params,
       .allocation_size = allocation_size,
+      .min_alignment = min_alignment,
   };
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_queue_alloca(batch->queue, step.wait_semaphore_list,
@@ -560,7 +563,7 @@ static iree_status_t iree_io_parameter_op_batch_enqueue_splat(
       z0, iree_hal_queue_fill(batch->queue, step.wait_semaphore_list,
                               step.signal_semaphore_list, buffer, buffer_offset,
                               length, pattern, pattern_length,
-                              IREE_HAL_FILL_FLAG_NONE));
+                              /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -584,7 +587,7 @@ static iree_status_t iree_io_parameter_op_batch_enqueue_file_read(
   iree_status_t status = iree_hal_queue_read(
       batch->queue, step.wait_semaphore_list, step.signal_semaphore_list,
       source_file, source_file_offset, target_buffer, target_buffer_offset,
-      length, flags);
+      length, /*barriers=*/NULL, flags);
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -621,7 +624,7 @@ static iree_status_t iree_io_parameter_op_batch_enqueue_file_write(
   iree_status_t status = iree_hal_queue_write(
       batch->queue, step.wait_semaphore_list, step.signal_semaphore_list,
       source_buffer, source_buffer_offset, target_file, target_file_offset,
-      length, flags);
+      length, /*barriers=*/NULL, flags);
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -653,9 +656,9 @@ static iree_status_t iree_io_parameter_op_batch_flush(
   // this links the incoming waits directly to the outgoing signals.
   if (batch->timeline_live_count == 0) {
     IREE_TRACE_ZONE_APPEND_TEXT(z0, "pass-through wait-signal");
-    status = iree_hal_queue_transfer(batch->queue, batch->wait_semaphore_list,
-                                     batch->signal_semaphore_list,
-                                     /*operation_count=*/0, NULL);
+    status = iree_hal_queue_transfer(
+        batch->queue, batch->wait_semaphore_list, batch->signal_semaphore_list,
+        /*operation_count=*/0, NULL, /*barriers=*/NULL);
   } else {
     IREE_TRACE_ZONE_APPEND_TEXT(z0, "timeline set wait chain");
     // Note that we allocate timelines on-demand up to timeline_live_count so
@@ -665,9 +668,9 @@ static iree_status_t iree_io_parameter_op_batch_flush(
         .semaphores = batch->timeline_semaphores,
         .payload_values = batch->timeline_values,
     };
-    status = iree_hal_queue_transfer(batch->queue, join_semaphore_list,
-                                     batch->signal_semaphore_list,
-                                     /*operation_count=*/0, NULL);
+    status = iree_hal_queue_transfer(
+        batch->queue, join_semaphore_list, batch->signal_semaphore_list,
+        /*operation_count=*/0, NULL, /*barriers=*/NULL);
   }
 
   // Report the total number of bytes transferred by the batch.
@@ -814,9 +817,9 @@ static iree_status_t iree_io_parameter_transfer_batch_begin_group(
       .semaphores = &group->start_semaphore,
       .payload_values = &group->start_value,
   };
-  return iree_hal_queue_transfer(batch->queue, group->wait_semaphore_list,
-                                 start_signal_list,
-                                 /*operation_count=*/0, NULL);
+  return iree_hal_queue_transfer(
+      batch->queue, group->wait_semaphore_list, start_signal_list,
+      /*operation_count=*/0, NULL, /*barriers=*/NULL);
 }
 
 typedef struct iree_io_parameter_transfer_batch_step_t {
@@ -924,7 +927,7 @@ static iree_status_t iree_io_parameter_transfer_batch_enqueue_splat(
                                                             length, &step));
   iree_status_t status = iree_hal_queue_fill(
       batch->queue, step.wait_semaphore_list, step.signal_semaphore_list,
-      buffer, buffer_offset, length, pattern, pattern_length,
+      buffer, buffer_offset, length, pattern, pattern_length, /*barriers=*/NULL,
       IREE_HAL_FILL_FLAG_NONE);
 
   IREE_TRACE_ZONE_END(z0);
@@ -948,7 +951,7 @@ static iree_status_t iree_io_parameter_transfer_batch_enqueue_file_read(
   iree_status_t status = iree_hal_queue_read(
       batch->queue, step.wait_semaphore_list, step.signal_semaphore_list,
       source_file, source_file_offset, target_buffer, target_buffer_offset,
-      length, flags);
+      length, /*barriers=*/NULL, flags);
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -984,7 +987,7 @@ static iree_status_t iree_io_parameter_transfer_batch_enqueue_file_write(
   iree_status_t status = iree_hal_queue_write(
       batch->queue, step.wait_semaphore_list, step.signal_semaphore_list,
       source_buffer, source_buffer_offset, target_file, target_file_offset,
-      length, flags);
+      length, /*barriers=*/NULL, flags);
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -1009,9 +1012,9 @@ static iree_status_t iree_io_parameter_transfer_batch_complete_group(
   const iree_io_parameter_transfer_batch_group_t* group =
       &batch->groups[group_index];
   if (group->timeline_mask == 0) {
-    return iree_hal_queue_transfer(batch->queue, group->wait_semaphore_list,
-                                   group->signal_semaphore_list,
-                                   /*operation_count=*/0, NULL);
+    return iree_hal_queue_transfer(
+        batch->queue, group->wait_semaphore_list, group->signal_semaphore_list,
+        /*operation_count=*/0, NULL, /*barriers=*/NULL);
   }
 
   iree_hal_semaphore_t*
@@ -1031,9 +1034,9 @@ static iree_status_t iree_io_parameter_transfer_batch_complete_group(
       .semaphores = wait_semaphores,
       .payload_values = wait_values,
   };
-  return iree_hal_queue_transfer(batch->queue, wait_semaphore_list,
-                                 group->signal_semaphore_list,
-                                 /*operation_count=*/0, NULL);
+  return iree_hal_queue_transfer(
+      batch->queue, wait_semaphore_list, group->signal_semaphore_list,
+      /*operation_count=*/0, NULL, /*barriers=*/NULL);
 }
 
 static iree_status_t iree_io_parameter_transfer_batch_end(
@@ -1072,8 +1075,11 @@ static iree_status_t iree_io_parameter_transfer_batch_end(
   return status;
 }
 
-static void iree_io_file_handle_buffer_release(void* user_data,
-                                               iree_hal_buffer_t* buffer) {
+static void iree_io_file_handle_buffer_release(
+    void* user_data, iree_hal_external_storage_class_t storage_class,
+    iree_hal_external_storage_payload_t payload) {
+  (void)storage_class;
+  (void)payload;
   iree_io_file_handle_release((iree_io_file_handle_t*)user_data);
 }
 
@@ -1082,7 +1088,7 @@ static iree_status_t iree_io_parameter_index_provider_load(
     iree_hal_queue_t* queue, iree_hal_pool_t* pool,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    iree_string_view_t source_scope, iree_hal_buffer_params_t target_params,
+    iree_string_view_t source_scope, iree_device_size_t target_min_alignment,
     iree_host_size_t count, iree_io_parameter_enumerator_t enumerator,
     iree_io_parameter_emitter_t emitter) {
   iree_io_parameter_index_provider_t* provider =
@@ -1115,6 +1121,18 @@ static iree_status_t iree_io_parameter_index_provider_load(
       IREE_TRACE_ZONE_APPEND_VALUE_I64(z_entry, span.length);
     }
 
+    // Each emitted buffer contains its requested span at |buffer_offset|.
+    // Validate the full output geometry before trying either import or
+    // allocation so both paths expose the same logical extent.
+    iree_device_size_t target_allocation_size = 0;
+    if (iree_status_is_ok(status) &&
+        IREE_UNLIKELY(!iree_device_size_checked_add(
+            span.buffer_offset, span.length, &target_allocation_size))) {
+      status = iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "loaded parameter buffer range exceeds the device address space");
+    }
+
     // TODO(benvanik): refactor iree_io_parameter_index_provider_resolve so that
     // it doesn't resolve the HAL file. Today if we hit the perfect case where
     // all loads are able to be imported directly then we don't end up using the
@@ -1132,55 +1150,65 @@ static iree_status_t iree_io_parameter_index_provider_load(
     // allow us to map files that we already have open via other mechanisms
     // (FILE, fd, etc).
     iree_hal_buffer_t* target_buffer = NULL;
-    if (iree_status_is_ok(status) &&
+    if (iree_status_is_ok(status) && target_min_alignment <= 1 &&
+        span.buffer_offset == 0 &&
         source_entry->type == IREE_IO_PARAMETER_INDEX_ENTRY_STORAGE_TYPE_FILE &&
         iree_io_file_handle_type(source_entry->storage.file.handle) ==
             IREE_IO_FILE_HANDLE_TYPE_HOST_ALLOCATION) {
-      iree_hal_allocator_t* allocator = iree_hal_device_allocator(device);
-      const iree_hal_buffer_compatibility_t compatibility =
-          iree_hal_allocator_query_buffer_compatibility(
-              allocator, target_params, span.length,
-              /*out_params=*/NULL, /*out_allocation_size=*/NULL);
-      if (iree_all_bits_set(compatibility,
-                            IREE_HAL_BUFFER_COMPATIBILITY_IMPORTABLE)) {
-        iree_byte_span_t host_allocation =
-            iree_io_file_handle_primitive(source_entry->storage.file.handle)
-                .value.host_allocation;
-        iree_hal_external_buffer_t external_buffer = {
-            .type = IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION,
-            .flags = IREE_HAL_EXTERNAL_BUFFER_FLAG_NONE,
-            .size = host_allocation.data_length,
-            .handle =
-                {
-                    .host_allocation =
-                        {
-                            .ptr = host_allocation.data +
-                                   source_entry->storage.file.offset,
-                        },
-                },
-        };
-        iree_hal_buffer_release_callback_t release_callback = {
-            .fn = iree_io_file_handle_buffer_release,
-            .user_data = source_entry->storage.file.handle,
+      const iree_hal_external_storage_class_t storage_class =
+          iree_hal_make_external_storage_class(
+              IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER);
+      iree_hal_pool_import_requirements_t import_requirements;
+      iree_byte_span_t host_allocation =
+          iree_io_file_handle_primitive(source_entry->storage.file.handle)
+              .value.host_allocation;
+      if (iree_hal_pool_query_import_requirements(pool, storage_class,
+                                                  &import_requirements) &&
+          host_allocation.data_length >= import_requirements.min_byte_length &&
+          (!import_requirements.max_byte_length ||
+           host_allocation.data_length <=
+               import_requirements.max_byte_length) &&
+          iree_host_ptr_has_alignment(
+              host_allocation.data,
+              (iree_host_size_t)import_requirements.base_alignment) &&
+          host_allocation.data_length %
+                  import_requirements.byte_length_granularity ==
+              0) {
+        iree_hal_external_storage_t external_buffer = {
+            .storage_class = storage_class,
+            .payload.host_pointer = host_allocation.data,
+            .byte_length = host_allocation.data_length,
+            .host_cacheability = IREE_HAL_HOST_CACHEABILITY_WRITE_BACK,
+            .maintenance_range =
+                iree_hal_make_buffer_range(0, host_allocation.data_length),
+            .release = iree_io_file_handle_buffer_release,
+            .release_user_data = source_entry->storage.file.handle,
         };
         iree_io_file_handle_retain(source_entry->storage.file.handle);
-        status = iree_hal_allocator_import_buffer(
-            allocator, target_params, &external_buffer, release_callback,
+        status = iree_hal_pool_import_buffer(
+            pool, &external_buffer,
+            iree_hal_make_buffer_range(
+                source_entry->storage.file.offset + span.parameter_offset,
+                target_allocation_size),
             &target_buffer);
         if (iree_status_is_ok(status)) {
           IREE_TRACE_ZONE_APPEND_TEXT(z_entry, "import succeeded");
         } else {
-          iree_io_file_handle_release(source_entry->storage.file.handle);
+          iree_hal_external_storage_release(&external_buffer);
         }
       }
     }
 
-    // When the import path above fails we fall back to alloca + fill/read.
+    // When no admitted zero-copy route applies, allocate and populate through
+    // the queue. A selected import route that fails is propagated: hiding a
+    // malformed handle or native attachment failure behind a copy would make
+    // the pool contract nondeterministic.
     if (iree_status_is_ok(status) && !target_buffer) {
       // Enqueue an allocation of the target buffer on a timeline.
       // The next operation we enqueue will go on the same timeline.
       status = iree_io_parameter_op_batch_enqueue_alloca(
-          &batch, pool, target_params, span.length, &target_buffer);
+          &batch, pool, target_min_alignment, target_allocation_size,
+          &target_buffer);
 
       // Enqueue the operation on the same timeline as the allocation.
       if (iree_status_is_ok(status)) {

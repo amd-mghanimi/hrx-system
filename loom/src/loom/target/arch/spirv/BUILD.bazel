@@ -54,7 +54,6 @@ _SPIRV_PROVIDER_VISIBILITY = [
     "//loom/src/loom/target/configured:__pkg__",
     "//loom/src/loom/tools/iree-benchmark-loom:__pkg__",
     "//loom/src/loom/tools/iree-test-loom:__pkg__",
-    "//loom/src/loom/tools/loom-compile:__pkg__",
     "//loom/src/loom/tooling/target/spirv:__pkg__",
 ] + _SPIRV_C_API_VISIBILITY + _SPIRV_CHECK_PACKAGE_VISIBILITY
 
@@ -65,6 +64,13 @@ _SPIRV_TOOLING_VISIBILITY = [
 #===------------------------------------------------------------------------===#
 # SPIR-V low descriptors
 #===------------------------------------------------------------------------===#
+
+loom_cc_library(
+    name = "bda_abi",
+    hdrs = ["bda_abi.h"],
+    visibility = _SPIRV_EMIT_VISIBILITY,
+    deps = ["//runtime/src/iree/base"],
+)
 
 loom_spirv_registry_sources(name = "registry_sources")
 
@@ -93,6 +99,12 @@ loom_cc_library(
         _SPIRV_LOWER_VISIBILITY +
         _SPIRV_OPS_VISIBILITY
     ),
+)
+
+loom_cc_library(
+    name = "extended_instruction",
+    hdrs = ["extended_instruction.h"],
+    visibility = _SPIRV_EMIT_VISIBILITY,
 )
 
 loom_generated_file(
@@ -164,6 +176,7 @@ loom_cc_library(
     textual_hdrs = [":packet_rows_tables.inl"],
     visibility = _SPIRV_EMIT_VISIBILITY,
     deps = [
+        ":extended_instruction",
         ":isa",
         ":value_types",
         "//loom/src/loom/target/arch/spirv/descriptors",
@@ -217,7 +230,24 @@ loom_cc_library(
     deps = [
         ":cooperative_properties",
         "//loom/src/loom/target:facts",
+        "//loom/src/loom/target:facts_builder",
         "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "compiler_provider",
+    srcs = ["compiler_provider.c"],
+    hdrs = ["compiler_provider.h"],
+    visibility = _SPIRV_C_API_VISIBILITY + [
+        "//loom/src/loom/target/configured:__pkg__",
+        "//loom/src/loom/tooling/target/spirv:__pkg__",
+    ],
+    deps = [
+        ":facts",
+        ":provider",
+        "//loom/src/loom/target:provider",
+        "//loom/src/loom/target/emit/spirv:module_compiler",
     ],
 )
 
@@ -239,6 +269,7 @@ loom_cc_test(
     srcs = ["profile_test.cc"],
     deps = [
         ":profile",
+        "//loom/src/loom/target:facts_builder",
         "//loom/src/loom/target/arch/spirv/records:target_records",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
@@ -256,13 +287,25 @@ loom_cc_library(
     ],
 )
 
+loom_cc_test(
+    name = "math_policy_test",
+    srcs = ["math_policy_test.cc"],
+    deps = [
+        ":math_policy",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/target:math_policy",
+        "//loom/src/loom/target:types",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
 loom_cc_library(
     name = "module_contract",
     srcs = ["module_contract.c"],
     hdrs = ["module_contract.h"],
-    visibility = _SPIRV_EMIT_VISIBILITY,
+    visibility = _SPIRV_EMIT_VISIBILITY + _SPIRV_TOOLING_VISIBILITY,
     deps = [
-        "//loom/src/loom/codegen/low:target_binding",
         "//loom/src/loom/target:types",
         "//runtime/src/iree/base",
     ],
@@ -274,6 +317,7 @@ loom_cc_library(
     hdrs = ["low_verify.h"],
     visibility = _SPIRV_TOOLING_VISIBILITY,
     deps = [
+        ":bda_abi",
         ":error_defs",
         ":module_contract",
         ":packet_rows",
@@ -281,6 +325,7 @@ loom_cc_library(
         ":scalar_types",
         "//loom/src/loom/codegen/low:diagnostics",
         "//loom/src/loom/codegen/low:verify",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/low",
         "//loom/src/loom/target:registers",
@@ -296,10 +341,34 @@ loom_cc_library(
     srcs = ["legalization.c"],
     hdrs = ["legalization.h"],
     deps = [
+        ":features",
+        ":value_types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/target:legalization",
         "//loom/src/loom/target/arch/spirv/descriptors",
+        "//loom/src/loom/transforms/scalar:target_legalization",
+        "//loom/src/loom/transforms/vector:packet_legalization",
+        "//loom/src/loom/transforms/vector:shape_legalization",
+        "//loom/src/loom/transforms/vector:target_legalization",
         "//loom/src/loom/transforms/vector:to_scalar",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "ir_provider",
+    srcs = ["ir_provider.c"],
+    hdrs = ["ir_provider.h"],
+    visibility = ["//loom/src/loom/target/configured:__pkg__"],
+    deps = [
+        ":facts",
+        "//loom/src/loom/target:provider",
+        "//loom/src/loom/target/arch/spirv/descriptors:low_registry",
+        "//loom/src/loom/target/arch/spirv/ops",
         "//runtime/src/iree/base",
     ],
 )
@@ -326,10 +395,14 @@ loom_cc_test(
     name = "provider_test",
     srcs = ["provider_test.cc"],
     deps = [
+        ":bda_abi",
+        ":error_defs",
         ":features",
         ":profile",
         ":provider",
         "//loom/src/loom/analysis:symbol_facts",
+        "//loom/src/loom/codegen/low:text_asm",
+        "//loom/src/loom/codegen/low:verify",
         "//loom/src/loom/format/text:parser",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
@@ -337,6 +410,7 @@ loom_cc_test(
         "//loom/src/loom/ops/target",
         "//loom/src/loom/target:provider",
         "//loom/src/loom/target/arch/spirv/records:target_records",
+        "//loom/src/loom/testing:diagnostic_matchers",
         "//loom/src/loom/testing:module_ptr",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
@@ -410,71 +484,77 @@ loom_check_test_suite(
     # Explicit-CFG corpora (carried_counter_store, selected_payload_transport,
     # shared_conditional_values, uniform_predicate_control) are inapplicable:
     # SPIR-V requires structured control flow. control_flow_legality owns that
-    # rejection contract; mixed corpora use per-case TEMPLATE-EXCLUDE directives.
+    # rejection contract.
     srcs = [
+        "test/bfloat_collective_legalization.loom-test",
         "test/source_low/barrier.loom-test",
         "test/source_low/baseline.loom-test",
         "test/source_low/buffer_bulk.loom-test",
         "test/source_low/buffer_raw.loom-test",
         "test/source_low/buffer_selection.loom-test",
+        "test/source_low/builtin_queries.loom-test",
         "test/source_low/callable_values.loom-test",
         "test/source_low/control_flow_legality.loom-test",
         "test/source_low/index_addressing.loom-test",
+        "test/source_low/integer_bit_counts.loom-test",
+        "test/source_low/integer_rotations.loom-test",
         "test/source_low/loop_counter_offset.loom-test",
         "test/source_low/low_verify_diagnostics.loom-test",
         "test/source_low/math_contraction.loom-test",
         "test/source_low/memory_access_flags.loom-test",
-        "test/source_low/memory_float8.loom-test",
-        "test/source_low/memory_integer_terms.loom-test",
-        "test/source_low/memory_packed_tails.loom-test",
+        "test/source_low/memory_constant.loom-test",
         "test/source_low/memory_scalar_addressing.loom-test",
-        "test/source_low/memory_scalar_wide_offsets.loom-test",
-        "test/source_low/memory_signed_terms.loom-test",
-        "test/source_low/memory_subview.loom-test",
-        "test/source_low/memory_vector_atomic_workgroup.loom-test",
+        "test/source_low/memory_shared_components.loom-test",
         "test/source_low/memory_wide_carriers.loom-test",
-        "test/source_low/memory_wide_offsets.loom-test",
-        "test/source_low/memory_word.loom-test",
         "test/source_low/memory_workgroup_scalar_addressing.loom-test",
+        "test/source_low/narrow_float_payloads.loom-test",
         "test/source_low/nested_view_selection.loom-test",
-        "test/source_low/numeric_address_widening.loom-test",
+        "test/source_low/numeric_bfloat_narrow.loom-test",
         "test/source_low/numeric_bfloat_widen.loom-test",
-        "test/source_low/numeric_boolean_comparison.loom-test",
-        "test/source_low/numeric_constant_remainder.loom-test",
-        "test/source_low/numeric_conversion.loom-test",
-        "test/source_low/numeric_conversion_float8.loom-test",
-        "test/source_low/numeric_conversion_wide.loom-test",
-        "test/source_low/numeric_float_comparison_flags.loom-test",
-        "test/source_low/numeric_index.loom-test",
-        "test/source_low/numeric_index_conversion.loom-test",
+        "test/source_low/numeric_extended_math.loom-test",
+        "test/source_low/numeric_float_arithmetic.loom-test",
+        "test/source_low/numeric_float_comparison.loom-test",
+        "test/source_low/numeric_float_extrema.loom-test",
         "test/source_low/numeric_integer_extrema.loom-test",
-        "test/source_low/numeric_minmax.loom-test",
         "test/source_low/numeric_narrow_address.loom-test",
-        "test/source_low/numeric_offset_wide.loom-test",
-        "test/source_low/numeric_reciprocal.loom-test",
+        "test/source_low/numeric_narrow_float_carriers.loom-test",
+        "test/source_low/numeric_narrow_float_signs.loom-test",
+        "test/source_low/numeric_rounding.loom-test",
         "test/source_low/numeric_scalar_f32.loom-test",
-        "test/source_low/numeric_scalar_i32.loom-test",
-        "test/source_low/numeric_scalar_i64.loom-test",
-        "test/source_low/numeric_scalar_i64_shift_counts.loom-test",
-        "test/source_low/numeric_scalar_i64_subtract.loom-test",
-        "test/source_low/numeric_unsigned_constant_division.loom-test",
+        "test/source_low/numeric_scalar_f32_values.loom-test",
+        "test/source_low/numeric_trigonometry.loom-test",
         "test/source_low/numeric_unsigned_remainder.loom-test",
+        "test/source_low/ordinary_vector_alu.loom-test",
+        "test/source_low/ordinary_vector_concat.loom-test",
+        "test/source_low/ordinary_vector_conversion.loom-test",
         "test/source_low/ordinary_vector_float.loom-test",
+        "test/source_low/ordinary_vector_scale.loom-test",
         "test/source_low/ordinary_vector_structure.loom-test",
+        "test/source_low/packed_bitstream_words.loom-test",
         "test/source_low/packed_memory_alignment.loom-test",
-        "test/source_low/packed_memory_values.loom-test",
-        "test/source_low/predicate_extension.loom-test",
+        "test/source_low/predicate_truncation.loom-test",
+        "test/source_low/predicate_truncation_diagnostics.loom-test",
+        "test/source_low/scalar_float_conversion.loom-test",
         "test/source_low/semantic_assertions.loom-test",
         "test/source_low/source_low.loom-test",
         "test/source_low/source_low_diagnostics.loom-test",
+        "test/source_low/source_unroll.loom-test",
+        "test/source_low/split_barrier.loom-test",
         "test/source_low/structural_value_types_bytecode.loom-test",
         "test/source_low/structured_control.loom-test",
+        "test/source_low/subgroup_ballot.loom-test",
+        "test/source_low/subgroup_predicates.loom-test",
+        "test/source_low/subgroup_reductions.loom-test",
+        "test/source_low/subgroup_shuffle.loom-test",
         "test/source_low/target_legalize.loom-test",
         "test/source_low/unbound_low.loom-test",
         "test/source_low/vector_atomic_policy.loom-test",
         "test/source_low/vector_large_insert.loom-test",
         "test/source_low/view_transport.loom-test",
+        "test/source_low/workgroup_payload_projection.loom-test",
         "test/source_low/workgroup_storage.loom-test",
+        "test/source_low/workgroup_storage_reuse.loom-test",
+        "test/subgroup_packet_legalization.loom-test",
     ],
     test_name_prefix_to_strip = "test/source_low/",
 )

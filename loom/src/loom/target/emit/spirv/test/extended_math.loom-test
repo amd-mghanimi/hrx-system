@@ -1,0 +1,56 @@
+// RUN: emit spirv-dis validate
+// REQUIRES: spirv-dis, spirv-val
+
+spirv.target<vulkan1_3> @target
+
+low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @spirv_extended_math() asm {
+  %one = OpConstant.f32 1065353216
+  %two = OpConstant.f32 1073741824
+  %pair = OpCompositeConstruct.v2f32 %one, %two
+  %sine = OpExtInst.GLSL.std.450.Sin.f32 %one
+  %cosine = OpExtInst.GLSL.std.450.Cos.v2f32 %pair
+  %exp = OpExtInst.GLSL.std.450.Exp.f32 %one
+  %log = OpExtInst.GLSL.std.450.Log.f32 %exp
+  %exp2 = OpExtInst.GLSL.std.450.Exp2.v2f32 %pair
+  %log2 = OpExtInst.GLSL.std.450.Log2.v2f32 %exp2
+  return
+}
+
+// ----
+               OpCapability Shader
+               OpCapability VulkanMemoryModel
+               OpCapability PhysicalStorageBufferAddresses
+               OpCapability Int64
+               OpExtension "SPV_KHR_vulkan_memory_model"
+               OpExtension "SPV_KHR_physical_storage_buffer"
+         %11 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel PhysicalStorageBuffer64 Vulkan
+               OpEntryPoint GLCompute %spirv_extended_math "spirv_extended_math"
+               OpExecutionMode %spirv_extended_math LocalSize 1 1 1
+               OpName %spirv_extended_math "spirv_extended_math"
+               OpName %one "one"
+               OpName %two "two"
+               OpName %pair "pair"
+               OpName %sine "sine"
+               OpName %cosine "cosine"
+               OpName %exp "exp"
+               OpName %log "log"
+               OpName %exp2 "exp2"
+               OpName %log2 "log2"
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %one = OpConstant %float 1
+        %two = OpConstant %float 2
+    %v2float = OpTypeVector %float 2
+%spirv_extended_math = OpFunction %void None %3
+          %4 = OpLabel
+       %pair = OpCompositeConstruct %v2float %one %two
+       %sine = OpExtInst %float %11 Sin %one
+     %cosine = OpExtInst %v2float %11 Cos %pair
+        %exp = OpExtInst %float %11 Exp %one
+        %log = OpExtInst %float %11 Log %exp
+       %exp2 = OpExtInst %v2float %11 Exp2 %pair
+       %log2 = OpExtInst %v2float %11 Log2 %exp2
+               OpReturn
+               OpFunctionEnd

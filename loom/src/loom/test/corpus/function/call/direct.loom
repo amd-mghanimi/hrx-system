@@ -1,0 +1,115 @@
+func.def noinline @swap(%a: i64, %b: i64) -> (i64, i64) {
+  func.return %b, %a : i64, i64
+}
+
+func.def noinline @nested_swap(%a: i64, %b: i64) -> (i64, i64) {
+  %first, %second = func.call @swap(%a, %b) : (i64, i64) -> (i64, i64)
+  func.return %first, %second : i64, i64
+}
+
+func.def @entry(%a: i64, %b: i64) -> (i64, i64, i64, i64) {
+  %first, %second = func.call @nested_swap(%a, %b) : (i64, i64) -> (i64, i64)
+  %third, %fourth = func.call @swap(%second, %first) : (i64, i64) -> (i64, i64)
+  func.return %a, %b, %third, %fourth : i64, i64, i64, i64
+}
+
+func.def @partial_results(%a: i64, %b: i64) -> (i64) {
+  %first, %second = func.call @swap(%a, %b) : (i64, i64) -> (i64, i64)
+  func.return %first : i64
+}
+
+func.def noinline @factorial(%n: i32) -> (i32) {
+  %c1 = scalar.constant 1 : i32
+  %done = scalar.cmpi sle, %n, %c1 : i32
+  %result = scf.if %done -> (i32) {
+    scf.yield %c1 : i32
+  } else {
+    %previous = scalar.subi %n, %c1 : i32
+    %partial = func.call @factorial(%previous) : (i32) -> (i32)
+    %product = scalar.muli %n, %partial : i32
+    scf.yield %product : i32
+  }
+  func.return %result : i32
+}
+
+func.def @loop_calls(%count: i32, %a: i64, %b: i64) -> (i32, i64, i64) {
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %remaining, %first, %second = scf.while(%before = %count : i32, %left = %a : i64, %right = %b : i64) -> (i32, i64, i64) {
+    %condition = scalar.cmpi sgt, %before, %c0 : i32
+    scf.condition %condition, %before, %left, %right : i1, i32, i64, i64
+  } do(%current: i32, %x: i64, %y: i64) {
+    %next = scalar.subi %current, %c1 : i32
+    %swapped_x, %swapped_y = func.call @swap(%x, %y) : (i64, i64) -> (i64, i64)
+    scf.yield %next, %swapped_x, %swapped_y : i32, i64, i64
+  }
+  func.return %count, %first, %second : i32, i64, i64
+}
+
+// A wide result tuple is only partly consumed. Original arguments must remain
+// live beside the kept results, including values from both ends of the tuple.
+func.def noinline @rotate16(%v0: i64, %v1: i64, %v2: i64, %v3: i64, %v4: i64, %v5: i64, %v6: i64, %v7: i64, %v8: i64, %v9: i64, %v10: i64, %v11: i64, %v12: i64, %v13: i64, %v14: i64, %v15: i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) {
+  func.return %v15, %v0, %v1, %v2, %v3, %v4, %v5, %v6, %v7, %v8, %v9, %v10, %v11, %v12, %v13, %v14 : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+}
+
+func.def @wide_call(%a: i64, %b: i64) -> (i64, i64, i64, i64, i64) {
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15 = func.call @rotate16(%a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b) : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  func.return %a, %b, %r0, %r8, %r15 : i64, i64, i64, i64, i64
+}
+
+func.def noinline @consume(%a: i64) {
+  func.return
+}
+
+func.def noinline @produce() -> (i64, i64, i64) {
+  %c1 = scalar.constant 1 : i64
+  %c2 = scalar.constant 2 : i64
+  %c3 = scalar.constant 3 : i64
+  func.return %c1, %c2, %c3 : i64, i64, i64
+}
+
+func.def @unequal_call_prefixes(%a: i64) -> (i64, i64, i64, i64) {
+  func.call @consume(%a) : (i64)
+  %r0, %r1, %r2 = func.call @produce() : () -> (i64, i64, i64)
+  func.return %a, %r0, %r1, %r2 : i64, i64, i64, i64
+}
+
+// Keeps direct, recursive, loop-carried, wide, and empty call signatures in a
+// single independently generated observation.
+func.def @direct_call_observations(%a: i64, %b: i64, %control: i64, %word_output: buffer, %wide_output: buffer) {
+  %control_word = scalar.trunci %control : i64 to i32
+  %mask = scalar.constant 7 : i32
+  %count = scalar.andi %control_word, %mask : i32
+  %entry0, %entry1, %entry2, %entry3 = func.call @entry(%a, %b) : (i64, i64) -> (i64, i64, i64, i64)
+  %partial = func.call @partial_results(%a, %b) : (i64, i64) -> (i64)
+  %factorial = func.call @factorial(%count) : (i32) -> (i32)
+  %original_count, %loop0, %loop1 = func.call @loop_calls(%count, %a, %b) : (i32, i64, i64) -> (i32, i64, i64)
+  %wide0, %wide1, %wide2, %wide3, %wide4 = func.call @wide_call(%a, %b) : (i64, i64) -> (i64, i64, i64, i64, i64)
+  %prefix0, %prefix1, %prefix2, %prefix3 = func.call @unequal_call_prefixes(%a) : (i64) -> (i64, i64, i64, i64)
+  %word_values = vector.from_elements %factorial, %original_count : vector<2xi32>
+  %wide_values = vector.from_elements %entry0, %entry1, %entry2, %entry3, %partial, %loop0, %loop1, %wide0, %wide1, %wide2, %wide3, %wide4, %prefix0, %prefix1, %prefix2, %prefix3 : vector<16xi64>
+  %origin = index.constant 0 : offset
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<2xi32>
+  %wide_results = buffer.view %wide_output[%origin] : buffer -> view<16xi64>
+  vector.store %word_values, %word_results[0] : vector<2xi32>, view<2xi32>
+  vector.store %wide_values, %wide_results[0] : vector<16xi64>, view<16xi64>
+  func.return
+}
+
+check.scenario @direct_call_values {
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %a_source = check.entropy.fork %entropy name("a") : check.entropy
+    %b_source = check.entropy.fork %entropy name("b") : check.entropy
+    %control_source = check.entropy.fork %entropy name("control") : check.entropy
+    %a = check.entropy.read %a_source[%trial] : check.entropy -> i64
+    %b = check.entropy.read %b_source[%trial] : check.entropy -> i64
+    %control = check.entropy.read %control_source[%trial] : check.entropy -> i64
+    %word_output = check.generate.fill value(0) : tensor<2xi32>
+    %wide_output = check.generate.fill value(0) : tensor<16xi64>
+    check.compare<@direct_call_observations>(%a, %b, %control, %word_output, %wide_output) : (i64, i64, i64, tensor<2xi32>, tensor<16xi64>) -> () {
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<2xi32>
+      check.expect.bitwise actual(%wide_output) expected(%wide_output) : tensor<16xi64>
+    }
+  }
+  check.return
+}

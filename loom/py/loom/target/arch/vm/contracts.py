@@ -946,7 +946,7 @@ def _view_cases():
                     minimum_alignment=(
                         0 if instruction in (BUFFER_LOAD, BUFFER_STORE) else width // 8
                     ),
-                    diagnostic=(
+                    alignment_diagnostic=(
                         None
                         if instruction in (BUFFER_LOAD, BUFFER_STORE)
                         else GuardDiagnostic(
@@ -966,6 +966,7 @@ def _view_cases():
                     static_byte_offset_maximum=0 if zero_static else 2**63 - 1,
                     dynamic_term_count=None if dynamic else 0,
                     dynamic_term_count_minimum=1 if dynamic else 0,
+                    reuse_view_base=dynamic,
                 )
                 emits = []
                 coordinate = ValueRef.source_memory_dynamic_byte_offset()
@@ -1150,7 +1151,10 @@ def _buffer_cases():
     yield DescriptorRule(
         source_op=buffer.buffer_alloca,
         descriptor=descriptor,
-        guards=(Guard.enum_attr_equals("memory_space", "private"),),
+        guards=(
+            Guard.operand_segment_count("pool", 0),
+            Guard.enum_attr_equals("memory_space", "private"),
+        ),
         emit=(
             EmitDescriptorOp(
                 descriptor=descriptor,

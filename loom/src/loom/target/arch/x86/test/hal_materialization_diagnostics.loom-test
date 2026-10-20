@@ -1,0 +1,99 @@
+// RUN: pass x86-materialize-hal-kernel
+
+x86.target<scalar> @target
+
+// An authored ABI dictionary has a closed field vocabulary.
+// ERROR@+1: BACKEND/054 {field_name="unknown"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({unknown = 0}) @unknown_field() asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/052 {constraint="a void logical signature and one offset per parameter"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [], signature = (i32) -> ()}) @missing_offset(%value: reg<x86.gpr32>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/053 {parameter_index="0", actual_type="buffer"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [64], signature = (buffer) -> ()}) @binding_limit(%value: reg<x86.gpr64>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// The starting byte fits, but the entire parameter must fit.
+// ERROR@+1: BACKEND/053 {parameter_index="0", actual_type="i64"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [252], signature = (i64) -> ()}) @constant_extent(%value: reg<x86.gpr64>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/052 {constraint="one argument carrier per logical parameter"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [], signature = () -> ()}) @carrier_count(%value: reg<x86.gpr32>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// A narrow logical value cannot use a pointer-width carrier.
+// ERROR@+1: BACKEND/053 {parameter_index="0", actual_type="reg<x86.gpr64>"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [0], signature = (i8) -> ()}) @carrier_width(%value: reg<x86.gpr64>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// A three-byte record fits the schema but has no scalar entry load.
+// ERROR@+1: BACKEND/053 {parameter_index="0", actual_type="reg<x86.gpr32>"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [0], signature = (vector<3xi8>) -> ()}) @load_width(%value: reg<x86.gpr32>) asm {
+  return
+}
+
+// ====
+
+x86.target<avx512> @target
+
+// Task parameters use the stable callable SIMD predicate representation.
+// ERROR@+1: BACKEND/053 {parameter_index="0", actual_type="reg<x86.k>"}
+low.kernel.def target<x86.avx512.core>(@target) abi_layout({offsets = [0], signature = (vector<16xi1>) -> ()}) @predicate_mask(%value: reg<x86.k>) asm {
+  return
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/052 {constraint="one invocation per workgroup without clustering"}
+low.kernel.def target<x86.scalar.core>(@target) abi_layout({offsets = [], signature = () -> ()}) cluster_size(2, 1, 1) @cluster() asm {
+  return
+}
+
+// ====
+
+// A source ABI rejection stops boundary construction before creating Low IR.
+// RUN: pass source-to-low
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/052 {constraint="a parameter layout fitting the dispatch binding and constant limits"}
+kernel.def target(@target) @constant_capacity() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%value0: i64, %value1: i64, %value2: i64, %value3: i64, %value4: i64, %value5: i64, %value6: i64, %value7: i64, %value8: i64, %value9: i64, %value10: i64, %value11: i64, %value12: i64, %value13: i64, %value14: i64, %value15: i64, %value16: i64, %value17: i64, %value18: i64, %value19: i64, %value20: i64, %value21: i64, %value22: i64, %value23: i64, %value24: i64, %value25: i64, %value26: i64, %value27: i64, %value28: i64, %value29: i64, %value30: i64, %value31: i64, %value32: i64) {
+  kernel.return
+}

@@ -1,0 +1,254 @@
+func.def device inline @compute_index_uniform_add(%step: index, %value: i32) -> (i32, i32, i32, i32) {
+  %position = index.cast %value : i32 to index
+  %increment = index.constant 64 : index
+  %sum_right = index.add %position, %step : index
+  %word_right = index.cast %sum_right : index to i32
+  %sum_left = index.add %step, %position : index
+  %word_left = index.cast %sum_left : index to i32
+  %sum_constant_right = index.add %position, %increment : index
+  %word_constant_right = index.cast %sum_constant_right : index to i32
+  %sum_constant_left = index.add %increment, %position : index
+  %word_constant_left = index.cast %sum_constant_left : index to i32
+  func.return %word_right, %word_left, %word_constant_right, %word_constant_left : i32, i32, i32, i32
+}
+
+kernel.def @index_uniform_add() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%step: index, %input: buffer, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi32>
+  %value = view.load %inputs[%lane] : view<64xi32> -> i32
+  %word_right, %word_left, %word_constant_right, %word_constant_left = func.call pure @compute_index_uniform_add(%step, %value) : (index, i32) -> (i32, i32, i32, i32)
+  %base_right = index.constant 0 : offset
+  %base_left = index.constant 256 : offset
+  %base_constant_right = index.constant 512 : offset
+  %base_constant_left = index.constant 768 : offset
+  %outputs_right = buffer.view %output[%base_right] : buffer -> view<64xi32>
+  %outputs_left = buffer.view %output[%base_left] : buffer -> view<64xi32>
+  %outputs_constant_right = buffer.view %output[%base_constant_right] : buffer -> view<64xi32>
+  %outputs_constant_left = buffer.view %output[%base_constant_left] : buffer -> view<64xi32>
+  view.store %word_right, %outputs_right[%lane] : i32, view<64xi32>
+  view.store %word_left, %outputs_left[%lane] : i32, view<64xi32>
+  view.store %word_constant_right, %outputs_constant_right[%lane] : i32, view<64xi32>
+  view.store %word_constant_left, %outputs_constant_left[%lane] : i32, view<64xi32>
+  kernel.return
+}
+
+func.def @index_uniform_add_oracle(%step: index, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi32>
+  %base_right = index.constant 0 : offset
+  %base_left = index.constant 256 : offset
+  %base_constant_right = index.constant 512 : offset
+  %base_constant_left = index.constant 768 : offset
+  %outputs_right = buffer.view %output[%base_right] : buffer -> view<64xi32>
+  %outputs_left = buffer.view %output[%base_left] : buffer -> view<64xi32>
+  %outputs_constant_right = buffer.view %output[%base_constant_right] : buffer -> view<64xi32>
+  %outputs_constant_left = buffer.view %output[%base_constant_left] : buffer -> view<64xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %loop_step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %loop_step] {
+    %value = view.load %inputs[%lane] : view<64xi32> -> i32
+    %word_right, %word_left, %word_constant_right, %word_constant_left = func.call pure @compute_index_uniform_add(%step, %value) : (index, i32) -> (i32, i32, i32, i32)
+    view.store %word_right, %outputs_right[%lane] : i32, view<64xi32>
+    view.store %word_left, %outputs_left[%lane] : i32, view<64xi32>
+    view.store %word_constant_right, %outputs_constant_right[%lane] : i32, view<64xi32>
+    view.store %word_constant_left, %outputs_constant_left[%lane] : i32, view<64xi32>
+  }
+  func.return
+}
+
+check.scenario @index_uniform_add_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %step = check.literal value(-17) : index
+    %input = check.generate.iota offset(100) step(1) : tensor<64xi32>
+    %storage = check.generate.fill value(-123) : tensor<288xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<288xi32> -> tensor<256xi32>
+    check.compare<@index_uniform_add, @index_uniform_add_oracle>(%step, %input, %output) : (index, tensor<64xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<288xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %step = check.literal value(37) : index
+    %input = check.generate.iota offset(2147483500) step(1) : tensor<64xi32>
+    %storage = check.generate.fill value(-123) : tensor<288xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<288xi32> -> tensor<256xi32>
+    check.compare<@index_uniform_add, @index_uniform_add_oracle>(%step, %input, %output) : (index, tensor<64xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<288xi32>
+    }
+  }
+  check.return
+}
+
+func.def device inline @compute_offset_uniform_add(%raw_step: offset, %value: i64) -> (i64, i64, i64, i64) {
+  %raw_position = scalar.assume %value [range(%value, 0, 4294967040)] : i64
+  %position = index.cast %raw_position : i64 to offset
+  %step = index.assume %raw_step [range(%raw_step, 0, 255)] : offset
+  %increment = index.constant 128 : offset
+  %sum_right = index.add %position, %step : offset
+  %word_right = index.cast %sum_right : offset to i64
+  %sum_left = index.add %step, %position : offset
+  %word_left = index.cast %sum_left : offset to i64
+  %sum_constant_right = index.add %position, %increment : offset
+  %word_constant_right = index.cast %sum_constant_right : offset to i64
+  %sum_constant_left = index.add %increment, %position : offset
+  %word_constant_left = index.cast %sum_constant_left : offset to i64
+  func.return %word_right, %word_left, %word_constant_right, %word_constant_left : i64, i64, i64, i64
+}
+
+kernel.def @offset_uniform_add() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%raw_step: offset, %input: buffer, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi64>
+  %value = view.load %inputs[%lane] : view<64xi64> -> i64
+  %word_right, %word_left, %word_constant_right, %word_constant_left = func.call pure @compute_offset_uniform_add(%raw_step, %value) : (offset, i64) -> (i64, i64, i64, i64)
+  %base_right = index.constant 0 : offset
+  %base_left = index.constant 512 : offset
+  %base_constant_right = index.constant 1024 : offset
+  %base_constant_left = index.constant 1536 : offset
+  %outputs_right = buffer.view %output[%base_right] : buffer -> view<64xi64>
+  %outputs_left = buffer.view %output[%base_left] : buffer -> view<64xi64>
+  %outputs_constant_right = buffer.view %output[%base_constant_right] : buffer -> view<64xi64>
+  %outputs_constant_left = buffer.view %output[%base_constant_left] : buffer -> view<64xi64>
+  view.store %word_right, %outputs_right[%lane] : i64, view<64xi64>
+  view.store %word_left, %outputs_left[%lane] : i64, view<64xi64>
+  view.store %word_constant_right, %outputs_constant_right[%lane] : i64, view<64xi64>
+  view.store %word_constant_left, %outputs_constant_left[%lane] : i64, view<64xi64>
+  kernel.return
+}
+
+func.def @offset_uniform_add_oracle(%raw_step: offset, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<64xi64>
+  %base_right = index.constant 0 : offset
+  %base_left = index.constant 512 : offset
+  %base_constant_right = index.constant 1024 : offset
+  %base_constant_left = index.constant 1536 : offset
+  %outputs_right = buffer.view %output[%base_right] : buffer -> view<64xi64>
+  %outputs_left = buffer.view %output[%base_left] : buffer -> view<64xi64>
+  %outputs_constant_right = buffer.view %output[%base_constant_right] : buffer -> view<64xi64>
+  %outputs_constant_left = buffer.view %output[%base_constant_left] : buffer -> view<64xi64>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %loop_step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %loop_step] {
+    %value = view.load %inputs[%lane] : view<64xi64> -> i64
+    %word_right, %word_left, %word_constant_right, %word_constant_left = func.call pure @compute_offset_uniform_add(%raw_step, %value) : (offset, i64) -> (i64, i64, i64, i64)
+    view.store %word_right, %outputs_right[%lane] : i64, view<64xi64>
+    view.store %word_left, %outputs_left[%lane] : i64, view<64xi64>
+    view.store %word_constant_right, %outputs_constant_right[%lane] : i64, view<64xi64>
+    view.store %word_constant_left, %outputs_constant_left[%lane] : i64, view<64xi64>
+  }
+  func.return
+}
+
+check.scenario @offset_uniform_add_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %step = check.literal value(64) : offset
+    %input = check.generate.iota offset(2147483584) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<288xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<288xi64> -> tensor<256xi64>
+    check.compare<@offset_uniform_add, @offset_uniform_add_oracle>(%step, %input, %output) : (offset, tensor<64xi64>, tensor<256xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<288xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %step = check.literal value(255) : offset
+    %input = check.generate.iota offset(4294966976) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<288xi64>
+    %output = check.tensor.view %storage offset(128) : tensor<288xi64> -> tensor<256xi64>
+    check.compare<@offset_uniform_add, @offset_uniform_add_oracle>(%step, %input, %output) : (offset, tensor<64xi64>, tensor<256xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<288xi64>
+    }
+  }
+  check.return
+}
+
+// Runtime word offsets widen before byte scaling. Both striped loads share
+// the resulting wide uniform contribution and a bounded per-lane residual.
+kernel.def @uniform_origin_loads() {
+  %c1 = index.constant 1 : index
+  %c128 = index.constant 128 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c128, %c1, %c1) : index
+} launch(%word: i32, %origin_bytes: i32, %input: buffer, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  %wide_word = scalar.extui %word : i32 to i64
+  %c4_i64 = scalar.constant 4 : i64
+  %wide_bytes = scalar.muli %wide_word, %c4_i64 : i64
+  %word_bytes = index.cast %wide_bytes : i64 to offset
+  %byte_origin = index.cast %origin_bytes : i32 to offset
+  %tile_bytes = index.add %byte_origin, %word_bytes : offset
+  %c4 = index.constant 4 : offset
+  %lane_bytes = index.scale %lane, %c4 : index, offset -> offset
+  %position = index.add %tile_bytes, %lane_bytes : offset
+  %storage = buffer.assume.memory_space<constant> %input : buffer
+  %source = buffer.view %storage[%position] : buffer -> view<129xi32>
+  %first = view.load %source[0] : view<129xi32> -> i32
+  %second = view.load %source[128] : view<129xi32> -> i32
+  %c0 = index.constant 0 : offset
+  %destination = buffer.view %output[%c0] : buffer -> view<2x128xi32>
+  view.store %first, %destination[0, %lane] : i32, view<2x128xi32>
+  view.store %second, %destination[1, %lane] : i32, view<2x128xi32>
+  kernel.return
+}
+
+// The reference walks contiguous element positions instead of constructing
+// each lane's byte address. Bounds describe the scenario's runtime inputs.
+func.def @uniform_origin_loads_oracle(%word: i32, %origin_bytes: i32, %input: buffer, %output: buffer) {
+  %bounded_word = scalar.assume %word [range(%word, 0, 1792)] : i32
+  %word_index = index.cast %bounded_word : i32 to index
+  %bounded_origin = scalar.assume %origin_bytes [range(%origin_bytes, 0, 28)] : i32
+  %origin_index = index.cast %bounded_origin : i32 to index
+  %c4 = index.constant 4 : index
+  %origin_bytess = index.div %origin_index, %c4 : index
+  %begin = index.add %word_index, %origin_bytess : index
+  %c0 = index.constant 0 : offset
+  %source = buffer.view %input[%c0] : buffer -> view<4096xi32>
+  %destination = buffer.view %output[%c0] : buffer -> view<256xi32>
+  %start = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  scf.for %ordinal = [%start to %end step %step] {
+    %position = index.add %begin, %ordinal : index
+    %value = view.load %source[%position] : view<4096xi32> -> i32
+    view.store %value, %destination[%ordinal] : i32, view<256xi32>
+  }
+  func.return
+}
+
+func.def @uniform_origin_inputs(%trial: index) -> (i32, i32) {
+  %c256 = index.constant 256 : index
+  %word_index = index.mul %trial, %c256 : index
+  %word = index.cast %word_index : index to i32
+  %c4 = index.constant 4 : index
+  %origin_index = index.mul %trial, %c4 : index
+  %origin_bytes = index.cast %origin_index : index to i32
+  func.return %word, %origin_bytes : i32, i32
+}
+
+check.scenario @uniform_origin_load_values {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %word, %origin_bytes = check.generate<@uniform_origin_inputs>(%trial) : (index) -> (i32, i32)
+    %input_storage = check.generate.iota offset(17) step(3) : tensor<4104xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<264xi32>
+    %input = check.tensor.view %input_storage offset(16) : tensor<4104xi32> -> tensor<4096xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    check.compare<@uniform_origin_loads, @uniform_origin_loads_oracle>(%word, %origin_bytes, %input, %output) : (i32, i32, tensor<4096xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%input_storage) expected(%input_storage) : tensor<4104xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<264xi32>
+    }
+  }
+  check.return
+}

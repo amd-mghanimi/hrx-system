@@ -10,6 +10,7 @@
 
 #include "iree/hal/cts/util/test_base.h"
 #include "loom/tooling/target/spirv/multiple_entries_spv.h"
+#include "loom/tooling/target/spirv/subgroup_entries_spv.h"
 
 namespace iree::hal::cts {
 namespace {
@@ -54,7 +55,7 @@ class SpirvArtifactExecutionTest : public CtsTestBase<> {
     IREE_ASSERT_OK(iree_hal_queue_dispatch(
         dispatch_queue_, iree_hal_semaphore_list_empty(), completion,
         executable_, function, iree_hal_make_static_dispatch_config(1, 1, 1),
-        constants, bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+        constants, bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
         completion, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -127,14 +128,14 @@ TEST_P(SpirvArtifactExecutionTest, DispatchesDistinctEntrySignatures) {
             dispatch_queue_, iree_hal_semaphore_list_empty(),
             iree_hal_semaphore_list_empty(), executable_, function,
             iree_hal_make_static_dispatch_config(1, 1, 1), wrong_constants,
-            correct_bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+            correct_bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
     IREE_EXPECT_STATUS_IS(
         StatusCode::kInvalidArgument,
         iree_hal_queue_dispatch(
             dispatch_queue_, iree_hal_semaphore_list_empty(),
             iree_hal_semaphore_list_empty(), executable_, function,
             iree_hal_make_static_dispatch_config(1, 1, 1), correct_constants,
-            wrong_bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+            wrong_bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   }
 }
 
@@ -160,6 +161,45 @@ TEST_P(SpirvArtifactExecutionTest, RejectsMissingEntryMetadata) {
                      iree_make_const_byte_span(bytes.data(), bytes.size()),
                      incomplete.out()));
   EXPECT_EQ(incomplete.get(), nullptr);
+}
+
+TEST_P(SpirvArtifactExecutionTest, CompiledFactsMatchSubgroupExecution) {
+  const auto* dispatch =
+      iree_hal_device_spec_dispatch(iree_hal_device_spec(device_));
+  ASSERT_NE(dispatch, nullptr);
+  if (dispatch->subgroup.minimum_size > 32 ||
+      dispatch->subgroup.maximum_size < 64) {
+    GTEST_SKIP()
+        << "device does not support both 32- and 64-lane compute subgroups";
+  }
+  const auto target =
+      SelectExecutableTarget(IREE_SV("spirv"), IREE_SV("vulkan1.3+bda"));
+  const auto* artifact = loom_spirv_subgroup_entries_create();
+  ASSERT_EQ(loom_spirv_subgroup_entries_size(), 1u);
+  executable_.reset();
+  IREE_ASSERT_OK(LoadExecutable(
+      iree_hal_queue_family(dispatch_queue_), target.target,
+      IREE_HAL_EXECUTABLE_LOAD_FLAG_NONE,
+      iree_make_const_byte_span(artifact[0].data, artifact[0].size),
+      executable_.out()));
+  for (uint32_t width : {32u, 64u}) {
+    SCOPED_TRACE(width);
+    // A sentinel checks the invocation extent as well as lane numbering.
+    const std::vector<uint32_t> initial(128, UINT32_MAX);
+    Ref<iree_hal_buffer_t> output;
+    IREE_ASSERT_OK(CreateDeviceBufferWithData(
+        initial.data(), initial.size() * sizeof(uint32_t), output.out()));
+    iree_hal_buffer_ref_t binding =
+        iree_hal_make_buffer_ref(output, 0, IREE_HAL_WHOLE_BUFFER);
+    Dispatch(width == 32 ? IREE_SV("lanes32") : IREE_SV("lanes64"),
+             iree_const_byte_span_empty(), {1, &binding});
+    ASSERT_FALSE(HasFatalFailure());
+    std::vector<uint32_t> expected = initial;
+    for (uint32_t i = 0; i < 2 * width; ++i) {
+      expected[i] = i % width;
+    }
+    EXPECT_EQ(ReadBufferData<uint32_t>(output), expected);
+  }
 }
 
 CTS_REGISTER_TEST_SUITE(SpirvArtifactExecutionTest);

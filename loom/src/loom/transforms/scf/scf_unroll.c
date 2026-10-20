@@ -11,6 +11,7 @@
 
 #include "loom/error/emitter.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/facts.h"
@@ -743,7 +744,7 @@ static iree_status_t loom_scf_unroll_reserve_result_scheme(
           .remap_symbol = loom_ir_remap_symbol_callback_empty(),
       },
       &remap));
-  IREE_RETURN_IF_ERROR(loom_builder_reserve_results(
+  IREE_RETURN_IF_ERROR(loom_builder_reserve_values(
       &context->rewriter->builder, source->result_count, reserved_results));
   IREE_RETURN_IF_ERROR(
       loom_ir_remap_map_values(&remap, loom_op_const_results(source),
@@ -1897,7 +1898,7 @@ static iree_status_t loom_scf_unroll_process_function_once(
                              .fn = loom_scf_unroll_collect_loop,
                              .user_data = &collect_context,
                          },
-                         context->pass->arena, &walk_result));
+                         &walk_result));
 
   // Fact computation is proportional to the entire function. Avoid it when
   // the terminal convergence iteration has no loops or when all remaining
@@ -1909,7 +1910,7 @@ static iree_status_t loom_scf_unroll_process_function_once(
   }
   IREE_RETURN_IF_ERROR(loom_pass_value_facts_acquire(
       context->pass, context->module,
-      loom_pass_value_fact_scope_function_for_target(
+      loom_pass_value_fact_scope_conditioned_function_for_target(
           function, loom_target_function_version_target_facts(
                         context->pass->function_version)),
       &context->fact_table));

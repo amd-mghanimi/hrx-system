@@ -148,3 +148,92 @@ func.def @cmpf_same_value(%x: f32) -> (i1, i1, i1) {
   %nan_sensitive = scalar.cmpf oeq, %x, %x : f32
   func.return %eq, %uno, %nan_sensitive : i1, i1, i1
 }
+
+// ====
+
+// Address carries compare bit patterns even when the low word is negative
+// in the signed representation used by integer facts.
+func.def @cmpi_address_carry() -> (i32, i1) {
+  %base = scalar.constant -4 : i32
+  %offset = scalar.constant 576 : i32
+  %low = scalar.addi %base, %offset : i32
+  %overflow = scalar.cmpi ult, %low, %base : i32
+  %carry = scalar.extui %overflow : i1 to i32
+  %same_bits = scalar.constant -4 : i32
+  %unchanged = scalar.cmpi ult, %same_bits, %base : i32
+  func.return %carry, %unchanged : i32, i1
+}
+
+// ----
+func.def @cmpi_address_carry() -> (i32, i1) {
+  %carry = scalar.constant 1 : i32
+  %unchanged = scalar.constant false : i1
+  func.return %carry, %unchanged : i32, i1
+}
+
+// ====
+
+// Negative signed ranges are above positive ranges in unsigned order. Two
+// wholly negative ranges retain their relative order.
+func.def @cmpi_unsigned_negative_ranges(%x: i8, %y: i8, %z: i8) -> (i1, i1, i1, i1, i1) {
+  %negative = scalar.assume %x [range(%x, -8, -4)] : i8
+  %positive = scalar.assume %y [range(%y, 1, 4)] : i8
+  %higher = scalar.assume %z [range(%z, -2, -1)] : i8
+  %lt = scalar.cmpi ult, %negative, %positive : i8
+  %ge = scalar.cmpi uge, %negative, %positive : i8
+  %le = scalar.cmpi ule, %positive, %negative : i8
+  %gt = scalar.cmpi ugt, %positive, %negative : i8
+  %ordered = scalar.cmpi ult, %negative, %higher : i8
+  func.return %lt, %ge, %le, %gt, %ordered : i1, i1, i1, i1, i1
+}
+
+// ----
+func.def @cmpi_unsigned_negative_ranges(%x: i8, %y: i8, %z: i8) -> (i1, i1, i1, i1, i1) {
+  %lt = scalar.constant false : i1
+  %ge = scalar.constant true : i1
+  %le = scalar.constant true : i1
+  %gt = scalar.constant false : i1
+  %ordered = scalar.constant true : i1
+  func.return %lt, %ge, %le, %gt, %ordered : i1, i1, i1, i1, i1
+}
+
+// ====
+
+// A signed interval crossing zero contains both unsigned extrema. Ordering
+// against an interior point stays dynamic, while an inclusive maximum folds.
+func.def @cmpi_unsigned_crossing_zero(%value: i32) -> (i1, i1) {
+  %bounded = scalar.assume %value [range(%value, -2, 2)] : i32
+  %interior = scalar.constant -4 : i32
+  %maximum = scalar.constant -1 : i32
+  %dynamic = scalar.cmpi ult, %bounded, %interior : i32
+  %at_most_maximum = scalar.cmpi ule, %bounded, %maximum : i32
+  func.return %dynamic, %at_most_maximum : i1, i1
+}
+
+// ----
+func.def @cmpi_unsigned_crossing_zero(%value: i32) -> (i1, i1) {
+  %bounded = scalar.assume %value [range(%value, -2, 2)] : i32
+  %interior = scalar.constant -4 : i32
+  %dynamic = scalar.cmpi ult, %bounded, %interior : i32
+  %at_most_maximum = scalar.constant true : i1
+  func.return %dynamic, %at_most_maximum : i1, i1
+}
+
+// ====
+
+// Unsigned i64 ordering must not overflow through signed endpoint arithmetic.
+func.def @cmpi_unsigned_full_width() -> (i1, i1) {
+  %signed_maximum = scalar.constant 9223372036854775807 : i64
+  %signed_minimum = scalar.constant -9223372036854775808 : i64
+  %unsigned_maximum = scalar.constant -1 : i64
+  %sign_boundary = scalar.cmpi ult, %signed_maximum, %signed_minimum : i64
+  %upper_half = scalar.cmpi ugt, %unsigned_maximum, %signed_minimum : i64
+  func.return %sign_boundary, %upper_half : i1, i1
+}
+
+// ----
+func.def @cmpi_unsigned_full_width() -> (i1, i1) {
+  %sign_boundary = scalar.constant true : i1
+  %upper_half = scalar.constant true : i1
+  func.return %sign_boundary, %upper_half : i1, i1
+}

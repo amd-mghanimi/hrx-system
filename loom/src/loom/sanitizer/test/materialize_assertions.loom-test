@@ -6,7 +6,7 @@ kernel.def @integer_predicates() {
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
 } launch(%x: i32, %y: i32) {
-  %x_checked, %y_checked = sanitizer.assert.value %x, %y [eq(%x, %y), ne(%x, 0), lt(%x, %y), le(%x, 8), gt(%x, -8), ge(%x, %y), min(%x, -16), max(%x, 16), range(%x, -4, 4), mul(%x, 4), pow2(%x)] : i32, i32
+  %x_checked, %y_checked = sanitizer.assert.value %x, %y [eq(%x, %y), ne(%x, 0), lt(%x, %y), le(%x, 8), gt(%x, -8), ge(%x, %y), ge(%x, -16), le(%x, 16), range(%x, -4, 4), multiple_of(%x, 4), power_of_two(%x)] : i32, i32
   kernel.return
 }
 
@@ -17,7 +17,7 @@ kernel.def @address_predicates() {
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
 } launch(%index: index, %limit: index, %offset: offset) {
-  %index_checked, %limit_checked, %offset_checked = sanitizer.assert.value %index, %limit, %offset [range(%index, 0, %limit), mul(%index, 8), pow2(%index), lt(%offset, 64), mul(%offset, 16), pow2(%offset)] : index, index, offset
+  %index_checked, %limit_checked, %offset_checked = sanitizer.assert.value %index, %limit, %offset [range(%index, 0, %limit), multiple_of(%index, 8), power_of_two(%index), lt(%offset, 64), multiple_of(%offset, 16), power_of_two(%offset)] : index, index, offset
   kernel.return
 }
 
@@ -27,7 +27,7 @@ kernel.def @boolean_predicates() {
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
 } launch(%bit: i1) {
-  %checked = sanitizer.assert.value %bit [ge(%bit, 0), mul(%bit, 1), pow2(%bit)] : i1
+  %checked = sanitizer.assert.value %bit [ge(%bit, 0), multiple_of(%bit, 1), power_of_two(%bit)] : i1
   kernel.return
 }
 
@@ -47,7 +47,7 @@ kernel.def @operation_and_empty_assertions() {
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
 } launch(%denominator: i32, %vector: vector<4xi32>) {
-  sanitizer.assert.op %denominator [ne(%denominator, 0), min(%denominator, 1)] : i32
+  sanitizer.assert.op %denominator [ne(%denominator, 0), ge(%denominator, 1)] : i32
   %same_vector = sanitizer.assert.value %vector [] : vector<4xi32>
   test.use %same_vector : vector<4xi32>
   sanitizer.assert.op %denominator [] : i32
@@ -109,7 +109,7 @@ kernel.def @integer_predicates() {
   %63 = scalar.andi %60, %62 : i1
   %64 = scalar.andi %57, %63 : i1
   kernel.assert %64 : i1
-  %x_checked, %y_checked = scalar.assume %x, %y [eq(%x, %y), ne(%x, 0), lt(%x, %y), le(%x, 8), gt(%x, -8), ge(%x, %y), min(%x, -16), max(%x, 16), range(%x, -4, 4), mul(%x, 4), pow2(%x)] : i32, i32
+  %x_checked, %y_checked = scalar.assume %x, %y [eq(%x, %y), ne(%x, 0), lt(%x, %y), le(%x, 8), gt(%x, -8), ge(%x, %y), ge(%x, -16), le(%x, 16), range(%x, -4, 4), multiple_of(%x, 4), power_of_two(%x)] : i32, i32
   kernel.return
 }
 
@@ -152,7 +152,7 @@ kernel.def @address_predicates() {
   %99 = scalar.andi %96, %98 : i1
   %100 = scalar.andi %92, %99 : i1
   kernel.assert %100 : i1
-  %index_checked, %limit_checked, %offset_checked = index.assume %index, %limit, %offset [range(%index, 0, %limit), mul(%index, 8), pow2(%index), lt(%offset, 64), mul(%offset, 16), pow2(%offset)] : index, index, offset
+  %index_checked, %limit_checked, %offset_checked = index.assume %index, %limit, %offset [range(%index, 0, %limit), multiple_of(%index, 8), power_of_two(%index), lt(%offset, 64), multiple_of(%offset, 16), power_of_two(%offset)] : index, index, offset
   kernel.return
 }
 
@@ -166,7 +166,7 @@ kernel.def @boolean_predicates() {
   %107 = scalar.andi %105, %106 : i1
   %108 = scalar.andi %107, %bit : i1
   kernel.assert %108 : i1
-  %checked = scalar.assume %bit [ge(%bit, 0), mul(%bit, 1), pow2(%bit)] : i1
+  %checked = scalar.assume %bit [ge(%bit, 0), multiple_of(%bit, 1), power_of_two(%bit)] : i1
   kernel.return
 }
 
@@ -318,6 +318,62 @@ kernel.def @checked_aliases_preserve_relational_facts() {
   %original_upper = scalar.constant 9223372036854775807 : i64
   %checked_upper = scalar.constant 127 : i64
   test.use %limit_checked, %original_upper, %checked_upper : index, i64, i64
+  kernel.return
+}
+
+// ====
+
+// Unsigned predicates compare the sign-extended integer carrier as uint64_t.
+// This retains source-language ordering across the sign bit without changing
+// the ordinary signless integer type.
+kernel.def @unsigned_predicates() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%lhs: i32, %rhs: i32) {
+  %lhs_checked, %rhs_checked = sanitizer.assert.value %lhs, %rhs [ult(%lhs, %rhs), ule(%lhs, %rhs), ugt(%rhs, %lhs), uge(%rhs, %lhs)] : i32, i32
+  kernel.return
+}
+
+// ----
+kernel.def @unsigned_predicates() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%lhs: i32, %rhs: i32) {
+  %5 = scalar.cmpi ult, %lhs, %rhs : i32
+  %6 = scalar.cmpi ule, %lhs, %rhs : i32
+  %7 = scalar.andi %5, %6 : i1
+  %8 = scalar.cmpi ugt, %rhs, %lhs : i32
+  %9 = scalar.andi %7, %8 : i1
+  %10 = scalar.cmpi uge, %rhs, %lhs : i32
+  %11 = scalar.andi %9, %10 : i1
+  kernel.assert %11 : i1
+  %lhs_checked, %rhs_checked = scalar.assume %lhs, %rhs [ult(%lhs, %rhs), ule(%lhs, %rhs), ugt(%rhs, %lhs), uge(%rhs, %lhs)] : i32, i32
+  kernel.return
+}
+
+// ====
+
+// Float equality preserves C/C++ NaN behavior: equality is ordered while
+// inequality is unordered.
+kernel.def @float_equality_predicates() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%lhs: f32, %rhs: f32) {
+  %lhs_checked, %rhs_checked = sanitizer.assert.value %lhs, %rhs [eq(%lhs, %rhs), ne(%lhs, 0)] : f32, f32
+  kernel.return
+}
+
+// ----
+kernel.def @float_equality_predicates() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%lhs: f32, %rhs: f32) {
+  %5 = scalar.cmpf oeq, %lhs, %rhs : f32
+  %6 = scalar.constant 0.0 : f32
+  %7 = scalar.cmpf une, %lhs, %6 : f32
+  %8 = scalar.andi %5, %7 : i1
+  kernel.assert %8 : i1
+  %lhs_checked, %rhs_checked = scalar.assume %lhs, %rhs [eq(%lhs, %rhs), ne(%lhs, 0)] : f32, f32
   kernel.return
 }
 

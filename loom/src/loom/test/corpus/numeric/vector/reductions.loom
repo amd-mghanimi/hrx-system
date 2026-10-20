@@ -1,0 +1,242 @@
+func.def @vector_integer_reductions(%storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %input = buffer.view %storage_buffer[%input_origin] : buffer -> view<5xi32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<5xi32>
+  %values = vector.load %input[0] : view<5xi32> -> vector<4xi32>
+  %initial = view.load %input[4] : view<5xi32> -> i32
+  %sum = vector.reduce<addi> %values, %initial : vector<4xi32>, i32
+  %signed_min = vector.reduce<minsi> %values, %initial : vector<4xi32>, i32
+  %signed_max = vector.reduce<maxsi> %values, %initial : vector<4xi32>, i32
+  %unsigned_min = vector.reduce<minui> %values, %initial : vector<4xi32>, i32
+  %unsigned_max = vector.reduce<maxui> %values, %initial : vector<4xi32>, i32
+  %results = vector.from_elements %sum, %signed_min, %signed_max, %unsigned_min, %unsigned_max : vector<5xi32>
+  vector.store %results, %output[0] : vector<5xi32>, view<5xi32>
+  func.return
+}
+
+check.scenario @vector_integer_reduction_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %storage = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<21xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<21xi32> -> tensor<5xi32>
+    check.compare<@vector_integer_reductions>(%storage) : (tensor<21xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<5xi32>
+    }
+  }
+  check.return
+}
+
+func.def @vector_bitwise_reductions(%storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %input = buffer.view %storage_buffer[%input_origin] : buffer -> view<4xi32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<4xi32>
+  %values = vector.load %input[0] : view<4xi32> -> vector<3xi32>
+  %initial = view.load %input[3] : view<4xi32> -> i32
+  %product = vector.reduce<muli> %values, %initial : vector<3xi32>, i32
+  %all_bits = vector.reduce<andi> %values, %initial : vector<3xi32>, i32
+  %any_bits = vector.reduce<ori> %values, %initial : vector<3xi32>, i32
+  %odd_bits = vector.reduce<xori> %values, %initial : vector<3xi32>, i32
+  %results = vector.from_elements %product, %all_bits, %any_bits, %odd_bits : vector<4xi32>
+  vector.store %results, %output[0] : vector<4xi32>, view<4xi32>
+  func.return
+}
+
+check.scenario @vector_bitwise_reduction_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %storage = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<20xi32> -> tensor<4xi32>
+    check.compare<@vector_bitwise_reductions>(%storage) : (tensor<20xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// An empty reduction returns the supplied accumulator, not a combining identity.
+func.def @vector_empty_reductions(%storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %input = buffer.view %storage_buffer[%input_origin] : buffer -> view<1xi32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<4xi32>
+  %initial = view.load %input[0] : view<1xi32> -> i32
+  %empty = vector.splat %initial : vector<0xi32>
+  %sum = vector.reduce<addi> %empty, %initial : vector<0xi32>, i32
+  %product = vector.reduce<muli> %empty, %initial : vector<0xi32>, i32
+  %minimum = vector.reduce<minsi> %empty, %initial : vector<0xi32>, i32
+  %bits = vector.reduce<ori> %empty, %initial : vector<0xi32>, i32
+  %results = vector.from_elements %sum, %product, %minimum, %bits : vector<4xi32>
+  vector.store %results, %output[0] : vector<4xi32>, view<4xi32>
+  func.return
+}
+
+check.scenario @vector_empty_reduction_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-17) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<20xi32> -> tensor<4xi32>
+    check.compare<@vector_empty_reductions>(%storage) : (tensor<20xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// Distinct initial values expose accidental broadcast or repeated accumulation.
+func.def @vector_axis_reductions(%storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %input = buffer.view %storage_buffer[%input_origin] : buffer -> view<6xi32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<7xi32>
+  %flat = vector.load %input[0] : view<6xi32> -> vector<6xi32>
+  %a = vector.extract %flat[0] : vector<6xi32> -> i32
+  %b = vector.extract %flat[1] : vector<6xi32> -> i32
+  %c = vector.extract %flat[2] : vector<6xi32> -> i32
+  %d = vector.extract %flat[3] : vector<6xi32> -> i32
+  %e = vector.extract %flat[4] : vector<6xi32> -> i32
+  %f = vector.extract %flat[5] : vector<6xi32> -> i32
+  %matrix = vector.from_elements %a, %b, %c, %d, %e, %f : vector<2x3xi32>
+  %transpose = vector.transpose<[1, 0]> %matrix : vector<2x3xi32> -> vector<3x2xi32>
+  %cube = vector.from_elements %a, %b, %c, %d, %e, %f, %a, %f : vector<2x2x2xi32>
+  %c10 = scalar.constant 10 : i32
+  %c100 = scalar.constant 100 : i32
+  %c1000 = scalar.constant 1000 : i32
+  %row_init = vector.from_elements %c10, %c100 : vector<2xi32>
+  %column_init = vector.from_elements %c10, %c100, %c1000 : vector<3xi32>
+  %rows = vector.reduce.axes<addi> %transpose, %row_init axes [0] : vector<3x2xi32>, vector<2xi32>
+  %columns = vector.reduce.axes<addi> %transpose, %column_init axes [1] : vector<3x2xi32>, vector<3xi32>
+  %planes = vector.reduce.axes<addi> %cube, %row_init axes [0, 2] : vector<2x2x2xi32>, vector<2xi32>
+  %r0 = vector.extract %rows[0] : vector<2xi32> -> i32
+  %r1 = vector.extract %rows[1] : vector<2xi32> -> i32
+  %c0 = vector.extract %columns[0] : vector<3xi32> -> i32
+  %c1 = vector.extract %columns[1] : vector<3xi32> -> i32
+  %c2 = vector.extract %columns[2] : vector<3xi32> -> i32
+  %p0 = vector.extract %planes[0] : vector<2xi32> -> i32
+  %p1 = vector.extract %planes[1] : vector<2xi32> -> i32
+  %results = vector.from_elements %r0, %r1, %c0, %c1, %c2, %p0, %p1 : vector<7xi32>
+  vector.store %results, %output[0] : vector<7xi32>, view<7xi32>
+  func.return
+}
+
+check.scenario @vector_axis_reduction_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %storage = check.generate.random.uniform seed(%input_seed) range(-1024 to 1024) : tensor<23xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<23xi32> -> tensor<7xi32>
+    check.compare<@vector_axis_reductions>(%storage) : (tensor<23xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<7xi32>
+    }
+  }
+  check.return
+}
+
+// The ordered reduction must preserve the authored accumulation sequence.
+// Sharing its input with the axis reduction also exercises a direct and a
+// partial consumer of the same runtime vector.
+func.def @vector_float_reductions(%storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %initial_origin = index.constant 32 : offset
+  %output_origin = index.constant 64 : offset
+  %input = buffer.view %storage_buffer[%input_origin] : buffer -> view<8xf32>
+  %initial = buffer.view %storage_buffer[%initial_origin] : buffer -> view<8xf32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<3xf32>
+  %values = vector.load %input[0] : view<8xf32> -> vector<8xf32>
+  %negative_large = scalar.constant -1e+20 : f32
+  %direct_seed = scalar.constant 1e+20 : f32
+  %order_sensitive_values = vector.insert %negative_large into %values[0] : f32, vector<8xf32>
+  %direct = vector.reduce<addf> %order_sensitive_values, %direct_seed : vector<8xf32>, f32
+  %positive_large = scalar.constant 1e+20 : f32
+  %axis_values_flat = vector.insert %positive_large into %order_sensitive_values[6] : f32, vector<8xf32>
+  %axis_values = vector.bitcast %axis_values_flat : vector<8xf32> to vector<4x2xf32>
+  %initial_values = vector.load %initial[0] : view<8xf32> -> vector<8xf32>
+  %axis_initial = vector.slice %initial_values[0] : vector<8xf32> -> vector<2xf32>
+  %axis_result = vector.reduce.axes<addf> %axis_values, %axis_initial axes [0] : vector<4x2xf32>, vector<2xf32>
+  %axis0 = vector.extract %axis_result[0] : vector<2xf32> -> f32
+  %axis1 = vector.extract %axis_result[1] : vector<2xf32> -> f32
+  %results = vector.from_elements %direct, %axis0, %axis1 : vector<3xf32>
+  vector.store %results, %output[0] : vector<3xf32>, view<3xf32>
+  func.return
+}
+
+// Keeping the dot result live through ordered and reassociated scalar
+// reductions covers their producer-consumer semantics independently of any one
+// target lowering.
+func.def @vector_bfloat_dot_reductions(%lhs_buffer: buffer, %rhs_buffer: buffer, %storage_buffer: buffer) {
+  %input_origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %lhs_view = buffer.view %lhs_buffer[%input_origin] : buffer -> view<16xbf16>
+  %rhs_view = buffer.view %rhs_buffer[%input_origin] : buffer -> view<16xbf16>
+  %initial_view = buffer.view %storage_buffer[%input_origin] : buffer -> view<8xf32>
+  %output = buffer.view %storage_buffer[%output_origin] : buffer -> view<2xf32>
+  %lhs = vector.load %lhs_view[0] : view<16xbf16> -> vector<16xbf16>
+  %rhs = vector.load %rhs_view[0] : view<16xbf16> -> vector<16xbf16>
+  %initial = vector.load %initial_view[0] : view<8xf32> -> vector<8xf32>
+  %dot = vector.dot2f %lhs, %rhs, %initial : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+  %dot_seed = scalar.constant 3.0 : f32
+  %ordered = vector.reduce<addf> %dot, %dot_seed : vector<8xf32>, f32
+  %reassociated = vector.reduce<addf, reassoc> %dot, %dot_seed : vector<8xf32>, f32
+  %results = vector.from_elements %ordered, %reassociated : vector<2xf32>
+  vector.store %results, %output[0] : vector<2xf32>, view<2xf32>
+  func.return
+}
+
+check.scenario @vector_float_reduction_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.iota offset(0.0) step(1.0) : tensor<19xf32>
+    %output = check.tensor.view %storage offset(64) : tensor<19xf32> -> tensor<3xf32>
+    %direct = check.tensor.view %output offset(0) : tensor<3xf32> -> tensor<1xf32>
+    %expected_direct = check.generate.fill value(28.0) : tensor<1xf32>
+    check.compare<@vector_float_reductions>(%storage) : (tensor<19xf32>) -> () {
+      check.expect.close actual(%direct) expected(%expected_direct) atol(0.0) rtol(0.0) nan(same) : tensor<1xf32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<3xf32>
+    }
+  }
+  check.return
+}
+
+check.scenario @vector_bfloat_dot_reduction_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %lhs = check.generate.fill value(2.0) : tensor<16xbf16>
+    %rhs = check.generate.fill value(3.0) : tensor<16xbf16>
+    %storage = check.generate.fill value(1.0) : tensor<18xf32>
+    %output = check.tensor.view %storage offset(64) : tensor<18xf32> -> tensor<2xf32>
+    %expected = check.generate.fill value(107.0) : tensor<2xf32>
+    check.compare<@vector_bfloat_dot_reductions>(%lhs, %rhs, %storage) : (tensor<16xbf16>, tensor<16xbf16>, tensor<18xf32>) -> () {
+      check.expect.close actual(%output) expected(%expected) atol(0.0) rtol(0.0) nan(same) : tensor<2xf32>
+    }
+  }
+  check.return
+}
+
+func.def @vector_float_extrema_reductions(%input_buffer: buffer, %output_buffer: buffer) {
+  %base = index.constant 0 : offset
+  %input = buffer.view %input_buffer[%base] : buffer -> view<4xf32>
+  %output = buffer.view %output_buffer[%base] : buffer -> view<2xf32>
+  %values = vector.load %input[0] : view<4xf32> -> vector<4xf32>
+  %minimum_initial = scalar.constant 1000.0 : f32
+  %minimum = vector.reduce<minnumf, reassoc|nnan|nsz> %values, %minimum_initial : vector<4xf32>, f32
+  %maximum_initial = scalar.constant -1000.0 : f32
+  %maximum = vector.reduce<maxnumf, reassoc|nnan|nsz> %values, %maximum_initial : vector<4xf32>, f32
+  %results = vector.from_elements %minimum, %maximum : vector<2xf32>
+  vector.store %results, %output[0] : vector<2xf32>, view<2xf32>
+  func.return
+}
+
+check.scenario @vector_float_extrema_reduction_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-999.0 to 999.0) : tensor<4xf32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-999.0 to 999.0) : tensor<4xf32>
+    %output = check.generate.fill value(0.0) : tensor<2xf32>
+    check.compare<@vector_float_extrema_reductions>(%input, %output) : (tensor<4xf32>, tensor<2xf32>) -> () {
+      check.expect.close actual(%input) expected(%expected_input) atol(0.0) rtol(0.0) nan(same) : tensor<4xf32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<2xf32>
+    }
+  }
+  check.return
+}

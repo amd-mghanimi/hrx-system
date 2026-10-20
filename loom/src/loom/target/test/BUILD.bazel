@@ -19,7 +19,12 @@ package(
 
 loom_check_test_suite(
     name = "test",
-    srcs = ["callgraph_specialization.loom-test"],
+    srcs = [
+        "callgraph_specialization.loom-test",
+        "source_motion.loom-test",
+        "source_tied_carriers.loom-test",
+        "strand_callgraph.loom-test",
+    ],
 )
 
 _TEST_LOW_LOWER_VISIBILITY = [
@@ -59,7 +64,21 @@ loom_cc_library(
     hdrs = ["target_records.h"],
     deps = [
         "//loom/src/loom/target:facts",
+        "//loom/src/loom/target:facts_builder",
         "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "ir_provider",
+    srcs = ["ir_provider.c"],
+    hdrs = ["ir_provider.h"],
+    visibility = ["//loom/src/loom/testing:__pkg__"],
+    deps = [
+        ":target_record_table",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/target:low_descriptor_registry_core_test",
+        "//loom/src/loom/target:provider",
     ],
 )
 
@@ -67,13 +86,11 @@ loom_cc_library(
     name = "provider",
     srcs = ["provider.c"],
     hdrs = ["provider.h"],
-    visibility = [
-        "//loom/src/loom/tools/loom-check:__pkg__",
-        "//loom/src/loom/tools/loom-format:__pkg__",
-    ],
+    visibility = ["//loom/src/loom/tools/loom-check:__pkg__"],
     deps = [
         ":lower",
         ":target_record_table",
+        "//loom/src/loom/ops/test",
         "//loom/src/loom/pass/test:registry",
         "//loom/src/loom/target:low_descriptor_registry_core_test",
         "//loom/src/loom/target:provider",

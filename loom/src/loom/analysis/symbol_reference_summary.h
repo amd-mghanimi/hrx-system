@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-static_assert(LOOM_TYPE_COUNT_ == 15,
+static_assert(LOOM_TYPE_COUNT_ == 16,
               "update symbol-bearing type classification for new kinds");
 
 // Shallow structural classification, without examining nested payloads. An

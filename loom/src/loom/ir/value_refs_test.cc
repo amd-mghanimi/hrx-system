@@ -222,7 +222,8 @@ TEST_F(ValueRefsTest, SubtreeWalkIncludesOperandTypeAndPredicateAttributes) {
 
 TEST_F(ValueRefsTest, SubtreeWalkIncludesDeclarationArgumentTypes) {
   const loom_value_id_t width = Constant(16);
-  const loom_type_t storage_type = loom_type_pool(loom_dim_pack_dynamic(width));
+  const loom_type_t storage_type =
+      loom_type_group_1d(loom_dim_pack_dynamic(width));
   loom_string_id_t name = LOOM_STRING_ID_INVALID;
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("storage"), &name));
   uint16_t symbol = LOOM_SYMBOL_ID_INVALID;

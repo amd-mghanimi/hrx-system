@@ -8,6 +8,7 @@
 #define IREE_NET_CARRIER_RDMA_CONNECTION_H_
 
 #include "iree/net/carrier/rdma/carrier.h"
+#include "iree/net/carrier/rdma/completion_queue.h"
 #include "iree/net/connection.h"
 #include "iree/net/transport_factory.h"
 
@@ -22,6 +23,10 @@ typedef struct iree_net_rdma_connection_t iree_net_rdma_connection_t;
 typedef struct iree_net_rdma_connection_options_t {
   // Combined message/direct ordinal bound, negotiated to the peer minimum.
   uint32_t max_endpoint_count;
+  // Local policy for the CQ shared by control and data QPs. Busy polling keeps
+  // this connection's caller-owned proactor runnable even when idle; other
+  // connections on that proactor still receive bounded service turns.
+  iree_net_rdma_completion_queue_mode_t completion_mode;
   // Private control resources, independent of application data backpressure.
   struct {
     // Registered transmit records and enforced control SQ depth.

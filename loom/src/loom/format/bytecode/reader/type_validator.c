@@ -311,6 +311,46 @@ static iree_status_t loom_bytecode_type_plan_build_shaped(
   return iree_ok_status();
 }
 
+static iree_status_t loom_bytecode_type_plan_build_group(
+    loom_bytecode_reader_decoder_t* decoder,
+    iree_arena_allocator_t* scratch_arena, uint8_t rank,
+    const uint64_t* dimensions, loom_type_t* out_type, uint64_t offset) {
+  if (rank == 0 || rank > LOOM_TYPE_MAX_RANK) {
+    return loom_bytecode_reader_emit_invalid_field(
+        decoder, IREE_SV("TYPES"), IREE_SV("type"), 0, IREE_SV("rank"), offset,
+        IREE_SV("group_rank_must_be_between_one_and_loom_type_maximum"));
+  }
+  if (!out_type) {
+    return iree_ok_status();
+  }
+
+  bool all_static = true;
+  for (uint8_t i = 0; i < rank; ++i) {
+    all_static &= !loom_dim_is_dynamic(dimensions[i]);
+  }
+  uint8_t flags = rank <= 2 ? LOOM_TYPE_FLAG_INLINE_DIMS : 0;
+  if (all_static) {
+    flags |= LOOM_TYPE_FLAG_ALL_STATIC;
+  }
+  loom_type_t type = {0};
+  type.header = loom_type_make_raw_header(LOOM_TYPE_GROUP, 0, rank, flags);
+  if (rank <= 2) {
+    for (uint8_t i = 0; i < rank; ++i) {
+      type.dims[i] = dimensions[i];
+    }
+  } else {
+    loom_overflow_dim_t* retained_dimensions = NULL;
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        scratch_arena, rank, sizeof(*retained_dimensions),
+        (void**)&retained_dimensions));
+    memcpy(retained_dimensions, dimensions,
+           (iree_host_size_t)rank * sizeof(*dimensions));
+    type.dims[0] = (uint64_t)(uintptr_t)retained_dimensions;
+  }
+  *out_type = type;
+  return iree_ok_status();
+}
+
 static iree_status_t loom_bytecode_type_plan_decode_entry(
     loom_bytecode_reader_decoder_t* decoder, loom_context_t* context,
     loom_bytecode_reader_module_view_t* module_view,
@@ -412,6 +452,46 @@ static iree_status_t loom_bytecode_type_plan_decode_entry(
           (loom_scalar_type_t)element_type, rank, attachment, encoding_instance,
           alignment, dims, out_plan_entry ? &direct_type : NULL,
           attachment_offset));
+      break;
+    }
+    case LOOM_TYPE_GROUP: {
+      uint8_t rank = 0;
+      IREE_RETURN_IF_ERROR(
+          loom_bytecode_reader_read_u8(decoder, cursor, &rank));
+      if (rank == 0 || rank > LOOM_TYPE_MAX_RANK) {
+        return loom_bytecode_reader_emit_invalid_field(
+            decoder, IREE_SV("TYPES"), IREE_SV("type"), type_index,
+            IREE_SV("rank"), type_offset,
+            IREE_SV("group_rank_must_be_between_one_and_loom_type_maximum"));
+      }
+      uint64_t dimensions[LOOM_TYPE_MAX_RANK] = {0};
+      for (uint8_t i = 0; i < rank; ++i) {
+        uint8_t is_dynamic = 0;
+        const uint64_t dimension_offset =
+            loom_bytecode_reader_cursor_absolute_position(cursor);
+        IREE_RETURN_IF_ERROR(
+            loom_bytecode_reader_read_u8(decoder, cursor, &is_dynamic));
+        if (is_dynamic == 0) {
+          uint64_t size = 0;
+          IREE_RETURN_IF_ERROR(
+              loom_bytecode_reader_read_uvarint(decoder, cursor, &size));
+          if (size > LOOM_DIM_MAX_STATIC_SIZE) {
+            return loom_bytecode_reader_emit_invalid_field(
+                decoder, IREE_SV("TYPES"), IREE_SV("type"), type_index,
+                IREE_SV("dim_size"), dimension_offset,
+                IREE_SV("static_dimension_exceeds_loom_maximum"));
+          }
+          dimensions[i] = loom_dim_pack_static((int64_t)size);
+        } else if (is_dynamic == 1) {
+          dimensions[i] = loom_dim_pack_dynamic(LOOM_VALUE_ID_INVALID);
+        } else {
+          return loom_bytecode_reader_emit_enum_value(
+              decoder, IREE_SV("is_dynamic"), is_dynamic, 2, dimension_offset);
+        }
+      }
+      IREE_RETURN_IF_ERROR(loom_bytecode_type_plan_build_group(
+          decoder, scratch_arena, rank, dimensions,
+          out_plan_entry ? &direct_type : NULL, type_offset));
       break;
     }
     case LOOM_TYPE_FUNCTION: {
@@ -617,32 +697,9 @@ static iree_status_t loom_bytecode_type_plan_decode_entry(
       direct_type = loom_type_encoding_with_role((loom_encoding_role_t)role);
       break;
     }
-    case LOOM_TYPE_POOL: {
-      uint8_t is_dynamic = 0;
-      uint64_t dim_offset =
-          loom_bytecode_reader_cursor_absolute_position(cursor);
-      IREE_RETURN_IF_ERROR(
-          loom_bytecode_reader_read_u8(decoder, cursor, &is_dynamic));
-      if (is_dynamic == 0) {
-        uint64_t size = 0;
-        IREE_RETURN_IF_ERROR(
-            loom_bytecode_reader_read_uvarint(decoder, cursor, &size));
-        if (size > LOOM_DIM_MAX_STATIC_SIZE) {
-          return loom_bytecode_reader_emit_invalid_field(
-              decoder, IREE_SV("TYPES"), IREE_SV("type"), type_index,
-              IREE_SV("block_size"), dim_offset,
-              IREE_SV("static_pool_block_size_exceeds_loom_maximum"));
-        }
-        direct_type = loom_type_pool(loom_dim_pack_static((int64_t)size));
-      } else if (is_dynamic == 1) {
-        direct_type =
-            loom_type_pool(loom_dim_pack_dynamic(LOOM_VALUE_ID_INVALID));
-      } else {
-        return loom_bytecode_reader_emit_enum_value(
-            decoder, IREE_SV("is_dynamic"), is_dynamic, 2, dim_offset);
-      }
+    case LOOM_TYPE_POOL:
+      direct_type = loom_type_pool();
       break;
-    }
     case LOOM_TYPE_BUFFER:
       direct_type = loom_type_buffer();
       break;

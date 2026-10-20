@@ -18,6 +18,7 @@
 #include "iree/base/tooling/flags.h"
 #include "iree/hal/api.h"
 #include "iree/hal/cts/util/registry.h"
+#include "iree/hal/drivers/amdgpu/allocator.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/buffer.h"
 #include "iree/hal/drivers/amdgpu/device/dispatch.h"
@@ -30,6 +31,7 @@
 #include "iree/hal/drivers/amdgpu/target/selection.h"
 #include "iree/hal/drivers/amdgpu/util/benchmark_flags.h"
 #include "iree/hal/memory/tlsf_pool.h"
+#include "iree/hal/slab_pool.h"
 #include "iree/io/file_contents.h"
 
 IREE_FLAG(
@@ -78,13 +80,8 @@ enum class QueueAllocaTlsfGrowthMode : int64_t {
   kForcedGrowth = 1,
 };
 
-constexpr iree_hal_buffer_params_t kQueueAllocaBufferParams = {
-    /*usage=*/IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
-    /*access=*/IREE_HAL_MEMORY_ACCESS_ALL,
-    /*type=*/IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE,
-    /*queue_family_affinity=*/0,
-    /*min_alignment=*/0,
-};
+constexpr iree_hal_buffer_usage_t kQueueAllocaBufferUsage =
+    IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE;
 
 iree_hal_device_profiling_data_families_t ProfileGuardrailDataFamilies(
     ProfileGuardrailMode mode) {
@@ -157,10 +154,10 @@ static iree_status_t QueueBenchmarkDiscardProfileSinkEndSession(
 
 static const iree_hal_profile_sink_vtable_t
     kQueueBenchmarkDiscardProfileSinkVtable = {
-        /*.destroy=*/QueueBenchmarkDiscardProfileSinkDestroy,
-        /*.begin_session=*/QueueBenchmarkDiscardProfileSinkBeginSession,
-        /*.write=*/QueueBenchmarkDiscardProfileSinkWrite,
-        /*.end_session=*/QueueBenchmarkDiscardProfileSinkEndSession,
+        .destroy = QueueBenchmarkDiscardProfileSinkDestroy,
+        .begin_session = QueueBenchmarkDiscardProfileSinkBeginSession,
+        .write = QueueBenchmarkDiscardProfileSinkWrite,
+        .end_session = QueueBenchmarkDiscardProfileSinkEndSession,
 };
 
 iree_status_t QueueBenchmarkDiscardProfileSinkCreate(
@@ -195,9 +192,9 @@ class QueueBenchmark : public benchmark::Fixture {
     }
 
     if (iree_status_is_ok(status)) {
-      status = iree_hal_driver_registry_try_create(
+      status = iree_hal_driver_registry_acquire_driver(
           iree_hal_driver_registry_default(), iree_make_cstring_view("amdgpu"),
-          host_allocator_, &driver_);
+          &driver_);
     }
 
     iree_async_proactor_pool_t* proactor_pool = nullptr;
@@ -532,13 +529,13 @@ class QueueBenchmark : public benchmark::Fixture {
           "epoch completion floor requires an AMDGPU semaphore");
     }
 
-    iree_hal_amdgpu_last_signal_flags_t signal_flags =
-        IREE_HAL_AMDGPU_LAST_SIGNAL_FLAG_NONE;
+    iree_hal_submitted_signal_flags_t signal_flags =
+        IREE_HAL_SUBMITTED_SIGNAL_FLAG_NONE;
     iree_async_axis_t producer_axis = 0;
     uint64_t producer_epoch = 0;
     uint64_t producer_value = 0;
-    if (IREE_UNLIKELY(!iree_hal_amdgpu_last_signal_load(
-            iree_hal_amdgpu_semaphore_last_signal(completion.semaphore),
+    if (IREE_UNLIKELY(!iree_hal_submitted_signal_load(
+            iree_hal_amdgpu_semaphore_submitted_signal(completion.semaphore),
             &signal_flags, &producer_axis, &producer_epoch, &producer_value))) {
       return iree_make_status(
           IREE_STATUS_FAILED_PRECONDITION,
@@ -611,7 +608,7 @@ class QueueBenchmark : public benchmark::Fixture {
     iree_hal_amdgpu_host_queue_t* host_queue = nullptr;
     IREE_RETURN_IF_ERROR(LookupHostQueue(queue_ordinal, &host_queue));
     return iree_hal_queue_barrier(&host_queue->base, wait_semaphore_list,
-                                  signal_semaphore_list,
+                                  signal_semaphore_list, /*barriers=*/NULL,
                                   IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
   }
 
@@ -622,10 +619,11 @@ class QueueBenchmark : public benchmark::Fixture {
     if (payload_kind == PayloadKind::kCopy) {
       iree_hal_amdgpu_host_queue_t* host_queue = nullptr;
       IREE_RETURN_IF_ERROR(LookupHostQueue(queue_ordinal, &host_queue));
-      return iree_hal_queue_copy(
-          &host_queue->base, wait_semaphore_list, signal_semaphore_list,
-          source_buffer_, /*source_offset=*/0, target_buffer_,
-          /*target_offset=*/0, kPayloadLength, IREE_HAL_COPY_FLAG_NONE);
+      return iree_hal_queue_copy(&host_queue->base, wait_semaphore_list,
+                                 signal_semaphore_list, source_buffer_,
+                                 /*source_offset=*/0, target_buffer_,
+                                 /*target_offset=*/0, kPayloadLength,
+                                 /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE);
     }
     if (payload_kind == PayloadKind::kDispatch) {
       iree_hal_amdgpu_host_queue_t* host_queue = nullptr;
@@ -647,7 +645,7 @@ class QueueBenchmark : public benchmark::Fixture {
           &host_queue->base, wait_semaphore_list, signal_semaphore_list,
           dispatch_executable_, iree_hal_executable_function_from_index(0),
           iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
-          IREE_HAL_DISPATCH_FLAG_NONE);
+          /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE);
     }
     if (payload_kind == PayloadKind::kNoopDispatch) {
       iree_hal_amdgpu_host_queue_t* host_queue = nullptr;
@@ -657,7 +655,7 @@ class QueueBenchmark : public benchmark::Fixture {
           dispatch_executable_, iree_hal_executable_function_from_index(0),
           iree_hal_make_static_dispatch_config(0, 0, 0),
           iree_const_byte_span_empty(), iree_hal_buffer_ref_list_empty(),
-          IREE_HAL_DISPATCH_FLAG_NONE);
+          /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE);
     }
     if (payload_kind == PayloadKind::kPreResolvedDispatch) {
       return SubmitPreResolvedDispatchWithLists(
@@ -668,7 +666,7 @@ class QueueBenchmark : public benchmark::Fixture {
     return iree_hal_queue_fill(
         &host_queue->base, wait_semaphore_list, signal_semaphore_list,
         target_buffer_, /*target_offset=*/0, kPayloadLength, &fill_pattern_,
-        sizeof(fill_pattern_), IREE_HAL_FILL_FLAG_NONE);
+        sizeof(fill_pattern_), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
   }
 
   iree_status_t SubmitBarrier(iree_hal_queue_ordinal_t queue_ordinal,
@@ -741,23 +739,30 @@ class QueueBenchmark : public benchmark::Fixture {
   iree_status_t CreateQueueAllocaTlsfPool(iree_device_size_t allocation_size,
                                           iree_hal_pool_t** out_pool) {
     *out_pool = nullptr;
-    iree_hal_queue_pool_backend_t backend = {0};
-    IREE_RETURN_IF_ERROR(iree_hal_device_query_queue_pool_backend(
-        device_, iree_hal_queue_family(queue0_), &backend));
-    if (!backend.slab_provider || !backend.notification) {
-      return iree_make_status(
-          IREE_STATUS_FAILED_PRECONDITION,
-          "queue pool backend query returned an incomplete backend bundle");
-    }
-
     iree_hal_tlsf_pool_options_t options = {};
     options.tlsf_options.range_length = allocation_size;
     options.tlsf_options.alignment = kPayloadBufferAlignment;
     options.tlsf_options.initial_block_capacity = 16;
     options.tlsf_options.frontier_capacity = 2;
-    return iree_hal_tlsf_pool_create(
-        options, backend.slab_provider, backend.notification,
-        iree_hal_pool_epoch_query_null(), host_allocator_, out_pool);
+    const iree_hal_pool_family_access_t family_access = {
+        .family = iree_hal_queue_family(queue0_),
+        .usage = kQueueAllocaBufferUsage,
+    };
+    const iree_hal_pool_scope_t scope = {
+        .family_count = 1,
+        .families = &family_access,
+    };
+    iree_hal_slab_pool_options_t backing_options;
+    iree_hal_slab_pool_options_initialize(&backing_options);
+    backing_options.trace_name = IREE_SV("amdgpu.queue_benchmark");
+    iree_hal_pool_t* backing_pool = nullptr;
+    IREE_RETURN_IF_ERROR(
+        iree_hal_slab_pool_create(device_group_, scope, &backing_options,
+                                  host_allocator_, &backing_pool));
+    iree_status_t status = iree_hal_tlsf_pool_create(backing_pool, &options,
+                                                     host_allocator_, out_pool);
+    iree_hal_pool_release(backing_pool);
+    return status;
   }
 
   iree_status_t QueueAllocaSubmit(iree_hal_pool_t* pool,
@@ -771,13 +776,9 @@ class QueueBenchmark : public benchmark::Fixture {
         /*semaphores=*/&signal_semaphore,
         /*payload_values=*/&signal_payload_value,
     };
-    iree_hal_buffer_params_t params = kQueueAllocaBufferParams;
-    params.queue_family_affinity = iree_hal_make_queue_family_affinity(
-        iree_hal_queue_family_ordinal(iree_hal_queue_family(queue0_)));
-    const iree_hal_pool_reservation_request_t request = {
-        /*.params=*/params,
-        /*.allocation_size=*/allocation_size,
-    };
+    const iree_hal_pool_reservation_request_t request =
+        iree_hal_make_pool_reservation_request(allocation_size,
+                                               /*min_alignment=*/1);
     iree_hal_buffer_t* buffer = nullptr;
     IREE_RETURN_IF_ERROR(iree_hal_queue_alloca(
         queue0_, iree_hal_semaphore_list_empty(), signal_semaphore_list, pool,
@@ -835,7 +836,7 @@ class QueueBenchmark : public benchmark::Fixture {
     IREE_RETURN_IF_ERROR(iree_hal_queue_fill(
         queue0_, iree_hal_semaphore_list_empty(), signal_semaphore_list,
         target_buffer, /*target_offset=*/0, kPayloadBufferAlignment, pattern,
-        pattern_length, IREE_HAL_FILL_FLAG_NONE));
+        pattern_length, /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
     return Wait(completion_semaphore_, payload_value);
   }
 
@@ -1419,9 +1420,10 @@ class QueueBenchmark : public benchmark::Fixture {
         queue_spec->families[iree_hal_queue_family_ordinal(queue_family)]
             .physical_device_affinity;
 
-    iree_hal_executable_target_selection_t selection = {};
-    selection.family = IREE_SV("amdgpu");
-    selection.physical_device_affinity = physical_device_affinity;
+    iree_hal_executable_target_selection_t selection = {
+        .family = IREE_SV("amdgpu"),
+        .physical_device_affinity = physical_device_affinity,
+    };
     const iree_hal_executable_target_selection_result_t target_result =
         iree_hal_device_spec_select_executable_target(
             iree_hal_device_spec(device_), &selection);
@@ -1578,15 +1580,17 @@ class QueueBenchmark : public benchmark::Fixture {
     }
 
     iree_hal_allocator_t* allocator = iree_hal_device_allocator(device_);
-    iree_hal_buffer_params_t params = {0};
+    iree_hal_amdgpu_buffer_spec_t params = {0};
     params.usage = IREE_HAL_BUFFER_USAGE_STORAGE;
     params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
+    params.access = IREE_HAL_MEMORY_ACCESS_ALL;
+    params.queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
     params.min_alignment = kPayloadBufferAlignment;
     for (iree_host_size_t i = 0; i < (iree_host_size_t)binding_count; ++i) {
       if (binding_count_buffers_[i]) {
         continue;
       }
-      iree_status_t status = iree_hal_allocator_allocate_buffer(
+      iree_status_t status = iree_hal_amdgpu_allocator_allocate_direct_buffer(
           allocator, params, kPayloadBufferAlignment,
           &binding_count_buffers_[i]);
       if (!HandleStatus(state, status,
@@ -1680,7 +1684,8 @@ class QueueBenchmark : public benchmark::Fixture {
                 sizeof(pre_resolved_dispatch_packet_template_));
     iree_hal_amdgpu_device_dispatch_emplace_packet(
         kernel_args, workgroup_count, dynamic_workgroup_local_memory,
-        &pre_resolved_dispatch_packet_template_, /*kernarg_ptr=*/nullptr);
+        &pre_resolved_dispatch_packet_template_, /*kernarg_ptr=*/nullptr,
+        &pre_resolved_dispatch_packet_template_.setup);
 
     pre_resolved_dispatch_kernargs_ = kernargs;
     pre_resolved_dispatch_kernarg_length_ = kernarg_length;
@@ -1880,7 +1885,7 @@ class QueueBenchmark : public benchmark::Fixture {
         &host_queue->base, wait_semaphore_list, signal_semaphore_list,
         binding_count_executable_, export_ordinal, dispatch_config,
         iree_const_byte_span_empty(),
-        BindingCountDispatchBindings(binding_count),
+        BindingCountDispatchBindings(binding_count), /*barriers=*/NULL,
         IREE_HAL_DISPATCH_FLAG_NONE);
   }
 
@@ -2156,22 +2161,24 @@ class QueueBenchmark : public benchmark::Fixture {
  private:
   bool AllocatePayloadBuffers(benchmark::State& state) {
     iree_hal_allocator_t* allocator = iree_hal_device_allocator(device_);
-    iree_hal_buffer_params_t params = {0};
+    iree_hal_amdgpu_buffer_spec_t params = {0};
     params.usage =
         IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
     params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
+    params.access = IREE_HAL_MEMORY_ACCESS_ALL;
+    params.queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
     params.min_alignment = kPayloadBufferAlignment;
 
     if (!HandleStatus(
             state,
-            iree_hal_allocator_allocate_buffer(
+            iree_hal_amdgpu_allocator_allocate_direct_buffer(
                 allocator, params, kPayloadBufferAlignment, &source_buffer_),
             "failed to allocate source payload buffer")) {
       return false;
     }
     if (!HandleStatus(
             state,
-            iree_hal_allocator_allocate_buffer(
+            iree_hal_amdgpu_allocator_allocate_direct_buffer(
                 allocator, params, kPayloadBufferAlignment, &target_buffer_),
             "failed to allocate target payload buffer")) {
       return false;

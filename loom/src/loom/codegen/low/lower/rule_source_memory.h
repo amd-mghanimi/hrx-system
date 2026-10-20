@@ -20,6 +20,32 @@ extern "C" {
 typedef struct loom_low_lower_rule_match_context_t
     loom_low_lower_rule_match_context_t;
 
+// Selects the producer-retained complete byte offset when this recipe accepts
+// it and it replaces a multi-term reconstruction. Single canonical terms keep
+// their native scale/displacement opportunities. Canonical analysis and memory
+// effects are independent of this materialization choice.
+static inline bool loom_low_lower_rule_source_memory_reuses_view_base(
+    const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_source_memory_access_plan_t* access) {
+  return iree_any_bit_set(source_memory->flags,
+                          LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_REUSE_VIEW_BASE) &&
+         access->dynamic_term_count > 1 &&
+         access->dynamic_term_count == access->dynamic_view_base_term_count &&
+         access->dynamic_view_base_value_id != LOOM_VALUE_ID_INVALID;
+}
+
+// Returns the displacement consumed by the selected recipe. The canonical
+// static offset remains unchanged for address facts and memory effects.
+static inline int64_t loom_low_lower_rule_source_memory_static_byte_offset(
+    const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_source_memory_access_plan_t* access) {
+  return access->static_byte_offset -
+         (loom_low_lower_rule_source_memory_reuses_view_base(source_memory,
+                                                             access)
+              ? access->dynamic_view_base_value_static_byte_offset
+              : 0);
+}
+
 typedef struct loom_low_lower_rule_source_memory_state_t {
   // Source op whose canonical access is retained in this state.
   const loom_op_t* source_op;
@@ -29,6 +55,10 @@ typedef struct loom_low_lower_rule_source_memory_state_t {
   bool plan_available;
   // Caller-owned storage receiving the canonical source-memory plan.
   loom_low_source_memory_access_plan_t* access_plan;
+  // Optional caller-owned axis storage used by read-only fragment legality.
+  loom_low_source_memory_axis_byte_stride_t* axis_byte_strides;
+  // Shared preselection's immutable source plan, or NULL in read-only legality.
+  const loom_low_source_memory_access_plan_t* retained_access;
   // Exact source-access rejection facts when planning did not succeed.
   loom_low_source_memory_access_diagnostic_t diagnostic;
 } loom_low_lower_rule_source_memory_state_t;
@@ -52,29 +82,32 @@ typedef struct loom_low_lower_rule_source_memory_match_t {
 } loom_low_lower_rule_source_memory_match_t;
 
 // Returns the source-memory-plan alignment used by generated diagnostics.
-uint32_t loom_low_lower_rule_source_memory_minimum_alignment(
+iree_status_t loom_low_lower_rule_source_memory_minimum_alignment(
     const loom_low_lower_rule_match_context_t* match_context,
-    const loom_op_t* source_op);
+    const loom_op_t* source_op, uint32_t* out_alignment);
 
 // Returns true when |memory_space| is present in the generated mask.
 bool loom_low_lower_rule_memory_space_matches(
     loom_low_lower_memory_space_mask_t memory_space_mask,
     loom_value_fact_memory_space_t memory_space);
 
-// Matches one generated source-memory row against a canonical access plan.
+// Matches one generated source-memory row's shape and address layout against
+// a canonical access plan, independently of address-width materialization.
 bool loom_low_lower_rule_source_memory_matches(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_lower_source_memory_shape_t* source_memory_shape,
     const loom_low_lower_source_memory_diagnostics_t* diagnostics,
     const loom_low_source_memory_access_plan_t* source_memory_access,
+    loom_low_source_memory_access_rejection_flags_t access_rejection_bits,
     uint16_t* out_diagnostic_index);
 
 // Matches every source-memory emit attached to |rule|.
-loom_low_lower_rule_source_memory_match_t
-loom_low_lower_rule_source_memory_emits_match(
+iree_status_t loom_low_lower_rule_source_memory_emits_match(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
-    const loom_low_lower_rule_t* rule);
+    const loom_low_lower_rule_t* rule,
+    loom_low_lower_rule_source_memory_match_t* out_match);
 
 // Resolves one canonical dynamic address term in the descriptor-declared byte
 // arithmetic carrier. Fixed-width source integers use the selected memory
@@ -87,9 +120,10 @@ iree_status_t loom_low_lower_rule_materialize_source_memory_dynamic_term(
     const loom_low_source_memory_access_plan_t* source_memory_access,
     uint8_t term_ordinal, loom_value_id_t* out_value_id);
 
-// Materializes the canonical dynamic byte offset selected by a source-memory
-// plan in the descriptor-declared carrier. Wider source terms are projected
-// before arithmetic; the selected memory contract owns the address range proof.
+// Materializes the recipe's dynamic byte offset in its declared carrier. When
+// reusing a complete view base this includes its embedded static contribution;
+// static_byte_offset above returns the matching residual displacement. Wider
+// source terms are projected before arithmetic; matching owns the range proof.
 iree_status_t loom_low_lower_rule_materialize_source_memory_byte_offset(
     loom_low_lower_context_t* context,
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
@@ -97,13 +131,34 @@ iree_status_t loom_low_lower_rule_materialize_source_memory_byte_offset(
     const loom_low_source_memory_access_plan_t* source_memory_access,
     loom_value_id_t* out_value_id);
 
-// Materializes the complete target address selected by a source-memory plan.
-iree_status_t loom_low_lower_rule_materialize_source_memory_address(
+// Materializes the complete byte offset, including the static bias selected by
+// the source-memory plan, in the descriptor-declared carrier.
+iree_status_t
+loom_low_lower_rule_materialize_source_memory_complete_byte_offset(
     loom_low_lower_context_t* context,
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
     const loom_low_lower_source_memory_t* source_memory,
     const loom_low_source_memory_access_plan_t* source_memory_access,
     loom_value_id_t* out_value_id);
+
+// Materializes the complete target address using its planned semantic
+// coordinate carrier. Descriptor register widths alone do not encode typed
+// coordinates.
+iree_status_t loom_low_lower_rule_materialize_source_memory_address(
+    loom_low_lower_context_t* context,
+    const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
+    const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_source_memory_access_plan_t* source_memory_access,
+    loom_type_t coordinate_type, loom_value_id_t* out_value_id);
+
+// Materializes a selected view-axis stride in element units, using the same
+// integer carrier and conversions as its source-memory address recipe.
+iree_status_t loom_low_lower_rule_materialize_source_memory_element_stride(
+    loom_low_lower_context_t* context,
+    const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
+    const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_source_memory_access_plan_t* access, uint8_t axis,
+    loom_type_t coordinate_type, loom_value_id_t* out_value_id);
 
 #ifdef __cplusplus
 }  // extern "C"

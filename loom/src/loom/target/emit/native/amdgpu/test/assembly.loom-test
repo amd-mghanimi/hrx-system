@@ -18,6 +18,22 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_constants(%resource
 
 // ====
 
+// Structural copies from scalar to vector registers encode the scalar source
+// selector directly in VOP1 rather than interpreting it as a VGPR ordinal.
+// RUN: emit amdgpu-native-words @gfx942_sgpr_to_vgpr_copy waits=none strategy=source fixed=%source:physical_register:2:1 fixed=%result:physical_register:1:1
+amdgpu.target<gfx942> @gfx942_target
+
+low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_sgpr_to_vgpr_copy(%source: reg<amdgpu.sgpr>) -> (reg<amdgpu.vgpr>) asm {
+  %result = copy %source : reg<amdgpu.sgpr> -> reg<amdgpu.vgpr>
+  return %result
+}
+
+// ----
+0x7E020202
+0xBF810000
+
+// ====
+
 // Compiler hints partition the low schedule but have no target representation.
 // RUN: emit amdgpu-assembly @gfx11_compiler_hint waits=none strategy=source
 amdgpu.target<gfx1100> @gfx11_target
@@ -150,7 +166,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_getpc(%resource: re
 
 // ----
   s_getpc_b64 s[6:7]
-  v_mov_b32_copy v1, s6
+  v_mov_b32 v1, s6
   buffer_store_dword v1, v0, s[0:3], s4 offen offset:0
   s_endpgm
 
@@ -169,7 +185,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_getpc_assembly(%res
 
 // ----
   s_getpc_b64 s[6:7]
-  v_mov_b32_copy v1, s6
+  v_mov_b32 v1, s6
   buffer_store_dword v1, v0, s[0:3], s4 offen offset:0
   s_endpgm
 
@@ -198,7 +214,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_rel32_pc_copy() asm
   s_mov_b32 s21, s5
   s_add_u32_rhs_symbol_rel32_lo s22, s20, symbol(@iree_asan_config), byte_offset(0)
   s_addc_u32_rhs_symbol_rel32_hi s23, s21, symbol(@iree_asan_config), byte_offset(0)
-  s_load_dwordx2 s[24:25], s[22:23] offset:16
+  s_load_dwordx2 s[24:25], s[22:23], 16
   s_endpgm
 
 // ====
@@ -758,8 +774,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_dot2_pairs(%lh
 }
 
 // ----
-  v_dual_dot2acc_f32_f16 v4, v0, v1 :: v_dual_dot2acc_f32_f16 v5, v2, v3
-  v_dual_dot2acc_f32_bf16 v6, v0, v1 :: v_dual_dot2acc_f32_bf16 v7, v2, v3
+  v_dual_dot2acc_f32_f16 v4, v1, v0 :: v_dual_dot2acc_f32_f16 v5, v2, v3
+  v_dual_dot2acc_f32_bf16 v6, v1, v0 :: v_dual_dot2acc_f32_bf16 v7, v2, v3
   s_endpgm
 
 // ====
@@ -774,12 +790,12 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_mixed_dot2_pai
 }
 
 // ----
-  v_dual_dot2acc_f32_f16 v4, v0, v1 :: v_dual_dot2acc_f32_bf16 v5, v2, v3
+  v_dual_dot2acc_f32_f16 v4, v1, v0 :: v_dual_dot2acc_f32_bf16 v5, v2, v3
   s_endpgm
 
 // ====
 
-// RUN: emit amdgpu-assembly @gfx11_vopd_binary_f32_pairs strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:2:1 fixed=%b1:physical_register:3:1 fixed=%mul0:physical_register:4:1 fixed=%mul1:physical_register:5:1 fixed=%add0:physical_register:6:1 fixed=%add1:physical_register:7:1 fixed=%sub0:physical_register:8:1 fixed=%sub1:physical_register:9:1
+// RUN: emit amdgpu-assembly @gfx11_vopd_binary_f32_pairs strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:3:1 fixed=%b1:physical_register:2:1 fixed=%mul0:physical_register:4:1 fixed=%mul1:physical_register:5:1 fixed=%add0:physical_register:6:1 fixed=%add1:physical_register:7:1 fixed=%sub0:physical_register:8:1 fixed=%sub1:physical_register:9:1
 amdgpu.target<gfx1100> @gfx11_target
 
 low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_binary_f32_pairs(%a0: reg<amdgpu.vgpr>, %b0: reg<amdgpu.vgpr>, %a1: reg<amdgpu.vgpr>, %b1: reg<amdgpu.vgpr>) asm {
@@ -793,9 +809,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_binary_f32_pai
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_mul_f32 v5, v2, v3
-  v_dual_add_f32 v6, v0, v1 :: v_dual_add_f32 v7, v2, v3
-  v_dual_sub_f32 v8, v0, v1 :: v_dual_sub_f32 v9, v2, v3
+  v_dual_mul_f32 v4, v0, v1 :: v_dual_mul_f32 v5, v3, v2
+  v_dual_add_f32 v6, v0, v1 :: v_dual_add_f32 v7, v3, v2
+  v_dual_sub_f32 v8, v0, v1 :: v_dual_sub_f32 v9, v3, v2
   s_endpgm
 
 // ====
@@ -812,13 +828,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_minmax_f32_pai
 }
 
 // ----
-  v_dual_min_f32 v4, v0, v1 :: v_dual_min_f32 v5, v2, v3
-  v_dual_max_f32 v6, v0, v1 :: v_dual_max_f32 v7, v2, v3
+  v_dual_min_f32 v4, v1, v0 :: v_dual_min_f32 v5, v2, v3
+  v_dual_max_f32 v6, v1, v0 :: v_dual_max_f32 v7, v2, v3
   s_endpgm
 
 // ====
 
-// RUN: emit amdgpu-assembly @gfx11_vopd_subrev_f32_pairs strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:2:1 fixed=%b1:physical_register:3:1 fixed=%diff0:physical_register:4:1 fixed=%diff1:physical_register:5:1
+// RUN: emit amdgpu-assembly @gfx11_vopd_subrev_f32_pairs strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:3:1 fixed=%b1:physical_register:2:1 fixed=%diff0:physical_register:4:1 fixed=%diff1:physical_register:5:1
 amdgpu.target<gfx1100> @gfx11_target
 
 low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_subrev_f32_pairs(%a0: reg<amdgpu.vgpr>, %b0: reg<amdgpu.vgpr>, %a1: reg<amdgpu.vgpr>, %b1: reg<amdgpu.vgpr>) asm {
@@ -828,7 +844,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_subrev_f32_pai
 }
 
 // ----
-  v_dual_subrev_f32 v4, v0, v1 :: v_dual_subrev_f32 v5, v2, v3
+  v_dual_subrev_f32 v4, v0, v1 :: v_dual_subrev_f32 v5, v3, v2
   s_endpgm
 
 // ====
@@ -843,7 +859,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_mixed_binary_f
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_f32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_f32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -858,7 +874,7 @@ low.func.def target<amdgpu.rdna3_5.core>(@gfx1151_target) @gfx1151_vopd_mixed_bi
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_f32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_f32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -873,7 +889,7 @@ low.func.def target<amdgpu.gfx11.generic.core>(@gfx11_generic_target) @gfx11_gen
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_f32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_f32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -906,8 +922,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_y_only_integer
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_nc_u32 v5, v2, v3
-  v_dual_add_f32 v6, v0, v1 :: v_dual_lshlrev_b32 v7, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_nc_u32 v5, v2, v3
+  v_dual_add_f32 v6, v1, v0 :: v_dual_lshlrev_b32 v7, v2, v3
   s_endpgm
 
 // ====
@@ -922,7 +938,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_and_b32_y_only
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_and_b32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_and_b32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -1019,10 +1035,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_rope_pair_rota
 
 // ----
   v_dual_mul_f32 v4, v0, v3 :: v_dual_mul_f32 v5, v1, v2
-  s_delay_alu instid0(VALU_DEP_1)
-  v_dual_sub_f32 v6, v4, v5 :: v_dual_mul_f32 v7, v2, v0
-  v_mul_f32 v8, v1, v3
-  s_delay_alu instid0(VALU_DEP_1) | instid1(VALU_DEP_2)
+  s_delay_alu instid0(VALU_DEP_1) | instskip(SKIP_1) | instid1(VALU_DEP_1)
+  v_sub_f32 v6, v4, v5
+  v_dual_mul_f32 v7, v0, v2 :: v_dual_mul_f32 v8, v1, v3
   v_add_f32 v9, v7, v8
   s_endpgm
 
@@ -1040,8 +1055,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_epilogue_weigh
 }
 
 // ----
-  v_dual_add_f32 v8, v0, v1 :: v_dual_add_f32 v9, v2, v3
-  v_dual_add_f32 v10, v4, v5 :: v_dual_add_f32 v11, v6, v7
+  v_dual_add_f32 v8, v1, v0 :: v_dual_add_f32 v9, v2, v3
+  v_dual_add_f32 v10, v5, v4 :: v_dual_add_f32 v11, v6, v7
   s_endpgm
 
 // ====
@@ -1058,8 +1073,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_dot2_pairs_ass
 }
 
 // ----
-  v_dual_dot2acc_f32_f16 v4, v0, v1 :: v_dual_dot2acc_f32_f16 v5, v2, v3
-  v_dual_dot2acc_f32_bf16 v6, v0, v1 :: v_dual_dot2acc_f32_bf16 v7, v2, v3
+  v_dual_dot2acc_f32_f16 v4, v1, v0 :: v_dual_dot2acc_f32_f16 v5, v2, v3
+  v_dual_dot2acc_f32_bf16 v6, v1, v0 :: v_dual_dot2acc_f32_bf16 v7, v2, v3
   s_endpgm
 
 // ====
@@ -1074,12 +1089,12 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_mixed_dot2_pai
 }
 
 // ----
-  v_dual_dot2acc_f32_f16 v4, v0, v1 :: v_dual_dot2acc_f32_bf16 v5, v2, v3
+  v_dual_dot2acc_f32_f16 v4, v1, v0 :: v_dual_dot2acc_f32_bf16 v5, v2, v3
   s_endpgm
 
 // ====
 
-// RUN: emit amdgpu-assembly @gfx11_vopd_binary_f32_pairs_assembly strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:2:1 fixed=%b1:physical_register:3:1 fixed=%mul0:physical_register:4:1 fixed=%mul1:physical_register:5:1 fixed=%add0:physical_register:6:1 fixed=%add1:physical_register:7:1 fixed=%sub0:physical_register:8:1 fixed=%sub1:physical_register:9:1
+// RUN: emit amdgpu-assembly @gfx11_vopd_binary_f32_pairs_assembly strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:3:1 fixed=%b1:physical_register:2:1 fixed=%mul0:physical_register:4:1 fixed=%mul1:physical_register:5:1 fixed=%add0:physical_register:6:1 fixed=%add1:physical_register:7:1 fixed=%sub0:physical_register:8:1 fixed=%sub1:physical_register:9:1
 amdgpu.target<gfx1100> @gfx11_target
 
 low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_binary_f32_pairs_assembly(%a0: reg<amdgpu.vgpr>, %b0: reg<amdgpu.vgpr>, %a1: reg<amdgpu.vgpr>, %b1: reg<amdgpu.vgpr>) asm {
@@ -1093,9 +1108,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_binary_f32_pai
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_mul_f32 v5, v2, v3
-  v_dual_add_f32 v6, v0, v1 :: v_dual_add_f32 v7, v2, v3
-  v_dual_sub_f32 v8, v0, v1 :: v_dual_sub_f32 v9, v2, v3
+  v_dual_mul_f32 v4, v0, v1 :: v_dual_mul_f32 v5, v3, v2
+  v_dual_add_f32 v6, v0, v1 :: v_dual_add_f32 v7, v3, v2
+  v_dual_sub_f32 v8, v0, v1 :: v_dual_sub_f32 v9, v3, v2
   s_endpgm
 
 // ====
@@ -1112,13 +1127,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_minmax_f32_pai
 }
 
 // ----
-  v_dual_min_f32 v4, v0, v1 :: v_dual_min_f32 v5, v2, v3
-  v_dual_max_f32 v6, v0, v1 :: v_dual_max_f32 v7, v2, v3
+  v_dual_min_f32 v4, v1, v0 :: v_dual_min_f32 v5, v2, v3
+  v_dual_max_f32 v6, v1, v0 :: v_dual_max_f32 v7, v2, v3
   s_endpgm
 
 // ====
 
-// RUN: emit amdgpu-assembly @gfx11_vopd_subrev_f32_pairs_assembly strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:2:1 fixed=%b1:physical_register:3:1 fixed=%diff0:physical_register:4:1 fixed=%diff1:physical_register:5:1
+// RUN: emit amdgpu-assembly @gfx11_vopd_subrev_f32_pairs_assembly strategy=source fixed=%a0:physical_register:0:1 fixed=%b0:physical_register:1:1 fixed=%a1:physical_register:3:1 fixed=%b1:physical_register:2:1 fixed=%diff0:physical_register:4:1 fixed=%diff1:physical_register:5:1
 amdgpu.target<gfx1100> @gfx11_target
 
 low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_subrev_f32_pairs_assembly(%a0: reg<amdgpu.vgpr>, %b0: reg<amdgpu.vgpr>, %a1: reg<amdgpu.vgpr>, %b1: reg<amdgpu.vgpr>) asm {
@@ -1128,7 +1143,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_subrev_f32_pai
 }
 
 // ----
-  v_dual_subrev_f32 v4, v0, v1 :: v_dual_subrev_f32 v5, v2, v3
+  v_dual_subrev_f32 v4, v0, v1 :: v_dual_subrev_f32 v5, v3, v2
   s_endpgm
 
 // ====
@@ -1143,7 +1158,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_mixed_binary_f
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_f32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_f32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -1160,8 +1175,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_y_only_integer
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_add_nc_u32 v5, v2, v3
-  v_dual_add_f32 v6, v0, v1 :: v_dual_lshlrev_b32 v7, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_add_nc_u32 v5, v2, v3
+  v_dual_add_f32 v6, v1, v0 :: v_dual_lshlrev_b32 v7, v2, v3
   s_endpgm
 
 // ====
@@ -1176,7 +1191,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_and_b32_y_only
 }
 
 // ----
-  v_dual_mul_f32 v4, v0, v1 :: v_dual_and_b32 v5, v2, v3
+  v_dual_mul_f32 v4, v1, v0 :: v_dual_and_b32 v5, v2, v3
   s_endpgm
 
 // ====
@@ -1241,7 +1256,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmac_chain_pai
 // ----
   v_dual_fmac_f32 v0, v1, v2 :: v_dual_fmac_f32 v3, v4, v5
   s_delay_alu instid0(VALU_DEP_1)
-  v_dual_fmac_f32 v0, v6, v7 :: v_dual_fmac_f32 v3, v8, v9
+  v_dual_fmac_f32 v0, v6, v7 :: v_dual_fmac_f32 v3, v9, v8
   s_endpgm
 
 // ====
@@ -1266,9 +1281,10 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmac_chain_pai
 }
 
 // ----
-  v_dual_fmac_f32 v0, v4, v8 :: v_dual_fmac_f32 v1, v6, v10
-  s_delay_alu instid0(VALU_DEP_1)
-  v_dual_fmac_f32 v0, v5, v9 :: v_dual_fmac_f32 v1, v7, v11
+  v_fmac_f32 v0, v4, v8
+  s_delay_alu instid0(VALU_DEP_1) | instskip(NEXT) | instid1(VALU_DEP_1)
+  v_dual_fmac_f32 v1, v6, v10 :: v_dual_fmac_f32 v0, v5, v9
+  v_fmac_f32 v1, v7, v11
   s_endpgm
 
 // ====
@@ -1312,13 +1328,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmaak_pair(%re
 }
 
 // ----
-  v_dual_fmaak_f32 v5, v0, v1, 0x3f800000 :: v_dual_fmaak_f32 v6, v2, v4, 0x3f800000
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_dual_fmaak_f32 v5, v0, v1, 0x3f800000 :: v_dual_fmaak_f32 v6, v3, v4, 0x3f800000
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1443,13 +1459,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmamk_pair(%re
 }
 
 // ----
-  v_dual_fmamk_f32 v5, v0, 0x3f800000, v1 :: v_dual_fmamk_f32 v6, v2, 0x3f800000, v4
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_dual_fmamk_f32 v5, v0, 0x3f800000, v1 :: v_dual_fmamk_f32 v6, v3, 0x3f800000, v4
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1471,13 +1487,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmamk_pair_ass
 }
 
 // ----
-  v_dual_fmamk_f32 v5, v0, 0x3f800000, v1 :: v_dual_fmamk_f32 v6, v2, 0x3f800000, v4
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_dual_fmamk_f32 v5, v0, 0x3f800000, v1 :: v_dual_fmamk_f32 v6, v3, 0x3f800000, v4
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1500,13 +1516,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmamk_literal_
 
 // ----
   v_fmamk_f32 v5, v0, 0x3f800000, v1
-  v_fmamk_f32 v6, v2, 0x40000000, v4
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_fmamk_f32 v6, v3, 0x40000000, v4
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1528,13 +1544,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmaak_pair_ass
 }
 
 // ----
-  v_dual_fmaak_f32 v5, v0, v1, 0x3f800000 :: v_dual_fmaak_f32 v6, v2, v4, 0x3f800000
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_dual_fmaak_f32 v5, v0, v1, 0x3f800000 :: v_dual_fmaak_f32 v6, v3, v4, 0x3f800000
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1557,13 +1573,13 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_fmaak_literal_
 
 // ----
   v_fmaak_f32 v5, v0, v1, 0x3f800000
-  v_fmaak_f32 v6, v2, v4, 0x40000000
-  buffer_store_dword v5, v3, s[0:3], s4 offen offset:0
-  buffer_store_dword v6, v3, s[0:3], s4 offen offset:4
-  buffer_store_dword v0, v3, s[0:3], s4 offen offset:8
-  buffer_store_dword v1, v3, s[0:3], s4 offen offset:12
-  buffer_store_dword v2, v3, s[0:3], s4 offen offset:16
-  buffer_store_dword v4, v3, s[0:3], s4 offen offset:20
+  v_fmaak_f32 v6, v3, v4, 0x40000000
+  buffer_store_dword v5, v2, s[0:3], s4 offen offset:0
+  buffer_store_dword v6, v2, s[0:3], s4 offen offset:4
+  buffer_store_dword v0, v2, s[0:3], s4 offen offset:8
+  buffer_store_dword v1, v2, s[0:3], s4 offen offset:12
+  buffer_store_dword v3, v2, s[0:3], s4 offen offset:16
+  buffer_store_dword v4, v2, s[0:3], s4 offen offset:20
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
 
@@ -1643,7 +1659,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_low16_shift_high(%v
 amdgpu.target<gfx1100> @gfx11_target
 
 low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_low16_extract_full(%value: reg<amdgpu.vgpr>) asm {
-  %extended = v_bfe_u32_offset_0_width_16_low16 %value
+  %extended = v_bfe_u32_offset_0_width_inline_low16 %value
   return
 }
 
@@ -1678,6 +1694,29 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_mad_u32_u24(%value:
 // ----
   v_mad_u32_u24 v0, s0, v0, v1
   s_endpgm
+
+// ====
+
+// Inline VOP3 sources keep the multiply-add at two words. A literal form would
+// append a third instruction word.
+// RUN: emit amdgpu-native-words @gfx11_mad_u32_u24_inline waits=none strategy=source fixed=%value:physical_register:0:1 fixed=%addend:physical_register:2:1 fixed=%src0:physical_register:1:1 fixed=%src1:physical_register:3:1 fixed=%src2:physical_register:4:1
+amdgpu.target<gfx1100> @gfx11_target
+
+low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_mad_u32_u24_inline(%value: reg<amdgpu.vgpr>, %addend: reg<amdgpu.sgpr>) asm {
+  %src0 = v_mad_u32_u24_src0_inline %value, %addend, 20
+  %src1 = v_mad_u32_u24_src1_inline %value, %addend, 20
+  %src2 = v_mad_u32_u24_src2_inline %value, %addend, 20
+  return
+}
+
+// ----
+0xD60B0001
+0x000A0094
+0xD60B0003
+0x00092900
+0xD60B0004
+0x02500500
+0xBFB00000
 
 // ====
 
@@ -1929,7 +1968,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_s_load_offset_only(
 }
 
 // ----
-  s_load_dwordx2 s[2:3], s[0:1] offset:32
+  s_load_dwordx2 s[2:3], s[0:1], 32
   s_endpgm
 
 // ====
@@ -1943,7 +1982,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_s_load_offset_only_
 }
 
 // ----
-  s_load_dwordx8 s[8:15], s[0:1] offset:32
+  s_load_dwordx8 s[8:15], s[0:1], 32
   s_endpgm
 
 // ====
@@ -1957,7 +1996,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_s_load_offset_only_
 }
 
 // ----
-  s_load_dwordx2 s[0:1], s[0:1] offset:32
+  s_load_dwordx2 s[0:1], s[0:1], 32
   s_endpgm
 
 // ====
@@ -1982,8 +2021,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_s_load_tied_after_p
 }
 
 // ----
-  s_load_dwordx4 s[4:7], s[0:1] offset:0
-  s_load_dwordx2 s[0:1], s[0:1] offset:16
+  s_load_dwordx4 s[4:7], s[0:1], 0
+  s_load_dwordx2 s[0:1], s[0:1], 16
   s_mov_b32 s0, 65535
   s_mov_b32 s2, 16
   s_mov_b32 s3, 822173696
@@ -2190,7 +2229,7 @@ low.func.def target<amdgpu.rdna4.gfx125x.core>(@gfx1250_target) @gfx1250_vgpr_ms
   s_set_vgpr_msb 64
   v_lshlrev_b32 v268, 1, v12
   s_set_vgpr_msb 16385
-  global_load_d16_b16 v2, v12, s[0:1] offset:0
+  global_load_short_d16 v2, v12, s[0:1] offset:0
   s_wait_loadcnt loadcnt(0)
   v_lshlrev_b32 v3, 16, v2
   s_set_vgpr_msb 256
@@ -2381,9 +2420,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_loop_arg_cycle(%lhs
 
 // ----
 .Lbb1:
-  v_mov_b32 v2, v1
-  v_mov_b32 v1, v0
-  v_mov_b32 v0, v2
+  v_mov_b32 v2, v0
+  v_mov_b32 v0, v1
+  v_mov_b32 v1, v2
   s_branch .Lbb1
 
 // ====
@@ -2429,9 +2468,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_scc_selects_with_in
   s_cmp_lt_i32 s0, s1
   s_cselect_b32 s0, s4, s5
   s_cmp_lt_i32 s2, s3
-  v_mov_b32_copy v1, s0
+  v_mov_b32 v1, s0
   s_cselect_b32 s0, s4, s5
-  v_mov_b32_copy v2, s0
+  v_mov_b32 v2, s0
   buffer_store_dword v1, v0, s[8:11], s6 offen offset:0
   buffer_store_dword v2, v0, s[8:11], s6 offen offset:4
   s_endpgm
@@ -2456,7 +2495,7 @@ low.func.def target<amdgpu.rdna4.gfx125x.core>(@gfx1250_target) @gfx1250_scc_sel
   s_cselect_b32 s0, s1, s2
   s_add_u32 s1, s3, s4
   s_add_u32 s1, s1, s4
-  v_mov_b32_copy v1, s0
+  v_mov_b32 v1, s0
   buffer_store_dword v1, v0, s[8:11], s1 offen offset:0
   s_endpgm
 
@@ -2659,14 +2698,14 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_predicated_tile_swe
 
 // ----
   v_mov_b32 v1, 0
-  s_mov_b32 s6, 16
-  s_mov_b32 s7, 128
-  s_mov_b32 s8, 0
-  global_load_d16_b16 v2, v1, s[0:1] offset:0
+  s_mov_b32 s6, 0
+  s_mov_b32 s7, 16
+  s_mov_b32 s8, 128
+  global_load_short_d16 v2, v1, s[0:1] offset:0
   v_cvt_f32_f16 v2, v2
   v_mov_b32 v3, v2
 .Lbb1:
-  s_cmp_lt_i32 s8, s7
+  s_cmp_lt_i32 s6, s8
   s_cbranch_scc0 .Lbb6
 .Lbb2:
   s_mov_b64_exec_read s[0:1]
@@ -2677,21 +2716,21 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_predicated_tile_swe
   s_and_saveexec_b64 s[10:11], s[10:11]
   s_cbranch_scc0 .Lbb5
 .Lbb4:
-  v_mov_b32_copy v4, s8
-  v_mov_b32 v5, 15
-  v_mov_b32 v6, 64
-  v_lshrrev_b32 v7, 4, v2
-  v_and_b32 v5, v2, v5
-  v_add_u32 v4, v4, v5
-  v_mad_u32_u24 v4, v7, 3072, v4
-  v_add_u32 v2, v2, v6
+  v_mov_b32 v4, 15
+  v_mov_b32 v5, 64
+  v_lshrrev_b32 v6, 4, v2
+  v_mov_b32 v7, s6
+  v_and_b32 v4, v2, v4
+  v_add_u32 v4, v7, v4
+  v_mad_u32_u24 v4, v6, 3072, v4
+  v_add_u32 v2, v2, v5
   v_lshlrev_b32 v4, 2, v4
   global_load_b32 v4, v4, s[2:3] offset:0
   v_add_f32 v3, v3, v4
   s_branch .Lbb3
 .Lbb5:
   s_mov_b64 exec, s[0:1]
-  s_add_u32 s8, s8, s6
+  s_add_u32 s6, s6, s7
   s_branch .Lbb1
 .Lbb6:
   global_store_b32 v1, v3, s[4:5] offset:0
@@ -3051,9 +3090,9 @@ low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_buffer_load_lds(%
 amdgpu.target<gfx950> @gfx950_target
 
 low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_dwordx3_memory(%resource: reg<amdgpu.sgpr x4>, %vaddr: reg<amdgpu.vgpr>, %soffset: reg<amdgpu.sgpr>, %addr: reg<amdgpu.vgpr>, %saddr: reg<amdgpu.sgpr x2>) asm {
-  %buffer = buffer_load_dwordx3 %resource, %vaddr, %soffset {offset = 12}
+  %buffer = buffer_load_dwordx3 %resource, %vaddr, %soffset {offset = 12} : reg<amdgpu.vgpr x3>
   buffer_store_dwordx3 %buffer, %resource, %vaddr, %soffset {offset = 16}
-  %global = global_load_dwordx3_saddr %addr, %saddr {offset = 4}
+  %global = global_load_dwordx3_saddr %addr, %saddr {offset = 4} : reg<amdgpu.vgpr x3>
   global_store_dwordx3_saddr %addr, %global, %saddr {offset = 8}
   return
 }
@@ -3071,16 +3110,16 @@ low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_dwordx3_memory(%r
 amdgpu.target<gfx950> @gfx950_target
 
 low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_narrow_vmem_loads(%resource: reg<amdgpu.sgpr x4>, %vaddr: reg<amdgpu.vgpr>, %soffset: reg<amdgpu.sgpr>, %saddr: reg<amdgpu.sgpr x2>) asm {
-  %buffer_u8 = buffer_load_u8 %resource, %vaddr, %soffset {offset = 4}
-  %buffer_i16 = buffer_load_i16 %resource, %vaddr, %soffset {offset = 8}
-  %global_u8 = global_load_ubyte_saddr %vaddr, %saddr {offset = 12}
-  %global_i16 = global_load_sshort_saddr %vaddr, %saddr {offset = 16}
+  %buffer_u8 = buffer_load_u8 %resource, %vaddr, %soffset {offset = 4} : reg<amdgpu.vgpr>
+  %buffer_i16 = buffer_load_i16 %resource, %vaddr, %soffset {offset = 8} : reg<amdgpu.vgpr>
+  %global_u8 = global_load_ubyte_saddr %vaddr, %saddr {offset = 12} : reg<amdgpu.vgpr>
+  %global_i16 = global_load_sshort_saddr %vaddr, %saddr {offset = 16} : reg<amdgpu.vgpr>
   return
 }
 
 // ----
-  buffer_load_u8 v1, v0, s[0:3], s4 offen offset:4
-  buffer_load_i16 v1, v0, s[0:3], s4 offen offset:8
+  buffer_load_ubyte v1, v0, s[0:3], s4 offen offset:4
+  buffer_load_sshort v1, v0, s[0:3], s4 offen offset:8
   global_load_ubyte v1, v0, s[6:7] offset:12
   global_load_sshort v0, v0, s[6:7] offset:16
   s_endpgm
@@ -3119,12 +3158,12 @@ low.func.def target<amdgpu.rdna4.core>(@gfx12_target) @gfx12_packed_half_atomics
 }
 
 // ----
-  buffer_atomic_pk_add_f16 v0, v6, s[0:3], s4 offen offset:4 scope:2 th:0
-  buffer_atomic_pk_add_bf16 v1, v6, s[0:3], s4 offen offset:8 scope:2 th:1
-  global_atomic_pk_add_f16_saddr v6, v2, s[6:7] offset:12 scope:2 th:0
-  global_atomic_pk_add_bf16_rtn_saddr v0, v6, v3, s[6:7] offset:16 scope:2 th:1
-  flat_atomic_pk_add_f16 v[4:5], v1 offset:20 scope:2 th:0
-  flat_atomic_pk_add_bf16 v0, v[4:5], v0 offset:24 scope:2 th:1
+  buffer_atomic_pk_add_f16 v0, v6, s[0:3], s4 offen offset:4 scope:SCOPE_DEV
+  buffer_atomic_pk_add_bf16 v1, v6, s[0:3], s4 offen offset:8 scope:SCOPE_DEV th:TH_ATOMIC_RETURN
+  global_atomic_pk_add_f16 v6, v2, s[6:7] offset:12 scope:SCOPE_DEV
+  global_atomic_pk_add_bf16 v0, v6, v3, s[6:7] offset:16 scope:SCOPE_DEV th:TH_ATOMIC_RETURN
+  flat_atomic_pk_add_f16 v[4:5], v1 offset:20 scope:SCOPE_DEV
+  flat_atomic_pk_add_bf16 v0, v[4:5], v0 offset:24 scope:SCOPE_DEV th:TH_ATOMIC_RETURN
   ds_pk_add_f16 v6, v0 offset:28
   ds_pk_add_rtn_bf16 v0, v6, v0 offset:32
   s_endpgm
@@ -3169,10 +3208,10 @@ low.func.def target<amdgpu.rdna4.core>(@gfx12_target) @gfx12_narrow_vmem_loads(%
 }
 
 // ----
-  buffer_load_u8 v1, v0, s[0:3], s4 offen offset:4
-  buffer_load_i16 v1, v0, s[0:3], s4 offen offset:8
-  global_load_u8 v1, v0, s[6:7] offset:12
-  global_load_i16 v0, v0, s[6:7] offset:16
+  buffer_load_ubyte v1, v0, s[0:3], s4 offen offset:4
+  buffer_load_sshort v1, v0, s[0:3], s4 offen offset:8
+  global_load_ubyte v1, v0, s[6:7] offset:12
+  global_load_sshort v0, v0, s[6:7] offset:16
   s_endpgm
 
 // ====
@@ -3188,9 +3227,9 @@ low.func.def target<amdgpu.rdna4.core>(@gfx12_target) @gfx12_vbuffer_vaddr_offse
 }
 
 // ----
-  buffer_load_dword v1, v0, s[0:3], null offen offset:4608 nv:0 scope:0 th:0
-  buffer_store_short v1, v0, s[0:3], null offen offset:1031 nv:0 scope:0 th:0
-  buffer_load_b96 v[0:2], v0, s[0:3], null offen offset:2049 nv:0 scope:0 th:0
+  buffer_load_dword v1, v0, s[0:3], null offen offset:4608
+  buffer_store_short v1, v0, s[0:3], null offen offset:1031
+  buffer_load_b96 v[0:2], v0, s[0:3], null offen offset:2049
   s_endpgm
 
 // ====
@@ -3207,8 +3246,8 @@ low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_packed_half_atomi
 }
 
 // ----
-  flat_atomic_pk_add_f16 v[2:3], v0 offset:4 sc1:0
-  flat_atomic_pk_add_bf16 v0, v[2:3], v1 offset:8 sc1:0
+  flat_atomic_pk_add_f16 v[2:3], v0 offset:4
+  flat_atomic_pk_add_bf16 v0, v[2:3], v1 offset:8 sc0
   ds_pk_add_f16 v5, v4 offset:12
   ds_pk_add_rtn_bf16 v0, v5, v0 offset:16
   s_endpgm
@@ -3241,18 +3280,18 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_stress_fragment(%s0
 }
 
 // ----
-  v_wmma_f32_16x16x16_f16 v[0:7], v[16:23], v[24:31], v[0:7]
   buffer_load_dword v11, v10, s[4:7], s8 offen offset:4
   buffer_load_b128 v[12:15], v10, s[4:7], s8 offen offset:16
+  v_wmma_f32_16x16x16_f16 v[0:7], v[16:23], v[24:31], v[0:7]
   s_load_dwordx2 s[10:11], s[0:1], s8 offset:16
   s_buffer_load_dword s0, s[4:7], s8 offset:0
   v_add_u32 v8, v8, v9
   s_add_u32 s1, s2, s3
   s_add_u32 s0, s1, s0
-  v_add_u32 v8, v8, v11
-  buffer_store_dword v8, v10, s[4:7], s0 offen offset:8
-  buffer_store_b128 v[12:15], v10, s[4:7], s10 offen offset:32
   v_wmma_f32_16x16x16_f16 v[0:7], v[16:23], v[24:31], v[0:7]
+  v_add_u32 v4, v8, v11
+  buffer_store_dword v4, v10, s[4:7], s0 offen offset:8
+  buffer_store_b128 v[12:15], v10, s[4:7], s10 offen offset:32
   buffer_store_b128 v[0:3], v10, s[4:7], s8 offen offset:48
   s_waitcnt vmcnt(0) lgkmcnt(0)
   s_waitcnt_depctr depctr(0)
@@ -3279,15 +3318,15 @@ low.func.def target<amdgpu.rdna3.core>(@gfx_target) @gfx11_smem_wait_drains_cros
 }
 
 // ----
-  s_load_dword s5, s[0:1], s2 offset:4
-  s_load_dword s6, s[0:1], s2 offset:0
+  s_load_dword s5, s[0:1], s2 offset:0
+  s_load_dword s6, s[0:1], s2 offset:4
   s_waitcnt vmcnt(63) lgkmcnt(0)
-  s_add_u32 s0, s6, s3
+  s_add_u32 s0, s5, s3
   s_cmp_lt_i32 s3, s4
   s_delay_alu instid0(SALU_CYCLE_1)
   s_cbranch_scc0 .Lbb2
 .Lbb1:
-  s_add_u32 s1, s5, s4
+  s_add_u32 s1, s6, s4
   s_add_u32 s0, s0, s1
   s_endpgm
 .Lbb2:
@@ -3326,8 +3365,7 @@ low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_smfmac_srcc_overl
 
 // ----
   v_smfmac_f32_32x32x16_bf16 v[0:15], v[16:17], v[20:23], v18
-  s_nop 15
-  s_nop 0
+  s_nop 8
   v_smfmac_f32_16x16x32_bf16 v[4:7], v[16:17], v[20:23], v18
   s_endpgm
 
@@ -3362,7 +3400,7 @@ low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_mfma_f32_operand_
 
 // ----
   v_mfma_f32_16x16x4_f32 v[4:7], v0, v1, v[4:7]
-  s_nop 6
+  s_nop 9
   global_store_dword v2, v4, s[0:1] offset:0
   s_waitcnt vmcnt(0) lgkmcnt(15)
   s_endpgm
@@ -3380,7 +3418,7 @@ low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_mfma_valu_operand
 }
 
 // ----
-  v_mov_b32_copy v0, v0
+  v_mov_b32 v0, v0
   s_nop 1
   v_mfma_f32_16x16x16_bf16 v[4:7], v[2:3], v[0:1], v[4:7]
   s_endpgm
@@ -3422,7 +3460,7 @@ low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_valu_sgpr_read_wa
 // ----
   v_add_co_u32 v0, s[2:3], s1, v0
   s_add_u32 s0, s0, s0
-  v_mov_b32_copy v0, s0
+  v_mov_b32 v0, s0
   v_addc_co_u32 v0, s[2:3], v0, v1, s[2:3]
   buffer_store_dword v0, v2, s[4:7], s1 offen offset:0
   s_waitcnt vmcnt(0) lgkmcnt(15)
@@ -3448,10 +3486,11 @@ low.func.def target<amdgpu.cdna3.core>(@gfx942_target) @gfx942_state_read_preced
   s_add_u32 s0, s2, s0
   s_addc_u32 s1, s1, s3
   v_add_co_u32 v0, s[8:9], s0, v0
-  v_mov_b32_copy v0, s1
+  v_mov_b32 v0, s1
   s_nop 0
   v_addc_co_u32 v0, s[0:1], v0, v1, s[8:9]
   s_add_u32 s0, s3, s2
+  s_nop 3
   buffer_store_dword v0, v2, s[4:7], s0 offen offset:0
   s_waitcnt vmcnt(0) lgkmcnt(15)
   s_endpgm
@@ -3473,7 +3512,7 @@ low.func.def target<amdgpu.cdna4.core>(@gfx950_target) @gfx950_valu_sgpr_read_wa
 // ----
   v_add_co_u32 v0, s[2:3], s1, v0
   s_add_u32 s0, s0, s0
-  v_mov_b32_copy v0, s0
+  v_mov_b32 v0, s0
   v_addc_co_u32 v0, s[2:3], v0, v1, s[2:3]
   buffer_store_dword v0, v2, s[4:7], s1 offen offset:0
   s_waitcnt vmcnt(0) lgkmcnt(15)
@@ -3495,8 +3534,8 @@ low.func.def target<amdgpu.rdna4.core>(@gfx12_target) @gfx12_valu_sgpr_read_depc
 // ----
   v_add_u32 v0, s0, v0
   s_add_u32 s0, s0, s0
-  s_wait_alu depctr(0)
   s_delay_alu instid0(VALU_DEP_1)
+  s_wait_alu depctr(65534)
   v_add_u32 v0, s0, v0
   buffer_store_dword v0, v1, s[4:7], s0 offen offset:0
   s_wait_storecnt storecnt(0)
@@ -3520,6 +3559,28 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_trans_result_depctr
   v_mul_f32 v0, v0, v1
   buffer_store_dword v0, v2, s[0:3], s4 offen offset:0
   s_waitcnt_vscnt vscnt(0)
+  s_endpgm
+
+// ====
+
+// Allocation-authored VGPR moves are vector-ALU consumers and must drain a
+// pending transcendental result before reading its physical register.
+// RUN: emit amdgpu-assembly @gfx11_trans_result_structural_copy strategy=source fixed=%trans:physical_register:7:1 fixed=%copy:physical_register:14:1
+amdgpu.target<gfx1100> @gfx11_target
+
+low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_trans_result_structural_copy(%input: reg<amdgpu.vgpr>, %scale: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
+  %trans = v_exp_f32 %input
+  %copy = copy %trans {detached = true} : reg<amdgpu.vgpr> -> reg<amdgpu.vgpr>
+  %result = v_mul_f32 %copy, %scale
+  return %result
+}
+
+// ----
+  v_exp_f32 v7, v0
+  s_waitcnt_depctr depctr(0)
+  v_mov_b32 v14, v7
+  s_delay_alu instid0(VALU_DEP_1)
+  v_mul_f32 v0, v14, v1
   s_endpgm
 
 // ====
@@ -3550,23 +3611,23 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_grouped_trans_lanes
 }
 
 // ----
-  v_exp_f32 v6, v1
-  v_exp_f32 v7, v2
-  v_exp_f32 v9, v3
-  v_exp_f32 v10, v4
-  v_add_f32 v6, v6, v0
-  v_add_f32 v7, v7, v0
+  v_exp_f32 v7, v1
+  v_exp_f32 v9, v2
+  v_exp_f32 v11, v3
+  v_exp_f32 v13, v4
+  v_add_f32 v6, v7, v0
+  v_add_f32 v9, v9, v0
   s_waitcnt_depctr depctr(0)
-  v_dual_add_f32 v8, v0, v9 :: v_dual_add_f32 v11, v10, v0
+  v_dual_add_f32 v7, v0, v11 :: v_dual_add_f32 v8, v13, v0
   v_rcp_f32 v0, v6
+  v_rcp_f32 v9, v9
   v_rcp_f32 v6, v7
   v_rcp_f32 v7, v8
-  v_rcp_f32 v8, v11
   v_mul_f32 v0, v0, v1
-  v_mul_f32 v1, v6, v2
+  v_mul_f32 v1, v9, v2
   s_waitcnt_depctr depctr(0)
-  v_mul_f32 v2, v7, v3
-  v_mul_f32 v3, v8, v4
+  v_mul_f32 v2, v6, v3
+  v_mul_f32 v3, v7, v4
   buffer_store_b128 v[0:3], v5, s[0:3], s4 offen offset:0
   s_waitcnt_vscnt vscnt(0)
   s_endpgm
@@ -3617,37 +3678,37 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_grouped_trans_lanes
 }
 
 // ----
-  v_exp_f32 v10, v1
-  v_exp_f32 v11, v2
-  v_exp_f32 v13, v3
-  v_exp_f32 v14, v4
-  v_exp_f32 v15, v5
-  v_exp_f32 v17, v6
-  v_exp_f32 v18, v7
-  v_exp_f32 v19, v8
-  v_add_f32 v10, v10, v0
-  v_add_f32 v11, v11, v0
-  v_add_f32 v12, v13, v0
-  v_add_f32 v21, v14, v0
-  v_add_f32 v13, v15, v0
-  v_add_f32 v14, v17, v0
-  v_dual_add_f32 v15, v0, v18 :: v_dual_add_f32 v16, v19, v0
+  v_exp_f32 v11, v1
+  v_exp_f32 v13, v2
+  v_exp_f32 v15, v3
+  v_exp_f32 v17, v4
+  v_exp_f32 v19, v5
+  v_exp_f32 v21, v6
+  v_exp_f32 v23, v7
+  v_exp_f32 v25, v8
+  v_add_f32 v10, v11, v0
+  v_add_f32 v13, v13, v0
+  v_add_f32 v11, v15, v0
+  v_add_f32 v12, v17, v0
+  v_add_f32 v14, v19, v0
+  v_add_f32 v15, v21, v0
+  v_dual_add_f32 v16, v0, v23 :: v_dual_add_f32 v17, v25, v0
   v_rcp_f32 v0, v10
+  v_rcp_f32 v13, v13
   v_rcp_f32 v10, v11
   v_rcp_f32 v11, v12
-  v_rcp_f32 v12, v21
-  v_rcp_f32 v13, v13
-  v_rcp_f32 v14, v14
+  v_rcp_f32 v12, v14
   v_rcp_f32 v15, v15
-  v_rcp_f32 v16, v16
+  v_rcp_f32 v14, v16
+  v_rcp_f32 v17, v17
   v_mul_f32 v0, v0, v1
-  v_mul_f32 v1, v10, v2
-  v_mul_f32 v2, v11, v3
-  v_mul_f32 v3, v12, v4
-  v_mul_f32 v4, v13, v5
-  v_mul_f32 v5, v14, v6
-  v_mul_f32 v6, v15, v7
-  v_mul_f32 v7, v16, v8
+  v_mul_f32 v1, v13, v2
+  v_mul_f32 v2, v10, v3
+  v_mul_f32 v3, v11, v4
+  v_mul_f32 v4, v12, v5
+  v_mul_f32 v5, v15, v6
+  v_mul_f32 v6, v14, v7
+  v_mul_f32 v7, v17, v8
   buffer_store_b128 v[0:3], v9, s[0:3], s4 offen offset:0
   buffer_store_b128 v[4:7], v9, s[0:3], s4 offen offset:16
   s_waitcnt_vscnt vscnt(0)
@@ -3693,7 +3754,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_trans_result_expire
 amdgpu.target<gfx950> @gfx_target
 
 low.func.def target<amdgpu.cdna4.core>(@gfx_target) @wait_fragment(%value: reg<amdgpu.vgpr>, %resource: reg<amdgpu.sgpr x4>, %soffset: reg<amdgpu.sgpr>, %vaddr: reg<amdgpu.vgpr>) asm {
-  %loaded = buffer_load_dword %resource, %vaddr, %soffset
+  %loaded = buffer_load_dword %resource, %vaddr, %soffset : reg<amdgpu.vgpr>
   buffer_store_dword %loaded, %resource, %vaddr, %soffset {offset = 4}
   return
 }
@@ -3897,10 +3958,11 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_overlapping_copy(%s
   s_mov_b32 s3, s2
   s_mov_b32 s2, s1
   s_mov_b32 s1, s0
-  s_mov_b32 s4, s1
-  s_mov_b32 s5, s2
-  s_mov_b32 s6, s3
-  buffer_store_dword v0, v1, s[4:7], s8 offen offset:0
+  s_mov_b32 s0, s1
+  s_mov_b32 s1, s2
+  s_mov_b32 s2, s3
+  s_mov_b32 s3, s4
+  buffer_store_dword v0, v1, s[0:3], s5 offen offset:0
   s_endpgm
 
 // ====
@@ -3916,10 +3978,10 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_concat_late_packet_
 
 // ----
   v_mov_b32 v4, v2
-  v_mov_b32 v1, v5
-  v_mov_b32 v5, v6
+  v_mov_b32 v1, v6
   v_mov_b32 v6, v7
-  v_mov_b32 v7, v1
+  v_mov_b32 v7, v5
+  v_mov_b32 v5, v1
   buffer_store_b128 v[4:7], v0, s[0:3], s4 offen offset:0
   s_endpgm
 
@@ -3935,12 +3997,12 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_concat_two_packet_c
 }
 
 // ----
-  v_mov_b32 v5, v0
-  v_mov_b32 v0, v1
-  v_mov_b32 v1, v5
-  v_mov_b32 v5, v2
-  v_mov_b32 v2, v3
-  v_mov_b32 v3, v5
+  v_mov_b32 v5, v1
+  v_mov_b32 v1, v0
+  v_mov_b32 v0, v5
+  v_mov_b32 v5, v3
+  v_mov_b32 v3, v2
+  v_mov_b32 v2, v5
   buffer_store_b128 v[0:3], v4, s[0:3], s4 offen offset:0
   s_endpgm
 
@@ -3956,10 +4018,10 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_concat_packet_cycle
 }
 
 // ----
-  v_mov_b32 v5, v1
-  v_mov_b32 v1, v2
+  v_mov_b32 v5, v2
   v_mov_b32 v2, v3
-  v_mov_b32 v3, v5
+  v_mov_b32 v3, v1
+  v_mov_b32 v1, v5
   buffer_store_b128 v[0:3], v4, s[0:3], s4 offen offset:0
   s_endpgm
 
@@ -3979,9 +4041,9 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_edge_cycle_scratch_
 
 // ----
   buffer_load_dword v0, v3, s[0:3], s4 offen offset:0
-  v_mov_b32 v4, v1
-  v_mov_b32 v1, v2
-  v_mov_b32 v2, v4
+  v_mov_b32 v4, v2
+  v_mov_b32 v2, v1
+  v_mov_b32 v1, v4
 .Lbb1:
   v_add_u32 v1, v1, v2
   s_waitcnt vmcnt(0) lgkmcnt(63)
@@ -4049,10 +4111,14 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_commutes_binar
 }
 
 // ----
-  v_dual_mul_f32 v4, v2, v0 :: v_dual_mul_f32 v5, v1, v2
-  v_dual_add_f32 v6, v2, v0 :: v_dual_add_f32 v7, v1, v2
-  v_dual_min_f32 v8, v2, v0 :: v_dual_min_f32 v9, v1, v2
-  v_dual_max_f32 v10, v2, v0 :: v_dual_max_f32 v11, v1, v2
+  v_mul_f32 v4, v0, v2
+  v_mul_f32 v5, v1, v2
+  v_add_f32 v6, v0, v2
+  v_add_f32 v7, v1, v2
+  v_min_f32 v8, v0, v2
+  v_min_f32 v9, v1, v2
+  v_max_f32 v10, v0, v2
+  v_max_f32 v11, v1, v2
   s_endpgm
 
 // ====
@@ -4083,7 +4149,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_commutes_accum
 }
 
 // ----
-  v_dual_fmac_f32 v4, v2, v0 :: v_dual_fmac_f32 v5, v1, v2
+  v_fmac_f32 v4, v0, v2
+  v_fmac_f32 v5, v1, v2
   s_endpgm
 
 // ====
@@ -4098,7 +4165,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_commutes_liter
 }
 
 // ----
-  v_dual_fmaak_f32 v4, v2, v0, 0x3f800000 :: v_dual_fmaak_f32 v5, v1, v2, 0x3f800000
+  v_fmaak_f32 v4, v0, v2, 0x3f800000
+  v_fmaak_f32 v5, v1, v2, 0x3f800000
   s_endpgm
 
 // ====
@@ -4113,7 +4181,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_commutes_dot_s
 }
 
 // ----
-  v_dual_dot2acc_f32_f16 v4, v2, v0 :: v_dual_dot2acc_f32_f16 v5, v1, v2
+  v_dot2_f32_f16 v4, v0, v2, v4
+  v_dot2_f32_f16 v5, v1, v2, v5
   s_endpgm
 
 // ====
@@ -4149,7 +4218,8 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_vopd_commutes_y_bit
 }
 
 // ----
-  v_dual_sub_f32 v4, v0, v2 :: v_dual_and_b32 v5, v2, v1
+  v_sub_f32 v4, v0, v2
+  v_and_b32 v5, v1, v2
   s_endpgm
 
 // ====
@@ -4181,7 +4251,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_static_storage_prec
 // Static storage moves to the entry prefix before scheduling. Its declaration
 // has no runtime action requiring the otherwise unused load to complete.
 // ----
-  s_load_dwordx8 s[8:15], s[0:1] offset:0
+  s_load_dwordx8 s[8:15], s[0:1], 0
   s_endpgm
 
 // ====

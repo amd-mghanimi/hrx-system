@@ -9,28 +9,14 @@
 #include "loom/error/source.h"
 #include "loom/format/text/printer.h"
 
-static bool loom_verify_resolve_location_id(const loom_verify_state_t* state,
-                                            loom_location_id_t location,
-                                            loom_source_range_t* out_range) {
-  if (!loom_source_resolve(state->source_resolver, state->module, location,
-                           out_range)) {
-    return false;
-  }
-  if (out_range->provenance == LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE &&
-      out_range->source.size > 0) {
-    out_range->provenance = LOOM_SOURCE_PROVENANCE_EXACT_SOURCE;
-  }
-  return true;
-}
-
-// Resolves an op's location to a source range via the configured resolver.
+// Resolves an op in its producer's module, which may differ from the
+// verifier's.
 static bool loom_verify_resolve_location(const loom_verify_state_t* state,
+                                         const loom_module_t* module,
                                          const loom_op_t* op,
                                          loom_source_range_t* out_range) {
-  if (!op) {
-    return false;
-  }
-  return loom_verify_resolve_location_id(state, op->location, out_range);
+  return op && loom_source_resolve(state->source_resolver, module, op->location,
+                                   out_range);
 }
 
 // Maximum per-token highlight ranges per diagnostic.
@@ -206,7 +192,9 @@ static iree_host_size_t loom_collect_source_backed_highlights(
     const loom_verify_highlight_target_t* wanted_targets,
     iree_host_size_t wanted_count, loom_highlight_range_t* out_highlights,
     iree_host_size_t max_highlight_count) {
-  if (!op || wanted_count == 0 || source_location->source.size == 0 ||
+  if (!op || wanted_count == 0 ||
+      source_location->provenance != LOOM_SOURCE_PROVENANCE_EXACT_SOURCE ||
+      source_location->source.size == 0 ||
       op->location == LOOM_LOCATION_UNKNOWN ||
       (iree_host_size_t)op->location >= module->locations.count) {
     return 0;
@@ -215,7 +203,7 @@ static iree_host_size_t loom_collect_source_backed_highlights(
   const loom_location_entry_t* location =
       loom_location_table_const_entry(&module->locations, op->location);
   if (location->kind != LOOM_LOCATION_FILE ||
-      location->file.field_span_count == 0 || !location->file.field_spans) {
+      location->file.field_span_count == 0 || !location->file.field_span_data) {
     return 0;
   }
 
@@ -224,9 +212,11 @@ static iree_host_size_t loom_collect_source_backed_highlights(
   for (uint16_t span_index = 0; span_index < location->file.field_span_count &&
                                 highlight_count < max_highlight_count;
        ++span_index) {
+    const loom_location_field_span_t field_span =
+        loom_location_file_field_span_at(location, span_index);
     loom_print_field_ref_t span_field_ref = {0};
-    if (!loom_verify_print_field_ref_from_location_field(
-            &location->file.field_spans[span_index], &span_field_ref)) {
+    if (!loom_verify_print_field_ref_from_location_field(&field_span,
+                                                         &span_field_ref)) {
       continue;
     }
 
@@ -237,12 +227,10 @@ static iree_host_size_t loom_collect_source_backed_highlights(
       continue;
     }
 
-    const loom_location_field_span_t* field_span =
-        &location->file.field_spans[span_index];
-    iree_host_size_t start_offset = loom_source_byte_offset(
-        source_location->source, field_span->start_line, field_span->start_col);
-    iree_host_size_t end_offset = loom_source_byte_offset(
-        source_location->source, field_span->end_line, field_span->end_col);
+    iree_host_size_t start_offset = loom_source_range_byte_offset(
+        source_location, field_span.start_line, field_span.start_col);
+    iree_host_size_t end_offset = loom_source_range_byte_offset(
+        source_location, field_span.end_line, field_span.end_col);
     if (start_offset >= end_offset || start_offset < source_location->start ||
         end_offset > source_location->end) {
       continue;
@@ -330,7 +318,9 @@ static iree_host_size_t loom_verify_collect_related_locations(
     loom_source_range_t source_location = {
         .provenance = LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE,
     };
-    if (!loom_verify_resolve_location(state, related_ops[i].op,
+    const loom_module_t* module =
+        related_ops[i].module ? related_ops[i].module : state->module;
+    if (!loom_verify_resolve_location(state, module, related_ops[i].op,
                                       &source_location)) {
       continue;
     }
@@ -355,8 +345,8 @@ static iree_host_size_t loom_verify_collect_related_locations(
         };
         related_location->highlight_count =
             loom_collect_source_backed_highlights(
-                state->module, related_ops[i].op,
-                &related_location->source_location, &highlight_target,
+                module, related_ops[i].op, &related_location->source_location,
+                &highlight_target,
                 /*wanted_count=*/1,
                 &out_related_highlights[related_location_count],
                 /*max_highlight_count=*/1);
@@ -374,9 +364,9 @@ static iree_host_size_t loom_verify_collect_related_locations(
 // Emits one structured diagnostic request through the configured sink.
 //
 // Source resolution strategy:
-//   1. Try the configured source resolver (original source text).
-//   2. If that fails, print the op to text and use the printed
-//      representation as the diagnostic source.
+//   1. Preserve recorded source identity and enrich it with exact text.
+//   2. Without exact text, print the op for carets while retaining the
+//      original identity separately in source_location.
 //
 // Per-token highlighting is derived automatically from structured field refs
 // attached to diagnostic params. Those refs are passed to the printer's field
@@ -406,6 +396,7 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
   diagnostic.params = emission->params;
   diagnostic.param_count = emission->param_count;
   diagnostic.emitter = LOOM_EMITTER_VERIFIER;
+  diagnostic.module = emission->module ? emission->module : state->module;
   diagnostic.origin.provenance = LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE;
   diagnostic.source_location.provenance =
       LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE;
@@ -429,15 +420,14 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
       &diagnostic.highlight_omitted_count);
   loom_highlight_range_t highlights[LOOM_VERIFY_MAX_HIGHLIGHTS];
 
-  // Try the source resolver first (original source text).
-  bool resolved = loom_verify_resolve_location(state, emission->op,
+  const loom_module_t* module = diagnostic.module;
+  bool resolved = loom_verify_resolve_location(state, module, emission->op,
                                                &diagnostic.source_location);
   if (resolved) {
     diagnostic.origin = diagnostic.source_location;
     diagnostic.highlight_count = loom_collect_source_backed_highlights(
-        state->module, emission->op, &diagnostic.source_location,
-        highlight_targets, highlight_target_count, highlights,
-        IREE_ARRAYSIZE(highlights));
+        module, emission->op, &diagnostic.source_location, highlight_targets,
+        highlight_target_count, highlights, IREE_ARRAYSIZE(highlights));
     if (diagnostic.highlight_count > 0) {
       diagnostic.highlights = highlights;
     }
@@ -449,8 +439,9 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
   iree_string_builder_t op_text_builder;
   loom_highlight_collector_t collector = {0};
   bool printed_op = false;
-  if (!resolved && emission->op) {
-    iree_string_builder_initialize(state->module->context->allocator,
+  if (diagnostic.origin.provenance != LOOM_SOURCE_PROVENANCE_EXACT_SOURCE &&
+      emission->op) {
+    iree_string_builder_initialize(module->context->allocator,
                                    &op_text_builder);
 
     collector.wanted_targets = highlight_targets;
@@ -463,8 +454,8 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
         .user_data = &collector,
     };
     iree_status_t print_status = loom_text_print_operation_with_field_callback(
-        state->module, emission->op, &op_text_builder,
-        LOOM_TEXT_PRINT_USE_ALIASES, field_callback);
+        module, emission->op, &op_text_builder, LOOM_TEXT_PRINT_USE_ALIASES,
+        field_callback);
     if (!iree_status_is_ok(print_status)) {
       // Printing failed (OOM, etc.). Use a static fallback so the
       // diagnostic still has something to display with carets.
@@ -483,7 +474,9 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
           .end_column = (uint32_t)sizeof(kFallback),
       };
       diagnostic.origin = fallback_range;
-      diagnostic.source_location = fallback_range;
+      if (!resolved) {
+        diagnostic.source_location = fallback_range;
+      }
     } else if (iree_string_builder_size(&op_text_builder) > 0) {
       iree_host_size_t text_length = iree_string_builder_size(&op_text_builder);
       loom_source_range_t op_range = {0};
@@ -498,7 +491,9 @@ void loom_verify_emit_diagnostic(loom_verify_state_t* state,
       op_range.end_line = 1;
       op_range.end_column = (uint32_t)text_length + 1;
       diagnostic.origin = op_range;
-      diagnostic.source_location = op_range;
+      if (!resolved) {
+        diagnostic.source_location = op_range;
+      }
       printed_op = true;
 
       if (collector.highlight_count > 0) {

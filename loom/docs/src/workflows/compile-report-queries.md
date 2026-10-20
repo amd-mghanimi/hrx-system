@@ -32,6 +32,7 @@ trace:
 | `allocation_high_water_rows.rows[]` and `spill_rows.rows[]` | Which placements and spill actions followed from that pressure? |
 | `source_low.rows[]`, `source_low.memory_rows[]`, and `source_low.selection_summaries.rows[]` | Which source operations selected each Low representation and memory route? |
 | `source_low.loop_pipelines.rows[]` and `source_low.loop_pipelines.stages[]` | Which loop policies ran, and which operations run ahead of the consumer? |
+| `pipeline_plans[]` | How much unique and replicated code does each resident pipeline use? Where do its workers and retained data live? |
 | `source_low.boundary_projections.rows[]` | Which loop-carried aggregates were decomposed, deliberately preserved, or rejected? |
 | `schedule_band_summary_rows.rows[]` | Which semantic instruction families occupy each schedule band? |
 | `wait_reason_summary_rows.rows[]` and `wait_action_rows.rows[]` | Why was each wait family required, and where was it placed? |
@@ -273,7 +274,12 @@ jq '.source_low.loop_pipelines | {count, rows, stages}' kernel.details.json
 ```
 
 Each operation row identifies its compiled `function`, applied-policy `loop`
-ordinal, source-body `position`, `op`, `stage`, and `iteration_lookahead`.
+ordinal, source-body `position`, `op`, `stage`, and `iteration_lookahead`. An
+optional `partition=guarded` marks a top-level conditional whose independent
+read closure became a producer while its carried-state remainder stayed in the
+consumer. Producer and consumer rows then share the same source position: they
+are the two retained distances of one authored conditional, rather than two
+source operations.
 For depth four, producer operations run three original iterations ahead of the
 ordered consumer. `queue_records * values_per_record` counts retained SSA
 values. Target representations, allocation, and other live state determine the
@@ -447,6 +453,10 @@ jq '[.wait_reason_summary_rows.rows[]?] |
     with_entries(select(.value != null))' report.json
 ```
 
+`loom-compile-report show` renders the same groups without requiring raw JSON.
+`diff` compares their counts by entry, counter, and reason, so a reason shift is
+visible even when an entry's total wait-action count does not change.
+
 Detail mode connects each action to scheduled producer and consumer semantics:
 
 ```shell
@@ -464,6 +474,13 @@ jq '.wait_action_rows.rows[]? |
      drained_count} |
     with_entries(select(.value != null))' report.details.json
 ```
+
+The `outstanding_before`, `outstanding_after`, and `drained_count` fields are
+counts for the scheduled block represented by that row. They are not a global
+inventory of the hardware counter. A planned wait with
+`outstanding_before: 0` can still be required when a residual counter epoch
+crosses a control-flow edge. Read zero as no packet counted in that local block,
+not as proof that the hardware wait is redundant.
 
 ## Account for memory traffic
 

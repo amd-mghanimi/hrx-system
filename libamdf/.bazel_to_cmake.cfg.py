@@ -9,6 +9,7 @@ import os
 import bazel_to_cmake_config
 import bazel_to_cmake_converter
 import bazel_to_cmake_requirements
+from loom_binary import LoomBinaryBuildFileFunctions
 
 _AMDF_CONFIG_CMAKE_OPTIONS = {
     "//libamdf/config:enabled_setting": "AMDF_BUILD",
@@ -21,7 +22,12 @@ _AMDF_CONFIG_CMAKE_OPTIONS = {
 }
 
 
-class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
+class AmdfBuildFileFunctions(
+    LoomBinaryBuildFileFunctions, bazel_to_cmake_converter.BuildFileFunctions
+):
+    def _declarative_load_bindings(self):
+        return {**super()._declarative_load_bindings(), "select": self.select}
+
     def _custom_initialize(self):
         self._amdf_requirement_policy = bazel_to_cmake_requirements.load_project_policy(
             self._repo_root,
@@ -30,6 +36,18 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
 
     def _package_name(self):
         return os.path.relpath(self._build_dir, self._repo_root).replace("\\", "/")
+
+    def _should_emit_python_target(self):
+        return self._package_name() == "libamdf/cts/gpu/kernels"
+
+    def _python_package_dirs(self):
+        return ["${PROJECT_SOURCE_DIR}"]
+
+    def py_binary(self, **kwargs):
+        if self._package_name() == "libamdf/cts/gpu/kernels":
+            # CMake extraction invokes the source script with host Python.
+            return
+        super().py_binary(**kwargs)
 
     def _apply_amdf_cmake_policy(self, kwargs, include_run_requirements=False):
         policy = self._amdf_requirement_policy.collect(self._package_name())
@@ -58,6 +76,10 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
             return _AMDF_CONFIG_CMAKE_OPTIONS[label]
         return super()._convert_select_condition(label)
 
+    def apply_amdf_target_policy(self, kwargs, name=None):
+        del name
+        return self._apply_amdf_cmake_policy(kwargs)
+
     def amdf_cc_library(self, deps=None, **kwargs):
         kwargs = self._apply_amdf_cmake_policy(kwargs)
         self.cc_library(deps=(deps or []) + ["//libamdf:headers"], **kwargs)
@@ -79,6 +101,78 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
             deps=(deps or []) + ["//libamdf:headers", "//third_party:google_benchmark"],
             **kwargs,
         )
+
+    def amdf_cts_gpu_kernel_set(
+        self,
+        name,
+        srcs,
+        targets,
+        entry_point,
+        namespace,
+        target_srcs=None,
+        data=None,
+        deps=None,
+        input_format="",
+        inputopts=None,
+        visibility=None,
+        target_compatible_with=None,
+    ):
+        del visibility
+        if target_srcs is not None and sorted(target_srcs) != sorted(targets):
+            raise ValueError(
+                "target_srcs must name exactly the kernel set's physical targets"
+            )
+        capabilities = self._loaded_modules.symbol(
+            "//loom/build_tools/amdgpu:target_config.bzl",
+            "LOOM_AMDGPU_DESCRIPTOR_SET_CAPABILITY_BY_TARGET",
+            self._build_dir,
+        )
+        for target in targets:
+            product = f"{name}_{target}"
+            path = f"${{CMAKE_CURRENT_BINARY_DIR}}/{product}.hsaco"
+            self._target_file_paths[self._current_target_label(product)] = path
+            self._target_file_paths[self._current_target_label(product + ".hsaco")] = (
+                path
+            )
+        compatibility = {
+            "//loom/config/target/amdgpu:" + capabilities[target]: []
+            for target in targets
+        }
+        compatibility["//conditions:default"] = ["@platforms//:incompatible"]
+        target_compatible_with = (target_compatible_with or []) + self.select(
+            compatibility
+        )
+        policy = self._apply_amdf_cmake_policy(
+            {"target_compatible_with": target_compatible_with}
+        )
+        self._emit_platform_guard_begin(policy["target_compatible_with"])
+        srcs_block, srcs_selection = self._convert_platform_select_strings(
+            name, "SRCS", srcs
+        )
+        self._converter.body += (
+            srcs_selection
+            + "amdf_cts_gpu_kernel_set(\n"
+            + self._convert_string_arg_block("NAME", name)
+            + srcs_block
+            + self._convert_data_srcs_block(data, block_name="DATA", sort=False)
+            + self._convert_loom_module_inputs("LIBRARIES", deps)
+            + self._convert_string_arg_block("INPUT_FORMAT", input_format or None)
+            + self._convert_string_list_block(
+                "INPUTOPTS", self._convert_location_args(inputopts), sort=False
+            )
+            + self._convert_string_list_block("TARGETS", targets, sort=False)
+            + self._convert_data_srcs_block(
+                [target_srcs[target] for target in targets]
+                if target_srcs is not None
+                else [],
+                block_name="TARGET_SRCS",
+                sort=False,
+            )
+            + self._convert_string_arg_block("ENTRY_POINT", entry_point)
+            + self._convert_string_arg_block("NAMESPACE", namespace)
+            + ")\n\n"
+        )
+        self._emit_platform_guard_end(policy["target_compatible_with"])
 
     def amdf_windows_sidecar_library(self, **kwargs):
         kwargs = dict(kwargs)
@@ -175,7 +269,10 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
         name,
         srcs,
         deps,
+        defines=None,
+        linkage_modes=("dynamic",),
         linkopts=None,
+        native_lifetimes=("process",),
         tags=None,
         resource_group=None,
         visibility=None,
@@ -191,13 +288,14 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
             name=corpus_name,
             testonly=True,
             srcs=srcs,
+            defines=defines,
             deps=deps,
             linkopts=linkopts,
             alwayslink=True,
             **kwargs,
         )
         common_deps = [":" + corpus_name, "//libamdf/cts/util:test_main"]
-        for mode in ("static", "shared", "dynamic"):
+        for mode in linkage_modes:
             binary_name = name + "_" + mode + "_bin"
             data = None if mode == "static" else ["//libamdf:amdf_shared_artifact"]
             body_start = len(self._converter.body)
@@ -220,7 +318,10 @@ class AmdfBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
                 if mode == "dynamic"
                 else []
             )
-            for lifetime, suffix in (("process", ""), ("instance", "_instance")):
+            for lifetime in native_lifetimes:
+                if lifetime not in ("process", "instance"):
+                    raise ValueError("unsupported libamdf native lifetime: " + lifetime)
+                suffix = "" if lifetime == "process" else "_" + lifetime
                 self.iree_executable_test(
                     name=name + "_" + mode + suffix,
                     src=":" + binary_name,

@@ -4,16 +4,13 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Correctness-gated benchmark work-plan execution.
+// Prepared benchmark work-plan execution.
 
 #ifndef LOOM_TOOLS_IREE_BENCHMARK_LOOM_WORK_EXECUTION_H_
 #define LOOM_TOOLS_IREE_BENCHMARK_LOOM_WORK_EXECUTION_H_
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
-#include "loom/tooling/compile/options.h"
-#include "loom/tooling/compile/report_capture.h"
-#include "loom/tooling/execution/session.h"
 #include "loom/tooling/testbench/executor.h"
 #include "loom/tools/iree-benchmark-loom/context.h"
 #include "loom/tools/iree-benchmark-loom/event.h"
@@ -24,6 +21,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct iree_benchmark_loom_hal_compilation_options_t
+    iree_benchmark_loom_hal_compilation_options_t;
 
 typedef struct iree_benchmark_loom_work_plan_execution_options_t {
   // Stable run identity emitted into lifecycle events.
@@ -36,14 +36,8 @@ typedef struct iree_benchmark_loom_work_plan_execution_options_t {
   const iree_benchmark_loom_options_t* benchmark_options;
   // Shared HAL context used by work items with kernel launches.
   iree_benchmark_loom_hal_context_t* hal_context;
-  // Shared Loom run session used for candidate compilation.
-  loom_run_session_t* session;
-  // Canonical parsed module used for candidate compilation.
-  const loom_run_module_t* run_module;
-  // Structured compile-report capture policy.
-  const loom_compile_report_capture_options_t* compile_report_options;
-  // Structured artifact-manifest sidecar policy.
-  const loom_compile_artifact_manifest_options_t* artifact_manifest_options;
+  // Public compiler inputs shared by all HAL candidates in this run.
+  const iree_benchmark_loom_hal_compilation_options_t* compilation;
   // Base case execution options for correctness checks.
   const loom_testbench_case_execution_options_t* case_execution_options;
   // Arena reused for prepared correctness executors.

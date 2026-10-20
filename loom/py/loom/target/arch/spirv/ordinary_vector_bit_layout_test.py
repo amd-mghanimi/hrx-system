@@ -25,11 +25,11 @@ from loom.target.arch.spirv.ordinary_vector_bit_layout import (
     ORDINARY_VECTOR_BIT_LAYOUT_TYPES,
     OrdinaryVectorBitLayoutCase,
 )
+from loom.target.arch.spirv.ordinary_vector_conversion import (
+    ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS,
+)
 from loom.target.arch.spirv.ordinary_vector_integer import (
     ORDINARY_VECTOR_INTEGER_INSTRUCTIONS,
-)
-from loom.target.arch.spirv.ordinary_vector_integer_conversion import (
-    ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS,
 )
 from loom.target.arch.spirv.scalar_conversion import SCALAR_BITCAST_CONVERSIONS
 
@@ -124,7 +124,7 @@ def test_bit_layout_instruction_rows_are_exact_and_unique() -> None:
         for row in (
             *ORDINARY_VECTOR_INSTRUCTIONS,
             *ORDINARY_VECTOR_INTEGER_INSTRUCTIONS,
-            *ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS,
+            *ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS,
         )
     )
     assert set(keys).isdisjoint(row.key for row in SCALAR_BITCAST_CONVERSIONS)

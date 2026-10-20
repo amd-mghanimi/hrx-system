@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "iree/base/internal/atomics.h"
+#include "iree/base/internal/sysfs.h"
 #include "iree/base/threading/call_once.h"
 #include "iree/base/threading/notification.h"
 #include "iree/base/threading/thread.h"
@@ -73,14 +74,7 @@ static int iree_thread_set_name(pthread_t handle, const char* name) {
 }
 
 static void* iree_thread_start_routine(void* param) {
-  // NOTE: we own a reference to the thread handle so that the creation
-  // thread can't delete this out from under us.
   iree_thread_t* thread = (iree_thread_t*)param;
-
-  // Set the thread name used by debuggers and tracy (which must be called on
-  // the thread).
-  iree_thread_set_name(thread->handle, thread->name);
-  IREE_TRACE_SET_THREAD_NAME(thread->name);
 
   // Wait until we resume if we were created suspended.
   while (iree_atomic_load(&thread->suspend_count, iree_memory_order_acquire) >
@@ -89,6 +83,11 @@ static void* iree_thread_start_routine(void* param) {
                             iree_thread_resumed_predicate, thread,
                             iree_infinite_timeout());
   }
+
+  // Set the thread name used by debuggers and tracy (which must be called on
+  // the thread).
+  iree_thread_set_name(thread->handle, thread->name);
+  IREE_TRACE_SET_THREAD_NAME(thread->name);
 
   // "Consume" the entry info so that we don't see it again (as we don't own
   // its lifetime).
@@ -100,7 +99,8 @@ static void* iree_thread_start_routine(void* param) {
   // Call the user thread entry point function.
   // Note that this can be a tail-call which saves a stack frame in all threads
   // (which is really just to make call stacks in debuggers much cleaner).
-  return (void*)((uintptr_t)entry(entry_arg));
+  // Failed startup resumes the native thread with no user entry to invoke.
+  return entry ? (void*)((uintptr_t)entry(entry_arg)) : NULL;
 }
 
 iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
@@ -108,6 +108,7 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
                                  iree_allocator_t allocator,
                                  iree_thread_t** out_thread) {
   IREE_TRACE_ZONE_BEGIN(z0);
+  *out_thread = NULL;
 
   // Allocate our thread struct; we'll use it to shuttle params into the thread
   // (including the user-specified entry_arg).
@@ -124,58 +125,70 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
   thread->entry_arg = entry_arg;
   iree_strncpy_s(thread->name, IREE_ARRAYSIZE(thread->name), params.name.data,
                  iree_min(params.name.size, IREE_ARRAYSIZE(thread->name) - 1));
-  thread->suspend_count = IREE_ATOMIC_VAR_INIT(params.create_suspended ? 1 : 0);
+  // Keep the entry behind the barrier until native configuration succeeds.
+  thread->suspend_count = IREE_ATOMIC_VAR_INIT(1);
   iree_notification_initialize(&thread->suspend_barrier);
   iree_thread_override_list_initialize(iree_thread_set_priority_class,
                                        params.priority_class, thread->allocator,
                                        &thread->qos_override_list);
 
   pthread_attr_t thread_attr;
-  pthread_attr_init(&thread_attr);
-  pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_JOINABLE);
-  if (params.stack_size) {
-    pthread_attr_setstacksize(&thread_attr, params.stack_size);
+  int rc = pthread_attr_init(&thread_attr);
+  bool thread_started = false;
+  if (rc == 0) {
+    // pthread attributes default to joinable threads.
+    if (params.stack_size) {
+      rc = pthread_attr_setstacksize(&thread_attr, params.stack_size);
+    }
+    if (rc == 0) {
+      IREE_TRACE_ZONE_BEGIN_NAMED(z1, "pthread_create");
+      rc = pthread_create(&thread->handle, &thread_attr,
+                          &iree_thread_start_routine, thread);
+      thread_started = rc == 0;
+      IREE_TRACE_ZONE_END(z1);
+    }
+    pthread_attr_destroy(&thread_attr);
   }
-
-  *out_thread = thread;
-
-  // Unfortunately we can't create the thread suspended (no API). This means
-  // that we are likely to incur some thrashing here as the thread gets spun up
-  // immediately. We emulate the create_suspended behavior by waiting in the
-  // thread until iree_thread_resume is called which at least gives us the same
-  // execution order guarantee across all platforms.
-  int rc;
-  {
-    IREE_TRACE_ZONE_BEGIN_NAMED(z1, "pthread_create");
-    rc = pthread_create(&thread->handle, &thread_attr,
-                        &iree_thread_start_routine, thread);
-    IREE_TRACE_ZONE_END(z1);
-  }
-  pthread_attr_destroy(&thread_attr);
   if (rc != 0) {
-    iree_thread_release(thread);  // for caller
-    *out_thread = NULL;
-    IREE_TRACE_ZONE_END(z0);
-    return iree_make_status(IREE_STATUS_INTERNAL,
-                            "thread creation failed with %d", rc);
+    status = iree_make_status(iree_status_code_from_errno(rc),
+                              "thread creation failed: %s", strerror(rc));
+  } else {
+    if (params.priority_class != IREE_THREAD_PRIORITY_CLASS_NORMAL) {
+      iree_thread_set_priority_class(thread, params.priority_class);
+    }
+    status = iree_thread_request_affinity(thread, params.initial_affinity);
   }
 
-  if (params.priority_class != IREE_THREAD_PRIORITY_CLASS_NORMAL) {
-    iree_thread_set_priority_class(thread, params.priority_class);
+  if (iree_status_is_ok(status)) {
+    *out_thread = thread;
+    if (!params.create_suspended) {
+      iree_thread_resume(thread);
+    }
+  } else if (thread_started) {
+    // No user code has run. Let the native thread exit, then join it.
+    thread->entry = NULL;
+    thread->entry_arg = NULL;
+    iree_thread_release(thread);
+  } else {
+    iree_notification_deinitialize(&thread->suspend_barrier);
+    iree_thread_override_list_deinitialize(&thread->qos_override_list);
+    iree_allocator_free(allocator, thread);
   }
-  if (!iree_thread_affinity_is_unspecified(params.initial_affinity)) {
-    iree_thread_request_affinity(thread, params.initial_affinity);
-  }
-
   IREE_TRACE_ZONE_END(z0);
-  return iree_ok_status();
+  return status;
 }
 
 static void iree_thread_delete(iree_thread_t* thread) {
   IREE_TRACE_ZONE_BEGIN(z0);
 
   iree_thread_resume(thread);
-  pthread_join(thread->handle, NULL);
+  if (pthread_equal(thread->handle, pthread_self())) {
+    // Self-releasing threads cannot join themselves. Detach so native thread
+    // resources are reclaimed automatically after the entry point returns.
+    pthread_detach(thread->handle);
+  } else {
+    pthread_join(thread->handle, NULL);
+  }
 
   iree_notification_deinitialize(&thread->suspend_barrier);
   iree_thread_override_list_deinitialize(&thread->qos_override_list);
@@ -282,144 +295,91 @@ void iree_thread_override_end(iree_thread_override_t* override) {
   IREE_TRACE_ZONE_END(z0);
 }
 
-// Sets all CPU bits in the given |out_set|.
-// The platform is allowed to place the thread on any CPU.
-static void iree_thread_make_cpu_set_all(cpu_set_t* out_set) {
-  for (uint32_t i = 0; i < CPU_SETSIZE; ++i) {
-    CPU_SET(i, out_set);
+typedef struct iree_thread_cpu_set_builder_t {
+  // Native mask populated by the sysfs CPU-list parser.
+  cpu_set_t* set;
+  // Whether the node contains CPUs outside the native mask representation.
+  bool overflow;
+} iree_thread_cpu_set_builder_t;
+
+static bool iree_thread_cpu_set_add_range(uint32_t start_cpu, uint32_t end_cpu,
+                                          void* user_data) {
+  iree_thread_cpu_set_builder_t* builder = user_data;
+  if (end_cpu > CPU_SETSIZE) {
+    builder->overflow = true;
+    return false;
   }
+  for (uint32_t cpu = start_cpu; cpu < end_cpu; ++cpu) {
+    CPU_SET(cpu, builder->set);
+  }
+  return true;
 }
 
-#if defined(IREE_PLATFORM_ANDROID) || defined(IREE_PLATFORM_LINUX)
-
-// Sets CPU bits associated with the given NUMA node ID.
-// If the platform query fails then all CPU bits are set.
-static void iree_thread_make_cpu_set_from_node_id(uint32_t node_id,
-                                                  cpu_set_t* out_set) {
-  // e.g. /sys/devices/system/node/node0/cpumap
-  char cpumap_path[256];
-  iree_snprintf(cpumap_path, sizeof(cpumap_path),
-                "/sys/devices/system/node/node%u/cpumap", node_id);
-
-  // Open file for reading. This should succeed under hypervisors/lockdown.
-  FILE* file = fopen(cpumap_path, "r");
-  if (!file) {
-    // Permission denied or not found (not a conformant Linux kernel).
-    iree_thread_make_cpu_set_all(out_set);
-    return;
+// Uses the shared sysfs CPU-list parser so NUMA masks have the same numbering
+// as topology discovery. An absent or unrepresentable node is an error.
+static iree_status_t iree_thread_make_cpu_set_from_node_id(uint32_t node_id,
+                                                           cpu_set_t* out_set) {
+  char path[128];
+  iree_snprintf(path, sizeof(path), "%s/node/node%u/cpulist",
+                iree_sysfs_get_root_path(), node_id);
+  char buffer[4096];
+  iree_host_size_t length = 0;
+  IREE_RETURN_IF_ERROR(
+      iree_sysfs_read_small_file(path, buffer, sizeof(buffer), &length));
+  iree_thread_cpu_set_builder_t builder = {.set = out_set};
+  IREE_RETURN_IF_ERROR(
+      iree_sysfs_parse_cpu_list(iree_make_string_view(buffer, length),
+                                iree_thread_cpu_set_add_range, &builder));
+  if (builder.overflow) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "NUMA node %u CPU mask exceeds %u CPUs", node_id,
+                            (unsigned)CPU_SETSIZE);
   }
-
-  // Read the entire file to EOF and get the cpumap line.
-  // After trimming we expect |line| to be something like:
-  // 'ffffffff,ffffffff,ffffffff,00000000,00000000,00000000'
-  char line_buffer[512];
-  const size_t read_length = fread(line_buffer, 1, sizeof(line_buffer), file);
-  if (ferror(file)) {
-    // Read should never fail, but may if the CPU set grows to thousands. We'd
-    // probably want to then query the file length and allocate a heap buffer.
-    // For now all systems we can observe easily fit into our stack buffer.
-    iree_thread_make_cpu_set_all(out_set);
-    return;
-  }
-  iree_string_view_t line =
-      iree_string_view_trim(iree_make_string_view(line_buffer, read_length));
-
-  // Parse each comma-delimited segment. Segments are a base-16 encoded uint32_t
-  // value. Each segment contains 32 CPU bits and we track the current index
-  // as we walk them to get the absolute cpu_set_t index.
-  intptr_t split_index = 0;
-  iree_host_size_t cpu_index = 0;
-  do {
-    iree_string_view_t segment_str;
-    split_index = iree_string_view_split(line, ',', &segment_str, &line);
-    uint32_t segment = 0;
-    if (!iree_string_view_atoi_uint32_base(segment_str, 16, &segment)) {
-      // Failed to parse segment as an integer.
-      iree_thread_make_cpu_set_all(out_set);
-      return;
-    }
-    for (iree_host_size_t i = 0; i < 32; ++i) {
-      if (segment & (1ull << i)) {
-        CPU_SET(cpu_index + i, out_set);
-      }
-    }
-    cpu_index += 32;
-  } while (split_index != -1);
-
-  fclose(file);
+  return iree_ok_status();
 }
 
-#else
-
-// No implementation available. BSD may have some equivalent to the Linux
-// cpumap we could use.
-static void iree_thread_make_cpu_set_from_node_id(uint32_t node_id,
-                                                  cpu_set_t* out_set) {
-  iree_thread_make_cpu_set_all(out_set);
-}
-
-#endif  // IREE_PLATFORM_ANDROID || IREE_PLATFORM_LINUX
-
-static void iree_thread_make_cpu_set_from_affinity(
-    iree_thread_affinity_t affinity, cpu_set_t* out_set) {
-  CPU_ZERO(out_set);
-
-  // Assign to any processor in the group.
-  if (affinity.group_any) {
-    iree_thread_make_cpu_set_from_node_id(affinity.group, out_set);
-    return;
+iree_status_t iree_thread_request_affinity(iree_thread_t* thread,
+                                           iree_thread_affinity_t affinity) {
+  if (iree_thread_affinity_is_unspecified(affinity)) {
+    return iree_ok_status();
   }
-
-  // Specific processors can be set directly and optionally we also set its
-  // paired SMT processor. Note that we don't check whether SMT is enabled and
-  // assume the smt field is only assigned if it is.
-  if (affinity.id_assigned) {
-    CPU_SET(affinity.id, out_set);
-    if (affinity.smt) {
-      CPU_SET(affinity.id + 1, out_set);
-    }
-    return;
-  }
-
-  // No specific affinity specified; use any CPU.
-  iree_thread_make_cpu_set_all(out_set);
-}
-
-void iree_thread_request_affinity(iree_thread_t* thread,
-                                  iree_thread_affinity_t affinity) {
-  IREE_TRACE_ZONE_BEGIN(z0);
-#if IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_INSTRUMENTATION
-  char affinity_desc[64];
-  int affinity_desc_length =
-      iree_snprintf(affinity_desc, IREE_ARRAYSIZE(affinity_desc),
-                    "group_any=%u, group=%u, id_assigned=%u, id=%u, smt=%u",
-                    affinity.group_any, affinity.group, affinity.id_assigned,
-                    affinity.id, affinity.smt);
-  IREE_TRACE_ZONE_APPEND_TEXT(z0, affinity_desc, affinity_desc_length);
-#endif  // IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_INSTRUMENTATION
-
   cpu_set_t cpu_set;
-  iree_thread_make_cpu_set_from_affinity(affinity, &cpu_set);
+  CPU_ZERO(&cpu_set);
+  if (affinity.group_any) {
+    IREE_RETURN_IF_ERROR(
+        iree_thread_make_cpu_set_from_node_id(affinity.group, &cpu_set));
+  } else {
+    if (affinity.id >= CPU_SETSIZE ||
+        (affinity.smt && affinity.id + 1 >= CPU_SETSIZE)) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "CPU %u exceeds native affinity mask",
+                              affinity.id);
+    }
+    CPU_SET(affinity.id, &cpu_set);
+    if (affinity.smt) {
+      CPU_SET(affinity.id + 1, &cpu_set);
+    }
+  }
 
+  int rc = 0;
 #if defined(IREE_PLATFORM_ANDROID)
-  // `pthread_gettid_np` is only available on API 21+ and it is needed to set
-  // affinity so skip it for older API versions.
 #if __ANDROID_API__ >= 21
-  // Android doesn't have pthread_setaffinity_np but that's usually just
-  // implemented as this sequence anyway:
-  pid_t tid = pthread_gettid_np(thread->handle);
-  sched_setaffinity(tid, sizeof(cpu_set), &cpu_set);
+  rc = sched_setaffinity(pthread_gettid_np(thread->handle), sizeof(cpu_set),
+                         &cpu_set) == 0
+           ? 0
+           : errno;
+#else
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "thread affinity requires Android API 21");
 #endif  // __ANDROID_API__ >= 21
 #else
-  pthread_setaffinity_np(thread->handle, sizeof(cpu_set), &cpu_set);
-#endif  // IREE_PLATFORM_*
-
-  // TODO(benvanik): make a set_mempolicy syscall where available to set the
-  // NUMA allocation pinning for the calling thread. We'll likely want an
-  // iree_allocator_t control operation for this to allow users to plug in
-  // their own implementations and also let the HAL pin allocated buffers.
-
-  IREE_TRACE_ZONE_END(z0);
+  rc = pthread_setaffinity_np(thread->handle, sizeof(cpu_set), &cpu_set);
+#endif  // IREE_PLATFORM_ANDROID
+  if (rc != 0) {
+    return iree_make_status(iree_status_code_from_errno(rc),
+                            "cannot apply thread affinity: %s", strerror(rc));
+  }
+  return iree_ok_status();
 }
 
 void iree_thread_resume(iree_thread_t* thread) {

@@ -209,7 +209,7 @@ static iree_status_t DispatchManualAsanSelector(
       queue, empty_wait, dispatch_signal, executable,
       iree_hal_executable_function_from_index(kManualAsanBindingEntrypoint),
       iree_hal_make_static_dispatch_config(1, 1, 1), constants, bindings,
-      IREE_HAL_DISPATCH_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   return iree_hal_semaphore_list_wait(dispatch_signal, iree_infinite_timeout(),
                                       IREE_ASYNC_WAIT_FLAG_NONE);
 }
@@ -234,7 +234,7 @@ static iree_status_t DispatchManualAsanRawAddress(
       queue, empty_wait, dispatch_signal, executable,
       iree_hal_executable_function_from_index(kManualAsanRawAddressEntrypoint),
       iree_hal_make_static_dispatch_config(1, 1, 1), constants, empty_bindings,
-      IREE_HAL_DISPATCH_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   return iree_hal_semaphore_list_wait(dispatch_signal, iree_infinite_timeout(),
                                       IREE_ASYNC_WAIT_FLAG_NONE);
 }
@@ -286,16 +286,21 @@ TEST_P(ManualAsanExecutableTest, ReportsCompatibleHooksThroughFeedback) {
       iree_hal_queue_family(asan_device.queue()), target_result.target,
       &load_params, executable.out()));
 
+  const iree_hal_pool_export_classes_t exports = {};
+  Ref<iree_hal_pool_t> pool;
+  IREE_ASSERT_OK(SanitizerCreateDevicePool(
+      asan_device.device_group(), asan_device.queue(), exports, pool.out()));
+
   Ref<iree_hal_buffer_t> output_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(
-      asan_device.allocator(), kManualAsanBufferLength, output_buffer.out()));
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool, kManualAsanBufferLength,
+                                             output_buffer.out()));
 
   iree_hal_buffer_ref_t binding_refs[1];
   binding_refs[0] = iree_hal_make_buffer_ref(
       output_buffer, /*offset=*/0, iree_hal_buffer_byte_length(output_buffer));
   iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   asan_device.recorder()->Reset();
@@ -332,8 +337,8 @@ TEST_P(ManualAsanExecutableTest, ReportsCompatibleHooksThroughFeedback) {
   tail_binding_refs[0] = iree_hal_make_buffer_ref(
       output_buffer, kManualAsanBufferLength - 1, /*length=*/1);
   iree_hal_buffer_ref_list_t tail_bindings = {
-      /*.count=*/IREE_ARRAYSIZE(tail_binding_refs),
-      /*.values=*/tail_binding_refs,
+      .count = IREE_ARRAYSIZE(tail_binding_refs),
+      .values = tail_binding_refs,
   };
   asan_device.recorder()->Reset();
   IREE_ASSERT_OK(DispatchManualAsanSelector(
@@ -348,10 +353,12 @@ TEST_P(ManualAsanExecutableTest, ReportsCompatibleHooksThroughFeedback) {
   EXPECT_NE(tail_report.shadow_value, 0u);
 
   Ref<iree_hal_buffer_t> stale_buffer;
-  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(
-      asan_device.allocator(), kManualAsanBufferLength, stale_buffer.out()));
+  IREE_ASSERT_OK(SanitizerCreateDeviceBuffer(pool, kManualAsanBufferLength,
+                                             stale_buffer.out()));
   const uint64_t stale_address =
-      (uint64_t)(uintptr_t)iree_hal_amdgpu_buffer_device_pointer(stale_buffer);
+      (uint64_t)(uintptr_t)iree_hal_amdgpu_buffer_device_pointer(
+          iree_hal_buffer_allocated_buffer(stale_buffer)) +
+      iree_hal_buffer_byte_offset(stale_buffer);
   ASSERT_NE(stale_address, 0u);
   stale_buffer.reset();
   asan_device.recorder()->Reset();

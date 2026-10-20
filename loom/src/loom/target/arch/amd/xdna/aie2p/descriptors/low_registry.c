@@ -8,10 +8,12 @@
 
 #include "loom/ops/op_defs.h"
 #include "loom/target/arch/amd/xdna/aie2p/descriptors/array_descriptors.h"
+#include "loom/target/arch/amd/xdna/aie2p/descriptors/configuration_descriptors.h"
 #include "loom/target/arch/amd/xdna/aie2p/descriptors/core_descriptors.h"
 
 static const loom_low_descriptor_set_provider_t kLowDescriptorSetProviders[] = {
     loom_aie2p_array_descriptor_set,
+    loom_aie2p_configuration_descriptor_set,
     loom_aie2p_core_descriptor_set,
 };
 

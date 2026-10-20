@@ -12,6 +12,7 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/allocation/assignment.h"
+#include "loom/codegen/low/allocation/live_range.h"
 #include "loom/codegen/low/allocation/unit_liveness.h"
 #include "loom/codegen/low/descriptors.h"
 
@@ -21,6 +22,22 @@ extern "C" {
 
 typedef struct loom_low_allocation_active_unit_entry_t
     loom_low_allocation_active_unit_entry_t;
+typedef struct loom_low_allocation_active_location_node_t
+    loom_low_allocation_active_location_node_t;
+typedef struct loom_low_allocation_active_occupancy_t
+    loom_low_allocation_active_occupancy_t;
+
+enum {
+  // Bounded projection window, not a limit on legal register locations.
+  LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_WORD_COUNT = 4,
+  LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_LOCATION_COUNT =
+      LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_WORD_COUNT * 64,
+};
+
+typedef enum loom_low_allocation_location_search_direction_e {
+  LOOM_LOW_ALLOCATION_LOCATION_SEARCH_ASCENDING = 0,
+  LOOM_LOW_ALLOCATION_LOCATION_SEARCH_DESCENDING = 1,
+} loom_low_allocation_location_search_direction_t;
 
 // Hash index over active register-like assignment units.
 typedef struct loom_low_allocation_active_unit_index_t {
@@ -47,25 +64,96 @@ typedef struct loom_low_allocation_active_unit_index_t {
   uint32_t* seen_generations_by_assignment_index;
   // Current non-zero query generation.
   uint32_t seen_generation;
+  // Descriptor set defining storage identities for ordered location queries.
+  const loom_low_descriptor_set_t* descriptor_set;
+  // Dense alias-set prefix before class-local ordered location spaces.
+  uint32_t active_location_alias_set_count;
+  // AVL root for each unique linear storage identity and location kind.
+  uint32_t* active_location_roots;
+  // Number of initialized entries in |active_location_roots|.
+  uint32_t active_location_space_count;
+  // Reusable ordered-location nodes, one per distinct active scalar location.
+  loom_low_allocation_active_location_node_t* active_location_nodes;
+  // Fixed node capacity derived from the simultaneous active-unit bound.
+  uint32_t active_location_capacity;
+  // High-water count of initialized ordered-location nodes.
+  uint32_t active_location_count;
+  // First reusable ordered-location node, or UINT32_MAX.
+  uint32_t free_active_location_head;
+  // Arena-owned definite occupancy for bounded linear classes, or NULL.
+  loom_low_allocation_active_occupancy_t* occupancy;
 } loom_low_allocation_active_unit_index_t;
 
 // Initializes |out_index| for up to |assignment_capacity| assignments and
 // |unit_capacity| simultaneously indexed units. Tiny indexes are left disabled
 // for bounded linear scans. Unrepresentable capacities fail initialization.
 iree_status_t loom_low_allocation_active_unit_index_initialize(
+    const loom_low_descriptor_set_t* descriptor_set,
     iree_host_size_t assignment_capacity, iree_host_size_t unit_capacity,
     iree_arena_allocator_t* arena,
     loom_low_allocation_active_unit_index_t* out_index);
 
+// Binds |unit_liveness| before any insertion and adds counted occupancy for
+// bounded linear register classes. The borrowed facts must outlive |index|;
+// remove an assignment before changing its lifetime facts or location. All
+// assignment endpoints must be less than |program_point_count|. Unsupported
+// class shapes need no occupancy storage and retain the exact hash queries.
+iree_status_t loom_low_allocation_active_unit_index_initialize_occupancy(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_unit_liveness_t* unit_liveness,
+    iree_host_size_t program_point_count, iree_arena_allocator_t* arena);
+
+// Advances definite unit occupancy through the monotone acquisition point.
+// Points beyond the calendar drain all remaining reservations.
+// Activation and retirement consume each indexed lifetime span once. Scalar
+// sparse ranges retain their next segment; aggregate sparse ranges stay on the
+// exact query path instead of expanding a unit-by-segment product.
+void loom_low_allocation_active_unit_index_advance(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* assignments, uint32_t point);
+
+// Adds definitely conflicting bases to |conflicts|, which has
+// LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_WORD_COUNT caller-owned words. The
+// candidate's location is ignored. Projection uses its units live at the
+// current acquisition point; absent bits and locations beyond the window still
+// require complete conflict queries. No ignored-storage exemption applies.
+// The result remains valid until active assignments or lifetime facts change.
+void loom_low_allocation_active_unit_index_project_conflicts(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate, uint64_t* conflicts);
+
 // Returns true when |index| has allocated storage and can answer hash queries.
 bool loom_low_allocation_active_unit_index_is_enabled(
     const loom_low_allocation_active_unit_index_t* index);
+
+// Returns true when the ordered active-location index can prove conflicts for
+// |candidate|. Eligible candidates and indexed assignments each occupy one
+// continuous linear allocation unit. The owning active set has expired all
+// assignments ending at or before the candidate's monotone acquisition start,
+// so every indexed location is a definite conflict independent of later
+// checks.
+bool loom_low_allocation_active_unit_index_can_order_candidate(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate);
+
+// Finds the first location in the inclusive range not occupied by an indexed
+// definite conflict, in |direction|. The candidate must satisfy
+// loom_low_allocation_active_unit_index_can_order_candidate and the active set
+// must represent its acquisition start. Other allocation constraints still
+// require the normal conflict query at the returned base.
+bool loom_low_allocation_active_unit_index_find_unoccupied_location(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate, uint32_t minimum_base,
+    uint32_t maximum_base,
+    loom_low_allocation_location_search_direction_t direction,
+    uint32_t* out_base);
 
 // Returns true when |candidate| conflicts with an indexed active assignment.
 // Assignment sparse segment ranges, when present, index
 // |unit_liveness->storage_segments.entries|.
 bool loom_low_allocation_active_unit_index_conflicts(
     loom_low_allocation_active_unit_index_t* index,
+    loom_low_allocation_live_range_sweep_t* live_range_sweep,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_allocation_unit_liveness_t* unit_liveness,
     const loom_low_allocation_assignment_t* assignments,
@@ -79,6 +167,7 @@ bool loom_low_allocation_active_unit_index_conflicts(
 // |unit_liveness->storage_segments.entries|.
 iree_status_t loom_low_allocation_active_unit_index_collect_conflicts(
     loom_low_allocation_active_unit_index_t* index,
+    loom_low_allocation_live_range_sweep_t* live_range_sweep,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_allocation_unit_liveness_t* unit_liveness,
     const loom_low_allocation_assignment_t* assignments,

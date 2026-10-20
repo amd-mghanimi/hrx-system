@@ -1,0 +1,126 @@
+// RUN: pass pipeline-scf-for,unroll-scf-for,scf-to-cfg,ownership-lifetime
+
+// A complete worker retains its channel accesses around an ordinary pipelined
+// loop. Global reads advance while the workgroup record stays in the consumer.
+// Admission and publication remain outside the local load schedule.
+kernel.def @bound_channel_workgroup_consumer() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %width = index.constant 64 : index
+  %last = index.constant 63 : index
+  %origin = index.constant 0 : offset
+  %stage_bytes = index.constant 512 : offset
+  %lane = kernel.workitem.id<x> : index
+  %peer = index.sub %last, %lane : index
+  %input_slots = buffer.view %input[%origin] : buffer -> view<2x256xi32>
+  %input_channel = channel.bind<fifo> %input_slots, %c2 : view<2x256xi32>, index -> channel<tile<256xi32>>
+  %input_read, %source = channel.acquire %input_channel : channel<tile<256xi32>> -> (read<tile<256xi32>>, view<256xi32>)
+  %destination = buffer.view %output[%origin] : buffer -> view<64xi32>
+  %scratch = buffer.alloca<workgroup> align(4) %stage_bytes : buffer
+  %output_slots = buffer.view %scratch[%origin] : buffer -> view<2x64xi32>
+  %output_channel = channel.bind<fifo> %output_slots, %c2 : view<2x64xi32>, index -> channel<tile<64xi32>>
+  %output_write, %published = channel.reserve %output_channel : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+  %identity = scalar.constant 0 : i32
+  %result = scf.for %row = [%c0 to %c4 step %c1](%sum = %identity : i32) -> (i32) pipeline(%c2) {
+    %address = index.madd %row, %width, %lane : index
+    %value = view.load %source[%address] : view<256xi32> -> i32
+    view.store %value, %published[%lane] : i32, view<64xi32>
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %observed = view.load %published[%peer] : view<64xi32> -> i32
+    %next = scalar.addi %sum, %observed : i32
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next : i32
+  }
+  view.store %result, %destination[%lane] : i32, view<64xi32>
+  channel.publish %output_write : write<tile<64xi32>>
+  channel.release %input_read : read<tile<256xi32>>
+  kernel.return
+}
+
+// ----
+kernel.def @bound_channel_workgroup_consumer() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %width = index.constant 64 : index
+  %last = index.constant 63 : index
+  %origin = index.constant 0 : offset
+  %stage_bytes = index.constant 512 : offset
+  %lane = kernel.workitem.id<x> : index
+  %peer = index.sub %last, %lane : index
+  %input_slots = buffer.view %input[%origin] : buffer -> view<2x256xi32>
+  %input_channel = channel.bind<fifo> %input_slots, %c2 : view<2x256xi32>, index -> channel<tile<256xi32>>
+  %input_read, %source = channel.acquire %input_channel : channel<tile<256xi32>> -> (read<tile<256xi32>>, view<256xi32>)
+  %destination = buffer.view %output[%origin] : buffer -> view<64xi32>
+  %scratch = buffer.alloca<workgroup> align(4) %stage_bytes : buffer
+  %output_slots = buffer.view %scratch[%origin] : buffer -> view<2x64xi32>
+  %output_channel = channel.bind<fifo> %output_slots, %c2 : view<2x64xi32>, index -> channel<tile<64xi32>>
+  %output_write, %published = channel.reserve %output_channel : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+  %identity = scalar.constant 0 : i32
+  %32 = index.constant 1 : index
+  %33 = index.cmp slt, %32, %c4 : index
+  cfg.cond_br %33, ^_bb1, ^_bb6
+^_bb1:
+  %address$35 = index.madd %c0, %width, %lane : index
+  %value$36 = view.load %source[%address$35] : view<256xi32> -> i32
+  cfg.br ^_bb2(%32: index, %identity: i32, %value$36: i32)
+^_bb2(%64: index, %65: i32, %66: i32):
+  %68 = index.cmp slt, %64, %c4 : index
+  cfg.cond_br %68, ^_bb3, ^_bb4
+^_bb3:
+  %67 = index.assume %64 [range(%64, 1, 3)] : index
+  %address$42 = index.madd %67, %width, %lane : index
+  %value$43 = view.load %source[%address$42] : view<256xi32> -> i32
+  view.store %66, %published[%lane] : i32, view<64xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %observed$44 = view.load %published[%peer] : view<64xi32> -> i32
+  %next$45 = scalar.addi %65, %observed$44 : i32
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %69 = index.add %67, %c1 : index
+  cfg.br ^_bb2(%69: index, %next$45: i32, %value$43: i32)
+^_bb4:
+  cfg.br ^_bb5(%65: i32, %66: i32)
+^_bb5(%62: i32, %63: i32):
+  view.store %63, %published[%lane] : i32, view<64xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %observed$46 = view.load %published[%peer] : view<64xi32> -> i32
+  %next$47 = scalar.addi %62, %observed$46 : i32
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  cfg.br ^_bb11(%next$47: i32)
+^_bb6:
+  cfg.br ^_bb7(%c0: index, %identity: i32)
+^_bb7(%57: index, %58: i32):
+  %60 = index.cmp slt, %57, %c4 : index
+  cfg.cond_br %60, ^_bb8, ^_bb9
+^_bb8:
+  %59 = index.assume %57 [range(%57, 0, 3)] : index
+  %address$51 = index.madd %59, %width, %lane : index
+  %value$52 = view.load %source[%address$51] : view<256xi32> -> i32
+  view.store %value$52, %published[%lane] : i32, view<64xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %observed$53 = view.load %published[%peer] : view<64xi32> -> i32
+  %next$54 = scalar.addi %58, %observed$53 : i32
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %61 = index.add %59, %c1 : index
+  cfg.br ^_bb7(%61: index, %next$54: i32)
+^_bb9:
+  cfg.br ^_bb10(%58: i32)
+^_bb10(%56: i32):
+  cfg.br ^_bb11(%56: i32)
+^_bb11(%result: i32):
+  view.store %result, %destination[%lane] : i32, view<64xi32>
+  channel.publish %output_write : write<tile<64xi32>>
+  channel.release %input_read : read<tile<256xi32>>
+  kernel.return
+}

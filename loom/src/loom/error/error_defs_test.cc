@@ -48,6 +48,18 @@ TEST(ErrorDefsTest, LookupBytecode007) {
   EXPECT_EQ(loom_error_def_param_kind(def, 1), LOOM_PARAM_U64);
 }
 
+TEST(ErrorDefsTest, LookupExpectBitwiseMismatch) {
+  const loom_error_def_t* def =
+      loom_error_def_lookup(LOOM_ERROR_DOMAIN_EXPECT, 2);
+  ASSERT_NE(def, nullptr);
+  EXPECT_EQ(loom_error_def_domain(def), LOOM_ERROR_DOMAIN_EXPECT);
+  EXPECT_EQ(loom_error_def_code(def), 2);
+  EXPECT_EQ(loom_error_def_severity(def), LOOM_DIAGNOSTIC_ERROR);
+  EXPECT_STREQ(loom_error_def_summary(def),
+               "Bitwise expectation did not match.");
+  EXPECT_EQ(def->param_count, 0);
+}
+
 TEST(ErrorDefsTest, LookupBackendPressurePeakRemark) {
   const loom_error_def_t* def =
       loom_error_def_lookup(LOOM_ERROR_DOMAIN_BACKEND, 3);
@@ -89,8 +101,9 @@ TEST(ErrorDefsTest, LookupComposedCatalogFallsBackAndShadows) {
   ASSERT_NE(expected, nullptr);
 
   uint16_t error_indices[] = {UINT16_MAX, UINT16_MAX};
-  loom_error_catalog_t catalog = {};
-  catalog.error_indices_by_code = error_indices;
+  loom_error_catalog_t catalog = {
+      .error_indices_by_code = error_indices,
+  };
   catalog.domain_spans[LOOM_ERROR_DOMAIN_TYPE].code_count =
       IREE_ARRAYSIZE(error_indices);
   catalog.fallback_catalog = &loom_error_catalog_core;
@@ -159,6 +172,27 @@ TEST(ErrorDefsTest, DomainNames) {
   EXPECT_STREQ(loom_error_domain_name(LOOM_ERROR_DOMAIN_SHAPE), "SHAPE");
   EXPECT_STREQ(loom_error_domain_name(LOOM_ERROR_DOMAIN_FOLD), "FOLD");
   EXPECT_STREQ(loom_error_domain_name(LOOM_ERROR_DOMAIN_BACKEND), "BACKEND");
+  EXPECT_STREQ(loom_error_domain_name(LOOM_ERROR_DOMAIN_EXPECT), "EXPECT");
+}
+
+TEST(ErrorDefsTest, ParsesCanonicalRefs) {
+  loom_error_ref_t ref = LOOM_ERROR_REF_NONE;
+  EXPECT_TRUE(loom_error_ref_parse(IREE_SV("TYPE/001"), &ref));
+  EXPECT_EQ(ref, LOOM_ERROR_REF(LOOM_ERROR_DOMAIN_TYPE, 1));
+  EXPECT_TRUE(loom_error_ref_parse(IREE_SV("EXPECT/002"), &ref));
+  EXPECT_EQ(ref, LOOM_ERROR_REF(LOOM_ERROR_DOMAIN_EXPECT, 2));
+}
+
+TEST(ErrorDefsTest, RejectsInvalidRefs) {
+  loom_error_ref_t ref = LOOM_ERROR_REF(LOOM_ERROR_DOMAIN_TYPE, 1);
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("TYPE/1"), &ref));
+  EXPECT_EQ(ref, LOOM_ERROR_REF_NONE);
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("type/001"), &ref));
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("TYPE/000"), &ref));
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("TYPE/1024"), &ref));
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("UNKNOWN/001"), &ref));
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("TYPE/001/tail"), &ref));
+  EXPECT_FALSE(loom_error_ref_parse(IREE_SV("TYPE/001"), nullptr));
 }
 
 TEST(ErrorDefsTest, EmitterNames) {

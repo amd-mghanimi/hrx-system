@@ -197,7 +197,7 @@ static iree_status_t iree_hal_replay_recorder_file_capture_fd_contents(
 }
 
 iree_status_t iree_hal_replay_recorder_file_make_object_payload(
-    iree_io_file_handle_t* handle,
+    iree_io_file_handle_t* handle, iree_hal_replay_object_id_t storage_pool_id,
     iree_hal_queue_family_affinity_t queue_family_affinity,
     iree_hal_memory_access_t access, iree_hal_external_file_flags_t flags,
     iree_hal_file_t* base_file,
@@ -212,6 +212,7 @@ iree_status_t iree_hal_replay_recorder_file_make_object_payload(
   memset(out_payload, 0, sizeof(*out_payload));
   *out_allocated_reference_storage = iree_byte_span_empty();
   *out_reference = iree_string_view_empty();
+  out_payload->storage_pool_id = storage_pool_id;
   out_payload->queue_family_affinity = queue_family_affinity;
   out_payload->file_length = base_file ? iree_hal_file_length(base_file) : 0;
   out_payload->access = access;
@@ -481,6 +482,13 @@ static uint64_t iree_hal_replay_recorder_file_length(
   return iree_hal_file_length(file->base_file);
 }
 
+static const iree_async_file_requirements_t*
+iree_hal_replay_recorder_file_requirements(iree_hal_file_t* base_file) {
+  iree_hal_replay_recorder_file_t* file =
+      iree_hal_replay_recorder_file_cast(base_file);
+  return iree_hal_file_requirements(file->base_file);
+}
+
 static iree_hal_buffer_t* iree_hal_replay_recorder_file_storage_buffer(
     iree_hal_file_t* base_file) {
   (void)base_file;
@@ -500,25 +508,20 @@ static bool iree_hal_replay_recorder_file_supports_synchronous_io(
 }
 
 static iree_status_t iree_hal_replay_recorder_file_read(
-    iree_hal_file_t* base_file, uint64_t file_offset, iree_hal_buffer_t* buffer,
-    iree_device_size_t buffer_offset, iree_device_size_t length) {
+    iree_hal_file_t* base_file, uint64_t file_offset, iree_byte_span_t target) {
   (void)base_file;
   (void)file_offset;
-  (void)buffer;
-  (void)buffer_offset;
-  (void)length;
+  (void)target;
   return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
                           "direct replay file reads are not recorded");
 }
 
 static iree_status_t iree_hal_replay_recorder_file_write(
-    iree_hal_file_t* base_file, uint64_t file_offset, iree_hal_buffer_t* buffer,
-    iree_device_size_t buffer_offset, iree_device_size_t length) {
+    iree_hal_file_t* base_file, uint64_t file_offset,
+    iree_const_byte_span_t source) {
   (void)base_file;
   (void)file_offset;
-  (void)buffer;
-  (void)buffer_offset;
-  (void)length;
+  (void)source;
   return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
                           "direct replay file writes are not recorded");
 }
@@ -527,6 +530,7 @@ static const iree_hal_file_vtable_t iree_hal_replay_recorder_file_vtable = {
     .destroy = iree_hal_replay_recorder_file_destroy,
     .allowed_access = iree_hal_replay_recorder_file_allowed_access,
     .length = iree_hal_replay_recorder_file_length,
+    .requirements = iree_hal_replay_recorder_file_requirements,
     .storage_buffer = iree_hal_replay_recorder_file_storage_buffer,
     .async_handle = iree_hal_replay_recorder_file_async_handle,
     .supports_synchronous_io =

@@ -63,15 +63,15 @@ std::string ToString(loomc_string_view_t value) {
 
 SourcePtr CreateJsonSource(const char* identifier, const char* json) {
   loomc_source_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.format=*/LOOMC_SOURCE_FORMAT_UNKNOWN,
-      /*.identifier=*/loomc_make_cstring_view(identifier),
-      /*.contents=*/loomc_make_byte_span(json, strlen(json)),
-      /*.storage=*/LOOMC_SOURCE_STORAGE_COPY,
-      /*.release=*/nullptr,
-      /*.release_user_data=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_UNKNOWN,
+      .identifier = loomc_make_cstring_view(identifier),
+      .contents = loomc_make_byte_span(json, strlen(json)),
+      .storage = LOOMC_SOURCE_STORAGE_COPY,
+      .release = nullptr,
+      .release_user_data = nullptr,
   };
   loomc_source_t* source = nullptr;
   loomc_status_t status =
@@ -141,8 +141,8 @@ void ExpectLimitValue(const loomc_target_profile_t* profile,
                       loomc_target_fact_state_t expected_state,
                       uint64_t expected_value) {
   loomc_spirv_limit_value_t value = {
-      /*.state=*/LOOMC_TARGET_FACT_STATE_UNKNOWN,
-      /*.value=*/0,
+      .state = LOOMC_TARGET_FACT_STATE_UNKNOWN,
+      .value = 0,
   };
   LOOMC_EXPECT_OK(
       loomc_spirv_target_profile_query_limit(profile, limit, &value));
@@ -155,8 +155,8 @@ void ExpectEnvironmentValue(const loomc_target_profile_t* profile,
                             loomc_target_fact_state_t expected_state,
                             uint64_t expected_value) {
   loomc_spirv_environment_value_t value = {
-      /*.state=*/LOOMC_TARGET_FACT_STATE_UNKNOWN,
-      /*.value=*/0,
+      .state = LOOMC_TARGET_FACT_STATE_UNKNOWN,
+      .value = 0,
   };
   LOOMC_EXPECT_OK(loomc_spirv_target_profile_query_environment(
       profile, environment, &value));
@@ -172,6 +172,7 @@ TEST(TargetSpirvVulkaninfoTest, ImportsGpuinfoProfileWrapper) {
         "properties": {
           "VkPhysicalDeviceProperties": {
             "apiVersion": 4206592,
+            "vendorID": 4318,
             "deviceName": "Unit Test GPU",
             "limits": {
               "maxComputeWorkGroupCount": [65535, 1024, 64],
@@ -181,26 +182,71 @@ TEST(TargetSpirvVulkaninfoTest, ImportsGpuinfoProfileWrapper) {
             }
           },
           "VkPhysicalDeviceVulkan11Properties": {
-            "subgroupSize": 32
+            "subgroupSize": 32,
+            "subgroupSupportedOperations": [
+              "VK_SUBGROUP_FEATURE_BASIC_BIT",
+              "VK_SUBGROUP_FEATURE_BALLOT_BIT",
+              "VK_SUBGROUP_FEATURE_VOTE_BIT",
+              "VK_SUBGROUP_FEATURE_ARITHMETIC_BIT",
+              "VK_SUBGROUP_FEATURE_SHUFFLE_BIT",
+              "VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT",
+              "VK_SUBGROUP_FEATURE_CLUSTERED_BIT"
+            ]
+          },
+          "VkPhysicalDeviceVulkan12Properties": {
+            "denormBehaviorIndependence":
+              "VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY",
+            "roundingModeIndependence":
+              "VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY",
+            "shaderDenormPreserveFloat16": true,
+            "shaderDenormPreserveFloat32": true,
+            "shaderDenormPreserveFloat64": true,
+            "shaderSignedZeroInfNanPreserveFloat16": true,
+            "shaderSignedZeroInfNanPreserveFloat32": true,
+            "shaderSignedZeroInfNanPreserveFloat64": true,
+            "shaderRoundingModeRTEFloat16": true,
+            "shaderRoundingModeRTEFloat32": true,
+            "shaderRoundingModeRTEFloat64": true
           }
         },
         "features": {
           "VkPhysicalDeviceFeatures": {
-            "shaderFloat64": false,
+            "shaderFloat64": true,
             "shaderInt16": true,
             "shaderInt64": true
           },
           "VkPhysicalDeviceVulkan12Features": {
+            "shaderSubgroupExtendedTypes": true,
             "shaderFloat16": true,
             "shaderInt8": true,
             "storageBuffer8BitAccess": true,
-            "bufferDeviceAddress": true
+            "bufferDeviceAddress": true,
+            "vulkanMemoryModel": true,
+            "vulkanMemoryModelDeviceScope": true,
+            "shaderBufferInt64Atomics": true,
+            "shaderSharedInt64Atomics": true
           },
           "VkPhysicalDevice16BitStorageFeatures": {
             "storageBuffer16BitAccess": true
           },
           "VkPhysicalDeviceCooperativeMatrixFeaturesKHR": {
             "cooperativeMatrix": true
+          },
+          "VkPhysicalDeviceShaderAtomicFloatFeaturesEXT": {
+            "shaderBufferFloat32Atomics": true,
+            "shaderSharedFloat32Atomics": true,
+            "shaderBufferFloat32AtomicAdd": true,
+            "shaderSharedFloat32AtomicAdd": true,
+            "shaderBufferFloat64Atomics": true,
+            "shaderSharedFloat64Atomics": true,
+            "shaderBufferFloat64AtomicAdd": true,
+            "shaderSharedFloat64AtomicAdd": true
+          },
+          "VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT": {
+            "shaderBufferFloat16Atomics": true,
+            "shaderSharedFloat16Atomics": true,
+            "shaderBufferFloat16AtomicAdd": true,
+            "shaderSharedFloat16AtomicAdd": true
           },
           "UnexpectedFutureFeatureStruct": {
             "surprise": true
@@ -219,12 +265,12 @@ TEST(TargetSpirvVulkaninfoTest, ImportsGpuinfoProfileWrapper) {
   })json";
   SourcePtr source = CreateJsonSource("unit-vulkaninfo.json", json.c_str());
   loomc_spirv_vulkaninfo_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("imported-wrapper"),
-      /*.profile_name=*/loomc_make_cstring_view("VP_unit_test"),
-      /*.device_index=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("imported-wrapper"),
+      .profile_name = loomc_make_cstring_view("VP_unit_test"),
+      .device_index = 0,
   };
   TargetProfilePtr profile =
       ImportVulkaninfoProfile(target_environment.get(), source.get(), &options);
@@ -238,12 +284,47 @@ TEST(TargetSpirvVulkaninfoTest, ImportsGpuinfoProfileWrapper) {
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT16,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT64,
-                     LOOMC_TARGET_FACT_STATE_FALSE);
+                     LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(),
                      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_16BIT_ACCESS,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
                      LOOMC_TARGET_FACT_STATE_TRUE);
+  const loomc_spirv_feature_t extended_features[] = {
+      LOOMC_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_ARITHMETIC,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_CLUSTERED,
+      LOOMC_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION,
+  };
+  for (loomc_spirv_feature_t feature : extended_features) {
+    ExpectFeatureState(profile.get(), feature, LOOMC_TARGET_FACT_STATE_TRUE);
+  }
 
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
                    LOOMC_TARGET_FACT_STATE_TRUE, 256);
@@ -255,7 +336,7 @@ TEST(TargetSpirvVulkaninfoTest, ImportsGpuinfoProfileWrapper) {
                    LOOMC_TARGET_FACT_STATE_TRUE, 256);
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
                    LOOMC_TARGET_FACT_STATE_TRUE, UINT64_C(49152));
-  ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+  ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE,
                    LOOMC_TARGET_FACT_STATE_TRUE, 32);
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_X,
                    LOOMC_TARGET_FACT_STATE_TRUE, 65535);
@@ -293,6 +374,7 @@ TEST(TargetSpirvVulkaninfoTest, ImportsRawDevicesArrayByIndex) {
       {
         "properties": {
           "apiVersion": 4202496,
+          "vendorID": 4098,
           "limits": {
             "maxComputeWorkGroupCount": [16, 8, 4],
             "maxComputeWorkGroupInvocations": 128,
@@ -307,6 +389,9 @@ TEST(TargetSpirvVulkaninfoTest, ImportsRawDevicesArrayByIndex) {
         "extended_features": {
           "VkPhysicalDeviceVulkan12Features": {
             "bufferDeviceAddress": true
+          },
+          "VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures": {
+            "shaderSubgroupExtendedTypes": true
           }
         }
       }
@@ -314,22 +399,27 @@ TEST(TargetSpirvVulkaninfoTest, ImportsRawDevicesArrayByIndex) {
   })json";
   SourcePtr source = CreateJsonSource("raw-vulkaninfo.json", json.c_str());
   loomc_spirv_vulkaninfo_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("selected-device"),
-      /*.profile_name=*/loomc_string_view_empty(),
-      /*.device_index=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("selected-device"),
+      .profile_name = loomc_string_view_empty(),
+      .device_index = 1,
   };
   TargetProfilePtr profile =
       ImportVulkaninfoProfile(target_environment.get(), source.get(), &options);
 
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_INT64,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT64,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_PHYSICAL_STORAGE_BUFFER,
                      LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION,
+                     LOOMC_TARGET_FACT_STATE_FALSE);
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
                    LOOMC_TARGET_FACT_STATE_TRUE, 128);
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_X,
@@ -349,11 +439,11 @@ TEST(TargetSpirvVulkaninfoTest, ImportsSourceLoadedFromOpenFile) {
   ASSERT_EQ(fseek(file, 0, SEEK_SET), 0);
 
   loomc_source_load_options_t source_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_LOAD_OPTIONS,
-      /*.structure_size=*/sizeof(source_options),
-      /*.next=*/nullptr,
-      /*.format=*/LOOMC_SOURCE_FORMAT_UNKNOWN,
-      /*.identifier=*/loomc_make_cstring_view("open-file-vulkaninfo.json"),
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_LOAD_OPTIONS,
+      .structure_size = sizeof(source_options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_UNKNOWN,
+      .identifier = loomc_make_cstring_view("open-file-vulkaninfo.json"),
   };
   loomc_source_t* source = nullptr;
   loomc_status_t status = loomc_source_create_from_file(
@@ -400,6 +490,55 @@ TEST(TargetSpirvVulkaninfoTest, ImportsSourceLoadedFromPath) {
   EXPECT_TRUE(path.Remove());
 }
 
+TEST(TargetSpirvVulkaninfoTest, ImportsComputeSubgroupSizeControlFamily) {
+  TargetEnvironmentPtr environment = CreateSpirvTargetEnvironment();
+  for (const std::string spelling :
+       {"Vulkan13", "SubgroupSizeControl", "SubgroupSizeControlEXT"}) {
+    for (bool control : {false, true}) {
+      for (bool compute : {false, true}) {
+        SCOPED_TRACE(spelling);
+        SCOPED_TRACE(control);
+        SCOPED_TRACE(compute);
+        const std::string stem = spelling == "SubgroupSizeControlEXT"
+                                     ? "SubgroupSizeControl"
+                                     : spelling;
+        const std::string suffix =
+            spelling == "SubgroupSizeControlEXT" ? "EXT" : "";
+        const std::string json =
+            R"({"devices":[{"properties":{
+              "VkPhysicalDeviceSubgroupProperties":{"subgroupSize":64},
+              "VkPhysicalDevice)" +
+            stem + "Properties" + suffix + R"(":{
+                "minSubgroupSize":32,"maxSubgroupSize":64,
+                "maxComputeWorkgroupSubgroups":16,"requiredSubgroupSizeStages":[")" +
+            (compute ? "VK_SHADER_STAGE_COMPUTE_BIT"
+                     : "VK_SHADER_STAGE_FRAGMENT_BIT") +
+            R"("]}},"extended_features":{"VkPhysicalDevice)" + stem +
+            "Features" + suffix + R"(":{"subgroupSizeControl":)" +
+            (control ? "true" : "false") + "}}}]}";
+        SourcePtr source = CreateJsonSource("subgroups.json", json.c_str());
+        TargetProfilePtr profile =
+            ImportVulkaninfoProfile(environment.get(), source.get(), nullptr);
+        ASSERT_NE(profile.get(), nullptr);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE,
+                         LOOMC_TARGET_FACT_STATE_TRUE, 64);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE,
+                         LOOMC_TARGET_FACT_STATE_TRUE,
+                         control && compute ? 32 : 64);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE,
+                         LOOMC_TARGET_FACT_STATE_TRUE, 64);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+                         LOOMC_TARGET_FACT_STATE_UNKNOWN, 0);
+        ExpectLimitValue(profile.get(),
+                         LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SUBGROUP_COUNT,
+                         control && compute ? LOOMC_TARGET_FACT_STATE_TRUE
+                                            : LOOMC_TARGET_FACT_STATE_UNKNOWN,
+                         control && compute ? 16 : 0);
+      }
+    }
+  }
+}
+
 TEST(TargetSpirvVulkaninfoTest, ReportsMalformedJsonAsResultDiagnostic) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   SourcePtr source = CreateJsonSource("bad-vulkaninfo.json", "{");
@@ -427,12 +566,12 @@ TEST(TargetSpirvVulkaninfoTest, ReportsMissingSelectedProfile) {
   })json";
   SourcePtr source = CreateJsonSource("profiles.json", json.c_str());
   loomc_spirv_vulkaninfo_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_string_view_empty(),
-      /*.profile_name=*/loomc_make_cstring_view("VP_missing"),
-      /*.device_index=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKANINFO_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_string_view_empty(),
+      .profile_name = loomc_make_cstring_view("VP_missing"),
+      .device_index = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;

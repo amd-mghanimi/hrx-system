@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from .bitwise import _v_alignbit_b32_overlay
 from .common import *
 
 _SDWA_DST_UNUSED_IMMEDIATE = Immediate(
@@ -230,6 +233,10 @@ def _s_tied_sopk_i32_overlay(
             results=("dst",),
             operands=("lhs",),
             immediates=("imm16",),
+            native_assembly_values=(
+                _native_result("dst"),
+                _native_i64_immediate("imm16"),
+            ),
         ),
         constraints=(
             Constraint(ConstraintKind.TIED, 0, 1),
@@ -239,21 +246,94 @@ def _s_tied_sopk_i32_overlay(
     )
 
 
-def _s_mul_hi_u32_overlay() -> AmdgpuDescriptorOverlay:
+def _s_mul_hi_overlay(
+    *, descriptor_key: str, instruction_name: str, mnemonic: str, semantic_tag: str
+) -> AmdgpuDescriptorOverlay:
     return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.s_mul_hi_u32",
-        instruction_name="S_MUL_HI_U32",
-        mnemonic="s_mul_hi_u32",
+        descriptor_key=descriptor_key,
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
         encoding_name="ENC_SOP2",
-        semantic_tag="integer.mul.hi.u32",
+        semantic_tag=semantic_tag,
         schedule_class=_SCHEDULE_SALU,
         operands=(
             AmdgpuOperandOverlay("SDST", _sgpr_result()),
             AmdgpuOperandOverlay("SSRC0", _sgpr_operand("lhs")),
             AmdgpuOperandOverlay("SSRC1", _sgpr_operand("rhs")),
         ),
+        operand_forms=(
+            _literal_operand_form(
+                replacement_descriptor=f"{descriptor_key}.lit",
+                source_operand="rhs",
+            ),
+        ),
         constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _s_mul_hi_literal_overlay(
+    *, descriptor_key: str, instruction_name: str, mnemonic: str, semantic_tag: str
+) -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=f"{descriptor_key}.lit",
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
+        encoding_name="ENC_SOP2",
+        encoding_format_id=AMDGPU_ENCODING_FORMAT_SOP2_LITERAL,
+        semantic_tag=semantic_tag,
+        schedule_class=_SCHEDULE_SALU,
+        operands=(
+            AmdgpuOperandOverlay("SDST", _sgpr_result()),
+            AmdgpuOperandOverlay("SSRC0", _sgpr_operand("lhs")),
+        ),
+        asm_forms=_asm(
+            mnemonic=f"{mnemonic}_lit",
+            results=("dst",),
+            operands=("lhs",),
+            immediates=("imm32",),
+        ),
+        immediate_fields=("LITERAL",),
+        immediates=(_LITERAL_U32_IMMEDIATE,),
+        fixed_encoding_fields=(("SSRC1", _predefined("SRC_LITERAL", "OPR_SSRC")),),
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _s_mul_hi_u32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_mul_hi_overlay(
+        descriptor_key="amdgpu.s_mul_hi_u32",
+        instruction_name="S_MUL_HI_U32",
+        mnemonic="s_mul_hi_u32",
+        semantic_tag="integer.mul.hi.u32",
+    )
+
+
+def _s_mul_hi_u32_literal_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_mul_hi_literal_overlay(
+        descriptor_key="amdgpu.s_mul_hi_u32",
+        instruction_name="S_MUL_HI_U32",
+        mnemonic="s_mul_hi_u32",
+        semantic_tag="integer.mul.hi.u32",
+    )
+
+
+def _s_mul_hi_i32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_mul_hi_overlay(
+        descriptor_key="amdgpu.s_mul_hi_i32",
+        instruction_name="S_MUL_HI_I32",
+        mnemonic="s_mul_hi_i32",
+        semantic_tag="integer.mul.hi.i32",
+    )
+
+
+def _s_mul_hi_i32_literal_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_mul_hi_literal_overlay(
+        descriptor_key="amdgpu.s_mul_hi_i32",
+        instruction_name="S_MUL_HI_I32",
+        mnemonic="s_mul_hi_i32",
+        semantic_tag="integer.mul.hi.i32",
     )
 
 
@@ -264,14 +344,22 @@ def _s_binary_u32_overlay(
     mnemonic: str,
     semantic_tag: str,
     rhs_inline_descriptor_key: str | None = None,
+    literal_descriptor_key: str | None = None,
 ) -> AmdgpuDescriptorOverlay:
-    operand_forms: tuple[OperandForm, ...] = ()
+    operand_forms: list[OperandForm] = []
     if rhs_inline_descriptor_key is not None:
-        operand_forms = (
+        operand_forms.append(
             _literal_operand_form(
                 replacement_descriptor=rhs_inline_descriptor_key,
                 source_operand="rhs",
-            ),
+            )
+        )
+    if literal_descriptor_key is not None:
+        operand_forms.append(
+            _literal_operand_form(
+                replacement_descriptor=literal_descriptor_key,
+                source_operand="rhs",
+            )
         )
     return AmdgpuDescriptorOverlay(
         descriptor_key=descriptor_key,
@@ -286,7 +374,7 @@ def _s_binary_u32_overlay(
             AmdgpuOperandOverlay("SSRC1", _sgpr_operand("rhs")),
         ),
         implicit_operands=(_SCC_CLOBBER_OUTPUT,),
-        operand_forms=operand_forms,
+        operand_forms=tuple(operand_forms),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
@@ -380,8 +468,39 @@ def _s_binary_u64_overlay(
     )
 
 
-def _s_min_i32_overlay() -> AmdgpuDescriptorOverlay:
-    return _s_binary_u32_overlay(
+def _s_minmax_i32_overlays(
+    *,
+    descriptor_key: str,
+    instruction_name: str,
+    mnemonic: str,
+    semantic_tag: str,
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return (
+        _s_binary_u32_overlay(
+            descriptor_key=descriptor_key,
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+            rhs_inline_descriptor_key=f"{descriptor_key}.rhs_inline",
+            literal_descriptor_key=f"{descriptor_key}.lit",
+        ),
+        _s_binary_u32_rhs_inline_overlay(
+            descriptor_key=f"{descriptor_key}.rhs_inline",
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+        ),
+        _s_binary_u32_literal_overlay(
+            descriptor_key=f"{descriptor_key}.lit",
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+        ),
+    )
+
+
+def _s_min_i32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _s_minmax_i32_overlays(
         descriptor_key="amdgpu.s_min_i32",
         instruction_name="S_MIN_I32",
         mnemonic="s_min_i32",
@@ -389,8 +508,12 @@ def _s_min_i32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _s_max_i32_overlay() -> AmdgpuDescriptorOverlay:
-    return _s_binary_u32_overlay(
+def _s_min_i32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_min_i32_overlays()[0]
+
+
+def _s_max_i32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _s_minmax_i32_overlays(
         descriptor_key="amdgpu.s_max_i32",
         instruction_name="S_MAX_I32",
         mnemonic="s_max_i32",
@@ -398,8 +521,12 @@ def _s_max_i32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _s_min_u32_overlay() -> AmdgpuDescriptorOverlay:
-    return _s_binary_u32_overlay(
+def _s_max_i32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_max_i32_overlays()[0]
+
+
+def _s_min_u32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _s_minmax_i32_overlays(
         descriptor_key="amdgpu.s_min_u32",
         instruction_name="S_MIN_U32",
         mnemonic="s_min_u32",
@@ -407,13 +534,21 @@ def _s_min_u32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _s_max_u32_overlay() -> AmdgpuDescriptorOverlay:
-    return _s_binary_u32_overlay(
+def _s_min_u32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_min_u32_overlays()[0]
+
+
+def _s_max_u32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _s_minmax_i32_overlays(
         descriptor_key="amdgpu.s_max_u32",
         instruction_name="S_MAX_U32",
         mnemonic="s_max_u32",
         semantic_tag="integer.max.u32",
     )
+
+
+def _s_max_u32_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_max_u32_overlays()[0]
 
 
 def _s_cselect_b32_overlay() -> AmdgpuDescriptorOverlay:
@@ -458,140 +593,46 @@ def _s_shift_u64_overlay(
             AmdgpuOperandOverlay("SSRC1", _sgpr_operand("shift")),
         ),
         implicit_operands=(_SCC_CLOBBER_OUTPUT,),
+        operand_forms=(
+            _literal_operand_form(
+                replacement_descriptor=f"{descriptor_key}.rhs_inline",
+                source_operand="shift",
+                immediate_field="shift",
+            ),
+        ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
 
-def _s_bcnt1_i32_overlay(
-    source_bit_count: int, encoding_condition: str
+def _s_shift_u64_rhs_inline_overlay(
+    *,
+    descriptor_key: str,
+    instruction_name: str,
+    mnemonic: str,
+    semantic_tag: str,
 ) -> AmdgpuDescriptorOverlay:
-    if source_bit_count not in (32, 64):
-        raise ValueError("S_BCNT1_I32 source width must be 32 or 64")
     return AmdgpuDescriptorOverlay(
-        descriptor_key=f"amdgpu.s_bcnt1_i32_b{source_bit_count}",
-        instruction_name=f"S_BCNT1_I32_B{source_bit_count}",
-        mnemonic=f"s_bcnt1_i32_b{source_bit_count}",
-        encoding_name="ENC_SOP1",
-        encoding_condition=encoding_condition,
-        semantic_tag=f"integer.ctpop.u{source_bit_count}",
+        descriptor_key=descriptor_key,
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
+        encoding_name="ENC_SOP2",
+        semantic_tag=semantic_tag,
         schedule_class=_SCHEDULE_SALU,
         operands=(
-            AmdgpuOperandOverlay("SDST", _sgpr_result()),
-            AmdgpuOperandOverlay(
-                "SSRC0", _sgpr_operand("input", units=source_bit_count // 32)
-            ),
+            AmdgpuOperandOverlay("SDST", _sgpr_result(units=2)),
+            AmdgpuOperandOverlay("SSRC0", _sgpr_operand("value", units=2)),
         ),
         implicit_operands=(_SCC_CLOBBER_OUTPUT,),
+        asm_forms=_asm(
+            mnemonic=f"{mnemonic}_rhs_inline",
+            native_assembly_mnemonic=mnemonic,
+            results=("dst",),
+            operands=("value",),
+            immediates=("shift",),
+        ),
+        immediate_fields=("SSRC1",),
+        immediates=(replace(_SOURCE_INLINE_U32_IMMEDIATE, field_name="shift"),),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _s_ctz_i32_overlay(
-    source_bit_count: int,
-    encoding_condition: str,
-    instruction_name: str,
-) -> AmdgpuDescriptorOverlay:
-    if source_bit_count not in (32, 64):
-        raise ValueError("scalar CTZ source width must be 32 or 64")
-    return AmdgpuDescriptorOverlay(
-        descriptor_key=f"amdgpu.s_ctz_i32_b{source_bit_count}",
-        instruction_name=instruction_name,
-        mnemonic=instruction_name.lower(),
-        encoding_name="ENC_SOP1",
-        encoding_condition=encoding_condition,
-        semantic_tag=f"integer.cttz.u{source_bit_count}.native_zero_minus_one",
-        schedule_class=_SCHEDULE_SALU,
-        operands=(
-            AmdgpuOperandOverlay("SDST", _sgpr_result()),
-            AmdgpuOperandOverlay(
-                "SSRC0", _sgpr_operand("input", units=source_bit_count // 32)
-            ),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _v_bcnt_u32_b32_overlay() -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_bcnt_u32_b32",
-        instruction_name="V_BCNT_U32_B32",
-        mnemonic="v_bcnt_u32_b32",
-        encoding_name="ENC_VOP3",
-        semantic_tag="integer.ctpop.accumulate.u32",
-        schedule_class=_SCHEDULE_VALU,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result()),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
-            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("addend")),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _v_ctz_i32_b32_overlay(instruction_name: str) -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_ctz_i32_b32",
-        instruction_name=instruction_name,
-        mnemonic=instruction_name.lower(),
-        encoding_name="ENC_VOP1",
-        semantic_tag="integer.cttz.u32.native_zero_minus_one",
-        schedule_class=_SCHEDULE_VALU,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result()),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _v_bcnt_u32_b32_src1_zero_overlay() -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_bcnt_u32_b32.src1_zero",
-        instruction_name="V_BCNT_U32_B32",
-        mnemonic="v_bcnt_u32_b32_src1_zero",
-        encoding_name="ENC_VOP3",
-        semantic_tag="integer.ctpop.u32",
-        schedule_class=_SCHEDULE_VALU,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result()),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
-        ),
-        fixed_encoding_fields=(("SRC1", _predefined("0", "OPR_SRC")),),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _integer_bit_count_overlays(
-    sop1_encoding_condition: str = "default",
-    *,
-    scalar_ctz_instruction_names: tuple[str, str] = (
-        "S_FF1_I32_B32",
-        "S_FF1_I32_B64",
-    ),
-    vector_ctz_instruction_name: str = "V_FFBL_B32",
-) -> tuple[AmdgpuDescriptorOverlay, ...]:
-    return (
-        _s_bcnt1_i32_overlay(32, sop1_encoding_condition),
-        _s_bcnt1_i32_overlay(64, sop1_encoding_condition),
-        _s_ctz_i32_overlay(
-            32, sop1_encoding_condition, scalar_ctz_instruction_names[0]
-        ),
-        _s_ctz_i32_overlay(
-            64, sop1_encoding_condition, scalar_ctz_instruction_names[1]
-        ),
-        _v_bcnt_u32_b32_overlay(),
-        _v_bcnt_u32_b32_src1_zero_overlay(),
-        _v_ctz_i32_b32_overlay(vector_ctz_instruction_name),
-    )
-
-
-def _rdna_integer_bit_count_overlays(
-    sop1_encoding_condition: str,
-) -> tuple[AmdgpuDescriptorOverlay, ...]:
-    return _integer_bit_count_overlays(
-        sop1_encoding_condition,
-        scalar_ctz_instruction_names=("S_CTZ_I32_B32", "S_CTZ_I32_B64"),
-        vector_ctz_instruction_name="V_CTZ_I32_B32",
     )
 
 
@@ -771,7 +812,7 @@ def _v_add_u32_rhs_tied_overlay(
             results=("dst",),
             operands=("lhs", "rhs"),
         ),
-        constraints=_destructive_accumulator_constraints(2),
+        constraints=(Constraint(ConstraintKind.PREFER_TIED, 0, 2),),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
@@ -1037,7 +1078,7 @@ def _v_add_co_ci_u32_overlay(
             AmdgpuOperandOverlay("SDST", _sgpr_result("carry", units=2)),
             AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("lhs")),
             AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("rhs")),
-            AmdgpuOperandOverlay("SRC2", _sgpr_operand("carry_in", units=2)),
+            AmdgpuOperandOverlay("SRC2", _sgpr_predicate("carry_in", units=2)),
         ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
@@ -1076,7 +1117,7 @@ def _v_sub_co_ci_u32_overlay(
             AmdgpuOperandOverlay("SDST", _sgpr_result("borrow", units=2)),
             AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("lhs")),
             AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("rhs")),
-            AmdgpuOperandOverlay("SRC2", _sgpr_operand("borrow_in", units=2)),
+            AmdgpuOperandOverlay("SRC2", _sgpr_predicate("borrow_in", units=2)),
         ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
@@ -1100,6 +1141,18 @@ def _v_sub_u32_overlay(instruction_name: str, mnemonic: str) -> AmdgpuDescriptor
     )
 
 
+def _v_sub_u32_src0_inline_overlay(
+    instruction_name: str, mnemonic: str
+) -> AmdgpuDescriptorOverlay:
+    return _v_binary_src0_inline_overlay(
+        descriptor_key="amdgpu.v_sub_u32.src0_inline",
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
+        semantic_tag="integer.sub.u32",
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+    )
+
+
 def _v_sub_u32_lhs_tied_overlay(
     instruction_name: str, mnemonic: str
 ) -> AmdgpuDescriptorOverlay:
@@ -1120,7 +1173,7 @@ def _v_sub_u32_lhs_tied_overlay(
             results=("dst",),
             operands=("lhs", "rhs"),
         ),
-        constraints=_destructive_accumulator_constraints(1),
+        constraints=(Constraint(ConstraintKind.PREFER_TIED, 0, 1),),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
@@ -1206,9 +1259,19 @@ def _v_mad_u32_u24_overlay(
     *,
     include_literal_forms: bool = True,
 ) -> AmdgpuDescriptorOverlay:
-    operand_forms: tuple[OperandForm, ...] = ()
+    operand_forms = tuple(
+        _literal_operand_form(
+            replacement_descriptor=f"amdgpu.v_mad_u32_u24.{source}_inline",
+            source_operand=operand,
+        )
+        for source, operand in (
+            ("src0", "a"),
+            ("src1", "b"),
+            ("src2", "addend"),
+        )
+    )
     if include_literal_forms:
-        operand_forms = (
+        operand_forms += (
             _literal_operand_form(
                 replacement_descriptor="amdgpu.v_mad_u32_u24.src0_lit",
                 source_operand="a",
@@ -1249,13 +1312,15 @@ def _v_mad_u32_u24_overlay(
     )
 
 
-def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverlay:
+def _v_mad_u32_u24_immediate_operands(
+    immediate_source: str,
+) -> tuple[str, tuple[AmdgpuOperandOverlay, ...], tuple[str, ...]]:
     source_fields = {
         "src0": ("SRC0", "a", _sgpr_vgpr_operand("a"), _U24_SOURCE_SIZE_REASON),
         "src1": ("SRC1", "b", _sgpr_vgpr_operand("b"), _U24_SOURCE_SIZE_REASON),
         "src2": ("SRC2", "addend", _sgpr_vgpr_operand("addend"), None),
     }
-    literal_field = source_fields[literal_source][0]
+    immediate_field = source_fields[immediate_source][0]
     operands = [AmdgpuOperandOverlay("VDST", _vgpr_result())]
     asm_operands = []
     for source_name, (
@@ -1264,7 +1329,7 @@ def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverl
         operand,
         size_reason,
     ) in source_fields.items():
-        if source_name == literal_source:
+        if source_name == immediate_source:
             continue
         asm_operands.append(field_name)
         operands.append(
@@ -1274,6 +1339,39 @@ def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverl
                 size_exception_reason=size_reason,
             )
         )
+    return immediate_field, tuple(operands), tuple(asm_operands)
+
+
+def _v_mad_u32_u24_inline_overlay(
+    inline_source: str,
+) -> AmdgpuDescriptorOverlay:
+    inline_field, operands, asm_operands = _v_mad_u32_u24_immediate_operands(
+        inline_source
+    )
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=f"amdgpu.v_mad_u32_u24.{inline_source}_inline",
+        instruction_name="V_MAD_U32_U24",
+        mnemonic=f"v_mad_u32_u24_{inline_source}_inline",
+        encoding_name="ENC_VOP3",
+        semantic_tag="integer.mad.lo.u24.u32",
+        schedule_class=_SCHEDULE_VALU,
+        operands=operands,
+        asm_forms=_asm(
+            results=("dst",),
+            operands=asm_operands,
+            immediates=("imm32",),
+        ),
+        immediate_fields=(inline_field,),
+        immediates=(_SOURCE_INLINE_U32_IMMEDIATE,),
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverlay:
+    literal_field, operands, asm_operands = _v_mad_u32_u24_immediate_operands(
+        literal_source
+    )
     return AmdgpuDescriptorOverlay(
         descriptor_key=f"amdgpu.v_mad_u32_u24.{literal_source}_lit",
         instruction_name="V_MAD_U32_U24",
@@ -1282,10 +1380,10 @@ def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverl
         encoding_format_id=AMDGPU_ENCODING_FORMAT_VOP3_LITERAL,
         semantic_tag="integer.mad.lo.u24.u32",
         schedule_class=_SCHEDULE_VALU,
-        operands=tuple(operands),
+        operands=operands,
         asm_forms=_asm(
             results=("dst",),
-            operands=tuple(asm_operands),
+            operands=asm_operands,
             immediates=("imm32",),
         ),
         immediates=(_LITERAL_U32_IMMEDIATE,),
@@ -1295,24 +1393,42 @@ def _v_mad_u32_u24_literal_overlay(literal_source: str) -> AmdgpuDescriptorOverl
     )
 
 
-def _v_minmax_i32_overlay(
+def _v_minmax_i32_overlays(
     *,
     descriptor_key: str,
     instruction_name: str,
     mnemonic: str,
     semantic_tag: str,
-) -> AmdgpuDescriptorOverlay:
-    return _v_binary_u32_overlay(
-        descriptor_key=descriptor_key,
-        instruction_name=instruction_name,
-        mnemonic=mnemonic,
-        semantic_tag=semantic_tag,
-        constraints=_REMATERIALIZABLE_COMMUTABLE_BINARY_CONSTRAINTS,
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return (
+        _v_binary_u32_overlay(
+            descriptor_key=descriptor_key,
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+            src0_inline_descriptor_key=f"{descriptor_key}.src0_inline",
+            literal_descriptor_key=f"{descriptor_key}.lit",
+            constraints=_REMATERIALIZABLE_COMMUTABLE_BINARY_CONSTRAINTS,
+        ),
+        _v_binary_src0_inline_overlay(
+            descriptor_key=f"{descriptor_key}.src0_inline",
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+            constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        ),
+        _v_binary_literal_overlay(
+            descriptor_key=f"{descriptor_key}.lit",
+            instruction_name=instruction_name,
+            mnemonic=mnemonic,
+            semantic_tag=semantic_tag,
+            constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        ),
     )
 
 
-def _v_min_i32_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_minmax_i32_overlay(
+def _v_min_i32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _v_minmax_i32_overlays(
         descriptor_key="amdgpu.v_min_i32",
         instruction_name="V_MIN_I32",
         mnemonic="v_min_i32",
@@ -1320,8 +1436,12 @@ def _v_min_i32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _v_max_i32_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_minmax_i32_overlay(
+def _v_min_i32_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_min_i32_overlays()[0]
+
+
+def _v_max_i32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _v_minmax_i32_overlays(
         descriptor_key="amdgpu.v_max_i32",
         instruction_name="V_MAX_I32",
         mnemonic="v_max_i32",
@@ -1329,8 +1449,12 @@ def _v_max_i32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _v_min_u32_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_minmax_i32_overlay(
+def _v_max_i32_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_max_i32_overlays()[0]
+
+
+def _v_min_u32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _v_minmax_i32_overlays(
         descriptor_key="amdgpu.v_min_u32",
         instruction_name="V_MIN_U32",
         mnemonic="v_min_u32",
@@ -1338,13 +1462,21 @@ def _v_min_u32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _v_max_u32_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_minmax_i32_overlay(
+def _v_min_u32_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_min_u32_overlays()[0]
+
+
+def _v_max_u32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return _v_minmax_i32_overlays(
         descriptor_key="amdgpu.v_max_u32",
         instruction_name="V_MAX_U32",
         mnemonic="v_max_u32",
         semantic_tag="integer.max.u32",
     )
+
+
+def _v_max_u32_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_max_u32_overlays()[0]
 
 
 def _v_readfirstlane_b32_overlay() -> AmdgpuDescriptorOverlay:
@@ -1416,6 +1548,8 @@ def _s_and_b32_overlay() -> AmdgpuDescriptorOverlay:
         instruction_name="S_AND_B32",
         mnemonic="s_and_b32",
         semantic_tag="integer.and.u32",
+        rhs_inline_descriptor_key="amdgpu.s_and_b32.rhs_inline",
+        literal_descriptor_key="amdgpu.s_and_b32.lit",
     )
 
 
@@ -1443,12 +1577,52 @@ def _s_or_b32_overlay() -> AmdgpuDescriptorOverlay:
         instruction_name="S_OR_B32",
         mnemonic="s_or_b32",
         semantic_tag="integer.or.u32",
+        rhs_inline_descriptor_key="amdgpu.s_or_b32.rhs_inline",
+        literal_descriptor_key="amdgpu.s_or_b32.lit",
+    )
+
+
+def _s_or_b32_rhs_inline_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_binary_u32_rhs_inline_overlay(
+        descriptor_key="amdgpu.s_or_b32.rhs_inline",
+        instruction_name="S_OR_B32",
+        mnemonic="s_or_b32",
+        semantic_tag="integer.or.u32",
+    )
+
+
+def _s_or_b32_literal_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_binary_u32_literal_overlay(
+        descriptor_key="amdgpu.s_or_b32.lit",
+        instruction_name="S_OR_B32",
+        mnemonic="s_or_b32",
+        semantic_tag="integer.or.u32",
     )
 
 
 def _s_xor_b32_overlay() -> AmdgpuDescriptorOverlay:
     return _s_binary_u32_overlay(
         descriptor_key="amdgpu.s_xor_b32",
+        instruction_name="S_XOR_B32",
+        mnemonic="s_xor_b32",
+        semantic_tag="integer.xor.u32",
+        rhs_inline_descriptor_key="amdgpu.s_xor_b32.rhs_inline",
+        literal_descriptor_key="amdgpu.s_xor_b32.lit",
+    )
+
+
+def _s_xor_b32_rhs_inline_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_binary_u32_rhs_inline_overlay(
+        descriptor_key="amdgpu.s_xor_b32.rhs_inline",
+        instruction_name="S_XOR_B32",
+        mnemonic="s_xor_b32",
+        semantic_tag="integer.xor.u32",
+    )
+
+
+def _s_xor_b32_literal_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_binary_u32_literal_overlay(
+        descriptor_key="amdgpu.s_xor_b32.lit",
         instruction_name="S_XOR_B32",
         mnemonic="s_xor_b32",
         semantic_tag="integer.xor.u32",
@@ -1695,6 +1869,15 @@ def _s_lshl_b64_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _s_lshl_b64_rhs_inline_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_shift_u64_rhs_inline_overlay(
+        descriptor_key="amdgpu.s_lshl_b64.rhs_inline",
+        instruction_name="S_LSHL_B64",
+        mnemonic="s_lshl_b64",
+        semantic_tag="integer.shl.u64",
+    )
+
+
 def _s_lshr_b32_overlay() -> AmdgpuDescriptorOverlay:
     return _s_binary_u32_overlay(
         descriptor_key="amdgpu.s_lshr_b32",
@@ -1717,6 +1900,15 @@ def _s_lshr_b32_rhs_inline_overlay() -> AmdgpuDescriptorOverlay:
 def _s_lshr_b64_overlay() -> AmdgpuDescriptorOverlay:
     return _s_shift_u64_overlay(
         descriptor_key="amdgpu.s_lshr_b64",
+        instruction_name="S_LSHR_B64",
+        mnemonic="s_lshr_b64",
+        semantic_tag="integer.shr.u64",
+    )
+
+
+def _s_lshr_b64_rhs_inline_overlay() -> AmdgpuDescriptorOverlay:
+    return _s_shift_u64_rhs_inline_overlay(
+        descriptor_key="amdgpu.s_lshr_b64.rhs_inline",
         instruction_name="S_LSHR_B64",
         mnemonic="s_lshr_b64",
         semantic_tag="integer.shr.u64",
@@ -2006,7 +2198,16 @@ def _v_lshlrev_b32_vop3_immediate_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _v_shift_b64_overlay(mnemonic: str, semantic_tag: str) -> AmdgpuDescriptorOverlay:
+def _v_shift_b64_overlay(
+    mnemonic: str, semantic_tag: str, *, shift_register_count: int = 0
+) -> AmdgpuDescriptorOverlay:
+    shift = _sgpr_vgpr_operand("shift")
+    if shift_register_count:
+        shift = replace(
+            shift,
+            address_map_kind=OperandAddressMapKind.LOW_SUBSET,
+            addressable_unit_count=shift_register_count,
+        )
     return AmdgpuDescriptorOverlay(
         descriptor_key=f"amdgpu.{mnemonic}",
         instruction_name=mnemonic.upper(),
@@ -2016,7 +2217,7 @@ def _v_shift_b64_overlay(mnemonic: str, semantic_tag: str) -> AmdgpuDescriptorOv
         schedule_class=_SCHEDULE_VALU,
         operands=(
             AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("shift")),
+            AmdgpuOperandOverlay("SRC0", shift),
             AmdgpuOperandOverlay("SRC1", _vgpr_operand("value", units=2)),
         ),
         operand_forms=(
@@ -2143,7 +2344,17 @@ def _v_bfe_low16_offset_immediate() -> Immediate:
     return replace(
         _v_bfe_offset_immediate(),
         flags=(ImmediateFlag.DEFAULT_VALUE,),
+        unsigned_max=0,
         default_value=0,
+    )
+
+
+def _v_bfe_low16_width_immediate() -> Immediate:
+    return replace(
+        _v_bfe_width_immediate(),
+        flags=(ImmediateFlag.DEFAULT_VALUE,),
+        unsigned_max=16,
+        default_value=16,
     )
 
 
@@ -2184,25 +2395,35 @@ def _v_bfe_offset_width_inline_overlay(*, is_signed: bool) -> AmdgpuDescriptorOv
     )
 
 
-def _v_bfe_u32_offset_0_width_16_low16_overlay() -> AmdgpuDescriptorOverlay:
+def _v_bfe_offset_0_width_inline_low16_overlay(
+    *, is_signed: bool
+) -> AmdgpuDescriptorOverlay:
+    type_suffix = "i32" if is_signed else "u32"
     return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_bfe_u32.offset_0_width_16_low16",
-        instruction_name="V_BFE_U32",
-        mnemonic="v_bfe_u32",
+        descriptor_key=f"amdgpu.v_bfe_{type_suffix}.offset_0_width_inline_low16",
+        instruction_name=f"V_BFE_{type_suffix.upper()}",
+        mnemonic=f"v_bfe_{type_suffix}",
         encoding_name="ENC_VOP3",
-        semantic_tag="integer.bitfield.extract.u32.low16_to_full32",
+        semantic_tag=f"integer.bitfield.extract.{type_suffix}.low16_to_full32",
         schedule_class=_SCHEDULE_VALU,
         operands=(
             AmdgpuOperandOverlay("VDST", _vgpr_result()),
             AmdgpuOperandOverlay(
                 "SRC0",
-                _vgpr_operand("value", register_part=_REG_PART_VGPR_LOW16),
+                Operand(
+                    "value",
+                    OperandRole.OPERAND,
+                    (
+                        replace(_SGPR_ALT[0], register_part=_REG_PART_SGPR_LOW16),
+                        replace(_VGPR_ALT[0], register_part=_REG_PART_VGPR_LOW16),
+                    ),
+                ),
                 size_exception_reason=_D16_PARTIAL_REGISTER_SIZE_REASON,
             ),
         ),
         asm_forms=_asm(
-            mnemonic="v_bfe_u32_offset_0_width_16_low16",
-            native_assembly_mnemonic="v_bfe_u32",
+            mnemonic=f"v_bfe_{type_suffix}_offset_0_width_inline_low16",
+            native_assembly_mnemonic=f"v_bfe_{type_suffix}",
             results=("dst",),
             operands=("value",),
             immediates=("offset", "width"),
@@ -2217,7 +2438,7 @@ def _v_bfe_u32_offset_0_width_16_low16_overlay() -> AmdgpuDescriptorOverlay:
         immediate_fields=("SRC1", "SRC2"),
         immediates=(
             _v_bfe_low16_offset_immediate(),
-            _source_inline_u32_16_immediate("width"),
+            _v_bfe_low16_width_immediate(),
         ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
@@ -2466,14 +2687,18 @@ def _v_ashrrev_i32_literal_overlay() -> AmdgpuDescriptorOverlay:
 
 
 def _integer_bitwise_shift_overlays(
-    *, include_vop3_literal_forms: bool = True
+    *, include_vop3_literal_forms: bool = True, shift_b64_register_count: int = 0
 ) -> tuple[AmdgpuDescriptorOverlay, ...]:
     return (
         _s_and_b32_overlay(),
         _s_and_b32_rhs_inline_overlay(),
         _s_and_b32_literal_overlay(),
         _s_or_b32_overlay(),
+        _s_or_b32_rhs_inline_overlay(),
+        _s_or_b32_literal_overlay(),
         _s_xor_b32_overlay(),
+        _s_xor_b32_rhs_inline_overlay(),
+        _s_xor_b32_literal_overlay(),
         _s_and_b64_overlay(),
         _s_and_b64_scc_overlay(),
         _s_or_b64_overlay(),
@@ -2481,11 +2706,19 @@ def _integer_bitwise_shift_overlays(
         _s_lshl_b32_overlay(),
         _s_lshl_b32_rhs_inline_overlay(),
         _s_lshl_b64_overlay(),
+        _s_lshl_b64_rhs_inline_overlay(),
         _s_lshr_b32_overlay(),
         _s_lshr_b32_rhs_inline_overlay(),
         _s_lshr_b64_overlay(),
+        _s_lshr_b64_rhs_inline_overlay(),
         _s_shift_u64_overlay(
             descriptor_key="amdgpu.s_ashr_i64",
+            instruction_name="S_ASHR_I64",
+            mnemonic="s_ashr_i64",
+            semantic_tag="integer.shr.s64",
+        ),
+        _s_shift_u64_rhs_inline_overlay(
+            descriptor_key="amdgpu.s_ashr_i64.rhs_inline",
             instruction_name="S_ASHR_I64",
             mnemonic="s_ashr_i64",
             semantic_tag="integer.shr.s64",
@@ -2519,7 +2752,11 @@ def _integer_bitwise_shift_overlays(
                 ("v_ashrrev_i64", "integer.shr.s64"),
             )
             for overlay in (
-                _v_shift_b64_overlay(mnemonic, semantic_tag),
+                _v_shift_b64_overlay(
+                    mnemonic,
+                    semantic_tag,
+                    shift_register_count=shift_b64_register_count,
+                ),
                 _v_shift_b64_src0_inline_overlay(mnemonic, semantic_tag),
             )
         ),
@@ -2533,7 +2770,8 @@ def _integer_bitwise_shift_overlays(
         ),
         _v_bfe_offset_width_inline_overlay(is_signed=False),
         _v_bfe_offset_width_inline_overlay(is_signed=True),
-        _v_bfe_u32_offset_0_width_16_low16_overlay(),
+        _v_bfe_offset_0_width_inline_low16_overlay(is_signed=False),
+        _v_bfe_offset_0_width_inline_low16_overlay(is_signed=True),
         _v_bfi_b32_overlay(),
         *((_v_bfi_b32_src0_literal_overlay(),) if include_vop3_literal_forms else ()),
         _v_lshrrev_b32_overlay(),
@@ -2549,6 +2787,7 @@ def _integer_bitwise_permute_overlays(
     *, include_vop3_literal_forms: bool = True
 ) -> tuple[AmdgpuDescriptorOverlay, ...]:
     return (
+        _v_alignbit_b32_overlay(),
         _v_perm_b32_overlay(include_literal_operand_form=include_vop3_literal_forms),
         *(
             (
@@ -2979,11 +3218,48 @@ def _v_binary_f32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
     )
 
 
+def _v_sub_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_sub_f64",
+        instruction_name="V_ADD_F64",
+        mnemonic="v_sub_f64",
+        encoding_name="ENC_VOP3",
+        semantic_tag="float.sub.f64",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("lhs", units=2)),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("rhs", units=2)),
+        ),
+        asm_forms=_asm(
+            results=("dst",),
+            operands=("lhs", "rhs"),
+            native_assembly_mnemonic="v_add_f64",
+            native_assembly_values=(
+                _native_result("dst"),
+                _native_operand("lhs"),
+                _native_negated_operand("rhs"),
+            ),
+        ),
+        fixed_encoding_fields=(("NEG", 2),),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
 def _v_binary_f16_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
     return (
         _v_add_f16_overlay(),
         _v_sub_f16_overlay(),
         _v_mul_f16_overlay(),
+        *(
+            _v_commutative_binary_f16_overlay(
+                descriptor_key=f"amdgpu.v_{operation}_f16",
+                instruction_name=f"V_{operation.upper()}_F16",
+                mnemonic=f"v_{operation}_f16",
+                semantic_tag=f"float.{semantic}.f16",
+            )
+            for operation, semantic in (("min", "minnum"), ("max", "maxnum"))
+        ),
     )
 
 
@@ -2992,24 +3268,6 @@ def _v_subrev_f32_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
         _v_subrev_f32_overlay(),
         _v_subrev_f32_literal_overlay(),
         _v_subrev_f32_src0_inline_overlay(),
-    )
-
-
-def _v_fma_f32_overlay() -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_fma_f32",
-        instruction_name="V_FMA_F32",
-        mnemonic="v_fma_f32",
-        encoding_name="ENC_VOP3",
-        semantic_tag="float.fma.f32",
-        schedule_class=_SCHEDULE_VALU,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result()),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("a")),
-            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("b")),
-            AmdgpuOperandOverlay("SRC2", _sgpr_vgpr_operand("c")),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
 
@@ -3803,6 +4061,14 @@ def _v_fmamk_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_fmamk_f32_product_flushing_overlay() -> AmdgpuDescriptorOverlay:
+    return replace(
+        _v_fmamk_f32_overlay(),
+        descriptor_key="amdgpu.v_fmamk_f32.flush_product",
+        semantic_tag="float.fmamk.flush_product.f32",
+    )
+
+
 def _s_fmaak_f32_overlay() -> AmdgpuDescriptorOverlay:
     return AmdgpuDescriptorOverlay(
         descriptor_key="amdgpu.s_fmaak_f32",
@@ -3990,6 +4256,26 @@ def _v_commutative_binary_vop3_float_overlay(
     )
 
 
+def _v_binary_f64_overlays(
+    *, minmax_instruction_suffix: str = ""
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        _v_commutative_binary_vop3_float_overlay(
+            descriptor_key=f"amdgpu.v_{operation}_f64",
+            instruction_name=f"V_{operation.upper()}{instruction_suffix}_F64",
+            mnemonic=f"v_{operation}{instruction_suffix.lower()}_f64",
+            semantic_tag=f"float.{semantic}.f64",
+            element_bit_width=64,
+        )
+        for operation, semantic, instruction_suffix in (
+            ("add", "add", ""),
+            ("mul", "mul", ""),
+            ("min", "minnum", minmax_instruction_suffix),
+            ("max", "maxnum", minmax_instruction_suffix),
+        )
+    )
+
+
 def _v_ternary_float_overlay(
     *,
     descriptor_key: str,
@@ -4032,9 +4318,8 @@ def _s_fmac_f16_overlay() -> AmdgpuDescriptorOverlay:
                 Operand(
                     "acc",
                     OperandRole.OPERAND,
-                    _SGPR_ALT,
+                    (replace(_SGPR_ALT[0], register_part=_REG_PART_SGPR_LOW16),),
                     flags=(OperandFlag.IMPLICIT,),
-                    register_part=_REG_PART_SGPR_LOW16,
                 ),
                 role_exception_reason=(
                     "the encoded low half of the scalar destination register "
@@ -4078,9 +4363,8 @@ def _v_fmac_f16_overlay() -> AmdgpuDescriptorOverlay:
                 Operand(
                     "acc",
                     OperandRole.OPERAND,
-                    _VGPR_ALT,
+                    (replace(_VGPR_ALT[0], register_part=_REG_PART_VGPR_LOW16),),
                     flags=(OperandFlag.IMPLICIT,),
-                    register_part=_REG_PART_VGPR_LOW16,
                 ),
                 role_exception_reason=(
                     "the encoded destination half-register is also the tied "
@@ -4194,9 +4478,8 @@ def _v_mac_f16_overlay() -> AmdgpuDescriptorOverlay:
                 Operand(
                     "acc",
                     OperandRole.OPERAND,
-                    _VGPR_ALT,
+                    (replace(_VGPR_ALT[0], register_part=_REG_PART_VGPR_LOW16),),
                     flags=(OperandFlag.IMPLICIT,),
-                    register_part=_REG_PART_VGPR_LOW16,
                 ),
                 role_exception_reason=(
                     "the encoded destination half-register is also the tied "
@@ -4277,22 +4560,55 @@ def _v_madmk_f16_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
-def _v_fma_f64_overlay() -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
-        descriptor_key="amdgpu.v_fma_f64",
-        instruction_name="V_FMA_F64",
-        mnemonic="v_fma_f64",
-        encoding_name="ENC_VOP3",
-        semantic_tag="float.fma.f64",
-        schedule_class=_SCHEDULE_VALU,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("a", units=2)),
-            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("b", units=2)),
-            AmdgpuOperandOverlay("SRC2", _sgpr_vgpr_operand("c", units=2)),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+def _v_fma_overlays(element_bit_width: int) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    base = _v_ternary_float_overlay(
+        descriptor_key=f"amdgpu.v_fma_f{element_bit_width}",
+        instruction_name=f"V_FMA_F{element_bit_width}",
+        mnemonic=f"v_fma_f{element_bit_width}",
+        semantic_tag=f"float.fma.f{element_bit_width}",
+        element_bit_width=element_bit_width,
     )
+    neg_a = replace(
+        base,
+        descriptor_key=f"{base.descriptor_key}.neg_a",
+        mnemonic=f"{base.mnemonic}_neg_a",
+        semantic_tag=f"{base.semantic_tag}.neg_a",
+        asm_forms=_asm(
+            results=("dst",),
+            operands=("a", "b", "c"),
+            native_assembly_mnemonic=base.mnemonic,
+            native_assembly_values=(
+                _native_result("dst"),
+                _native_negated_operand("a"),
+                _native_operand("b"),
+                _native_operand("c"),
+            ),
+        ),
+        fixed_encoding_fields=(("NEG", 1),),
+    )
+    neg_a_one = replace(
+        base,
+        descriptor_key=f"{base.descriptor_key}.neg_a_one",
+        mnemonic=f"{base.mnemonic}_neg_a_one",
+        semantic_tag=f"{base.semantic_tag}.neg_a_one",
+        operands=base.operands[:-1],
+        asm_forms=_asm(
+            results=("dst",),
+            operands=("a", "b"),
+            native_assembly_mnemonic=base.mnemonic,
+            native_assembly_values=(
+                _native_result("dst"),
+                _native_negated_operand("a"),
+                _native_operand("b"),
+                _native_literal("1.0"),
+            ),
+        ),
+        fixed_encoding_fields=(
+            ("NEG", 1),
+            ("SRC2", _predefined("1.0", "OPR_SRC")),
+        ),
+    )
+    return base, neg_a, neg_a_one
 
 
 def _v_fmac_f64_overlay() -> AmdgpuDescriptorOverlay:
@@ -4413,7 +4729,10 @@ def _v_pk_with_op_sel_hi_field(
                 f"packed overlay '{overlay.descriptor_key}' has no OP_SEL_HI field"
             )
         rewritten_overlays.append(
-            replace(overlay, fixed_encoding_fields=tuple(fixed_encoding_fields))
+            replace(
+                overlay,
+                fixed_encoding_fields=tuple(fixed_encoding_fields),
+            )
         )
     return tuple(rewritten_overlays)
 
@@ -4437,6 +4756,7 @@ def _v_pk_ternary_literal_overlay(
     literal_field = ""
     operands = [AmdgpuOperandOverlay("VDST", _vgpr_result(units=units))]
     asm_operands = []
+    native_values = [_native_result("dst")]
     for (
         source_name,
         xml_field_name,
@@ -4445,8 +4765,10 @@ def _v_pk_ternary_literal_overlay(
     ) in _V_PK_TERNARY_SOURCES:
         if source_name == literal_source:
             literal_field = xml_field_name
+            native_values.append(_native_i64_immediate("imm32"))
             continue
         asm_operands.append(operand_name)
+        native_values.append(_native_operand(operand_name))
         operands.append(
             AmdgpuOperandOverlay(
                 xml_field_name, operand_builder(operand_name, units=units)
@@ -4463,14 +4785,19 @@ def _v_pk_ternary_literal_overlay(
         semantic_tag=semantic_tag,
         schedule_class=_SCHEDULE_VALU,
         operands=tuple(operands),
-        asm_forms=_asm(
-            results=("dst",),
-            operands=tuple(asm_operands),
-            immediates=("imm32",),
+        asm_forms=(
+            AsmForm(
+                native_assembly_mnemonic=mnemonic,
+                results=("dst",),
+                operands=tuple(asm_operands),
+                immediates=(AsmImmediate("imm32"),),
+                native_assembly_values=tuple(native_values),
+            ),
         ),
+        immediate_fields=("LITERAL",),
         immediates=(_LITERAL_U32_IMMEDIATE,),
         fixed_encoding_fields=(
-            ("OP_SEL_HI", 0x7),
+            ("OP_SEL_HI", 7),
             (literal_field, _predefined("SRC_LITERAL", "OPR_SRC")),
         ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
@@ -4520,13 +4847,45 @@ def _v_pk_fma_f16_literal_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
     )
 
 
-def _v_pk_add_f16_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_pk_binary_overlay(
-        descriptor_key="amdgpu.v_pk_add_f16",
-        instruction_name="V_PK_ADD_F16",
-        mnemonic="v_pk_add_f16",
-        semantic_tag="float.add.pk2.f16",
+def _v_pk_float_add_overlay(element_type: str) -> AmdgpuDescriptorOverlay:
+    overlay = _v_pk_binary_overlay(
+        descriptor_key=f"amdgpu.v_pk_add_{element_type}",
+        instruction_name=f"V_PK_ADD_{element_type.upper()}",
+        mnemonic=f"v_pk_add_{element_type}",
+        semantic_tag=f"float.add.pk2.{element_type}",
     )
+    return replace(
+        overlay,
+        immediate_fields=("NEG", "NEG_HI"),
+        immediates=tuple(
+            Immediate(
+                name,
+                ImmediateKind.UNSIGNED,
+                flags=(ImmediateFlag.DEFAULT_VALUE,),
+                bit_width=3,
+                unsigned_max=3,
+                default_value=0,
+            )
+            for name in ("neg_lo", "neg_hi")
+        ),
+        asm_forms=_asm(
+            results=("dst",),
+            operands=("lhs", "rhs"),
+            immediates=("neg_lo", "neg_hi"),
+            named_immediates=True,
+            native_assembly_values=(
+                _native_result("dst"),
+                _native_operand("lhs"),
+                _native_operand("rhs"),
+                _native_amdgpu_named_bit_list_immediate("neg_lo", 2),
+                _native_amdgpu_named_bit_list_immediate("neg_hi", 2),
+            ),
+        ),
+    )
+
+
+def _v_pk_add_f16_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_pk_float_add_overlay("f16")
 
 
 def _v_pk_minnum_f16_overlay(
@@ -4592,12 +4951,7 @@ def _v_pk_mul_bf16_overlay() -> AmdgpuDescriptorOverlay:
 
 
 def _v_pk_add_bf16_overlay() -> AmdgpuDescriptorOverlay:
-    return _v_pk_binary_overlay(
-        descriptor_key="amdgpu.v_pk_add_bf16",
-        instruction_name="V_PK_ADD_BF16",
-        mnemonic="v_pk_add_bf16",
-        semantic_tag="float.add.pk2.bf16",
-    )
+    return _v_pk_float_add_overlay("bf16")
 
 
 def _v_pk_fma_bf16_overlay() -> AmdgpuDescriptorOverlay:
@@ -4819,6 +5173,149 @@ def _v_pk_add_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_pk_broadcast_overlays(
+    overlay: AmdgpuDescriptorOverlay,
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    """Pins selectors and physical reads together, including literal forms."""
+    source_names = tuple(
+        source.descriptor_operand.field_name for source in overlay.operands[1:]
+    )
+    units = overlay.operands[0].descriptor_operand.unit_count
+    immediate_names = tuple(immediate.field_name for immediate in overlay.immediates)
+    native_immediates = tuple(
+        value
+        for form in overlay.asm_forms or ()
+        for value in form.native_assembly_values
+        if value.field_name in immediate_names
+    )
+    overlays = []
+    for mask in range(1, 1 << len(source_names)):
+        operands = [overlay.operands[0]]
+        native_values = [_native_result("dst")]
+        for source_index, source in enumerate(overlay.operands[1:]):
+            name = source.descriptor_operand.field_name
+            if mask & (1 << source_index):
+                operand = source.descriptor_operand
+                operand = replace(
+                    operand,
+                    unit_count=1,
+                    reg_alts=tuple(
+                        replace(
+                            alternative,
+                            unit_alignment=units,
+                            register_part=(
+                                {
+                                    _REG_SGPR: _REG_PART_SGPR_LOW16,
+                                    _REG_VGPR: _REG_PART_VGPR_LOW16,
+                                }[alternative.reg_class]
+                                if units == 1
+                                else None
+                            ),
+                        )
+                        for alternative in operand.reg_alts
+                    ),
+                )
+                source = replace(
+                    source,
+                    descriptor_operand=operand,
+                    size_exception_reason=(
+                        "packed lanes both select the low half"
+                        if units == 1
+                        else "packed lanes both select the first dword"
+                    ),
+                )
+            native_values.append(_native_operand(name))
+            operands.append(source)
+        selector = 7 ^ mask
+        selector_value = _native_modifier_literal(
+            "op_sel_hi:["
+            + ",".join(str((selector >> bit) & 1) for bit in range(len(source_names)))
+            + "]"
+        )
+        native_values.append(selector_value)
+        suffix = "_".join(
+            name for bit, name in enumerate(source_names) if mask & (1 << bit)
+        )
+        descriptor_key = f"{overlay.descriptor_key}.broadcast_{suffix}"
+        variant = replace(
+            overlay,
+            descriptor_key=descriptor_key,
+            operands=tuple(operands),
+            operand_forms=tuple(
+                replace(
+                    form,
+                    replacement_descriptor=form.replacement_descriptor.replace(
+                        overlay.descriptor_key, descriptor_key, 1
+                    ),
+                )
+                for form in overlay.operand_forms
+            ),
+            fixed_encoding_fields=(("OP_SEL_HI", selector),),
+            asm_forms=_asm(
+                mnemonic=f"{overlay.mnemonic}.broadcast_{suffix}",
+                native_assembly_mnemonic=overlay.mnemonic,
+                results=("dst",),
+                operands=source_names,
+                immediates=immediate_names,
+                named_immediates=True,
+                native_assembly_values=(*native_values, *native_immediates),
+            ),
+        )
+        overlays.append(variant)
+        if overlay.operand_forms:
+            source_operands = {source.xml_field_name: source for source in operands}
+            overlays.extend(
+                replace(
+                    literal,
+                    operands=tuple(
+                        source_operands[source.xml_field_name]
+                        for source in literal.operands
+                    ),
+                    fixed_encoding_fields=tuple(
+                        (field, selector if field == "OP_SEL_HI" else value)
+                        for field, value in literal.fixed_encoding_fields
+                    ),
+                    asm_forms=tuple(
+                        replace(
+                            form,
+                            native_assembly_mnemonic=overlay.mnemonic,
+                            native_assembly_values=(
+                                *form.native_assembly_values,
+                                selector_value,
+                            ),
+                        )
+                        for form in literal.asm_forms or ()
+                    ),
+                )
+                for literal in _v_pk_ternary_literal_overlays(
+                    descriptor_key=descriptor_key,
+                    instruction_name=overlay.instruction_name,
+                    mnemonic=f"{overlay.mnemonic}.broadcast_{suffix}",
+                    semantic_tag=overlay.semantic_tag,
+                )
+            )
+    return tuple(overlays)
+
+
+def _v_pk_operand_overlays(
+    overlays: tuple[AmdgpuDescriptorOverlay, ...],
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    """Expands packed arithmetic families with complete operand contracts."""
+    result = []
+    for overlay in overlays:
+        result.extend((overlay, *_v_pk_broadcast_overlays(overlay)))
+        if overlay.operand_forms:
+            result.extend(
+                _v_pk_ternary_literal_overlays(
+                    descriptor_key=overlay.descriptor_key,
+                    instruction_name=overlay.instruction_name,
+                    mnemonic=overlay.mnemonic,
+                    semantic_tag=overlay.semantic_tag,
+                )
+            )
+    return tuple(result)
+
+
 def _v_pk_mul_f32_overlay() -> AmdgpuDescriptorOverlay:
     return _v_pk_binary_overlay(
         descriptor_key="amdgpu.v_pk_mul_f32",
@@ -4826,6 +5323,31 @@ def _v_pk_mul_f32_overlay() -> AmdgpuDescriptorOverlay:
         mnemonic="v_pk_mul_f32",
         semantic_tag="float.mul.pk2.f32",
         units=2,
+    )
+
+
+def _v_unary_float_overlay(
+    *,
+    descriptor_key: str,
+    instruction_name: str,
+    mnemonic: str,
+    semantic_tag: str,
+    element_bit_width: int,
+    schedule_class: str = _SCHEDULE_VALU,
+) -> AmdgpuDescriptorOverlay:
+    units = element_bit_width // 32
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=descriptor_key,
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
+        encoding_name="ENC_VOP1",
+        semantic_tag=semantic_tag,
+        schedule_class=schedule_class,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=units)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=units)),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
 
@@ -4837,18 +5359,29 @@ def _v_unary_f32_overlay(
     semantic_tag: str,
     schedule_class: str = _SCHEDULE_VALU,
 ) -> AmdgpuDescriptorOverlay:
-    return AmdgpuDescriptorOverlay(
+    return _v_unary_float_overlay(
         descriptor_key=descriptor_key,
         instruction_name=instruction_name,
         mnemonic=mnemonic,
-        encoding_name="ENC_VOP1",
         semantic_tag=semantic_tag,
+        element_bit_width=32,
         schedule_class=schedule_class,
-        operands=(
-            AmdgpuOperandOverlay("VDST", _vgpr_result()),
-            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
-        ),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_unary_f64_overlay(
+    *,
+    descriptor_key: str,
+    instruction_name: str,
+    mnemonic: str,
+    semantic_tag: str,
+) -> AmdgpuDescriptorOverlay:
+    return _v_unary_float_overlay(
+        descriptor_key=descriptor_key,
+        instruction_name=instruction_name,
+        mnemonic=mnemonic,
+        semantic_tag=semantic_tag,
+        element_bit_width=64,
     )
 
 
@@ -4913,6 +5446,24 @@ def _v_floor_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_floor_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_unary_f64_overlay(
+        descriptor_key="amdgpu.v_floor_f64",
+        instruction_name="V_FLOOR_F64",
+        mnemonic="v_floor_f64",
+        semantic_tag="float.floor.f64",
+    )
+
+
+def _v_ceil_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_unary_f64_overlay(
+        descriptor_key="amdgpu.v_ceil_f64",
+        instruction_name="V_CEIL_F64",
+        mnemonic="v_ceil_f64",
+        semantic_tag="float.ceil.f64",
+    )
+
+
 def _v_ceil_f32_overlay() -> AmdgpuDescriptorOverlay:
     return _v_unary_f32_overlay(
         descriptor_key="amdgpu.v_ceil_f32",
@@ -4931,12 +5482,30 @@ def _v_rndne_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_rndne_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_unary_f64_overlay(
+        descriptor_key="amdgpu.v_rndne_f64",
+        instruction_name="V_RNDNE_F64",
+        mnemonic="v_rndne_f64",
+        semantic_tag="float.roundeven.f64",
+    )
+
+
 def _v_trunc_f32_overlay() -> AmdgpuDescriptorOverlay:
     return _v_unary_f32_overlay(
         descriptor_key="amdgpu.v_trunc_f32",
         instruction_name="V_TRUNC_F32",
         mnemonic="v_trunc_f32",
         semantic_tag="float.trunc.f32",
+    )
+
+
+def _v_trunc_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_unary_f64_overlay(
+        descriptor_key="amdgpu.v_trunc_f64",
+        instruction_name="V_TRUNC_F64",
+        mnemonic="v_trunc_f64",
+        semantic_tag="float.trunc.f64",
     )
 
 
@@ -4959,6 +5528,152 @@ def _v_sqrt_f32_overlay() -> AmdgpuDescriptorOverlay:
         instruction_name="V_SQRT_F32",
         mnemonic="v_sqrt_f32",
         semantic_tag="float.sqrt.f32",
+    )
+
+
+def _v_sqrt_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_sqrt_f64",
+        instruction_name="V_SQRT_F64",
+        mnemonic="v_sqrt_f64",
+        encoding_name="ENC_VOP1",
+        semantic_tag="float.sqrt.f64",
+        schedule_class=_amdgpu_trans_schedule_class_name("amdgpu.v_sqrt_f64"),
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=2)),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_rsq_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_rsq_f64",
+        instruction_name="V_RSQ_F64",
+        mnemonic="v_rsq_f64",
+        encoding_name="ENC_VOP1",
+        semantic_tag="float.rsqrt.f64",
+        schedule_class=_amdgpu_trans_schedule_class_name("amdgpu.v_rsq_f64"),
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=2)),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_ldexp_overlay(bit_width: int) -> AmdgpuDescriptorOverlay:
+    if bit_width not in (32, 64):
+        raise ValueError("V_LDEXP floating width must be 32 or 64")
+    units = bit_width // 32
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=f"amdgpu.v_ldexp_f{bit_width}",
+        instruction_name=f"V_LDEXP_F{bit_width}",
+        mnemonic=f"v_ldexp_f{bit_width}",
+        encoding_name="ENC_VOP3",
+        semantic_tag=f"float.ldexp.f{bit_width}",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=units)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=units)),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("exponent")),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_ldexp_f32_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_ldexp_overlay(32)
+
+
+def _v_ldexp_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return _v_ldexp_overlay(64)
+
+
+def _v_rcp_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_rcp_f64",
+        instruction_name="V_RCP_F64",
+        mnemonic="v_rcp_f64",
+        encoding_name="ENC_VOP1",
+        semantic_tag="float.reciprocal.f64",
+        schedule_class=_amdgpu_trans_schedule_class_name("amdgpu.v_rcp_f64"),
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=2)),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_div_scale_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_div_scale_f64",
+        instruction_name="V_DIV_SCALE_F64",
+        mnemonic="v_div_scale_f64",
+        encoding_name="VOP3_SDST_ENC",
+        semantic_tag="float.div.scale.f64",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("value", units=2)),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("denominator", units=2)),
+            AmdgpuOperandOverlay("SRC2", _sgpr_vgpr_operand("numerator", units=2)),
+        ),
+        ignored_operands=(
+            AmdgpuIgnoredOperandOverlay(
+                "SDST",
+                ignore_reason="fixed-architectural-vcc-scale-mask",
+                fixed_encoding_value=_predefined("VCC_LO", "OPR_SDST"),
+            ),
+        ),
+        implicit_operands=(
+            _vcc_output(_vcc_result("mask"), xml_operand_required=False),
+        ),
+        asm_forms=_asm(
+            results=("dst", "mask"),
+            operands=("value", "denominator", "numerator"),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_div_fmas_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_div_fmas_f64",
+        instruction_name="V_DIV_FMAS_F64",
+        mnemonic="v_div_fmas_f64",
+        encoding_name="ENC_VOP3",
+        semantic_tag="float.div.fmas.f64",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("a", units=2)),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("b", units=2)),
+            AmdgpuOperandOverlay("SRC2", _sgpr_vgpr_operand("c", units=2)),
+        ),
+        implicit_operands=(_vcc_input(_vcc_predicate("scale_mask")),),
+        asm_forms=_asm(results=("dst",), operands=("a", "b", "c", "scale_mask")),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_div_fixup_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_div_fixup_f64",
+        instruction_name="V_DIV_FIXUP_F64",
+        mnemonic="v_div_fixup_f64",
+        encoding_name="ENC_VOP3",
+        semantic_tag="float.div.fixup.f64",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("quotient", units=2)),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("denominator", units=2)),
+            AmdgpuOperandOverlay("SRC2", _sgpr_vgpr_operand("numerator", units=2)),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
 
@@ -5053,6 +5768,40 @@ def _v_div_fixup_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_cvt_f64_f32_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_cvt_f64_f32",
+        instruction_name="V_CVT_F64_F32",
+        mnemonic="v_cvt_f64_f32",
+        encoding_name="ENC_VOP1",
+        semantic_tag="convert.float.f32.f64",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
+        ),
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cvt_f32_f64_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_cvt_f32_f64",
+        instruction_name="V_CVT_F32_F64",
+        mnemonic="v_cvt_f32_f64",
+        encoding_name="ENC_VOP1",
+        semantic_tag="convert.float.f64.f32",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result()),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=2)),
+        ),
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
 def _v_cvt_f32_i32_overlay() -> AmdgpuDescriptorOverlay:
     return AmdgpuDescriptorOverlay(
         descriptor_key="amdgpu.v_cvt_f32_i32",
@@ -5067,6 +5816,45 @@ def _v_cvt_f32_i32_overlay() -> AmdgpuDescriptorOverlay:
         ),
         constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cvt_f64_integer_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        AmdgpuDescriptorOverlay(
+            descriptor_key=f"amdgpu.v_cvt_f64_{source_type}",
+            instruction_name=f"V_CVT_F64_{source_type.upper()}",
+            mnemonic=f"v_cvt_f64_{source_type}",
+            encoding_name="ENC_VOP1",
+            semantic_tag=f"convert.{signedness}.{source_type}.f64",
+            schedule_class=_SCHEDULE_VALU,
+            operands=(
+                AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
+                AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input")),
+            ),
+            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+        )
+        for source_type, signedness in (("i32", "signed"), ("u32", "unsigned"))
+    )
+
+
+def _v_cvt_integer_f64_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        AmdgpuDescriptorOverlay(
+            descriptor_key=f"amdgpu.v_cvt_{result_type}_f64",
+            instruction_name=f"V_CVT_{result_type.upper()}_F64",
+            mnemonic=f"v_cvt_{result_type}_f64",
+            encoding_name="ENC_VOP1",
+            semantic_tag=f"convert.float.f64.{signedness}.{result_type}",
+            schedule_class=_SCHEDULE_VALU,
+            operands=(
+                AmdgpuOperandOverlay("VDST", _vgpr_result()),
+                AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("input", units=2)),
+            ),
+            constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+        )
+        for result_type, signedness in (("i32", "signed"), ("u32", "unsigned"))
     )
 
 
@@ -5103,6 +5891,28 @@ def _v_cvt_f32_f16_overlay(
                 "SRC0", _vgpr_operand("input", register_part=_REG_PART_VGPR_LOW16)
             ),
         ),
+        constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cvt_f32_f16_input_high_overlay(
+    *, op_sel_field: str = "OP_SEL"
+) -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_cvt_f32_f16.input_high",
+        instruction_name="V_CVT_F32_F16",
+        mnemonic="v_cvt_f32_f16_input_high",
+        encoding_name="ENC_VOP3",
+        semantic_tag="convert.float.f16.high.f32",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result()),
+            AmdgpuOperandOverlay(
+                "SRC0", _vgpr_operand("input", register_part=_REG_PART_VGPR_HIGH16)
+            ),
+        ),
+        fixed_encoding_fields=((op_sel_field, 1),),
         constraints=_REMATERIALIZABLE_RESULT_CONSTRAINTS,
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
@@ -5149,6 +5959,9 @@ def _v_pack_b32_f16_overlay() -> AmdgpuDescriptorOverlay:
 
 
 _PACKED8_SOURCE_SIZE_REASON = "packed8-conversion-reads-byte-lanes-of-b32-source"
+# Compact packed conversion sources use bit 7 to select a register half,
+# leaving seven bits for the physical register index.
+_PACKED8_COMPACT_SOURCE_ADDRESSABLE_UNIT_COUNT = 128
 
 
 def _v_cvt_f32_packed8_overlay(
@@ -5187,7 +6000,13 @@ def _v_cvt_pk_f32_packed8_overlay(
             AmdgpuOperandOverlay("VDST", _vgpr_result(units=2)),
             AmdgpuOperandOverlay(
                 "SRC0",
-                _sgpr_vgpr_operand("input"),
+                replace(
+                    _sgpr_vgpr_operand("input"),
+                    address_map_kind=OperandAddressMapKind.LOW_SUBSET,
+                    addressable_unit_count=(
+                        _PACKED8_COMPACT_SOURCE_ADDRESSABLE_UNIT_COUNT
+                    ),
+                ),
                 size_exception_reason=_PACKED8_SOURCE_SIZE_REASON,
             ),
         ),
@@ -5214,7 +6033,7 @@ def _v_cvt_pk_f16_packed8_overlay(
                     register_part=_REG_PART_VGPR_LOW16,
                     address_map_kind=OperandAddressMapKind.LOW_SUBSET,
                     addressable_unit_count=(
-                        _D16_PARTIAL_REGISTER_ADDRESSABLE_UNIT_COUNT
+                        _PACKED8_COMPACT_SOURCE_ADDRESSABLE_UNIT_COUNT
                     ),
                 ),
                 size_exception_reason=_PACKED8_SOURCE_SIZE_REASON,
@@ -5585,12 +6404,11 @@ def _v_cvt_pk_packed8_encode_overlay(
                 Operand(
                     "acc",
                     OperandRole.OPERAND,
-                    _VGPR_ALT,
+                    (replace(_VGPR_ALT[0], register_part=_REG_PART_VGPR_LOW16),),
                     flags=(
                         OperandFlag.IMPLICIT,
                         OperandFlag.STORAGE_CONTINUATION,
                     ),
-                    register_part=_REG_PART_VGPR_LOW16,
                 ),
                 role_exception_reason=(
                     "the encoded destination register carries the untouched "
@@ -5714,6 +6532,40 @@ def _v_cvt_pk_u16_u32_overlay() -> AmdgpuDescriptorOverlay:
             AmdgpuOperandOverlay("VDST", _vgpr_result()),
             AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("low")),
             AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("high")),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cvt_pkrtz_f16_f32_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_cvt_pk_rtz_f16_f32",
+        instruction_name="V_CVT_PKRTZ_F16_F32",
+        mnemonic="v_cvt_pkrtz_f16_f32",
+        encoding_name="ENC_VOP3",
+        semantic_tag="convert.float.f32x2.f16x2.rtz",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result()),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("low")),
+            AmdgpuOperandOverlay("SRC1", _sgpr_vgpr_operand("high")),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cvt_pk_rtz_f16_f32_overlay() -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.v_cvt_pk_rtz_f16_f32",
+        instruction_name="V_CVT_PK_RTZ_F16_F32",
+        mnemonic="v_cvt_pk_rtz_f16_f32",
+        encoding_name="ENC_VOP2",
+        semantic_tag="convert.float.f32x2.f16x2.rtz",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result()),
+            AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("low")),
+            AmdgpuOperandOverlay("VSRC1", _vgpr_operand("high")),
         ),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
@@ -5858,6 +6710,24 @@ def _v_cvt_u32_f32_overlay() -> AmdgpuDescriptorOverlay:
     )
 
 
+def _v_cmp_operand(field_name: str, bit_width: int = 32) -> Operand:
+    if bit_width == 16:
+        return Operand(
+            field_name,
+            OperandRole.OPERAND,
+            (
+                RegClassAlt(_REG_SGPR, register_part=_REG_PART_SGPR_LOW16),
+                RegClassAlt(_REG_VGPR, register_part=_REG_PART_VGPR_LOW16),
+            ),
+        )
+    return Operand(
+        field_name,
+        OperandRole.OPERAND,
+        (*_SGPR_ALT, *_VGPR_CONST_ALT),
+        unit_count=bit_width // 32,
+    )
+
+
 def _v_cmp_i32_overlay(
     *, predicate: str, instruction_suffix: str, semantic_suffix: str
 ) -> AmdgpuDescriptorOverlay:
@@ -5872,8 +6742,8 @@ def _v_cmp_i32_overlay(
         schedule_class=_SCHEDULE_VALU,
         operands=(
             AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
-            AmdgpuOperandOverlay("SRC0", _vgpr_const_operand("lhs")),
-            AmdgpuOperandOverlay("SRC1", _vgpr_const_operand("rhs")),
+            AmdgpuOperandOverlay("SRC0", _v_cmp_operand("lhs")),
+            AmdgpuOperandOverlay("SRC1", _v_cmp_operand("rhs")),
         ),
         operand_forms=_v_cmp_inline_operand_forms(descriptor_key),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
@@ -5894,8 +6764,8 @@ def _v_cmp_u32_overlay(
         schedule_class=_SCHEDULE_VALU,
         operands=(
             AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
-            AmdgpuOperandOverlay("SRC0", _vgpr_const_operand("lhs")),
-            AmdgpuOperandOverlay("SRC1", _vgpr_const_operand("rhs")),
+            AmdgpuOperandOverlay("SRC0", _v_cmp_operand("lhs")),
+            AmdgpuOperandOverlay("SRC1", _v_cmp_operand("rhs")),
         ),
         operand_forms=_v_cmp_inline_operand_forms(descriptor_key),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
@@ -5927,8 +6797,8 @@ def _v_cmp_source_inline_overlay(
     immediate: Immediate,
 ) -> AmdgpuDescriptorOverlay:
     source_fields = {
-        "src0": ("SRC0", "lhs", _vgpr_const_operand("lhs")),
-        "src1": ("SRC1", "rhs", _vgpr_const_operand("rhs")),
+        "src0": ("SRC0", "lhs", _v_cmp_operand("lhs")),
+        "src1": ("SRC1", "rhs", _v_cmp_operand("rhs")),
     }
     literal_field, literal_operand, _ = source_fields[literal_source]
     remaining_operands = [
@@ -6076,23 +6946,29 @@ def _v_cmp_u32_source_overlays(
     )
 
 
-def _v_cmp_f32_overlay(
-    *, predicate: str, instruction_suffix: str, semantic_suffix: str
+def _v_cmp_float_overlay(
+    *,
+    predicate: str,
+    instruction_suffix: str,
+    semantic_suffix: str,
+    bit_width: int = 32,
 ) -> AmdgpuDescriptorOverlay:
     instruction_predicate = instruction_suffix.lower()
     return AmdgpuDescriptorOverlay(
-        descriptor_key=f"amdgpu.v_cmp_{predicate}_f32",
-        instruction_name=f"V_CMP_{instruction_suffix}_F32",
-        mnemonic=f"v_cmp_{instruction_predicate}_f32",
+        descriptor_key=f"amdgpu.v_cmp_{predicate}_f{bit_width}",
+        instruction_name=f"V_CMP_{instruction_suffix}_F{bit_width}",
+        mnemonic=f"v_cmp_{instruction_predicate}_f{bit_width}",
         encoding_name="ENC_VOP3",
-        semantic_tag=f"cmp.f32.{semantic_suffix}",
+        semantic_tag=f"cmp.f{bit_width}.{semantic_suffix}",
         schedule_class=_SCHEDULE_VALU,
         operands=(
             AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
-            AmdgpuOperandOverlay("SRC0", _vgpr_const_operand("lhs")),
-            AmdgpuOperandOverlay("SRC1", _vgpr_const_operand("rhs")),
+            AmdgpuOperandOverlay("SRC0", _v_cmp_operand("lhs", bit_width)),
+            AmdgpuOperandOverlay("SRC1", _v_cmp_operand("rhs", bit_width)),
         ),
-        operand_forms=_v_cmp_inline_operand_forms(f"amdgpu.v_cmp_{predicate}_f32"),
+        operand_forms=_v_cmp_inline_operand_forms(f"amdgpu.v_cmp_{predicate}_f32")
+        if bit_width == 32
+        else (),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
@@ -6111,6 +6987,24 @@ def _v_cmp_f32_source_overlays(
         )
         for literal_source in ("src0", "src1")
     )
+
+
+_V_CMP_FLOAT_PREDICATES = (
+    ("oeq", "EQ", "oeq"),
+    ("ogt", "GT", "ogt"),
+    ("oge", "GE", "oge"),
+    ("olt", "LT", "olt"),
+    ("ole", "LE", "ole"),
+    ("one", "LG", "one"),
+    ("ord", "O", "ord"),
+    ("ueq", "NLG", "ueq"),
+    ("ugt", "NLE", "ugt"),
+    ("uge", "NLT", "uge"),
+    ("ult", "NGE", "ult"),
+    ("ule", "NGT", "ule"),
+    ("une", "NEQ", "une"),
+    ("uno", "U", "uno"),
+)
 
 
 _V_CMP_OVERLAY_FAMILIES = (
@@ -6139,58 +7033,324 @@ _V_CMP_OVERLAY_FAMILIES = (
         ),
     ),
     (
-        _v_cmp_f32_overlay,
+        _v_cmp_float_overlay,
         _v_cmp_f32_source_overlays,
         _SOURCE_INLINE_F32_IMMEDIATE,
-        (
-            ("oeq", "EQ", "oeq"),
-            ("ogt", "GT", "ogt"),
-            ("oge", "GE", "oge"),
-            ("olt", "LT", "olt"),
-            ("ole", "LE", "ole"),
-            ("one", "LG", "one"),
-            ("ord", "O", "ord"),
-            ("ueq", "NLG", "ueq"),
-            ("ugt", "NLE", "ugt"),
-            ("uge", "NLT", "uge"),
-            ("ult", "NGE", "ult"),
-            ("ule", "NGT", "ule"),
-            ("une", "NEQ", "une"),
-            ("uno", "U", "uno"),
-        ),
+        _V_CMP_FLOAT_PREDICATES,
     ),
 )
 
 
 def _v_cmp_base_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
-    return tuple(
-        base_builder(
-            predicate=predicate,
-            instruction_suffix=instruction_suffix,
-            semantic_suffix=semantic_suffix,
-        )
-        for base_builder, _, _, rows in _V_CMP_OVERLAY_FAMILIES
-        for predicate, instruction_suffix, semantic_suffix in rows
-    )
-
-
-def _v_cmp_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
-    return tuple(
-        overlay
-        for base_builder, source_builder, _, rows in _V_CMP_OVERLAY_FAMILIES
-        for predicate, instruction_suffix, semantic_suffix in rows
-        for overlay in (
+    return (
+        tuple(
             base_builder(
                 predicate=predicate,
                 instruction_suffix=instruction_suffix,
                 semantic_suffix=semantic_suffix,
-            ),
-            *source_builder(
-                predicate=predicate,
-                instruction_suffix=instruction_suffix,
-                semantic_suffix=semantic_suffix,
+            )
+            for base_builder, _, _, rows in _V_CMP_OVERLAY_FAMILIES
+            for predicate, instruction_suffix, semantic_suffix in rows
+        )
+        + _v_cmp_float_overlays(16)
+        + _v_cmp_float_overlays(64)
+    )
+
+
+def _v_cmp_float_overlays(bit_width: int) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        _v_cmp_float_overlay(
+            predicate=predicate,
+            instruction_suffix=instruction_suffix,
+            semantic_suffix=semantic_suffix,
+            bit_width=bit_width,
+        )
+        for predicate, instruction_suffix, semantic_suffix in _V_CMP_FLOAT_PREDICATES
+    )
+
+
+_V_CMP_CLASS_MASK_SOURCE_SIZE_REASON = (
+    "classification-mask-reads-low-10-bits-of-b32-source"
+)
+
+_V_CMP_CLASS_F16_HIGH_SDWA_FIXED_FIELDS = (
+    ("SRC0", 249),
+    ("S0", 0),
+    ("S1", 1),
+    ("SD", 1),
+    ("SRC0_ABS", 0),
+    ("SRC0_NEG", 0),
+    ("SRC0_SEL", 5),
+    ("SRC0_SEXT", 0),
+    ("SRC1_ABS", 0),
+    ("SRC1_NEG", 0),
+    ("SRC1_SEL", 6),
+    ("SRC1_SEXT", 0),
+)
+
+
+def _v_cmp_class_descriptor_key(bit_width: int, input_part: str) -> str:
+    if input_part == "low":
+        return f"amdgpu.v_cmp_class_f{bit_width}"
+    if bit_width == 16 and input_part == "high":
+        return "amdgpu.v_cmp_class_f16.input_high"
+    raise ValueError(f"unsupported f{bit_width} class input part '{input_part}'")
+
+
+def _v_cmp_class_input_operand(bit_width: int, input_part: str) -> Operand:
+    if bit_width == 16:
+        register_part = {
+            "low": _REG_PART_VGPR_LOW16,
+            "high": _REG_PART_VGPR_HIGH16,
+        }.get(input_part)
+        if register_part is None:
+            raise ValueError(f"unsupported f16 class input part '{input_part}'")
+        return _vgpr_operand("input", register_part=register_part)
+    if input_part != "low" or bit_width not in (32, 64):
+        raise ValueError(f"unsupported f{bit_width} class input part '{input_part}'")
+    return _vgpr_operand("input", units=bit_width // 32)
+
+
+def _v_cmp_class_fixed_fields(
+    bit_width: int, input_part: str, op_sel_field: str
+) -> tuple[tuple[str, int], ...]:
+    if input_part == "low":
+        return ()
+    if bit_width == 16 and input_part == "high":
+        return ((op_sel_field, 1),)
+    raise ValueError(f"unsupported f{bit_width} class input part '{input_part}'")
+
+
+def _v_cmp_class_mnemonic(bit_width: int, input_part: str) -> str:
+    mnemonic = f"v_cmp_class_f{bit_width}"
+    return f"{mnemonic}_input_high" if input_part == "high" else mnemonic
+
+
+def _v_cmp_class_overlay(
+    bit_width: int,
+    *,
+    input_part: str = "low",
+    include_literal_form: bool = True,
+    op_sel_field: str = "OP_SEL",
+) -> AmdgpuDescriptorOverlay:
+    descriptor_key = _v_cmp_class_descriptor_key(bit_width, input_part)
+    operand_forms = (
+        _literal_operand_form(
+            replacement_descriptor=f"{descriptor_key}.classes_inline",
+            source_operand="classes",
+            immediate_field="classes",
+        ),
+    )
+    if include_literal_form:
+        operand_forms += (
+            _literal_operand_form(
+                replacement_descriptor=f"{descriptor_key}.classes_lit",
+                source_operand="classes",
             ),
         )
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=descriptor_key,
+        instruction_name=f"V_CMP_CLASS_F{bit_width}",
+        mnemonic=_v_cmp_class_mnemonic(bit_width, input_part),
+        encoding_name="ENC_VOP3",
+        semantic_tag=f"cmp.f{bit_width}.class",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
+            AmdgpuOperandOverlay(
+                "SRC0", _v_cmp_class_input_operand(bit_width, input_part)
+            ),
+            AmdgpuOperandOverlay(
+                "SRC1",
+                _sgpr_operand("classes"),
+                size_exception_reason=(
+                    _V_CMP_CLASS_MASK_SOURCE_SIZE_REASON if bit_width == 16 else None
+                ),
+            ),
+        ),
+        fixed_encoding_fields=_v_cmp_class_fixed_fields(
+            bit_width, input_part, op_sel_field
+        ),
+        operand_forms=operand_forms,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cmp_class_inline_overlay(
+    bit_width: int, *, input_part: str = "low", op_sel_field: str = "OP_SEL"
+) -> AmdgpuDescriptorOverlay:
+    descriptor_key = _v_cmp_class_descriptor_key(bit_width, input_part)
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=f"{descriptor_key}.classes_inline",
+        instruction_name=f"V_CMP_CLASS_F{bit_width}",
+        mnemonic=_v_cmp_class_mnemonic(bit_width, input_part),
+        encoding_name="ENC_VOP3",
+        semantic_tag=f"cmp.f{bit_width}.class",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
+            AmdgpuOperandOverlay(
+                "SRC0", _v_cmp_class_input_operand(bit_width, input_part)
+            ),
+        ),
+        asm_forms=_asm(
+            mnemonic=(f"{_v_cmp_class_mnemonic(bit_width, input_part)}_classes_inline"),
+            results=("mask",),
+            operands=("input",),
+            immediates=("classes",),
+            named_immediates=True,
+        ),
+        immediate_fields=("SRC1",),
+        immediates=(replace(_SOURCE_INLINE_U32_IMMEDIATE, field_name="classes"),),
+        fixed_encoding_fields=_v_cmp_class_fixed_fields(
+            bit_width, input_part, op_sel_field
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cmp_class_literal_overlay(
+    bit_width: int, *, input_part: str = "low", op_sel_field: str = "OP_SEL"
+) -> AmdgpuDescriptorOverlay:
+    descriptor_key = _v_cmp_class_descriptor_key(bit_width, input_part)
+    return AmdgpuDescriptorOverlay(
+        descriptor_key=f"{descriptor_key}.classes_lit",
+        instruction_name=f"V_CMP_CLASS_F{bit_width}",
+        mnemonic=f"{_v_cmp_class_mnemonic(bit_width, input_part)}_classes_lit",
+        encoding_name="ENC_VOP3",
+        encoding_format_id=AMDGPU_ENCODING_FORMAT_VOP3_LITERAL,
+        semantic_tag=f"cmp.f{bit_width}.class",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _sgpr_result("mask", units=2)),
+            AmdgpuOperandOverlay(
+                "SRC0", _v_cmp_class_input_operand(bit_width, input_part)
+            ),
+        ),
+        asm_forms=_asm(
+            results=("mask",),
+            operands=("input",),
+            immediates=("imm32",),
+        ),
+        immediates=(_LITERAL_U32_IMMEDIATE,),
+        fixed_encoding_fields=(
+            *_v_cmp_class_fixed_fields(bit_width, input_part, op_sel_field),
+            ("SRC1", _predefined("SRC_LITERAL", "OPR_SRC")),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _v_cmp_class_f16_high_sdwa_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    descriptor_key = _v_cmp_class_descriptor_key(16, "high")
+    register_overlay = AmdgpuDescriptorOverlay(
+        descriptor_key=descriptor_key,
+        instruction_name="V_CMP_CLASS_F16",
+        mnemonic="v_cmp_class_f16_input_high_sdwa",
+        encoding_name="VOPC_VOP_SDWA_SDST_ENC",
+        encoding_condition="has_sdwa",
+        semantic_tag="cmp.f16.class",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("SDST", _sgpr_result("mask", units=2)),
+            AmdgpuOperandOverlay(
+                "VSRC0",
+                _vgpr_operand("input", register_part=_REG_PART_VGPR_HIGH16),
+            ),
+            AmdgpuOperandOverlay(
+                "VSRC1",
+                _sgpr_operand("classes"),
+                size_exception_reason=_V_CMP_CLASS_MASK_SOURCE_SIZE_REASON,
+            ),
+        ),
+        fixed_encoding_fields=_V_CMP_CLASS_F16_HIGH_SDWA_FIXED_FIELDS,
+        operand_forms=(
+            _literal_operand_form(
+                replacement_descriptor=f"{descriptor_key}.classes_inline",
+                source_operand="classes",
+                immediate_field="classes",
+            ),
+        ),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+    inline_overlay = replace(
+        register_overlay,
+        descriptor_key=f"{descriptor_key}.classes_inline",
+        mnemonic="v_cmp_class_f16_input_high_sdwa_classes_inline",
+        operands=register_overlay.operands[:2],
+        asm_forms=_asm(
+            results=("mask",),
+            operands=("input",),
+            immediates=("classes",),
+            named_immediates=True,
+        ),
+        immediate_fields=("VSRC1",),
+        immediates=(replace(_SOURCE_INLINE_U32_IMMEDIATE, field_name="classes"),),
+        operand_forms=(),
+    )
+    return register_overlay, inline_overlay
+
+
+def _v_cmp_class_cdna_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return (
+        tuple(
+            overlay
+            for bit_width in (16, 32, 64)
+            for overlay in (
+                _v_cmp_class_overlay(bit_width, include_literal_form=False),
+                _v_cmp_class_inline_overlay(bit_width),
+            )
+        )
+        + _v_cmp_class_f16_high_sdwa_overlays()
+    )
+
+
+def _v_cmp_class_overlays(
+    *, op_sel_field: str = "OP_SEL"
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        overlay
+        for bit_width in (16, 32, 64)
+        for input_part in (("low", "high") if bit_width == 16 else ("low",))
+        for overlay in (
+            _v_cmp_class_overlay(
+                bit_width,
+                input_part=input_part,
+                op_sel_field=op_sel_field,
+            ),
+            _v_cmp_class_inline_overlay(
+                bit_width, input_part=input_part, op_sel_field=op_sel_field
+            ),
+            _v_cmp_class_literal_overlay(
+                bit_width,
+                input_part=input_part,
+                op_sel_field=op_sel_field,
+            ),
+        )
+    )
+
+
+def _v_cmp_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return (
+        tuple(
+            overlay
+            for base_builder, source_builder, _, rows in _V_CMP_OVERLAY_FAMILIES
+            for predicate, instruction_suffix, semantic_suffix in rows
+            for overlay in (
+                base_builder(
+                    predicate=predicate,
+                    instruction_suffix=instruction_suffix,
+                    semantic_suffix=semantic_suffix,
+                ),
+                *source_builder(
+                    predicate=predicate,
+                    instruction_suffix=instruction_suffix,
+                    semantic_suffix=semantic_suffix,
+                ),
+            )
+        )
+        + _v_cmp_float_overlays(16)
+        + _v_cmp_float_overlays(64)
     )
 
 
@@ -6636,8 +7796,125 @@ def _v_mov_b32_copy_overlay() -> AmdgpuDescriptorOverlay:
             AmdgpuOperandOverlay("VDST", _vgpr_result()),
             AmdgpuOperandOverlay("SRC0", _sgpr_vgpr_operand("src")),
         ),
-        asm_forms=_asm(mnemonic="v_mov_b32_copy", results=("dst",), operands=("src",)),
+        asm_forms=_asm(
+            mnemonic="v_mov_b32_copy",
+            native_assembly_mnemonic="v_mov_b32",
+            results=("dst",),
+            operands=("src",),
+        ),
         flags=(DescriptorFlag.DEAD_REMOVABLE, DescriptorFlag.SAFE_TO_SPECULATE),
+    )
+
+
+_PERMLANE_SWAP_CONTROL_IMMEDIATES = (
+    Immediate(
+        "bound_ctrl",
+        ImmediateKind.UNSIGNED,
+        flags=(ImmediateFlag.DEFAULT_VALUE,),
+        bit_width=1,
+        encoding_field_bit_offset=1,
+        unsigned_max=1,
+        default_value=0,
+    ),
+    Immediate(
+        "fi",
+        ImmediateKind.UNSIGNED,
+        flags=(ImmediateFlag.DEFAULT_VALUE,),
+        bit_width=1,
+        encoding_field_bit_offset=0,
+        unsigned_max=1,
+        default_value=0,
+    ),
+)
+
+_PERMLANE_SWAP_CONSTRAINTS = (
+    Constraint(ConstraintKind.TIED, 0, 2),
+    Constraint(ConstraintKind.DESTRUCTIVE, 0, 2),
+    Constraint(ConstraintKind.TIED, 1, 3),
+    Constraint(ConstraintKind.DESTRUCTIVE, 1, 3),
+)
+
+
+def _v_permlane_swap_overlays(
+    lane_count: int,
+) -> tuple[AmdgpuDescriptorOverlay, ...]:
+    mnemonic = f"v_permlane{lane_count}_swap_b32"
+    native_register_values = (
+        _native_result("dst"),
+        _native_result("src"),
+    )
+    compact = AmdgpuDescriptorOverlay(
+        descriptor_key=f"amdgpu.{mnemonic}",
+        instruction_name=mnemonic.upper(),
+        mnemonic=mnemonic,
+        encoding_name="ENC_VOP1",
+        semantic_tag=f"lane.permlane{lane_count}.swap.b32",
+        schedule_class=_SCHEDULE_VALU,
+        operands=(
+            AmdgpuOperandOverlay("VDST", _vgpr_result("dst")),
+            AmdgpuOperandOverlay("SRC0", _vgpr_result("src")),
+            AmdgpuOperandOverlay(
+                "VDST",
+                Operand(
+                    "old_dst",
+                    OperandRole.OPERAND,
+                    _VGPR_ALT,
+                    flags=(OperandFlag.IMPLICIT,),
+                ),
+                role_exception_reason=(
+                    "the encoded destination register is also the tied first swap input"
+                ),
+            ),
+            AmdgpuOperandOverlay(
+                "SRC0",
+                Operand(
+                    "old_src",
+                    OperandRole.OPERAND,
+                    _VGPR_ALT,
+                    flags=(OperandFlag.IMPLICIT,),
+                ),
+                role_exception_reason=(
+                    "the encoded source register is also the tied second swap input"
+                ),
+            ),
+        ),
+        asm_forms=_asm(
+            results=("dst", "src"),
+            operands=("old_dst", "old_src"),
+            native_assembly_values=native_register_values,
+        ),
+        constraints=_PERMLANE_SWAP_CONSTRAINTS,
+        effects=(_CONVERGENT_EFFECT,),
+    )
+    extended_mnemonic = f"{mnemonic}_e64"
+    extended = replace(
+        compact,
+        descriptor_key=f"amdgpu.{mnemonic}.e64",
+        mnemonic=extended_mnemonic,
+        encoding_name="ENC_VOP3",
+        immediate_fields=("OP_SEL", "OP_SEL"),
+        immediates=_PERMLANE_SWAP_CONTROL_IMMEDIATES,
+        asm_forms=_asm(
+            mnemonic=extended_mnemonic,
+            results=("dst", "src"),
+            operands=("old_dst", "old_src"),
+            immediates=("bound_ctrl", "fi"),
+            named_immediates=True,
+            native_assembly_values=(
+                *native_register_values,
+                _native_amdgpu_named_i64_immediate("bound_ctrl"),
+                _native_amdgpu_named_i64_immediate("fi"),
+            ),
+        ),
+    )
+    return compact, extended
+
+
+def _gfx950_permlane_swap_overlays() -> tuple[AmdgpuDescriptorOverlay, ...]:
+    return tuple(
+        overlay
+        for lane_count in (16, 32)
+        for overlay in _v_permlane_swap_overlays(lane_count)
     )
 
 
@@ -6807,10 +8084,9 @@ def _v_mov_b32_sdwa_overlay() -> AmdgpuDescriptorOverlay:
 
 
 __all__ = (
-    "_integer_bit_count_overlays",
+    "_gfx950_permlane_swap_overlays",
     "_integer_bitwise_permute_overlays",
     "_integer_bitwise_shift_overlays",
-    "_rdna_integer_bit_count_overlays",
     "_s_add_u32_overlay",
     "_s_add_u32_rhs_inline_overlay",
     "_s_addk_i32_overlay",
@@ -6836,24 +8112,38 @@ __all__ = (
     "_s_lshl_b32_overlay",
     "_s_lshl_b32_rhs_inline_overlay",
     "_s_lshl_b64_overlay",
+    "_s_lshl_b64_rhs_inline_overlay",
     "_s_lshl_add_u32_overlay",
     "_s_lshr_b32_overlay",
     "_s_lshr_b32_rhs_inline_overlay",
     "_s_lshr_b64_overlay",
+    "_s_lshr_b64_rhs_inline_overlay",
     "_s_max_i32_overlay",
+    "_s_max_i32_overlays",
     "_s_max_u32_overlay",
+    "_s_max_u32_overlays",
     "_s_min_i32_overlay",
+    "_s_min_i32_overlays",
     "_s_min_u32_overlay",
+    "_s_min_u32_overlays",
     "_s_mul_hi_u32_overlay",
+    "_s_mul_hi_u32_literal_overlay",
+    "_s_mul_hi_i32_overlay",
+    "_s_mul_hi_i32_literal_overlay",
     "_s_mul_i32_overlay",
     "_s_mul_i32_rhs_inline_overlay",
     "_s_mulk_i32_overlay",
     "_s_or_b32_overlay",
+    "_s_or_b32_rhs_inline_overlay",
+    "_s_or_b32_literal_overlay",
     "_s_or_b64_overlay",
     "_s_shift_u64_overlay",
+    "_s_shift_u64_rhs_inline_overlay",
     "_s_sub_u32_overlay",
     "_s_sub_u32_rhs_inline_overlay",
     "_s_xor_b32_overlay",
+    "_s_xor_b32_rhs_inline_overlay",
+    "_s_xor_b32_literal_overlay",
     "_s_xor_b64_overlay",
     "_v_add_co_ci_u32_overlay",
     "_v_add_co_u32_overlay",
@@ -6874,8 +8164,9 @@ __all__ = (
     "_v_ashrrev_i32_overlay",
     "_v_ashrrev_i32_src0_inline_overlay",
     "_v_bfe_offset_immediate",
+    "_v_bfe_offset_0_width_inline_low16_overlay",
     "_v_bfe_offset_width_inline_overlay",
-    "_v_bfe_u32_offset_0_width_16_low16_overlay",
+    "_v_bfe_low16_width_immediate",
     "_v_bfe_width_immediate",
     "_v_bfi_b32_src0_literal_overlay",
     "_v_binary_f16_overlay",
@@ -6887,13 +8178,20 @@ __all__ = (
     "_v_binary_f32_overlay",
     "_v_binary_f32_operand_forms",
     "_v_binary_f32_overlays",
+    "_v_binary_f64_overlays",
+    "_v_sub_f64_overlay",
     "_v_binary_literal_overlay",
     "_v_binary_src0_inline_f32_overlay",
     "_v_binary_src0_inline_overlay",
     "_v_binary_u32_overlay",
     "_v_binary_vop3_float_overlay",
     "_v_cmp_base_overlays",
-    "_v_cmp_f32_overlay",
+    "_v_cmp_class_cdna_overlays",
+    "_v_cmp_class_inline_overlay",
+    "_v_cmp_class_literal_overlay",
+    "_v_cmp_class_overlay",
+    "_v_cmp_class_overlays",
+    "_v_cmp_float_overlay",
     "_v_cmp_f32_source_overlays",
     "_v_cmp_i32_overlay",
     "_v_cmp_i32_equality_vcc_overlays",
@@ -6921,7 +8219,12 @@ __all__ = (
     "_v_cndmask_b32_vcc_overlay",
     "_v_cvt_f16_f32_overlay",
     "_v_cvt_f32_f16_overlay",
+    "_v_cvt_f32_f16_input_high_overlay",
     "_v_cvt_f32_i32_overlay",
+    "_v_cvt_f64_integer_overlays",
+    "_v_cvt_integer_f64_overlays",
+    "_v_cvt_f64_f32_overlay",
+    "_v_cvt_f32_f64_overlay",
     "_v_cvt_f32_packed8_overlays",
     "_v_cvt_f32_packed8_selection_overlays",
     "_v_cvt_f32_ubyte_overlays",
@@ -6929,6 +8232,8 @@ __all__ = (
     "_v_cvt_i32_f32_overlay",
     "_v_cvt_pk_bf16_f32_dpp16_overlay",
     "_v_cvt_pk_bf16_f32_overlay",
+    "_v_cvt_pk_rtz_f16_f32_overlay",
+    "_v_cvt_pkrtz_f16_f32_overlay",
     "_v_cvt_f16_packed8_byte_overlays",
     "_v_cvt_pk_f16_packed8_overlays",
     "_v_cvt_pk_packed8_from_f16_overlays",
@@ -6943,9 +8248,14 @@ __all__ = (
     "_v_div_fixup_f32_overlay",
     "_v_div_fmas_f32_overlay",
     "_v_div_scale_f32_overlay",
+    "_v_div_scale_f64_overlay",
+    "_v_div_fmas_f64_overlay",
+    "_v_div_fixup_f64_overlay",
     "_v_cos_f32_overlay",
+    "_v_ceil_f64_overlay",
     "_v_exp_f32_overlay",
     "_v_floor_f32_overlay",
+    "_v_floor_f64_overlay",
     "_s_fmaak_f32_overlay",
     "_s_fmac_f16_overlay",
     "_s_fmac_f32_overlay",
@@ -6953,9 +8263,8 @@ __all__ = (
     "_v_fma_f16_overlay",
     "_v_fmaak_f32_overlay",
     "_v_fmaak_f16_overlay",
-    "_v_fma_f32_overlay",
+    "_v_fma_overlays",
     "_v_interp_overlays",
-    "_v_fma_f64_overlay",
     "_v_fma_mix_f32_overlay",
     "_v_fma_mix_f32_overlays",
     "_v_fma_mix_f32_src2_literal_overlay",
@@ -6967,6 +8276,7 @@ __all__ = (
     "_v_fmac_f64_overlay",
     "_v_fmamk_f16_overlay",
     "_v_fmamk_f32_overlay",
+    "_v_fmamk_f32_product_flushing_overlay",
     "_v_pk_ashrrev_i16_overlay",
     "_v_pk_add_f16_overlay",
     "_v_pk_add_f32_overlay",
@@ -6991,6 +8301,8 @@ __all__ = (
     "_v_pk_mul_lo_u16_overlay",
     "_v_pk_i16_binary_overlays",
     "_v_pk_fma_f32_overlay",
+    "_v_pk_broadcast_overlays",
+    "_v_pk_operand_overlays",
     "_v_pk_fmac_f16_overlay",
     "_v_pk_mad_i16_overlay",
     "_v_pk_mad_i16_literal_overlays",
@@ -7024,6 +8336,7 @@ __all__ = (
     "_v_mad_mixhi_f16_overlays",
     "_v_mad_mixlo_f16_overlays",
     "_v_madmk_f16_overlay",
+    "_v_mad_u32_u24_inline_overlay",
     "_v_mad_u32_u24_literal_overlay",
     "_v_mad_u32_u24_overlay",
     "_v_med3_num_f32_overlay",
@@ -7032,13 +8345,17 @@ __all__ = (
     "_v_max_f32_overlay",
     "_v_max_f32_src0_inline_overlay",
     "_v_max_i32_overlay",
+    "_v_max_i32_overlays",
     "_v_max_u32_overlay",
+    "_v_max_u32_overlays",
     "_v_min_f32_literal_overlay",
     "_v_min_f32_overlay",
     "_v_min_f32_src0_inline_overlay",
     "_v_min_i32_overlay",
+    "_v_min_i32_overlays",
     "_v_min_u32_overlay",
-    "_v_minmax_i32_overlay",
+    "_v_min_u32_overlays",
+    "_v_minmax_i32_overlays",
     "_v_mov_b32_copy_overlay",
     "_v_mov_b32_dpp16_overlay",
     "_v_mov_b32_dpp16_masked_overlay",
@@ -7059,6 +8376,8 @@ __all__ = (
     "_v_or_b32_overlay",
     "_v_or_b32_src0_inline_overlay",
     "_v_rcp_f32_overlay",
+    "_v_rcp_f64_overlay",
+    "_v_rndne_f64_overlay",
     "_v_readfirstlane_b32_overlay",
     "_v_readlane_b32_src1_inline_overlay",
     "_v_readlane_b32_src1_sgpr_overlay",
@@ -7066,7 +8385,12 @@ __all__ = (
     "_v_rsq_f32_overlay",
     "_v_sin_f32_overlay",
     "_v_sqrt_f32_overlay",
+    "_v_sqrt_f64_overlay",
+    "_v_rsq_f64_overlay",
+    "_v_ldexp_f64_overlay",
+    "_v_ldexp_f32_overlay",
     "_v_trunc_f32_overlay",
+    "_v_trunc_f64_overlay",
     "_v_sub_f16_overlay",
     "_v_sub_f32_literal_overlay",
     "_v_sub_f32_overlay",
@@ -7079,6 +8403,7 @@ __all__ = (
     "_v_subrev_f32_src0_inline_overlay",
     "_v_sub_u32_lhs_tied_overlay",
     "_v_sub_u32_overlay",
+    "_v_sub_u32_src0_inline_overlay",
     "_v_ternary_float_overlay",
     "_v_unary_f32_overlay",
     "_v_xor_b32_literal_overlay",

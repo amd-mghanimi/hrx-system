@@ -1,5 +1,19 @@
 // RUN: roundtrip
 
+func.def @refine_dynamic_vector(%m: index, %n: index, %source: vector<[%m]x4xf32>) -> (vector<[%n]x4xf32>) {
+  %refined = vector.refine %source : vector<[%m]x4xf32> -> vector<[%n]x4xf32>
+  func.return %refined : vector<[%n]x4xf32>
+}
+
+// ====
+
+func.def @refine_static_vector(%m: index, %source: vector<[%m]xi32>) -> (vector<16xi32>) {
+  %refined = vector.refine %source : vector<[%m]xi32> -> vector<16xi32>
+  func.return %refined : vector<16xi32>
+}
+
+// ====
+
 // Construction ops keep scalar/vector interop explicit.
 func.def @construction(%x: f32, %i: i32, %n: index) {
   %c0 = index.constant 0 : index
@@ -24,6 +38,24 @@ func.def @construction(%x: f32, %i: i32, %n: index) {
   %updated = vector.insert %lane0 into %c[%n] : f32, vector<4xf32>
   %from = vector.from_elements %x, %x, %x, %x : vector<4xf32>
   test.use %ps, %pv, %empty, %vf, %empty_splat, %vi, %lanes, %int_lanes, %dyn_lanes, %tail, %int_tail, %wide, %updated, %from : f32, vector<4xf32>, vector<0xf32>, vector<16xf32>, vector<0xf32>, vector<[%n]xi32>, vector<16xindex>, vector<4xi32>, vector<[%n]xindex>, vector<16xi1>, vector<4xi1>, vector<4x4xf32>, vector<4xf32>, vector<4xf32>
+  func.return
+}
+
+// ====
+
+// Address-domain casts preserve vector shape while making every semantic
+// boundary explicit in the element types.
+func.def @address_casts(%i1: vector<2xi1>, %i8: vector<2xi8>, %i16: vector<2xi16>, %i32: vector<2xi32>, %i64: vector<2xi64>, %indices: vector<2xindex>, %offsets: vector<2xoffset>) {
+  %i1_to_index = vector.index_cast %i1 : vector<2xi1> to vector<2xindex>
+  %i8_to_offset = vector.index_cast %i8 : vector<2xi8> to vector<2xoffset>
+  %i16_to_index = vector.index_cast %i16 : vector<2xi16> to vector<2xindex>
+  %i32_to_offset = vector.index_cast %i32 : vector<2xi32> to vector<2xoffset>
+  %i64_to_index = vector.index_cast %i64 : vector<2xi64> to vector<2xindex>
+  %index_to_i64 = vector.index_cast %indices : vector<2xindex> to vector<2xi64>
+  %offset_to_i16 = vector.index_cast %offsets : vector<2xoffset> to vector<2xi16>
+  %index_to_offset = vector.index_cast %indices : vector<2xindex> to vector<2xoffset>
+  %offset_to_index = vector.index_cast %offsets : vector<2xoffset> to vector<2xindex>
+  test.use %i1_to_index, %i8_to_offset, %i16_to_index, %i32_to_offset, %i64_to_index, %index_to_i64, %offset_to_i16, %index_to_offset, %offset_to_index : vector<2xindex>, vector<2xoffset>, vector<2xindex>, vector<2xoffset>, vector<2xindex>, vector<2xi64>, vector<2xi16>, vector<2xoffset>, vector<2xindex>
   func.return
 }
 
@@ -210,6 +242,8 @@ func.def @cmp_select(%a: vector<16xf32>, %b: vector<16xf32>, %i: vector<16xi32>,
 func.def @casts(%h: vector<8xf16>, %f: vector<8xf32>, %i8: vector<8xi8>, %i32: vector<8xi32>, %scale_bytes: vector<2xi8>) {
   %w = vector.extf %h : vector<8xf16> to vector<8xf32>
   %n = vector.fptrunc %f : vector<8xf32> to vector<8xf16>
+  %wf = vector.extf<daz> %h : vector<8xf16> to vector<8xf32>
+  %nf = vector.fptrunc<daz|ftz> %f : vector<8xf32> to vector<8xbf16>
   %si = vector.extsi %i8 : vector<8xi8> to vector<8xi32>
   %ui = vector.extui %i8 : vector<8xi8> to vector<8xi32>
   %tr = vector.trunci %i32 : vector<8xi32> to vector<8xi8>
@@ -219,7 +253,7 @@ func.def @casts(%h: vector<8xf16>, %f: vector<8xf32>, %i8: vector<8xi8>, %i32: v
   %fu = vector.fptoui %f : vector<8xf32> to vector<8xi32>
   %bits = vector.bitcast %f : vector<8xf32> to vector<8xi32>
   %scale = vector.bitcast %scale_bytes : vector<2xi8> to vector<1xf16>
-  test.use %w, %n, %si, %ui, %tr, %sf, %uf, %fs, %fu, %bits, %scale : vector<8xf32>, vector<8xf16>, vector<8xi32>, vector<8xi32>, vector<8xi8>, vector<8xf32>, vector<8xf32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<1xf16>
+  test.use %w, %n, %wf, %nf, %si, %ui, %tr, %sf, %uf, %fs, %fu, %bits, %scale : vector<8xf32>, vector<8xf16>, vector<8xf32>, vector<8xbf16>, vector<8xi32>, vector<8xi32>, vector<8xi8>, vector<8xf32>, vector<8xf32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<1xf16>
   func.return
 }
 
@@ -452,9 +486,9 @@ func.def @schema_decode_static_payload(%payload: vector<4xi32>, %schema: encodin
 func.def @matrix_fragments(%lhs: vector<6xi32>, %rhs: vector<6xi32>, %acc: vector<8xf32>, %m: index, %n: index, %k: index, %scale: vector<1xf16>) {
   %schema = encoding.define #encoding.operand<element_format=f6e3m2, payload_elements=32, payload_registers=6, scale_group_elements=32, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
   %lhs_fragment = vector.fragment<lhs> %lhs shape [%m, %k] using {scale = %scale : vector<1xf16>, schema = %schema : encoding<schema>} : vector<6xi32>
-  %rhs_fragment = vector.fragment<rhs> %rhs shape [%k, %n] using {scale = %scale : vector<1xf16>, schema = %schema : encoding<schema>} where [mul(%k, 32)] : vector<6xi32>
+  %rhs_fragment = vector.fragment<rhs> %rhs shape [%k, %n] using {scale = %scale : vector<1xf16>, schema = %schema : encoding<schema>} where [multiple_of(%k, 32)] : vector<6xi32>
   %init_fragment = vector.fragment<init> %acc shape [%m, %n] : vector<8xf32>
-  %result_fragment = vector.fragment<result> %acc shape [%m, %n] where [mul(%n, 16)] : vector<8xf32>
+  %result_fragment = vector.fragment<result> %acc shape [%m, %n] where [multiple_of(%n, 16)] : vector<8xf32>
   %lhs_repacked = vector.fragment.repack<lhs> %result_fragment shape [%m, %n] : vector<8xf32> -> vector<16xbf16>
   %result = vector.mma %lhs_fragment, %rhs_fragment, %init_fragment : vector<6xi32>, vector<6xi32>, vector<8xf32>
   test.use %lhs_fragment, %rhs_fragment, %init_fragment, %result_fragment, %lhs_repacked, %result : vector<6xi32>, vector<6xi32>, vector<8xf32>, vector<8xf32>, vector<16xbf16>, vector<8xf32>

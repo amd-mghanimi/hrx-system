@@ -12,6 +12,7 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 #include "loom/analysis/symbol_facts.h"
+#include "loom/codegen/low/loop_execution.h"
 #include "loom/codegen/low/lower/representation_projection.h"
 #include "loom/codegen/low/lower/rules.h"
 #include "loom/codegen/low/lower/source_selection.h"
@@ -23,7 +24,9 @@
 #include "loom/format/text/parser.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
+#include "loom/ops/cfg/ops.h"
 #include "loom/ops/func/ops.h"
+#include "loom/ops/index/ops.h"
 #include "loom/ops/low/ops.h"
 #include "loom/ops/pass/ops.h"
 #include "loom/ops/sanitizer/ops.h"
@@ -68,16 +71,17 @@ static iree_status_t CollectDiagnosticEmission(
   return iree_ok_status();
 }
 
-static loom_target_low_call_policy_t RequireInlineLowCalls(
-    const loom_resolved_target_t* resolved_target) {
+static loom_target_call_policy_t RequireInlineSemanticCalls(
+    const loom_resolved_target_t* resolved_target, const loom_module_t* module,
+    loom_call_like_kind_t kind, loom_call_like_t call,
+    loom_func_like_t callee) {
   (void)resolved_target;
-  return LOOM_TARGET_LOW_CALL_POLICY_REQUIRE_INLINE;
-}
-
-static loom_target_low_call_policy_t PreserveDirectLowCalls(
-    const loom_resolved_target_t* resolved_target) {
-  (void)resolved_target;
-  return LOOM_TARGET_LOW_CALL_POLICY_DIRECT;
+  (void)module;
+  (void)call;
+  (void)callee;
+  return kind == LOOM_CALL_LIKE_KIND_SEMANTIC
+             ? LOOM_TARGET_CALL_POLICY_REQUIRE_INLINE
+             : LOOM_TARGET_CALL_POLICY_DIRECT;
 }
 
 static const loom_low_descriptor_set_provider_t
@@ -90,11 +94,12 @@ static loom_pass_descriptor_t MakeFunctionPassDescriptor(
     iree_string_view_t key, loom_pass_info_fn_t info,
     loom_function_pass_fn_t function_run,
     loom_pass_create_fn_t create = nullptr) {
-  loom_pass_descriptor_t descriptor = {};
-  descriptor.key = key;
-  descriptor.info = info;
-  descriptor.function_run = function_run;
-  descriptor.create = create;
+  loom_pass_descriptor_t descriptor = {
+      .key = key,
+      .info = info,
+      .function_run = function_run,
+      .create = create,
+  };
   return descriptor;
 }
 
@@ -107,7 +112,9 @@ class LowLowerPassTest : public ::testing::Test {
     RegisterDialect(LOOM_DIALECT_PASS, loom_pass_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_SANITIZER, loom_sanitizer_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_TARGET, loom_target_dialect_vtables);
+    RegisterDialect(LOOM_DIALECT_CFG, loom_cfg_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_FUNC, loom_func_dialect_vtables);
+    RegisterDialect(LOOM_DIALECT_INDEX, loom_index_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_LOW, loom_low_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_SCALAR, loom_scalar_dialect_vtables);
     RegisterDialect(LOOM_DIALECT_TEMPLATE, loom_template_dialect_vtables);
@@ -135,8 +142,8 @@ class LowLowerPassTest : public ::testing::Test {
 
   ModulePtr Parse(iree_string_view_t source) {
     loom_text_parse_options_t parse_options = {
-        /*.diagnostic_sink=*/{},
-        /*.max_errors=*/20,
+        .diagnostic_sink = {},
+        .max_errors = 20,
     };
     loom_low_descriptor_text_asm_environment_initialize(
         &registry_.registry, &parse_options.low_asm_environment);
@@ -154,7 +161,7 @@ class LowLowerPassTest : public ::testing::Test {
     IREE_ASSERT(name_id != LOOM_STRING_ID_INVALID);
     const uint16_t symbol_id = loom_module_find_symbol(module, name_id);
     IREE_ASSERT(symbol_id != LOOM_SYMBOL_ID_INVALID);
-    return (loom_symbol_ref_t){/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    return loom_symbol_ref_t{.module_id = 0, .symbol_id = symbol_id};
   }
 
   iree_status_t RunSourceToLow(
@@ -169,31 +176,32 @@ class LowLowerPassTest : public ::testing::Test {
     std::vector<uint8_t> statistic_storage(
         pass_info->statistic_layout->storage_size, 0);
     const loom_codegen_pass_environment_options_t environment_options = {
-        /*.descriptor_registry=*/&registry_.registry,
-        /*.lower_policy_registry=*/policy_registry,
-        /*.legality_provider_list=*/nullptr,
-        /*.legalizer_registry=*/nullptr,
-        /*.math_policy_registry=*/nullptr,
-        /*.compile_report=*/nullptr,
-        /*.target_environment=*/nullptr,
+        .descriptor_registry = &registry_.registry,
+        .lower_policy_registry = policy_registry,
+        .legality_provider_list = nullptr,
+        .legalizer_registry = nullptr,
+        .math_policy_registry = nullptr,
+        .compile_report = nullptr,
+        .target_environment = nullptr,
     };
     loom_codegen_pass_environment_storage_t codegen_environment_storage;
     loom_pass_environment_t environment =
         loom_codegen_pass_environment_storage_initialize(
             &environment_options, function_versions,
             &codegen_environment_storage);
-    loom_pass_t pass = {};
-    pass.info = pass_info;
-    pass.module_run = loom_low_source_to_low_run;
-    pass.instance_arena = &instance_arena;
-    pass.arena = &instance_arena;
-    pass.statistic_storage = statistic_storage.data();
-    pass.environment = &environment;
-    pass.value_facts = &value_facts;
+    loom_pass_t pass = {
+        .info = pass_info,
+        .module_run = loom_low_source_to_low_run,
+        .instance_arena = &instance_arena,
+        .arena = &instance_arena,
+        .statistic_storage = statistic_storage.data(),
+        .environment = &environment,
+        .value_facts = &value_facts,
+    };
     if (collector != nullptr) {
       pass.diagnostic_emitter = {
-          /*.fn=*/CollectDiagnosticEmission,
-          /*.user_data=*/collector,
+          .fn = CollectDiagnosticEmission,
+          .user_data = collector,
       };
     }
 
@@ -212,31 +220,33 @@ class LowLowerPassTest : public ::testing::Test {
       const loom_function_version_list_t* function_versions = nullptr,
       DiagnosticEmissionCollector* collector = nullptr) {
     static const loom_pass_option_enum_value_t kRewriteValues[] = {
-        {/*.value=*/IREE_SVL("call")},
-        {/*.value=*/IREE_SVL("inline")},
+        {.value = IREE_SVL("call")},
+        {.value = IREE_SVL("inline")},
     };
     static const loom_pass_option_schema_t kSelectionOptions[] = {
-        {/*.name=*/IREE_SVL("rewrite"),
-         /*.kind=*/LOOM_PASS_OPTION_SCHEMA_ENUM,
-         /*.flags=*/0,
-         /*.minimum_uint32=*/0,
-         /*.maximum_uint32=*/0,
-         /*.enum_values=*/kRewriteValues,
-         /*.enum_value_count=*/IREE_ARRAYSIZE(kRewriteValues)},
+        {
+            .name = IREE_SVL("rewrite"),
+            .kind = LOOM_PASS_OPTION_SCHEMA_ENUM,
+            .flags = 0,
+            .minimum_uint32 = 0,
+            .maximum_uint32 = 0,
+            .enum_values = kRewriteValues,
+            .enum_value_count = IREE_ARRAYSIZE(kRewriteValues),
+        },
     };
     static const loom_pass_descriptor_t kPassDescriptors[] = {
         {
-            /*.key=*/IREE_SVL("inline-callables"),
-            /*.info=*/loom_inline_callables_pass_info,
-            /*.module_run=*/{loom_inline_callables_run},
-            /*.create=*/nullptr,
-            /*.destroy=*/nullptr,
-            /*.flags=*/0,
-            /*.unavailable_reason=*/{},
-            /*.option_schema=*/nullptr,
-            /*.option_schema_count=*/0,
-            /*.requirement_defs=*/nullptr,
-            /*.requirement_count=*/0,
+            .key = IREE_SVL("inline-callables"),
+            .info = loom_inline_callables_pass_info,
+            .module_run = loom_inline_callables_run,
+            .create = nullptr,
+            .destroy = nullptr,
+            .flags = 0,
+            .unavailable_reason = {},
+            .option_schema = nullptr,
+            .option_schema_count = 0,
+            .requirement_defs = nullptr,
+            .requirement_count = 0,
         },
         MakeFunctionPassDescriptor(IREE_SV("low-dce"), loom_low_dce_pass_info,
                                    loom_low_dce_run),
@@ -245,58 +255,58 @@ class LowLowerPassTest : public ::testing::Test {
                                    loom_low_materialize_allocation_run,
                                    loom_low_materialize_allocation_create),
         {
-            /*.key=*/IREE_SVL("select-templates"),
-            /*.info=*/loom_template_selection_pass_info,
-            /*.module_run=*/{loom_template_selection_run},
-            /*.create=*/loom_template_selection_create,
-            /*.destroy=*/nullptr,
-            /*.flags=*/0,
-            /*.unavailable_reason=*/{},
-            /*.option_schema=*/kSelectionOptions,
-            /*.option_schema_count=*/IREE_ARRAYSIZE(kSelectionOptions),
-            /*.requirement_defs=*/nullptr,
-            /*.requirement_count=*/0,
+            .key = IREE_SVL("select-templates"),
+            .info = loom_template_selection_pass_info,
+            .module_run = loom_template_selection_run,
+            .create = loom_template_selection_create,
+            .destroy = nullptr,
+            .flags = 0,
+            .unavailable_reason = {},
+            .option_schema = kSelectionOptions,
+            .option_schema_count = IREE_ARRAYSIZE(kSelectionOptions),
+            .requirement_defs = nullptr,
+            .requirement_count = 0,
         },
         {
-            /*.key=*/IREE_SVL("source-to-low"),
-            /*.info=*/loom_low_source_to_low_pass_info,
-            /*.module_run=*/{loom_low_source_to_low_run},
-            /*.create=*/loom_low_source_to_low_create,
-            /*.destroy=*/nullptr,
-            /*.flags=*/0,
-            /*.unavailable_reason=*/{},
-            /*.option_schema=*/nullptr,
-            /*.option_schema_count=*/0,
-            /*.requirement_defs=*/nullptr,
-            /*.requirement_count=*/0,
+            .key = IREE_SVL("source-to-low"),
+            .info = loom_low_source_to_low_pass_info,
+            .module_run = loom_low_source_to_low_run,
+            .create = loom_low_source_to_low_create,
+            .destroy = nullptr,
+            .flags = 0,
+            .unavailable_reason = {},
+            .option_schema = nullptr,
+            .option_schema_count = 0,
+            .requirement_defs = nullptr,
+            .requirement_count = 0,
         },
         {
-            /*.key=*/IREE_SVL("symbol-dce"),
-            /*.info=*/loom_symbol_dce_pass_info,
-            /*.module_run=*/{loom_symbol_dce_run},
-            /*.create=*/nullptr,
-            /*.destroy=*/nullptr,
-            /*.flags=*/0,
-            /*.unavailable_reason=*/{},
-            /*.option_schema=*/nullptr,
-            /*.option_schema_count=*/0,
-            /*.requirement_defs=*/nullptr,
-            /*.requirement_count=*/0,
+            .key = IREE_SVL("symbol-dce"),
+            .info = loom_symbol_dce_pass_info,
+            .module_run = loom_symbol_dce_run,
+            .create = nullptr,
+            .destroy = nullptr,
+            .flags = 0,
+            .unavailable_reason = {},
+            .option_schema = nullptr,
+            .option_schema_count = 0,
+            .requirement_defs = nullptr,
+            .requirement_count = 0,
         },
     };
     static const loom_pass_registry_t kPassRegistry = {
-        /*.descriptors=*/kPassDescriptors,
-        /*.descriptor_count=*/IREE_ARRAYSIZE(kPassDescriptors),
+        .descriptors = kPassDescriptors,
+        .descriptor_count = IREE_ARRAYSIZE(kPassDescriptors),
     };
 
     const loom_codegen_pass_environment_options_t environment_options = {
-        /*.descriptor_registry=*/&registry_.registry,
-        /*.lower_policy_registry=*/&policy_registry_,
-        /*.legality_provider_list=*/nullptr,
-        /*.legalizer_registry=*/nullptr,
-        /*.math_policy_registry=*/nullptr,
-        /*.compile_report=*/nullptr,
-        /*.target_environment=*/nullptr,
+        .descriptor_registry = &registry_.registry,
+        .lower_policy_registry = &policy_registry_,
+        .legality_provider_list = nullptr,
+        .legalizer_registry = nullptr,
+        .math_policy_registry = nullptr,
+        .compile_report = nullptr,
+        .target_environment = nullptr,
     };
     loom_codegen_pass_environment_storage_t codegen_environment_storage;
     loom_pass_environment_t environment =
@@ -304,16 +314,16 @@ class LowLowerPassTest : public ::testing::Test {
             &environment_options, function_versions,
             &codegen_environment_storage);
     loom_pass_tool_run_options_t run_options = {
-        /*.registry=*/&kPassRegistry,
-        /*.environment=*/environment,
-        /*.function_versions=*/function_versions,
-        /*.predicate_provider=*/{},
-        /*.block_pool=*/&block_pool_,
+        .registry = &kPassRegistry,
+        .environment = environment,
+        .function_versions = function_versions,
+        .predicate_provider = {},
+        .block_pool = &block_pool_,
     };
     if (collector != nullptr) {
       run_options.diagnostic_emitter = {
-          /*.fn=*/CollectDiagnosticEmission,
-          /*.user_data=*/collector,
+          .fn = CollectDiagnosticEmission,
+          .user_data = collector,
       };
     }
     loom_pass_run_result_t run_result = {};
@@ -336,26 +346,27 @@ class LowLowerPassTest : public ::testing::Test {
     std::vector<uint8_t> statistic_storage(
         pass_info->statistic_layout->storage_size, 0);
     const loom_codegen_pass_environment_options_t environment_options = {
-        /*.descriptor_registry=*/&registry_.registry,
-        /*.lower_policy_registry=*/&policy_registry_,
-        /*.legality_provider_list=*/nullptr,
-        /*.legalizer_registry=*/nullptr,
-        /*.math_policy_registry=*/nullptr,
-        /*.compile_report=*/nullptr,
-        /*.target_environment=*/nullptr,
+        .descriptor_registry = &registry_.registry,
+        .lower_policy_registry = &policy_registry_,
+        .legality_provider_list = nullptr,
+        .legalizer_registry = nullptr,
+        .math_policy_registry = nullptr,
+        .compile_report = nullptr,
+        .target_environment = nullptr,
     };
     loom_codegen_pass_environment_storage_t codegen_environment_storage;
     loom_pass_environment_t environment =
         loom_codegen_pass_environment_storage_initialize(
             &environment_options, function_versions,
             &codegen_environment_storage);
-    loom_pass_t pass = {};
-    pass.info = pass_info;
-    pass.module_run = loom_inline_callables_run;
-    pass.instance_arena = &instance_arena;
-    pass.arena = &instance_arena;
-    pass.statistic_storage = statistic_storage.data();
-    pass.environment = &environment;
+    loom_pass_t pass = {
+        .info = pass_info,
+        .module_run = loom_inline_callables_run,
+        .instance_arena = &instance_arena,
+        .arena = &instance_arena,
+        .statistic_storage = statistic_storage.data(),
+        .environment = &environment,
+    };
 
     iree_status_t status = loom_inline_callables_create(&pass, options);
     if (iree_status_is_ok(status)) {
@@ -385,7 +396,15 @@ TEST_F(LowLowerPassTest, SourceSelectionUsesPerFunctionTargetFacts) {
       "func.def target(@test_target) @add(%lhs: i32, %rhs: i32) -> (i32) {\n"
       "  %sum = scalar.addi %lhs, %rhs : i32\n"
       "  func.return %sum : i32\n"
-      "}\n"));
+      "}\n"
+      "low.func.def target<test.low.core>(@test_target) @ready("
+      "%value: reg<test.i32>) -> (reg<test.i32>) {\n"
+      "  low.return %value : reg<test.i32>\n"
+      "}\n"
+      "low.func.decl target<test.low.core>(@test_target) @external("
+      "%value: reg<test.i32>) -> (reg<test.i32>)\n"
+      "func.decl target(@test_target) @source_external(%value: i32) -> "
+      "(i32)\n"));
   ASSERT_GT(loom_test_target_bundles.count, 2u);
 
   loom_low_lower_policy_registry_t policy_registry = {};
@@ -425,21 +444,27 @@ TEST_F(LowLowerPassTest, SourceSelectionUsesPerFunctionTargetFacts) {
       &function_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
   loom_low_source_selection_options_t options = {
-      /*.policy_registry=*/&policy_registry,
-      /*.diagnostic_emitter=*/{},
-      /*.lowering_kind=*/{},
-      /*.function_versions=*/&function_versions,
-      /*.collect_target_candidates=*/false,
+      .policy_registry = &policy_registry,
+      .diagnostic_emitter = {},
+      .function_versions = &function_versions,
+      .collect_target_candidates = false,
   };
   loom_low_source_selection_list_t selections = {};
-  IREE_ASSERT_OK(loom_low_select_source_symbols(module.get(), &options, &arena,
-                                                &selections));
+  IREE_ASSERT_OK(loom_low_select_lowering_symbols(module.get(), &options,
+                                                  &arena, &selections));
 
-  ASSERT_EQ(selections.count, 1u);
+  ASSERT_EQ(selections.count, 4u);
+  EXPECT_EQ(selections.values[0].kind, LOOM_LOW_SOURCE_SELECTION_FUNCTION);
+  EXPECT_EQ(selections.values[1].kind,
+            LOOM_LOW_SOURCE_SELECTION_REPRESENTATION);
+  EXPECT_EQ(selections.values[2].kind,
+            LOOM_LOW_SOURCE_SELECTION_REPRESENTATION);
+  EXPECT_EQ(selections.values[3].kind, LOOM_LOW_SOURCE_SELECTION_DECLARATION);
+  EXPECT_EQ(selections.values[0].report, nullptr);
   EXPECT_EQ(selections.values[0].version_handle, &function_version.base);
   EXPECT_EQ(selections.values[0].target_ref.module_id, target_ref.module_id);
   EXPECT_EQ(selections.values[0].target_ref.symbol_id, target_ref.symbol_id);
@@ -464,6 +489,61 @@ TEST_F(LowLowerPassTest, SourceSelectionUsesPerFunctionTargetFacts) {
                                      IREE_SV("test.low.core")));
   EXPECT_EQ(selections.values[0].target_source,
             LOOM_TARGET_BINDING_SOURCE_SPECIALIZATION);
+  iree_arena_deinitialize(&arena);
+}
+
+TEST_F(LowLowerPassTest, FinalizesPoliciesOnceWithoutAdditionalStorage) {
+  ModulePtr module = Parse(IREE_SV(
+      "test.target<low_core> @test_target\n"
+      "low.func.decl target<test.low.core>(@test_target) @ready()\n"
+      "func.def target(@test_target) @idle() {\n  func.return\n}\n"
+      "func.def target(@test_target) @first() {\n  func.return\n}\n"
+      "func.def target(@test_target) @first_again() {\n  func.return\n}\n"
+      "func.def target(@test_target) @second() {\n  func.return\n}\n"
+      "func.decl target(@test_target) @second_again()\n"));
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool_, &arena);
+  const loom_low_source_selection_options_t options = {
+      .policy_registry = &policy_registry_,
+  };
+  loom_low_source_selection_list_t selections = {};
+  IREE_ASSERT_OK(loom_low_select_lowering_symbols(module.get(), &options,
+                                                  &arena, &selections));
+  ASSERT_EQ(selections.count, 6u);
+
+  std::vector<int> order;
+  loom_low_lower_policy_t first = *selections.values[2].policy;
+  first.finalize_module = {
+      .fn =
+          [](void* user_data, loom_module_t*, loom_low_lower_module_state_t*,
+             iree_arena_allocator_t*) {
+            static_cast<std::vector<int>*>(user_data)->push_back(1);
+            return iree_ok_status();
+          },
+      .user_data = &order,
+  };
+  loom_low_lower_policy_t second = first;
+  second.finalize_module.fn = [](void* user_data, loom_module_t*,
+                                 loom_low_lower_module_state_t*,
+                                 iree_arena_allocator_t*) {
+    static_cast<std::vector<int>*>(user_data)->push_back(2);
+    return iree_ok_status();
+  };
+  // Leading Low projections do not contribute finalizers. The inactive source
+  // prefix and repeated policies cannot change the first-use order.
+  selections.values[0].policy = &first;
+  selections.values[2].policy = &second;
+  selections.values[3].policy = &second;
+  selections.values[4].policy = &first;
+  selections.values[5].policy = &first;
+  loom_low_lower_module_state_t* module_state = nullptr;
+  IREE_ASSERT_OK(loom_low_lower_module_state_allocate(&arena, &module_state));
+  const iree_host_size_t retained_bytes = arena.used_allocation_size;
+  IREE_ASSERT_OK(loom_low_source_selection_finalize_policies(
+      module.get(), &selections, module_state, &arena));
+  EXPECT_EQ(order, (std::vector<int>{2, 1}));
+  EXPECT_EQ(selections.count, 6u);
+  EXPECT_EQ(arena.used_allocation_size, retained_bytes);
   iree_arena_deinitialize(&arena);
 }
 
@@ -517,8 +597,8 @@ TEST_F(LowLowerPassTest, ModuleInternalVersionLowersWithoutArtifactAbi) {
       &function_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
 
   IREE_ASSERT_OK(RunSourceToLow(&policy_registry_, module.get(), nullptr,
@@ -528,6 +608,105 @@ TEST_F(LowLowerPassTest, ModuleInternalVersionLowersWithoutArtifactAbi) {
             LOOM_TARGET_ABI_UNKNOWN);
   EXPECT_FALSE(loom_symbol_ref_is_valid(
       loom_low_func_def_target(function_version.base.function.op)));
+  iree_arena_deinitialize(&arena);
+}
+
+TEST_F(LowLowerPassTest, SourceLoweringRetainsExactAndBoundedLoopExecution) {
+  ModulePtr module =
+      Parse(IREE_SV("test.target<low_core> @target\n"
+                    "func.def target(@target) @exact_loop() {\n"
+                    "  %begin = index.constant 0 : index\n"
+                    "  %end = index.constant 4 : index\n"
+                    "  %step = index.constant 1 : index\n"
+                    "  cfg.br ^header(%begin: index)\n"
+                    "^header(%position: index):\n"
+                    "  %more = index.cmp slt, %position, %end : index\n"
+                    "  cfg.cond_br %more, ^body, ^exit\n"
+                    "^body:\n"
+                    "  %next = index.add %position, %step : index\n"
+                    "  cfg.br ^header(%next: index)\n"
+                    "^exit:\n"
+                    "  func.return\n"
+                    "}\n"
+                    "func.def target(@target) @bounded_loop(%end: index) {\n"
+                    "  %begin = index.constant 0 : index\n"
+                    "  %step = index.constant 1 : index\n"
+                    "  cfg.br ^header(%begin: index)\n"
+                    "^header(%position: index):\n"
+                    "  %more = index.cmp slt, %position, %end : index\n"
+                    "  cfg.cond_br %more, ^body, ^exit\n"
+                    "^body:\n"
+                    "  %next = index.add %position, %step : index\n"
+                    "  cfg.br ^header(%next: index)\n"
+                    "^exit:\n"
+                    "  func.return\n"
+                    "}\n"));
+
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool_, &arena);
+  loom_symbol_fact_table_t symbol_facts = {};
+  loom_symbol_fact_table_initialize(&symbol_facts, &arena);
+  const loom_symbol_ref_t target_ref =
+      FindSymbolRef(module.get(), IREE_SV("target"));
+  const loom_symbol_facts_base_t* base_target_facts = nullptr;
+  IREE_ASSERT_OK(loom_symbol_fact_table_lookup_ref(
+      &symbol_facts, module.get(), target_ref, &base_target_facts));
+  const loom_target_symbol_facts_t* target_facts =
+      loom_target_symbol_facts_cast(base_target_facts);
+  ASSERT_NE(target_facts, nullptr);
+
+  const loom_symbol_ref_t exact_ref =
+      FindSymbolRef(module.get(), IREE_SV("exact_loop"));
+  const loom_symbol_ref_t bounded_ref =
+      FindSymbolRef(module.get(), IREE_SV("bounded_loop"));
+  loom_target_function_version_t exact_version = {};
+  exact_version.base.type = &loom_target_function_version_type;
+  exact_version.base.function = loom_func_like_cast(
+      module.get(), module->symbols.entries[exact_ref.symbol_id].defining_op);
+  exact_version.function_target_facts = target_facts->projection;
+  loom_target_function_version_t bounded_version = {};
+  bounded_version.base.type = &loom_target_function_version_type;
+  bounded_version.base.function = loom_func_like_cast(
+      module.get(), module->symbols.entries[bounded_ref.symbol_id].defining_op);
+  bounded_version.function_target_facts = target_facts->projection;
+  loom_function_version_t* function_version_values[] = {
+      &exact_version.base,
+      &bounded_version.base,
+  };
+  const loom_function_version_list_t function_versions = {
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
+  };
+
+  IREE_ASSERT_OK(RunSourceToLow(&policy_registry_, module.get(), nullptr,
+                                &function_versions));
+  const auto expect_loop_fact =
+      [&](const loom_target_function_version_t& version,
+          uint64_t expected_count,
+          loom_low_loop_execution_count_kind_t expected_kind) {
+        ASSERT_NE(version.loop_execution, nullptr);
+        const loom_region_t* body = loom_func_like_body(version.base.function);
+        loom_low_loop_execution_index_t index = {};
+        IREE_ASSERT_OK(loom_low_loop_execution_index_build(
+            version.loop_execution, body, &arena, &index));
+        iree_host_size_t fact_count = 0;
+        for (uint16_t i = 0; i < body->block_count; ++i) {
+          const loom_block_t* block = loom_region_const_block(body, i);
+          const loom_low_loop_execution_facts_t* facts =
+              loom_low_loop_execution_index_lookup(&index, block);
+          if (facts == nullptr) {
+            continue;
+          }
+          ++fact_count;
+          ASSERT_TRUE(loom_low_cond_br_isa(block->last_op));
+          EXPECT_EQ(facts->trip_count, expected_count);
+          EXPECT_EQ(facts->count_kind, expected_kind);
+        }
+        EXPECT_EQ(fact_count, 1u);
+      };
+  expect_loop_fact(exact_version, 4, LOOM_LOW_LOOP_EXECUTION_COUNT_EXACT);
+  expect_loop_fact(bounded_version, INT64_MAX,
+                   LOOM_LOW_LOOP_EXECUTION_COUNT_BOUNDED);
   iree_arena_deinitialize(&arena);
 }
 
@@ -575,8 +754,8 @@ TEST_F(LowLowerPassTest,
       &function_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
 
   IREE_ASSERT_OK(RunFlatPipeline(
@@ -700,13 +879,13 @@ TEST_F(LowLowerPassTest,
   };
   loom_low_lower_policy_t policy = *loom_test_low_lower_policy();
   policy.contract.rule_sets = {
-      /*.count=*/IREE_ARRAYSIZE(rule_sets),
-      /*.values=*/rule_sets,
+      .count = IREE_ARRAYSIZE(rule_sets),
+      .values = rule_sets,
   };
   const loom_low_lower_policy_registry_entry_t entries[] = {
       {
-          /*.contract_set_key=*/IREE_SVL("test.low.core"),
-          /*.policy=*/&policy,
+          .contract_set_key = IREE_SVL("test.low.core"),
+          .policy = &policy,
       },
   };
   loom_low_lower_policy_registry_t policy_registry = {};
@@ -777,8 +956,9 @@ TEST_F(LowLowerPassTest, InvokeNormalizesToDirectLowCallWithPolicyPreserved) {
   EXPECT_EQ(loom_low_func_call_callee(call_op).module_id, helper_ref.module_id);
   EXPECT_EQ(loom_low_func_call_callee(call_op).symbol_id, helper_ref.symbol_id);
 
-  loom_target_provider_t direct_provider = {};
-  direct_provider.select_low_call_policy = PreserveDirectLowCalls;
+  loom_target_provider_t direct_provider = {
+      .select_call_policy = loom_target_select_call_policy_direct,
+  };
   loom_target_function_version_t entry_version = {};
   entry_version.base.type = &loom_target_function_version_type;
   entry_version.base.function = entry;
@@ -787,14 +967,54 @@ TEST_F(LowLowerPassTest, InvokeNormalizesToDirectLowCallWithPolicyPreserved) {
       &entry_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
 
   IREE_ASSERT_OK(RunInlineCallables(module.get(), &function_versions,
                                     IREE_SV("policy=target")));
   EXPECT_FALSE(iree_any_bit_set(call_op->flags, LOOM_OP_FLAG_DEAD));
   EXPECT_TRUE(HasSymbol(module.get(), IREE_SV("helper")));
+}
+
+TEST_F(LowLowerPassTest, DefinitionRejectionPreservesEarlierSourceSymbols) {
+  ModulePtr module = Parse(
+      IREE_SV("test.target<low_core> @target\n"
+              "func.decl target(@target) @valid(%input: i32) -> (i32)\n"
+              "func.def target(@target) @identity(%input: i32) -> (i32) {\n"
+              "  func.return %input : i32\n"
+              "}\n"
+              "func.def target(@target) @unsupported(%input: f64) {\n"
+              "  func.return\n"
+              "}\n"));
+  const loom_symbol_ref_t valid_ref =
+      FindSymbolRef(module.get(), IREE_SV("valid"));
+  const loom_symbol_ref_t unsupported_ref =
+      FindSymbolRef(module.get(), IREE_SV("unsupported"));
+  const loom_symbol_ref_t identity_ref =
+      FindSymbolRef(module.get(), IREE_SV("identity"));
+  const loom_op_t* identity =
+      module->symbols.entries[identity_ref.symbol_id].defining_op;
+  const loom_op_t* valid =
+      module->symbols.entries[valid_ref.symbol_id].defining_op;
+  const loom_op_t* unsupported =
+      module->symbols.entries[unsupported_ref.symbol_id].defining_op;
+  const iree_host_size_t initial_value_count = module->values.count;
+  const uint32_t op_count = loom_module_block(module.get())->op_count;
+
+  DiagnosticEmissionCollector collector;
+  IREE_ASSERT_OK(RunSourceToLow(&policy_registry_, module.get(), &collector));
+  EXPECT_EQ(collector.count, 1);
+  EXPECT_EQ(module->values.count, initial_value_count);
+  EXPECT_EQ(loom_module_block(module.get())->op_count, op_count);
+  EXPECT_EQ(module->symbols.entries[valid_ref.symbol_id].defining_op, valid);
+  EXPECT_EQ(module->symbols.entries[identity_ref.symbol_id].defining_op,
+            identity);
+  EXPECT_FALSE(iree_any_bit_set(identity->flags, LOOM_OP_FLAG_DEAD));
+  EXPECT_EQ(module->symbols.entries[unsupported_ref.symbol_id].defining_op,
+            unsupported);
+  EXPECT_FALSE(iree_any_bit_set(valid->flags, LOOM_OP_FLAG_DEAD));
+  EXPECT_FALSE(iree_any_bit_set(unsupported->flags, LOOM_OP_FLAG_DEAD));
 }
 
 TEST_F(LowLowerPassTest,
@@ -804,9 +1024,19 @@ TEST_F(LowLowerPassTest,
                     "    %input: reg<test.i32>) -> (reg<test.i32>) {\n"
                     "  %result = low.op<test.projectable_effect.i32>(%input) : "
                     "(reg<test.i32>) -> reg<test.i32>\n"
+                    "  low.op.cond_br<test.native.cond_br.i32>(%input, "
+                    "%result) {predicate = slt}, ^exit, ^exit : "
+                    "(reg<test.i32>, reg<test.i32>)\n"
+                    "^exit:\n"
                     "  low.return %result : reg<test.i32>\n"
-                    "}\n"));
+                    "}\n"
+                    "low.func.decl target<test.low.core> @project_import("
+                    "%input: reg<test.i32>) -> (reg<test.i32>)\n"));
 
+  const loom_symbol_ref_t import_ref =
+      FindSymbolRef(module.get(), IREE_SV("project_import"));
+  const loom_func_like_t import = loom_func_like_cast(
+      module.get(), module->symbols.entries[import_ref.symbol_id].defining_op);
   const loom_symbol_ref_t function_ref =
       FindSymbolRef(module.get(), IREE_SV("project_effect"));
   loom_func_like_t function = loom_func_like_cast(
@@ -817,26 +1047,29 @@ TEST_F(LowLowerPassTest,
   loom_op_t* packet = loom_region_entry_block(body)->first_op;
   ASSERT_NE(packet, nullptr);
   ASSERT_TRUE(loom_low_op_isa(packet));
+  loom_op_t* branch = packet->next_op;
+  ASSERT_NE(branch, nullptr);
+  ASSERT_TRUE(loom_low_op_cond_br_isa(branch));
   EXPECT_TRUE(iree_any_bit_set(packet->traits, LOOM_TRAIT_UNKNOWN_EFFECTS));
   EXPECT_TRUE(loom_region_has_read_effects(body));
   EXPECT_TRUE(loom_region_has_write_effects(body));
   EXPECT_FALSE(loom_region_has_convergent_effects(body));
 
   const loom_target_snapshot_t target_snapshot = {
-      /*.name=*/IREE_SVL("test-alt"),
+      .name = IREE_SVL("test-alt"),
   };
   const loom_target_export_plan_t target_export_plan = {
-      /*.name=*/IREE_SVL("test-alt-function"),
+      .name = IREE_SVL("test-alt-function"),
   };
   const loom_target_config_t target_config = {
-      /*.name=*/IREE_SVL("test.low.alt"),
-      /*.contract_set_key=*/IREE_SVL("test.low.alt"),
+      .name = IREE_SVL("test.low.alt"),
+      .contract_set_key = IREE_SVL("test.low.alt"),
   };
   const loom_target_bundle_t target_bundle = {
-      /*.name=*/IREE_SVL("test-alt"),
-      /*.snapshot=*/&target_snapshot,
-      /*.export_plan=*/&target_export_plan,
-      /*.config=*/&target_config,
+      .name = IREE_SVL("test-alt"),
+      .snapshot = &target_snapshot,
+      .export_plan = &target_export_plan,
+      .config = &target_config,
   };
   loom_target_facts_t target_facts = {};
   loom_target_facts_builder_initialize(&loom_test_target_fact_type,
@@ -849,14 +1082,71 @@ TEST_F(LowLowerPassTest,
 
   iree_arena_allocator_t arena;
   iree_arena_initialize(&block_pool_, &arena);
-  bool valid = false;
-  bool changed = false;
-  IREE_ASSERT_OK(loom_low_project_function_representation(
+  const loom_string_id_t authored_contract =
+      loom_func_like_repr_contract(function);
+  const loom_type_t authored_argument_type =
+      loom_block_arg_type(module.get(), loom_region_entry_block(body), 0);
+  const uint32_t authored_descriptor = loom_low_op_descriptor(packet);
+  const uint32_t authored_branch_descriptor =
+      loom_low_op_cond_br_descriptor(branch);
+  const loom_low_representation_projection_plan_t* plan = nullptr;
+  IREE_ASSERT_OK(loom_low_plan_function_representation(
       module.get(), function, &target_facts, &projection_registry.registry,
-      iree_diagnostic_emitter_t{}, &arena, &valid, &changed));
+      iree_diagnostic_emitter_t{}, &arena, &plan));
+  ASSERT_NE(plan, nullptr);
+  const loom_low_representation_projection_plan_t* import_plan = nullptr;
+  IREE_ASSERT_OK(loom_low_plan_function_representation(
+      module.get(), import, &target_facts, &projection_registry.registry,
+      iree_diagnostic_emitter_t{}, &arena, &import_plan));
+  ASSERT_NE(import_plan, nullptr);
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module.get(),
+                             loom_low_func_decl_args(import.op).values[0]),
+      authored_argument_type));
+  EXPECT_EQ(loom_func_like_repr_contract(import), authored_contract);
+  EXPECT_EQ(loom_func_like_repr_contract(function), authored_contract);
+  EXPECT_EQ(loom_low_op_descriptor(packet), authored_descriptor);
+  EXPECT_EQ(loom_low_op_cond_br_descriptor(branch), authored_branch_descriptor);
+  EXPECT_TRUE(loom_type_equal(
+      loom_block_arg_type(module.get(), loom_region_entry_block(body), 0),
+      authored_argument_type));
+  EXPECT_TRUE(iree_any_bit_set(packet->traits, LOOM_TRAIT_UNKNOWN_EFFECTS));
+  EXPECT_TRUE(loom_region_has_read_effects(body));
+  EXPECT_TRUE(loom_region_has_write_effects(body));
+  EXPECT_FALSE(loom_region_has_convergent_effects(body));
+
+  const loom_low_representation_projection_plan_t* plans[] = {plan,
+                                                              import_plan};
+  loom_low_representation_projection_index_t index = {};
+  IREE_ASSERT_OK(loom_low_representation_projection_index_build(
+      module.get(), plans, IREE_ARRAYSIZE(plans), &arena, &index));
+  EXPECT_EQ(loom_low_representation_projection_index_find(
+                &index, function_ref.symbol_id),
+            plan);
+  EXPECT_EQ(loom_low_representation_projection_index_find(&index,
+                                                          import_ref.symbol_id),
+            import_plan);
+  const loom_type_t projected_argument_type =
+      loom_low_representation_projection_argument_type(plan, 0);
+  const loom_type_t projected_result_type =
+      loom_low_representation_projection_result_type(plan, 0);
+  EXPECT_FALSE(
+      loom_type_equal(projected_argument_type, authored_argument_type));
+  EXPECT_TRUE(loom_type_equal(
+      loom_low_representation_projection_argument_type(import_plan, 0),
+      projected_argument_type));
+  EXPECT_TRUE(loom_type_equal(
+      loom_low_representation_projection_result_type(import_plan, 0),
+      projected_result_type));
+
+  bool changed = false;
+  IREE_ASSERT_OK(
+      loom_low_apply_function_representation(module.get(), plan, &changed));
+  EXPECT_TRUE(changed);
+  IREE_ASSERT_OK(loom_low_apply_function_representation(module.get(),
+                                                        import_plan, &changed));
   iree_arena_deinitialize(&arena);
 
-  EXPECT_TRUE(valid);
   EXPECT_TRUE(changed);
   EXPECT_FALSE(iree_any_bit_set(packet->traits, LOOM_TRAIT_UNKNOWN_EFFECTS));
   EXPECT_TRUE(iree_any_bit_set(packet->traits, LOOM_TRAIT_CONVERGENT));
@@ -873,6 +1163,29 @@ TEST_F(LowLowerPassTest,
       target_descriptor_set, IREE_SV("test.projectable_effect.i32"));
   ASSERT_NE(target_ordinal, LOOM_LOW_DESCRIPTOR_ORDINAL_NONE);
   EXPECT_EQ(loom_low_op_descriptor(packet), target_ordinal);
+  const uint32_t target_branch_ordinal =
+      loom_low_descriptor_set_lookup_descriptor(
+          target_descriptor_set, IREE_SV("test.native.cond_br.i32"));
+  ASSERT_NE(target_branch_ordinal, LOOM_LOW_DESCRIPTOR_ORDINAL_NONE);
+  EXPECT_EQ(loom_low_op_cond_br_descriptor(branch), target_branch_ordinal);
+  EXPECT_EQ(loom_func_like_repr_contract(import),
+            loom_func_like_repr_contract(function));
+  EXPECT_TRUE(loom_type_equal(
+      projected_argument_type,
+      loom_block_arg_type(module.get(), loom_region_entry_block(body), 0)));
+  EXPECT_TRUE(loom_type_equal(
+      projected_result_type,
+      loom_module_value_type(
+          module.get(), loom_low_func_def_results(function.op).values[0])));
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module.get(),
+                             loom_low_func_decl_args(import.op).values[0]),
+      loom_block_arg_type(module.get(), loom_region_entry_block(body), 0)));
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module.get(),
+                             loom_low_func_decl_results(import.op).values[0]),
+      loom_module_value_type(
+          module.get(), loom_low_func_def_results(function.op).values[0])));
 }
 
 TEST_F(LowLowerPassTest, InlineRetainsCalleeWithImmutableFunctionVersion) {
@@ -895,8 +1208,8 @@ TEST_F(LowLowerPassTest, InlineRetainsCalleeWithImmutableFunctionVersion) {
       &helper_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
 
   IREE_ASSERT_OK(RunInlineCallables(module.get(), &function_versions,
@@ -939,10 +1252,12 @@ TEST_F(LowLowerPassTest, LowCallPolicyIsSelectedPerCallerProvider) {
       "  low.return %result : reg<test.i32>\n"
       "}\n"));
 
-  loom_target_provider_t require_inline_provider = {};
-  require_inline_provider.select_low_call_policy = RequireInlineLowCalls;
-  loom_target_provider_t direct_provider = {};
-  direct_provider.select_low_call_policy = PreserveDirectLowCalls;
+  loom_target_provider_t require_inline_provider = {
+      .select_call_policy = loom_target_select_call_policy_require_inline,
+  };
+  loom_target_provider_t direct_provider = {
+      .select_call_policy = loom_target_select_call_policy_direct,
+  };
 
   const loom_symbol_ref_t required_caller_ref =
       FindSymbolRef(module.get(), IREE_SV("required_caller"));
@@ -965,8 +1280,8 @@ TEST_F(LowLowerPassTest, LowCallPolicyIsSelectedPerCallerProvider) {
       &direct_caller_version.base,
   };
   const loom_function_version_list_t function_versions = {
-      /*.values=*/function_version_values,
-      /*.count=*/IREE_ARRAYSIZE(function_version_values),
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
   };
 
   IREE_ASSERT_OK(RunInlineCallables(module.get(), &function_versions,
@@ -985,6 +1300,143 @@ TEST_F(LowLowerPassTest, LowCallPolicyIsSelectedPerCallerProvider) {
       loom_region_entry_block(loom_func_like_body(direct_caller));
   ASSERT_NE(direct_entry, nullptr);
   EXPECT_TRUE(loom_low_func_call_isa(direct_entry->first_op));
+}
+
+TEST_F(LowLowerPassTest, LowInliningTranslatesEveryLoopExecutionBinding) {
+  ModulePtr module = Parse(
+      IREE_SV("test.target<low_core> @target\n"
+              "low.func.def target<test.low.core>(@target) @helper(\n"
+              "    %condition: reg<test.i32>, %value: reg<test.i32>) -> "
+              "(reg<test.i32>) {\n"
+              "  low.br ^header\n"
+              "^header:\n"
+              "  low.cond_br %condition, ^body, ^exit : reg<test.i32>\n"
+              "^body:\n"
+              "  low.br ^header\n"
+              "^exit:\n"
+              "  low.return %value : reg<test.i32>\n"
+              "}\n"
+              "low.func.def public target<test.low.core>(@target) @caller(\n"
+              "    %condition: reg<test.i32>, %value: reg<test.i32>) -> "
+              "(reg<test.i32>) {\n"
+              "  %first = low.func.call @helper(%condition, %value) : "
+              "(reg<test.i32>, reg<test.i32>) -> (reg<test.i32>)\n"
+              "  %second = low.func.call @helper(%condition, %first) : "
+              "(reg<test.i32>, reg<test.i32>) -> (reg<test.i32>)\n"
+              "  low.return %second : reg<test.i32>\n"
+              "}\n"));
+
+  loom_target_provider_t provider = {
+      .select_call_policy = loom_target_select_call_policy_require_inline,
+  };
+  const loom_symbol_ref_t helper_ref =
+      FindSymbolRef(module.get(), IREE_SV("helper"));
+  const loom_symbol_ref_t caller_ref =
+      FindSymbolRef(module.get(), IREE_SV("caller"));
+  loom_target_function_version_t helper_version = {};
+  helper_version.base.type = &loom_target_function_version_type;
+  helper_version.base.function = loom_func_like_cast(
+      module.get(), module->symbols.entries[helper_ref.symbol_id].defining_op);
+  IREE_ASSERT_OK(loom_low_loop_execution_map_allocate(
+      &module->arena, &helper_version.loop_execution));
+  loom_block_t* helper_header =
+      loom_region_block(loom_func_like_body(helper_version.base.function), 1);
+  IREE_ASSERT_OK(loom_low_loop_execution_map_insert(
+      helper_version.loop_execution, helper_header->last_op,
+      {.trip_count = 4, .count_kind = LOOM_LOW_LOOP_EXECUTION_COUNT_EXACT}));
+  loom_target_function_version_t caller_version = {};
+  caller_version.base.type = &loom_target_function_version_type;
+  caller_version.base.function = loom_func_like_cast(
+      module.get(), module->symbols.entries[caller_ref.symbol_id].defining_op);
+  caller_version.resolved_target.provider = &provider;
+  loom_function_version_t* function_version_values[] = {
+      &helper_version.base,
+      &caller_version.base,
+  };
+  const loom_function_version_list_t function_versions = {
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
+  };
+
+  IREE_ASSERT_OK(RunInlineCallables(module.get(), &function_versions,
+                                    IREE_SV("policy=target")));
+  ASSERT_NE(caller_version.loop_execution, nullptr);
+  const loom_region_t* caller_body =
+      loom_func_like_body(caller_version.base.function);
+  iree_arena_allocator_t scratch_arena;
+  iree_arena_initialize(&block_pool_, &scratch_arena);
+  loom_low_loop_execution_index_t index = {};
+  IREE_ASSERT_OK(loom_low_loop_execution_index_build(
+      caller_version.loop_execution, caller_body, &scratch_arena, &index));
+  iree_host_size_t fact_count = 0;
+  for (uint16_t i = 0; i < caller_body->block_count; ++i) {
+    const loom_low_loop_execution_facts_t* facts =
+        loom_low_loop_execution_index_lookup(
+            &index, loom_region_const_block(caller_body, i));
+    if (facts == nullptr) {
+      continue;
+    }
+    ++fact_count;
+    EXPECT_EQ(facts->trip_count, 4u);
+    EXPECT_EQ(facts->count_kind, LOOM_LOW_LOOP_EXECUTION_COUNT_EXACT);
+  }
+  EXPECT_EQ(fact_count, 2u);
+  iree_arena_deinitialize(&scratch_arena);
+}
+
+TEST_F(LowLowerPassTest, CallPolicyDistinguishesSemanticAndLowStages) {
+  ModulePtr module = Parse(
+      IREE_SV("func.def @source_helper(%value: i32) -> (i32) {\n"
+              "  func.return %value : i32\n"
+              "}\n"
+              "func.def public @source_caller(%value: i32) -> (i32) {\n"
+              "  %result = func.call @source_helper(%value) : (i32) -> (i32)\n"
+              "  func.return %result : i32\n"
+              "}\n"
+              "low.func.def target<test.low.core> @low_helper(\n"
+              "    %value: reg<test.i32>) -> (reg<test.i32>) {\n"
+              "  low.return %value : reg<test.i32>\n"
+              "}\n"
+              "low.func.def public target<test.low.core> @low_caller(\n"
+              "    %value: reg<test.i32>) -> (reg<test.i32>) {\n"
+              "  %result = low.func.call @low_helper(%value) : "
+              "(reg<test.i32>) -> (reg<test.i32>)\n"
+              "  low.return %result : reg<test.i32>\n"
+              "}\n"));
+
+  loom_target_provider_t provider = {
+      .select_call_policy = RequireInlineSemanticCalls,
+  };
+
+  const loom_symbol_ref_t source_caller_ref =
+      FindSymbolRef(module.get(), IREE_SV("source_caller"));
+  const loom_symbol_ref_t low_caller_ref =
+      FindSymbolRef(module.get(), IREE_SV("low_caller"));
+  loom_target_function_version_t source_caller_version = {};
+  source_caller_version.base.type = &loom_target_function_version_type;
+  source_caller_version.base.function = loom_func_like_cast(
+      module.get(),
+      module->symbols.entries[source_caller_ref.symbol_id].defining_op);
+  source_caller_version.resolved_target.provider = &provider;
+  loom_target_function_version_t low_caller_version = {};
+  low_caller_version.base.type = &loom_target_function_version_type;
+  low_caller_version.base.function = loom_func_like_cast(
+      module.get(),
+      module->symbols.entries[low_caller_ref.symbol_id].defining_op);
+  low_caller_version.resolved_target.provider = &provider;
+  loom_function_version_t* function_version_values[] = {
+      &source_caller_version.base,
+      &low_caller_version.base,
+  };
+  const loom_function_version_list_t function_versions = {
+      .values = function_version_values,
+      .count = IREE_ARRAYSIZE(function_version_values),
+  };
+
+  IREE_ASSERT_OK(RunInlineCallables(module.get(), &function_versions,
+                                    IREE_SV("policy=target")));
+  EXPECT_FALSE(HasSymbol(module.get(), IREE_SV("source_helper")));
+  EXPECT_TRUE(HasSymbol(module.get(), IREE_SV("low_helper")));
 }
 
 }  // namespace

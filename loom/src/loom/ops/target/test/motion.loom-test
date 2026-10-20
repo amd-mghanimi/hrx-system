@@ -1,0 +1,53 @@
+// A captured construction query and an independent worker query name different
+// execution targets, even though their op syntax and result types are identical.
+// RUN: pass cse
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+pipeline.def public target(@construction) @query_worker() run(%output: channel<tile<2xi32>>) {
+  %construction_width = target.subgroup.size : index
+  %construction_value = index.cast %construction_width : index to i32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %worker_width = target.subgroup.size : index
+    %worker_value = index.cast %worker_width : index to i32
+    view.store %construction_value, %record[0] : i32, view<2xi32>
+    view.store %worker_value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ====
+
+// A contextual query is still pure. Erasing an unused query has no effects.
+// RUN: pass dce
+func.def @unused_query() {
+  %width = target.subgroup.size : index
+  func.return
+}
+
+// ----
+func.def @unused_query() {
+  func.return
+}
+
+// ====
+
+// A resolved query still folds, allowing ordinary constant propagation and CSE.
+// RUN: pass canonicalize,cse
+test.target<low_core> @worker {subgroup_size = 32}
+
+func.def target(@worker) @resolved_queries() -> (index, index) {
+  %first = target.subgroup.size : index
+  %second = target.subgroup.size : index
+  func.return %first, %second : index, index
+}
+
+// ----
+test.target<low_core> @worker {subgroup_size = 32}
+
+func.def target(@worker) @resolved_queries() -> (index, index) {
+  %first = index.constant 32 : index
+  func.return %first, %first : index, index
+}

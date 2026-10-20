@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_bfloat_widen.loom
 // RUN: emit source-low target=amd.xdna.aie2p:core output=low
 
 func.def @widen_bfloat(%input: bf16) -> (f32) {
@@ -85,17 +84,13 @@ low.func.def target<amd.xdna.aie2p.core> abi(object_function) @bfloat_pair_sum()
   %second_wide = lshl %second, %22
   %26 = vbcst.32 %first_wide
   %27 = vbcst.32 %second_wide
-  %28 = acc.clear.f32x64
-  %29 = slice %28[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %30 = vmov.vector512.to.accumulator512 %26
-  %31 = concat(%30, %29, %29, %29) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %32 = vmov.vector512.to.accumulator512 %27
-  %33 = concat(%32, %29, %29, %29) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %34 = mova.i32 60
-  %35 = vadd.f32x64 %31, %33, %34
-  %36 = slice %35[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %37 = vmov.accumulator512.to.vector512 %36
-  %sum = vextract.32.imm %37, 0
+  %28 = vmov.vector512.to.accumulator512.low %26
+  %29 = vmov.vector512.to.accumulator512.low %27
+  %30 = mova.i32 60
+  %31 = vadd.f32x16 %28, %29, %30
+  %32 = slice %31[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %33 = vmov.accumulator512.to.vector512 %32
+  %sum = vextract.32.imm %33, 0
   return %sum
 }
 

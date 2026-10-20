@@ -139,7 +139,7 @@ kernel.def target(@hip_mcpu_gfx11_generic) export("effect_tir_assume") @effect_t
   %src_view = buffer.view %src_noalias[%c0_bytes] : buffer -> view<4xf32, %layout>
   %dst_noalias = buffer.assume.noalias %dst : buffer
   %dst_view = buffer.view %dst_noalias[%c0_bytes] : buffer -> view<4xf32, %layout>
-  %n_assumed = scalar.assume %n [mul(%n, 16)] : i32
+  %n_assumed = scalar.assume %n [multiple_of(%n, 16)] : i32
   %c0 = index.constant 0 : index
   %load = view.load %src_view[%c0] : view<4xf32, %layout> -> f32
   view.store %load, %dst_view[%c0] : f32, view<4xf32, %layout>
@@ -462,7 +462,7 @@ kernel.def target(@hip_mcpu_gfx11_generic) export("assume_or_static_false") @ass
   %tx = kernel.workitem.id<x> : index
   %ty = kernel.workitem.id<y> : index
   %tz = kernel.workitem.id<z> : index
-  %n_assumed = scalar.assume %n [mul(%n, 128)] : i32
+  %n_assumed = scalar.assume %n [multiple_of(%n, 128)] : i32
   %c0 = index.constant 0 : index
   %load = view.load %src[%c0] : view<1xf32, %layout> -> f32
   view.store %load, %dst[%c0] : f32, view<1xf32, %layout>

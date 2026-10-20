@@ -24,6 +24,14 @@
   IREE_HAL_AMDGPU_LIBHSA_PFN
 #endif  // !IREE_HAL_AMDGPU_LIBHSA_LEAK_CHECK_DISABLED_PFN
 
+// Optional entry points use the same declarations and call thunks as required
+// entry points. Dynamic loaders may override this macro to leave a missing
+// symbol null and let its owning consumer select a compatible fallback.
+#if !defined(IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN)
+#define IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN \
+  IREE_HAL_AMDGPU_LIBHSA_LEAK_CHECK_DISABLED_PFN
+#endif  // !IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN
+
 //===----------------------------------------------------------------------===//
 // Library/System Management
 //===----------------------------------------------------------------------===//
@@ -386,19 +394,19 @@ IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_SIGNALS, void, hsa_signal_xor_screlease,
                            ARGS(signal, value))
 
 IREE_HAL_AMDGPU_LIBHSA_PFN(
-    TRACE_ALWAYS, hsa_signal_value_t, hsa_signal_wait_scacquire,
+    TRACE_NONE, hsa_signal_value_t, hsa_signal_wait_scacquire,
     DECL(hsa_signal_t signal, hsa_signal_condition_t condition,
          hsa_signal_value_t compare_value, uint64_t timeout_hint,
          hsa_wait_state_t wait_state_hint),
     ARGS(signal, condition, compare_value, timeout_hint, wait_state_hint))
 IREE_HAL_AMDGPU_LIBHSA_PFN(
-    TRACE_ALWAYS, hsa_signal_value_t, hsa_signal_wait_relaxed,
+    TRACE_NONE, hsa_signal_value_t, hsa_signal_wait_relaxed,
     DECL(hsa_signal_t signal, hsa_signal_condition_t condition,
          hsa_signal_value_t compare_value, uint64_t timeout_hint,
          hsa_wait_state_t wait_state_hint),
     ARGS(signal, condition, compare_value, timeout_hint, wait_state_hint))
 
-IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_ALWAYS, uint32_t, hsa_amd_signal_wait_all,
+IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_NONE, uint32_t, hsa_amd_signal_wait_all,
                            DECL(uint32_t signal_count, hsa_signal_t* signals,
                                 hsa_signal_condition_t* conds,
                                 hsa_signal_value_t* values,
@@ -407,7 +415,7 @@ IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_ALWAYS, uint32_t, hsa_amd_signal_wait_all,
                                 hsa_signal_value_t* satisfying_values),
                            ARGS(signal_count, signals, conds, values,
                                 timeout_hint, wait_hint, satisfying_values))
-IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_ALWAYS, uint32_t, hsa_amd_signal_wait_any,
+IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_NONE, uint32_t, hsa_amd_signal_wait_any,
                            DECL(uint32_t signal_count, hsa_signal_t* signals,
                                 hsa_signal_condition_t* conds,
                                 hsa_signal_value_t* values,
@@ -441,11 +449,13 @@ IREE_HAL_AMDGPU_LIBHSA_LEAK_CHECK_DISABLED_PFN(
     ARGS(agent, size, type, callback, data, private_segment_size,
          group_segment_size, queue))
 
-IREE_HAL_AMDGPU_LIBHSA_LEAK_CHECK_DISABLED_PFN(
+#if IREE_HAL_AMDGPU_HAVE_HSA_AMD_QUEUE_CREATE
+IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN(
     TRACE_ALWAYS, hsa_status_t, hsa_amd_queue_create,
     DECL(hsa_agent_t agent, hsa_amd_queue_create_desc_t* descs,
          uint32_t num_descs),
     ARGS(agent, descs, num_descs))
+#endif  // IREE_HAL_AMDGPU_HAVE_HSA_AMD_QUEUE_CREATE
 
 IREE_HAL_AMDGPU_LIBHSA_PFN(
     TRACE_ALWAYS, hsa_status_t, hsa_soft_queue_create,
@@ -617,5 +627,6 @@ IREE_HAL_AMDGPU_LIBHSA_PFN(TRACE_ALWAYS, hsa_status_t,
 
 #undef IREE_HAL_AMDGPU_LIBHSA_PFN
 #undef IREE_HAL_AMDGPU_LIBHSA_LEAK_CHECK_DISABLED_PFN
+#undef IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN
 #undef DECL
 #undef ARGS

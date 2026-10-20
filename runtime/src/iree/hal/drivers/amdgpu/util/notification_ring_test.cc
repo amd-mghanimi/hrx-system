@@ -63,7 +63,7 @@ static void DestroyReleaseOrderResource(iree_hal_resource_t* base_resource) {
 }
 
 static const iree_hal_resource_vtable_t kReleaseOrderResourceVTable = {
-    /*.destroy=*/DestroyReleaseOrderResource,
+    .destroy = DestroyReleaseOrderResource,
 };
 
 static void VerifySemaphoreNotVisibleBeforePreSignalAction(
@@ -284,6 +284,46 @@ TEST_F(NotificationRingTest, SingleNotification) {
           ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
       0u);
 
+  iree_async_semaphore_release(semaphore);
+}
+
+TEST_F(NotificationRingTest, DeviceCompletionWaitsForHostPublication) {
+  IREE_ASSERT_OK_AND_ASSIGN(auto ring, InitializeRing());
+  iree_async_semaphore_t* semaphore = CreateSemaphore();
+  PreSignalActionState action_state = {semaphore, 0};
+  auto* reclaim_entry = ReclaimEntryForNextEpoch(ring.get(), 64);
+  reclaim_entry->pre_signal_action = {
+      VerifySemaphoreNotVisibleBeforePreSignalAction, &action_state};
+  const uint64_t epoch =
+      iree_hal_amdgpu_notification_ring_advance_epoch(ring.get());
+  PushNotification(ring.get(), epoch, semaphore, 1);
+
+  // The GPU can finish assembled packets while the submitting thread still
+  // holds their host resources. Neither retirement nor user completion is
+  // visible until that thread publishes its final resource accesses.
+  iree_hsa_signal_store_screlease(
+      IREE_LIBHSA(&libhsa), ring->epoch.signal,
+      (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch));
+  uint64_t kernarg_position = 0;
+  EXPECT_EQ(
+      iree_hal_amdgpu_notification_ring_drain(
+          ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
+      0u);
+  EXPECT_EQ(action_state.callback_count, 0);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore), 0u);
+  EXPECT_EQ(kernarg_position, 0u);
+  EXPECT_EQ(
+      iree_atomic_load(&ring->epoch.last_drained, iree_memory_order_acquire),
+      0);
+
+  iree_hal_amdgpu_notification_ring_publish_epoch(ring.get(), epoch);
+  EXPECT_EQ(
+      iree_hal_amdgpu_notification_ring_drain(
+          ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
+      1u);
+  EXPECT_EQ(action_state.callback_count, 1);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore), 1u);
+  EXPECT_EQ(kernarg_position, 64u);
   iree_async_semaphore_release(semaphore);
 }
 
@@ -702,12 +742,15 @@ TEST_F(NotificationRingTest, QueueOwnedReclaimPositionReporting) {
 
   SimulateCompletions(ring.get(), 2);
   iree_hal_amdgpu_reclaim_positions_t reclaim_positions = {0};
-  EXPECT_EQ(
-      iree_hal_amdgpu_notification_ring_drain_reclaim_positions(
-          ring.get(), EmptyFrontier(), nullptr, nullptr, &reclaim_positions),
-      0u);
+  iree_hal_amdgpu_notification_epoch_snapshot_t epoch_snapshot = {0};
+  EXPECT_EQ(iree_hal_amdgpu_notification_ring_drain_reclaim_positions(
+                ring.get(), EmptyFrontier(), nullptr, nullptr,
+                &reclaim_positions, &epoch_snapshot),
+            0u);
   EXPECT_EQ(reclaim_positions.kernarg_write_position, 192u);
   EXPECT_EQ(reclaim_positions.queue_upload_write_position, 256u);
+  EXPECT_EQ(epoch_snapshot.completed_epoch, 2u);
+  EXPECT_EQ(epoch_snapshot.published_epoch, 2u);
 }
 
 TEST_F(NotificationRingTest, KernargPositionReportingForZeroSignalEpochs) {
@@ -743,15 +786,15 @@ TEST_F(NotificationRingTest, PreSignalActionRunsBeforeSemaphorePublication) {
   IREE_ASSERT_OK_AND_ASSIGN(auto ring, InitializeRing());
   iree_async_semaphore_t* semaphore = CreateSemaphore();
   PreSignalActionState action_state = {
-      /*.semaphore=*/semaphore,
-      /*.callback_count=*/0,
+      .semaphore = semaphore,
+      .callback_count = 0,
   };
 
   iree_hal_amdgpu_reclaim_entry_t* reclaim_entry =
       ReclaimEntryForNextEpoch(ring.get());
   reclaim_entry->pre_signal_action = {
-      /*.fn=*/VerifySemaphoreNotVisibleBeforePreSignalAction,
-      /*.user_data=*/&action_state,
+      .fn = VerifySemaphoreNotVisibleBeforePreSignalAction,
+      .user_data = &action_state,
   };
   uint64_t epoch = iree_hal_amdgpu_notification_ring_advance_epoch(ring.get());
   PushNotification(ring.get(), epoch, semaphore, 1);
@@ -807,11 +850,11 @@ TEST_F(NotificationRingTest, RetireCallbackRunsBeforeSemaphorePublication) {
   IREE_ASSERT_OK_AND_ASSIGN(auto ring, InitializeRing());
   iree_async_semaphore_t* semaphore = CreateSemaphore();
   RetireCallbackState callback_state = {
-      /*.semaphore=*/semaphore,
-      /*.entry=*/nullptr,
-      /*.epoch=*/0,
-      /*.flags=*/IREE_HAL_AMDGPU_RECLAIM_RETIRE_FLAG_NONE,
-      /*.callback_count=*/0,
+      .semaphore = semaphore,
+      .entry = nullptr,
+      .epoch = 0,
+      .flags = IREE_HAL_AMDGPU_RECLAIM_RETIRE_FLAG_NONE,
+      .callback_count = 0,
   };
 
   iree_hal_amdgpu_reclaim_entry_t* reclaim_entry =
@@ -841,15 +884,15 @@ TEST_F(NotificationRingTest, FailAllRetireCallbackRunsBeforeSemaphoreFailure) {
   IREE_ASSERT_OK_AND_ASSIGN(auto ring, InitializeRing());
   iree_async_semaphore_t* semaphore = CreateSemaphore();
   PreSignalActionState action_state = {
-      /*.semaphore=*/semaphore,
-      /*.callback_count=*/0,
+      .semaphore = semaphore,
+      .callback_count = 0,
   };
   RetireCallbackState callback_state = {
-      /*.semaphore=*/semaphore,
-      /*.entry=*/nullptr,
-      /*.epoch=*/0,
-      /*.flags=*/IREE_HAL_AMDGPU_RECLAIM_RETIRE_FLAG_NONE,
-      /*.callback_count=*/0,
+      .semaphore = semaphore,
+      .entry = nullptr,
+      .epoch = 0,
+      .flags = IREE_HAL_AMDGPU_RECLAIM_RETIRE_FLAG_NONE,
+      .callback_count = 0,
   };
 
   iree_hal_amdgpu_reclaim_entry_t* reclaim_entry =
@@ -869,8 +912,8 @@ TEST_F(NotificationRingTest, FailAllRetireCallbackRunsBeforeSemaphoreFailure) {
   reclaim_entry->signal_semaphore_count = 1;
   reclaim_entry->count = 2;
   reclaim_entry->pre_signal_action = {
-      /*.fn=*/VerifySemaphoreNotVisibleBeforeFailedPreSignalAction,
-      /*.user_data=*/&action_state,
+      .fn = VerifySemaphoreNotVisibleBeforeFailedPreSignalAction,
+      .user_data = &action_state,
   };
   uint64_t epoch = iree_hal_amdgpu_notification_ring_advance_epoch(ring.get());
   PushNotification(ring.get(), epoch, semaphore, 1);

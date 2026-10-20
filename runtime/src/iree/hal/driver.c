@@ -17,17 +17,71 @@
 
 IREE_HAL_API_RETAIN_RELEASE(driver);
 
+typedef struct iree_hal_device_uri_runtime_feature_t {
+  // Bare URI parameter selecting the runtime service.
+  iree_string_view_t key;
+  // Generic device-creation feature enabled by the parameter.
+  iree_hal_device_runtime_feature_flags_t flag;
+} iree_hal_device_uri_runtime_feature_t;
+
+static const iree_hal_device_uri_runtime_feature_t
+    iree_hal_device_uri_runtime_features[] = {
+        {IREE_SVL("feedback"), IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK},
+        {IREE_SVL("asan"), IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_ASAN},
+        {IREE_SVL("tsan"), IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_TSAN},
+};
+static_assert((IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK |
+               IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_ASAN |
+               IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_TSAN) ==
+                  IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAGS_KNOWN,
+              "device URI parameters must cover every runtime feature");
+
+// Consumes generic bare URI parameters into |inout_create_params| and compacts
+// the remaining driver-specific parameters in place.
+static iree_status_t iree_hal_driver_consume_runtime_feature_params(
+    iree_host_size_t* inout_param_count, iree_string_pair_t* params,
+    iree_hal_device_create_params_t* inout_create_params) {
+  iree_host_size_t remaining_count = 0;
+  for (iree_host_size_t i = 0; i < *inout_param_count; ++i) {
+    const iree_string_pair_t param = params[i];
+    const iree_hal_device_uri_runtime_feature_t* feature = NULL;
+    for (iree_host_size_t j = 0;
+         j < IREE_ARRAYSIZE(iree_hal_device_uri_runtime_features); ++j) {
+      if (iree_string_view_equal(param.key,
+                                 iree_hal_device_uri_runtime_features[j].key)) {
+        feature = &iree_hal_device_uri_runtime_features[j];
+        break;
+      }
+    }
+    if (!feature) {
+      params[remaining_count++] = param;
+      continue;
+    }
+    if (!iree_string_view_is_empty(param.value)) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "device URI runtime service '%.*s' does not accept a value",
+          (int)param.key.size, param.key.data);
+    }
+    inout_create_params->runtime_features |= feature->flag;
+  }
+  *inout_param_count = remaining_count;
+  return iree_ok_status();
+}
+
 IREE_API_EXPORT iree_status_t iree_hal_driver_query_available_devices(
-    iree_hal_driver_t* driver, iree_allocator_t host_allocator,
-    iree_host_size_t* out_device_info_count,
+    iree_hal_driver_t* driver, iree_string_view_t driver_name,
+    iree_allocator_t host_allocator, iree_host_size_t* out_device_info_count,
     iree_hal_device_info_t** out_device_infos) {
   IREE_ASSERT_ARGUMENT(driver);
   IREE_ASSERT_ARGUMENT(out_device_info_count);
   IREE_ASSERT_ARGUMENT(out_device_infos);
   *out_device_info_count = 0;
+  *out_device_infos = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
   iree_status_t status = _VTABLE_DISPATCH(driver, query_available_devices)(
-      driver, host_allocator, out_device_info_count, out_device_infos);
+      driver, driver_name, host_allocator, out_device_info_count,
+      out_device_infos);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -45,8 +99,9 @@ IREE_API_EXPORT iree_status_t iree_hal_driver_dump_device_info(
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_driver_create_device_by_ordinal(
-    iree_hal_driver_t* driver, iree_host_size_t device_ordinal,
-    iree_host_size_t param_count, const iree_string_pair_t* params,
+    iree_hal_driver_t* driver, iree_string_view_t driver_name,
+    iree_host_size_t device_ordinal, iree_host_size_t param_count,
+    const iree_string_pair_t* params,
     const iree_hal_device_create_params_t* create_params,
     iree_allocator_t host_allocator, iree_hal_device_t** out_device) {
   IREE_ASSERT_ARGUMENT(driver);
@@ -62,9 +117,9 @@ IREE_API_EXPORT iree_status_t iree_hal_driver_create_device_by_ordinal(
   // Query the devices from the driver.
   iree_host_size_t device_info_count = 0;
   iree_hal_device_info_t* device_infos = NULL;
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_driver_query_available_devices(
-              driver, host_allocator, &device_info_count, &device_infos));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_driver_query_available_devices(
+                                            driver, driver_name, host_allocator,
+                                            &device_info_count, &device_infos));
 
   // Get the ID of the Nth device.
   iree_hal_device_id_t device_id = IREE_HAL_DEVICE_ID_DEFAULT;
@@ -173,10 +228,16 @@ IREE_API_EXPORT iree_status_t iree_hal_driver_create_device_by_uri(
     }
   }
 
-  // Have the driver create the device.
-  iree_status_t status = iree_hal_driver_create_device_by_path(
-      driver, driver_name, device_path, param_count, params, create_params,
-      host_allocator, out_device);
+  // Resolve generic runtime services and leave backend-specific parameters for
+  // the driver. Programmatic requirements compose with URI requirements.
+  iree_hal_device_create_params_t resolved_create_params = *create_params;
+  iree_status_t status = iree_hal_driver_consume_runtime_feature_params(
+      &param_count, params, &resolved_create_params);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_driver_create_device_by_path(
+        driver, driver_name, device_path, param_count, params,
+        &resolved_create_params, host_allocator, out_device);
+  }
   if (!iree_status_is_ok(status)) {
     status = iree_status_annotate_f(status, "creating device '%.*s'",
                                     (int)device_uri.size, device_uri.data);

@@ -177,6 +177,52 @@ iree_status_t iree_hal_cmd_build_update(iree_hal_cmd_block_builder_t* builder,
   return iree_ok_status();
 }
 
+iree_status_t iree_hal_cmd_build_fence(iree_hal_cmd_block_builder_t* builder,
+                                       iree_hal_atomic_flags_t atomic_flags) {
+  IREE_ASSERT_ARGUMENT(builder);
+  iree_hal_cmd_fence_t* command = NULL;
+  IREE_RETURN_IF_ERROR(iree_hal_cmd_block_builder_append_cmd(
+      builder, IREE_HAL_CMD_FENCE, IREE_HAL_CMD_FLAG_NONE, sizeof(*command),
+      /*fixup_count=*/0, /*binding_count=*/0,
+      /*tile_count=*/1, (void**)&command, /*out_fixups=*/NULL));
+  command->atomic_flags = atomic_flags;
+  return iree_ok_status();
+}
+
+//===----------------------------------------------------------------------===//
+// Cache maintenance
+//===----------------------------------------------------------------------===//
+
+iree_status_t iree_hal_cmd_build_cache(
+    iree_hal_cmd_block_builder_t* builder,
+    const iree_hal_memory_transition_recipe_info_t* recipe,
+    iree_hal_buffer_ref_t buffer_ref, iree_hal_cmd_fixup_t** out_fixups,
+    iree_hal_cmd_build_token_t* out_token) {
+  const uint16_t binding_count =
+      recipe->executor == IREE_HAL_MEMORY_TRANSITION_EXECUTOR_HOST_DIRECT ? 1
+                                                                          : 0;
+  iree_hal_cmd_cache_t* command = NULL;
+  *out_fixups = NULL;
+  *out_token = (iree_hal_cmd_build_token_t){
+      .cmd_bytes = sizeof(*command),
+      .flags = IREE_HAL_CMD_FLAG_NONE,
+      .fixup_count = binding_count,
+      .binding_count = binding_count,
+      .tile_count = 1,
+  };
+  IREE_RETURN_IF_ERROR(iree_hal_cmd_block_builder_append_cmd(
+      builder, IREE_HAL_CMD_CACHE, IREE_HAL_CMD_FLAG_NONE, sizeof(*command),
+      binding_count, binding_count, 1, (void**)&command, out_fixups));
+  command->recipe = *recipe;
+  command->buffer_ref = buffer_ref;
+  if (binding_count) {
+    command->target_binding = builder->total_binding_count - 1;
+    (*out_fixups)[0].data_index = command->target_binding;
+  }
+  out_token->command = &command->header;
+  return iree_ok_status();
+}
+
 //===----------------------------------------------------------------------===//
 // ATOMIC
 //===----------------------------------------------------------------------===//
@@ -314,10 +360,6 @@ iree_status_t iree_hal_cmd_build_dispatch(
   }
 
   // Validate constants.
-  if (IREE_UNLIKELY((constants.data_length % sizeof(uint32_t)) != 0)) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "constants must be 4-byte aligned");
-  }
   const iree_host_size_t expected_constant_length =
       dispatch_attrs.constant_byte_length;
   if (IREE_UNLIKELY(constants.data_length != expected_constant_length)) {
@@ -326,8 +368,6 @@ iree_status_t iree_hal_cmd_build_dispatch(
                             " but was provided %" PRIhsz,
                             expected_constant_length, constants.data_length);
   }
-  const iree_host_size_t constant_count =
-      dispatch_attrs.constant_byte_length / sizeof(uint32_t);
 
   // Validate bindings.
   if (IREE_UNLIKELY(binding_count != dispatch_attrs.binding_count)) {
@@ -358,9 +398,19 @@ iree_status_t iree_hal_cmd_build_dispatch(
   // Append the command and reserve fixup storage for all bindings.
   iree_hal_cmd_dispatch_t* cmd = NULL;
   iree_hal_cmd_fixup_t* fixups = NULL;
-  const iree_hal_cmd_flags_t cmd_flags = uses_indirect_parameters
-                                             ? IREE_HAL_CMD_FLAG_INDIRECT
-                                             : IREE_HAL_CMD_FLAG_NONE;
+  iree_hal_cmd_flags_t cmd_flags = uses_indirect_parameters
+                                       ? IREE_HAL_CMD_FLAG_INDIRECT
+                                       : IREE_HAL_CMD_FLAG_NONE;
+  if (iree_any_bit_set(
+          dispatch_attrs.flags,
+          IREE_HAL_EXECUTABLE_DISPATCH_FLAG_V0_PRESERVE_SUBNORMAL_INPUTS)) {
+    cmd_flags |= IREE_HAL_CMD_FLAG_PRESERVE_SUBNORMAL_INPUTS;
+  }
+  if (iree_any_bit_set(
+          dispatch_attrs.flags,
+          IREE_HAL_EXECUTABLE_DISPATCH_FLAG_V0_PRESERVE_SUBNORMAL_RESULTS)) {
+    cmd_flags |= IREE_HAL_CMD_FLAG_PRESERVE_SUBNORMAL_RESULTS;
+  }
   out_token->command = NULL;
   out_token->cmd_bytes = cmd_bytes;
   out_token->flags = cmd_flags;
@@ -375,7 +425,7 @@ iree_status_t iree_hal_cmd_build_dispatch(
       (uint16_t)(builder->total_binding_count - total_binding_count);
 
   // Fill dispatch command fields.
-  cmd->constant_count = (uint8_t)constant_count;
+  cmd->constant_byte_length = dispatch_attrs.constant_byte_length;
   cmd->binding_count = dispatch_attrs.binding_count;
   cmd->binding_data_base = binding_data_base;
   cmd->executable = task_executable;

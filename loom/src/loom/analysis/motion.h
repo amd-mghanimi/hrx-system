@@ -35,7 +35,9 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
 #include "loom/analysis/availability.h"
+#include "loom/analysis/motion_policy.h"
 #include "loom/analysis/movement.h"
+#include "loom/analysis/read_motion.h"
 #include "loom/ir/ir.h"
 #include "loom/ir/local_value_domain.h"
 #include "loom/ops/op_defs.h"
@@ -57,6 +59,8 @@ typedef struct loom_motion_region_stack_t {
   iree_host_size_t capacity;
 } loom_motion_region_stack_t;
 
+typedef struct loom_motion_memory_t loom_motion_memory_t;
+
 typedef struct loom_motion_analysis_t {
   // Module containing the IR being queried.
   const loom_module_t* module;
@@ -72,8 +76,8 @@ typedef struct loom_motion_analysis_t {
   loom_movement_analysis_t movement;
   // True when movement owns initialized analysis storage.
   bool movement_initialized;
-  // True when the movement table has analyzed the local region tree.
-  bool movement_analyzed;
+  // Demand-built write and ordering snapshot, retained across legal hoists.
+  loom_motion_memory_t* memory;
   // Reusable stack for subtree region walks.
   loom_motion_region_stack_t region_stack;
 } loom_motion_analysis_t;
@@ -88,6 +92,11 @@ typedef struct loom_motion_read_barrier_table_t
 // tree. |fact_table| and |value_domain| may both be NULL for effect-free
 // relocation clients. Memory-aware loop placement requires both. The caller
 // owns all borrowed state and must keep it live for the analysis lifetime.
+// Memory queries retain write/ordering evidence. Moving ordinary reads and
+// effect-free subtrees preserves that evidence. Changing effects, operands,
+// their enclosing loop scopes, or region block topology requires a new
+// analysis instance. Availability is queried at each proposed insertion point
+// rather than cached across moves.
 iree_status_t loom_motion_analysis_initialize_region(
     const loom_module_t* module, const loom_region_t* region,
     loom_value_fact_table_t* fact_table,
@@ -121,7 +130,7 @@ typedef struct loom_motion_loop_hoist_result_t {
   loom_motion_loop_hoist_rejection_flags_t rejection_bits;
   // Movement classifier details when MOVEMENT_UNAVAILABLE is set.
   loom_movement_rejection_flags_t movement_rejection_bits;
-  // First operation proving the rejection, or NULL when no op applies.
+  // Operation proving the rejection, or NULL when no op applies.
   const loom_op_t* blocking_op;
 } loom_motion_loop_hoist_result_t;
 
@@ -139,53 +148,10 @@ iree_status_t loom_motion_subtree_evaluate_hoist_before_loop(
     loom_motion_analysis_t* analysis, loom_loop_like_t loop,
     const loom_op_t* candidate_op, loom_motion_loop_hoist_result_t* out_result);
 
-//===----------------------------------------------------------------------===//
-// Local classification
-//===----------------------------------------------------------------------===//
-
-// Local classification checks direct op traits and retained region summaries,
-// not recursive SSA availability. Use the subtree queries below when moving an
-// op with nested regions or when an insertion point is known.
-
-// Returns true if |op| has no live uses, no retained compiler hints, and no
-// semantic effects that must keep it in the IR.
-bool loom_motion_op_can_erase(const loom_module_t* module, const loom_op_t* op);
-
-// Returns true if |op| may be moved by a transform that preserves the original
-// dynamic execution predicate. This rejects tied results, terminator roots,
-// hints, convergence, pending source expansion, unknown effects, reads, writes,
-// and nondeterminism. It intentionally does not reject UNIQUE_IDENTITY beyond
-// the ordinary purity/effect checks: relocating one execution site without
-// duplicating it is not CSE.
-bool loom_motion_op_can_relocate_effect_free(const loom_module_t* module,
-                                             const loom_op_t* op);
-
-// Returns true if |op| may be rebuilt independently while preserving or
-// narrowing its original dynamic execution predicate. This requires pure,
-// deterministic, identity-free semantics and rejects retained regions,
-// terminators, hints, poison boundaries, convergence, and pending source
-// expansion. It does not require SAFE_TO_SPECULATE because rematerialization
-// must not introduce execution on an additional control path.
-bool loom_motion_op_can_rematerialize_effect_free(const loom_module_t* module,
-                                                  const loom_op_t* op);
-
-// Returns true if |op| may be executed on additional control paths. This
-// requires SAFE_TO_SPECULATE and rejects any region side effects, convergence,
-// hints, or pending source expansion.
-bool loom_motion_op_can_speculate(const loom_module_t* module,
-                                  const loom_op_t* op);
-
 // Returns true when |op| is an ordinary unmasked view or vector load with no
 // write, ordering, convergence, identity, or nondeterministic semantics.
 bool loom_motion_op_is_ordinary_load(const loom_module_t* module,
                                      const loom_op_t* op);
-
-// Returns true when sinking an ordinary load across |op| preserves source
-// ordering. This is a deliberately alias-independent predicate: any write,
-// fence, unknown effect, nested region, convergence, or retained semantic
-// boundary blocks motion.
-bool loom_motion_read_can_cross_op(const loom_module_t* module,
-                                   const loom_op_t* op);
 
 // Creates a lazy read-barrier table using |arena| storage. The first query in a
 // block captures source-order segments for every operation then live in that
@@ -194,7 +160,7 @@ bool loom_motion_read_can_cross_op(const loom_module_t* module,
 // fail queries. Rewrites may retain the table while replacing operations in
 // place, but must not move captured operations across observable effect
 // boundaries.
-iree_status_t loom_motion_read_barrier_table_create(
+iree_status_t loom_motion_read_barrier_table_allocate(
     const loom_module_t* module, iree_arena_allocator_t* arena,
     loom_motion_read_barrier_table_t** out_table);
 
@@ -221,8 +187,9 @@ iree_status_t loom_motion_subtree_can_relocate_before(
     const loom_op_t* before_op, bool* out_can_relocate);
 
 // Same as loom_motion_subtree_can_relocate_before, but every non-terminator op
-// in the moved subtree must be SAFE_TO_SPECULATE because the caller may execute
-// the subtree more often than the source IR did.
+// in the moved subtree must be unconditionally SAFE_TO_SPECULATE or satisfy its
+// declared execution condition using retained function facts because the caller
+// may execute the subtree more often than the source IR did.
 iree_status_t loom_motion_subtree_can_speculate_before(
     loom_motion_analysis_t* analysis, const loom_op_t* candidate_op,
     const loom_op_t* before_op, bool* out_can_speculate);

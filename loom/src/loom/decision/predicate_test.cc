@@ -18,8 +18,8 @@ static loom_decision_predicate_operand_t Operand(
     loom_value_facts_t facts,
     uint32_t identity = LOOM_DECISION_OPERAND_IDENTITY_NONE) {
   return {
-      /*.facts=*/facts,
-      /*.identity=*/identity,
+      .facts = facts,
+      .identity = identity,
   };
 }
 
@@ -46,10 +46,14 @@ static bool EvaluateExactRelation(loom_predicate_kind_t predicate_kind,
       return lhs > rhs;
     case LOOM_PREDICATE_GE:
       return lhs >= rhs;
-    case LOOM_PREDICATE_MIN:
-      return lhs >= rhs;
-    case LOOM_PREDICATE_MAX:
-      return lhs <= rhs;
+    case LOOM_PREDICATE_ULT:
+      return static_cast<uint64_t>(lhs) < static_cast<uint64_t>(rhs);
+    case LOOM_PREDICATE_ULE:
+      return static_cast<uint64_t>(lhs) <= static_cast<uint64_t>(rhs);
+    case LOOM_PREDICATE_UGT:
+      return static_cast<uint64_t>(lhs) > static_cast<uint64_t>(rhs);
+    case LOOM_PREDICATE_UGE:
+      return static_cast<uint64_t>(lhs) >= static_cast<uint64_t>(rhs);
     default:
       return false;
   }
@@ -74,9 +78,8 @@ static loom_decision_truth_t ReferenceRelation(
 
 TEST(PredicateTest, ExhaustiveSmallIntegerRelations) {
   constexpr loom_predicate_kind_t kPredicateKinds[] = {
-      LOOM_PREDICATE_EQ,  LOOM_PREDICATE_NE,  LOOM_PREDICATE_LT,
-      LOOM_PREDICATE_LE,  LOOM_PREDICATE_GT,  LOOM_PREDICATE_GE,
-      LOOM_PREDICATE_MIN, LOOM_PREDICATE_MAX,
+      LOOM_PREDICATE_EQ, LOOM_PREDICATE_NE, LOOM_PREDICATE_LT,
+      LOOM_PREDICATE_LE, LOOM_PREDICATE_GT, LOOM_PREDICATE_GE,
   };
   for (loom_predicate_kind_t predicate_kind : kPredicateKinds) {
     for (int64_t lhs_lo = -3; lhs_lo <= 3; ++lhs_lo) {
@@ -118,6 +121,86 @@ TEST(PredicateTest, SameRuntimeIdentityProvesReflexiveRelations) {
             LOOM_DECISION_TRUTH_FALSE);
   EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_GE, operands),
             LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_ULT, operands),
+            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_ULE, operands),
+            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_UGT, operands),
+            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_UGE, operands),
+            LOOM_DECISION_TRUTH_TRUE);
+}
+
+TEST(PredicateTest, NonzeroFactDecidesEqualityWithZero) {
+  loom_value_facts_t nonzero = loom_value_facts_unknown();
+  nonzero.flags |= LOOM_VALUE_FACT_NON_ZERO;
+  const loom_decision_predicate_operand_t operands[3] = {
+      Operand(nonzero),
+      Operand(loom_value_facts_exact_i64(0)),
+  };
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_EQ, operands),
+            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_NE, operands),
+            LOOM_DECISION_TRUTH_TRUE);
+}
+
+TEST(PredicateTest, UnsignedRelationsOrderCarrierBitsAcrossTheSignBit) {
+  constexpr loom_predicate_kind_t kPredicateKinds[] = {
+      LOOM_PREDICATE_ULT,
+      LOOM_PREDICATE_ULE,
+      LOOM_PREDICATE_UGT,
+      LOOM_PREDICATE_UGE,
+  };
+  constexpr int64_t kValues[] = {INT64_MIN, -3, -1, 0, 1, INT64_MAX};
+  for (loom_predicate_kind_t predicate_kind : kPredicateKinds) {
+    for (int64_t lhs : kValues) {
+      for (int64_t rhs : kValues) {
+        const loom_decision_predicate_operand_t operands[3] = {
+            Operand(loom_value_facts_exact_i64(lhs)),
+            Operand(loom_value_facts_exact_i64(rhs)),
+        };
+        EXPECT_EQ(loom_decision_predicate_evaluate(predicate_kind, operands),
+                  EvaluateExactRelation(predicate_kind, lhs, rhs)
+                      ? LOOM_DECISION_TRUTH_TRUE
+                      : LOOM_DECISION_TRUTH_FALSE)
+            << "kind=" << static_cast<int>(predicate_kind) << " lhs=" << lhs
+            << " rhs=" << rhs;
+      }
+    }
+  }
+}
+
+TEST(PredicateTest, UnsignedRelationsKeepSplitIntervalsUnknown) {
+  const loom_decision_predicate_operand_t operands[3] = {
+      Operand(loom_value_facts_make(-4, 4, 1)),
+      Operand(loom_value_facts_exact_i64(8)),
+  };
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_ULE, operands),
+            LOOM_DECISION_TRUTH_UNKNOWN);
+}
+
+TEST(PredicateTest, UnsignedRelationsOrderSignStableIntervals) {
+  const loom_decision_predicate_operand_t positive_then_negative[3] = {
+      Operand(loom_value_facts_make(1, 4, 1)),
+      Operand(loom_value_facts_make(-4, -1, 1)),
+  };
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_ULT,
+                                             positive_then_negative),
+            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_UGE,
+                                             positive_then_negative),
+            LOOM_DECISION_TRUTH_FALSE);
+
+  const loom_decision_predicate_operand_t negative_then_positive[3] = {
+      positive_then_negative[1],
+      positive_then_negative[0],
+  };
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_UGT,
+                                             negative_then_positive),
+            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_ULE,
+                                             negative_then_positive),
+            LOOM_DECISION_TRUTH_FALSE);
 }
 
 TEST(PredicateTest, IntegerExtremesDoNotOverflow) {
@@ -131,11 +214,13 @@ TEST(PredicateTest, IntegerExtremesDoNotOverflow) {
             LOOM_DECISION_TRUTH_FALSE);
 
   operands[1] = Operand(loom_value_facts_exact_i64(1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_TRUE);
   operands[1] = Operand(loom_value_facts_exact_i64(INT64_MAX));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_FALSE);
 
   operands[1] = Operand(loom_value_facts_exact_i64(INT64_MIN));
   operands[2] = Operand(loom_value_facts_exact_i64(INT64_MIN));
@@ -159,7 +244,8 @@ TEST(PredicateTest, ExhaustiveExactMultiples) {
           Operand(loom_value_facts_exact_i64(value)),
           Operand(loom_value_facts_exact_i64(divisor)),
       };
-      EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
+      EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF,
+                                                 operands),
                 value % divisor == 0 ? LOOM_DECISION_TRUTH_TRUE
                                      : LOOM_DECISION_TRUTH_FALSE)
           << "value=" << value << " divisor=" << divisor;
@@ -172,28 +258,34 @@ TEST(PredicateTest, MultipleUsesDivisorAndRangeProofs) {
       Operand(loom_value_facts_make(16, 80, 16)),
       Operand(loom_value_facts_exact_i64(16)),
   };
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_TRUE);
 
   operands[0] = Operand(loom_value_facts_make(1, 15, 1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_FALSE);
 
   operands[0] = Operand(loom_value_facts_make(-15, -1, 1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_FALSE);
 
   operands[0] = Operand(loom_value_facts_make(1, 16, 1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_UNKNOWN);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_UNKNOWN);
 
   operands[1] = Operand(loom_value_facts_exact_i64(0));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_UNKNOWN);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_UNKNOWN);
 
   operands[1] = Operand(loom_value_facts_exact_i64(-16));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_MUL, operands),
-            LOOM_DECISION_TRUTH_UNKNOWN);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_MULTIPLE_OF, operands),
+      LOOM_DECISION_TRUTH_UNKNOWN);
 }
 
 TEST(PredicateTest, ExhaustiveExactPowerOfTwo) {
@@ -203,7 +295,7 @@ TEST(PredicateTest, ExhaustiveExactPowerOfTwo) {
     };
     const bool is_power_of_two = value > 0 && (value & (value - 1)) == 0;
     EXPECT_EQ(
-        loom_decision_predicate_evaluate(LOOM_PREDICATE_POW2, operands),
+        loom_decision_predicate_evaluate(LOOM_PREDICATE_POWER_OF_TWO, operands),
         is_power_of_two ? LOOM_DECISION_TRUTH_TRUE : LOOM_DECISION_TRUTH_FALSE)
         << "value=" << value;
   }
@@ -215,16 +307,19 @@ TEST(PredicateTest, PowerOfTwoUsesKnownPredicateFacts) {
   loom_decision_predicate_operand_t operands[3] = {
       Operand(known_power_of_two),
   };
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_POW2, operands),
-            LOOM_DECISION_TRUTH_TRUE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_POWER_OF_TWO, operands),
+      LOOM_DECISION_TRUTH_TRUE);
 
   operands[0] = Operand(loom_value_facts_make(-10, 0, 1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_POW2, operands),
-            LOOM_DECISION_TRUTH_FALSE);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_POWER_OF_TWO, operands),
+      LOOM_DECISION_TRUTH_FALSE);
 
   operands[0] = Operand(loom_value_facts_make(1, 1024, 1));
-  EXPECT_EQ(loom_decision_predicate_evaluate(LOOM_PREDICATE_POW2, operands),
-            LOOM_DECISION_TRUTH_UNKNOWN);
+  EXPECT_EQ(
+      loom_decision_predicate_evaluate(LOOM_PREDICATE_POWER_OF_TWO, operands),
+      LOOM_DECISION_TRUTH_UNKNOWN);
 }
 
 TEST(PredicateTest, ExhaustiveSmallRanges) {

@@ -17,6 +17,7 @@ from typing import Any
 
 from loom.assembly import (
     ARROW,
+    BINDING_TYPE_BLOCK_ARG,
     COLON,
     COMMA,
     EQUALS,
@@ -54,8 +55,8 @@ from loom.assembly import (
 )
 from loom.dialect.func.defs import (
     CallingConv,
+    EffectContract,
     InlinePolicyAttr,
-    Purity,
     Retain,
     Visibility,
 )
@@ -81,6 +82,7 @@ from loom.dsl import (
     UNKNOWN_EFFECTS,
     AttrDef,
     BlockArgsSatisfy,
+    BorrowedResult,
     CallLikeInterface,
     CallLikeKind,
     ConditionForwardedCountMatchesBlockArgs,
@@ -109,8 +111,8 @@ from loom.dsl import (
     SymbolDefinitionFlag,
     SymbolReference,
     VariadicValuesMatch,
-    YieldCountMatchesResults,
-    YieldTypesMatchResults,
+    YieldCountMatches,
+    YieldTypesMatch,
 )
 
 # ============================================================================
@@ -255,7 +257,7 @@ _FUNC_COMMON_ATTRS = [
     AttrDef("export_attrs", "dict", optional=True),
     AttrDef("visibility", "enum", enum_def=Visibility, optional=True),
     AttrDef("cc", "enum", enum_def=CallingConv, optional=True),
-    AttrDef("purity", "enum", enum_def=Purity, optional=True),
+    AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
     AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     AttrDef("allocation", "enum", enum_def=LowAllocationMode, optional=True),
     AttrDef("schedule", "enum", enum_def=LowScheduleMode, optional=True),
@@ -309,7 +311,7 @@ _FUNC_MODIFIER_FORMAT: list[FormatElement] = [
     OptionalGroup([Attr("visibility")], anchor="visibility"),
     OptionalGroup([Attr("retain")], anchor="retain"),
     OptionalGroup([Attr("cc")], anchor="cc"),
-    OptionalGroup([Attr("purity")], anchor="purity"),
+    OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
     OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
     OptionalGroup(
         [kw("allocation"), GLUE, LPAREN, Attr("allocation"), GLUE, RPAREN],
@@ -504,7 +506,7 @@ _FUNC_LIKE_COMMON: dict[str, Any] = dict(
     export_attrs="export_attrs",
     visibility="visibility",
     cc="cc",
-    purity="purity",
+    effect_contract="effect_contract",
     inline_policy="inline_policy",
     predicates="predicates",
 )
@@ -552,8 +554,6 @@ low_func_def = Op(
     verify="loom_low_func_def_verify",
     constraints=[
         BlockArgsSatisfy("body", REGISTER),
-        YieldCountMatchesResults("body", "results"),
-        YieldTypesMatchResults("body", "results"),
     ],
     format=[
         *_FUNC_MODIFIER_FORMAT,
@@ -698,7 +698,7 @@ low_func_call = Op(
             "symbol",
             symbol_ref=SymbolReference("function", ["callable"]),
         ),
-        AttrDef("purity", "enum", enum_def=Purity, optional=True),
+        AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
         AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     ],
     results=[Result("results", REGISTER, variadic=True)],
@@ -708,15 +708,16 @@ low_func_call = Op(
             callee="callee",
             operands="operands",
             results="results",
-            purity="purity",
+            effect_contract="effect_contract",
             inline_policy="inline_policy",
             kind=CallLikeKind.LOW_INTERNAL,
         ),
     ],
     effective_traits="loom_low_func_call_effective_traits",
+    canonicalize="loom_low_func_call_canonicalize",
     verify="loom_low_func_call_verify",
     format=[
-        OptionalGroup([Attr("purity")], anchor="purity"),
+        OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
         OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
         SymbolRef("callee"),
         GLUE,
@@ -736,6 +737,7 @@ low_func_call = Op(
         "%result = low.func.call @extern_add(%lhs, %rhs) : (reg<amdgpu.vgpr x1>, reg<amdgpu.vgpr x1>) -> (reg<amdgpu.vgpr x1>)",
         "%result = low.func.call pure @extern_add(%lhs) : (reg<test.i32>) -> (reg<test.i32>)",
     ],
+    eager_execution_cost=0,
 )
 
 # ============================================================================
@@ -899,15 +901,19 @@ low_scf_if = Op(
         ),
     ],
     interfaces=[
-        RegionBranchInterface(selector="condition"),
+        RegionBranchInterface(
+            selector="condition",
+            true_region="then_region",
+            false_region="else_region",
+        ),
     ],
     constraints=[
         BlockArgsSatisfy("then_region", REGISTER),
         BlockArgsSatisfy("else_region", REGISTER),
-        YieldCountMatchesResults("then_region", "results"),
-        YieldTypesMatchResults("then_region", "results"),
-        YieldCountMatchesResults("else_region", "results"),
-        YieldTypesMatchResults("else_region", "results"),
+        YieldCountMatches("then_region", "results"),
+        YieldTypesMatch("then_region", "results"),
+        YieldCountMatches("else_region", "results"),
+        YieldTypesMatch("else_region", "results"),
     ],
     traits=[ImplicitTerminator("low.scf.yield")],
     format=[
@@ -993,6 +999,7 @@ low_scf_for = Op(
         LoopLikeInterface(
             body="body",
             iter_args="iter_args",
+            results="results",
             iv="iv",
             lower_bound="lower_bound",
             upper_bound="upper_bound",
@@ -1004,8 +1011,8 @@ low_scf_for = Op(
         SameType("lower_bound", "step"),
         IterArgsMatchResults("iter_args", "results"),
         BlockArgsSatisfy("body", REGISTER),
-        YieldCountMatchesResults("body", "results"),
-        YieldTypesMatchResults("body", "results"),
+        YieldCountMatches("body", "results"),
+        YieldTypesMatch("body", "results"),
     ],
     traits=[ImplicitTerminator("low.scf.yield"), STORAGE_RELATION],
     format=[
@@ -1051,30 +1058,44 @@ low_scf_while = Op(
     "low.scf.while",
     group=low_ops,
     phase=OpPhase.EXECUTABLE,
-    doc=("Condition-controlled target-low loop with explicit condition and body regions and loop-carried register state."),
+    doc=(
+        "Condition-controlled target-low loop with explicit condition and body "
+        "regions. Initial registers and low.scf.yield define the condition-region "
+        "header tuple. low.scf.condition defines an independent body/result "
+        "tuple: its forwarded registers enter the body on the true edge and "
+        "become loop results on the false edge. The tuples may differ in count "
+        "and register type, and either tuple may be empty."
+    ),
     verify="loom_low_scf_while_verify",
     operands=[
         Operand(
             "iter_args",
             REGISTER,
             variadic=True,
-            doc="Initial loop-carried register values.",
+            doc="Initial registers for the condition-region header tuple.",
         )
     ],
-    results=[Result("results", REGISTER, variadic=True)],
+    results=[
+        Result(
+            "results",
+            REGISTER,
+            variadic=True,
+            doc="Registers forwarded by the final false low.scf.condition edge.",
+        )
+    ],
     regions=[
         RegionDef(
             "before",
-            doc=("Runs before each condition check. Terminated by low.scf.condition."),
+            doc=("Runs before each condition check. Its arguments are initialized by iter_args and updated by low.scf.yield. Terminated by low.scf.condition."),
             single_block=True,
             terminator="low.scf.condition",
         ),
         RegionDef(
             "after",
-            doc="Runs while the condition is true. Terminated by low.scf.yield.",
+            doc=("Runs while the condition is true. Its arguments are the registers forwarded by low.scf.condition. Terminated by low.scf.yield, whose values update the condition-region arguments."),
             single_block=True,
             terminator="low.scf.yield",
-            arg_source="iter_args",
+            arg_source="results",
         ),
     ],
     interfaces=[
@@ -1082,19 +1103,24 @@ low_scf_while = Op(
             body="after",
             condition_region="before",
             iter_args="iter_args",
+            results="results",
         ),
     ],
     constraints=[
-        IterArgsMatchResults("iter_args", "results"),
         ConditionForwardedCountMatchesBlockArgs("before", "after", "results"),
         ConditionForwardedTypesMatchBlockArgs("before", "after", "results"),
-        YieldCountMatchesResults("after", "results"),
-        YieldTypesMatchResults("after", "results"),
+        YieldCountMatches("after", "before"),
+        YieldTypesMatch("after", "before"),
     ],
     traits=[STORAGE_RELATION],
     format=[
         OptionalGroup(
-            [BindingList("iter_args")],
+            [
+                BindingList(
+                    "iter_args",
+                    type_source=BINDING_TYPE_BLOCK_ARG,
+                )
+            ],
             anchor="iter_args",
         ),
         OptionalGroup(
@@ -1105,13 +1131,13 @@ low_scf_while = Op(
         kw("do"),
         OptionalGroup(
             [BlockArgs("after")],
-            anchor="iter_args",
+            anchor="results",
         ),
         Region("after", syntax="low.asm.optional"),
     ],
     examples=[
         "low.scf.while {\n  low.scf.condition %condition : reg<spirv.id : i1>\n} do {\n  low.scf.yield\n}",
-        "%result = low.scf.while(%before = %initial : reg<spirv.id : i32>) -> (reg<spirv.id : i32>) {\n  low.scf.condition %keep_going, %before : reg<spirv.id : i1>, reg<spirv.id : i32>\n} do(%body: reg<spirv.id : i32>) {\n  low.scf.yield %body : reg<spirv.id : i32>\n}",
+        "%terminal, %candidate = low.scf.while(%before = %initial : reg<spirv.id : i32>) -> (reg<spirv.id : i32>, reg<spirv.id : i32>) {\n  %next = OpIAdd %before, %one\n  %keep_going = OpULessThan %next, %limit\n  low.scf.condition %keep_going, %before, %next : reg<spirv.id : i1>, reg<spirv.id : i32>, reg<spirv.id : i32>\n} do(%body_state: reg<spirv.id : i32>, %body_candidate: reg<spirv.id : i32>) {\n  low.scf.yield %body_candidate : reg<spirv.id : i32>\n}",
     ],
 )
 
@@ -1165,6 +1191,49 @@ low_op = Op(
     examples=[
         "%sum = low.op<amdgpu.v_add_u32>(%lhs, %rhs) : (reg<amdgpu.vgpr x1>, reg<amdgpu.vgpr x1>) -> reg<amdgpu.vgpr x1>",
         "low.op<amdgpu.s_waitcnt>() {vmcnt = 0} : ()",
+    ],
+    eager_execution_cost=0,
+)
+
+# ============================================================================
+# low.op.cond_br — descriptor-backed conditional branch
+# ============================================================================
+
+low_op_cond_br = Op(
+    "low.op.cond_br",
+    group=low_ops,
+    phase=OpPhase.EXECUTABLE,
+    doc=("Descriptor-backed target conditional branch over virtual-register operands and two semantic CFG successors."),
+    operands=[Operand("operands", REGISTER, variadic=True)],
+    attrs=[
+        AttrDef("descriptor", "scoped_enum"),
+        AttrDef("attrs", "dict", optional=True),
+    ],
+    successors=[
+        Successor("true_dest", doc="Destination block when the target predicate is true."),
+        Successor("false_dest", doc="Destination block when the target predicate is false."),
+    ],
+    traits=[TERMINATOR, UNKNOWN_EFFECTS],
+    verify="loom_low_op_cond_br_verify",
+    generate_c_builder=False,
+    format=[
+        ScopedEnumRef("descriptor"),
+        GLUE,
+        LPAREN,
+        Refs("operands"),
+        RPAREN,
+        AttrDict("attrs"),
+        COMMA,
+        BlockRef("true_dest"),
+        COMMA,
+        BlockRef("false_dest"),
+        COLON,
+        LPAREN,
+        TypesOf("operands"),
+        RPAREN,
+    ],
+    examples=[
+        "low.op.cond_br<test.native.cond_br.i32>(%lhs, %rhs) {predicate = slt}, ^equal, ^unequal : (reg<test.i32>, reg<test.i32>)",
     ],
 )
 
@@ -1249,6 +1318,7 @@ low_copy = Op(
         ),
     ],
     results=[Result("result", REGISTER, allocates=True)],
+    structural_materialization=True,
     traits=[STORAGE_RELATION],
     verify="loom_low_copy_verify",
     facts="loom_low_copy_facts",
@@ -1286,6 +1356,7 @@ low_move = Op(
         ),
     ],
     results=[Result("result", REGISTER, allocates=True)],
+    structural_materialization=True,
     constraints=[
         SameRegisterClass("source", "result"),
     ],
@@ -1320,6 +1391,7 @@ low_slice = Op(
     ],
     operands=[Operand("source", REGISTER)],
     results=[Result("result", REGISTER)],
+    structural_materialization=True,
     traits=[PURE, STORAGE_RELATION],
     constraints=[
         SameRegisterClass("source", "result"),
@@ -1356,6 +1428,7 @@ low_concat = Op(
     doc=("Compose one fresh register-range identity from ordered register subranges."),
     operands=[Operand("sources", REGISTER, variadic=True)],
     results=[Result("result", REGISTER, allocates=True)],
+    structural_materialization=True,
     traits=[STORAGE_RELATION],
     constraints=[
         SameRegisterClass("sources", "result"),
@@ -1417,12 +1490,13 @@ low_storage_reserve = Op(
     assembly=AssemblyFormat("storage"),
     group=low_ops,
     phase=OpPhase.EXECUTABLE,
-    doc="Reserve target-low function-local storage and preserve its segment footprint.",
+    doc="Reserve target-low function-local storage and preserve its segment footprint. The result borrows storage owned by the execution frame and requires no explicit release.",
     attrs=[
         AttrDef("byte_length", ATTR_TYPE_I64),
         AttrDef("byte_alignment", ATTR_TYPE_I64),
     ],
     results=[Result("storage", STORAGE, allocates=True)],
+    ownership_effects=[BorrowedResult("storage")],
     traits=[UNKNOWN_EFFECTS],
     verify="loom_low_storage_reserve_verify",
     facts="loom_low_storage_reserve_facts",
@@ -1548,6 +1622,7 @@ low_storage_address = Op(
         AttrDef("offset", ATTR_TYPE_I64, default=0, elide_default=True),
     ],
     results=[Result("result", REGISTER)],
+    structural_materialization=True,
     traits=[PURE],
     verify="loom_low_storage_address_verify",
     format=[
@@ -1632,7 +1707,11 @@ low_invoke = Op(
         "Source-typed call edge to an explicitly selected target-Low function. "
         "Source-to-Low lowering maps the source operands and results to the "
         "helper register signature, proves the helper argument predicates, and "
-        "normalizes the edge to low.func.call. Authored inline policy has the "
+        "normalizes the edge to low.func.call. Each source value maps to one "
+        "register-typed value. Views require storage and layout information "
+        "beyond that carrier and are not accepted as operands or results; use "
+        "a source helper taking views or pass buffers and offsets explicitly. "
+        "Authored inline policy has the "
         "same meaning as on low.func.call; targets without a Low call ABI may "
         "require the normalized edge to inline before emission."
     ),
@@ -1643,7 +1722,7 @@ low_invoke = Op(
             "symbol",
             symbol_ref=SymbolReference("function", ["callable"]),
         ),
-        AttrDef("purity", "enum", enum_def=Purity, optional=True),
+        AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
         AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     ],
     results=[Result("results", ANY, variadic=True)],
@@ -1657,15 +1736,16 @@ low_invoke = Op(
             callee="callee",
             operands="operands",
             results="results",
-            purity="purity",
+            effect_contract="effect_contract",
             inline_policy="inline_policy",
             kind=CallLikeKind.LOW_INVOKE,
         ),
     ],
     effective_traits="loom_low_invoke_effective_traits",
+    canonicalize="loom_low_invoke_canonicalize",
     verify="loom_low_invoke_verify",
     format=[
-        OptionalGroup([Attr("purity")], anchor="purity"),
+        OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
         OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
         SymbolRef("callee"),
         GLUE,
@@ -1686,6 +1766,7 @@ low_invoke = Op(
         "%result = low.invoke @extern_add(%lhs, %rhs) : (i32, i32) -> (i32)",
         "%result = low.invoke pure @extern_add(%lhs, %rhs) : (i32, i32) -> (i32)",
     ],
+    eager_execution_cost=0,
 )
 
 # ============================================================================
@@ -1792,4 +1873,6 @@ ALL_LOW_OPS: tuple[Op, ...] = (
     low_schedule_begin,
     low_schedule_phase,
     low_schedule_end,
+    # Appended to preserve every existing serialized Low operation ordinal.
+    low_op_cond_br,
 )

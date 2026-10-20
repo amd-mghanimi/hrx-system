@@ -1,0 +1,97 @@
+// Compiler admission keeps independent entries diagnosable in the same module.
+x86.target<scalar> @target
+
+low.func.def public target<x86.scalar.core>(@target) @small_address() -> (reg<x86.gpr32>) asm {
+  %slot = storage {byte_alignment = 8, byte_length = 8} : low.storage<stack>
+  // ERROR@+1: X86/004 {constraint="one 64-bit GPR for storage addresses"}
+  %pointer = storage_address %slot : low.storage<stack> -> reg<x86.gpr32>
+  return %pointer
+}
+
+low.func.def public target<x86.scalar.core>(@target) @short_span(%value: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 8, byte_length = 4} : low.storage<stack>
+  // ERROR@+1: X86/004 {constraint="a register transfer that fits within its storage span"}
+  low.spill %value, %slot : reg<x86.gpr64>, low.storage<stack>
+  return
+}
+
+// ====
+
+// This checks a frame's representable address range without allocating its bytes.
+x86.target<scalar> @target
+
+// ERROR@+1: X86/004 {constraint="stack storage and alignment within signed 32-bit addressing"}
+low.func.def public target<x86.scalar.core>(@target) @large_frame() -> (reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 8, byte_length = 2147483648} : low.storage<stack>
+  %pointer = storage_address %slot : low.storage<stack> -> reg<x86.gpr64>
+  return %pointer
+}
+
+// ====
+
+x86.target<scalar> @target
+
+// ERROR@+1: X86/004 {constraint="stack, scratch, or private storage; host functions have no workgroup storage ABI"}
+low.func.def public target<x86.scalar.core>(@target) @workgroup_storage() -> (reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 8, byte_length = 8} : low.storage<workgroup>
+  %pointer = storage_address %slot : low.storage<workgroup> -> reg<x86.gpr64>
+  return %pointer
+}
+
+// ====
+
+// Native exports share a linker namespace even when IR symbols differ.
+func.def public export("same") @first() {
+  func.return
+}
+
+// ERROR@+1: BACKEND/056 {symbol_name="same"}
+func.def public export("same") @second() {
+  func.return
+}
+
+// ====
+
+// The authored bank relation is valid, but has no native host placement meaning.
+// ERROR@+1: BACKEND/055 {constraint="readonly data without bank placement constraints"}
+global.rodata.def @left = conflicts([@right]) bytes("00")
+
+// ERROR@+1: BACKEND/055 {constraint="readonly data without bank placement constraints"}
+global.rodata.def @right = conflicts([@left]) bytes("00")
+
+func.def public @table() -> (buffer) {
+  %data = global.load @left : buffer
+  func.return %data : buffer
+}
+
+// ====
+
+// A retained import may be compiled into an object, but cannot name a module.
+x86.target<scalar> @target
+
+// ERROR@+1: BACKEND/055 {constraint="unqualified native or object imports"}
+low.func.decl import(native, "observe", module = "host") target<x86.scalar.core>(@target) @observe(%value: reg<x86.gpr64>)
+
+low.func.def public target<x86.scalar.core>(@target) @caller(%value: reg<x86.gpr64>) asm {
+  low.func.call @observe(%value) : (reg<x86.gpr64>)
+  return
+}
+
+// ====
+
+// A HAL image cannot defer a live data reference to an external linker.
+global.rodata.decl @external_table
+
+// ERROR@+1: BACKEND/057 {symbol_name="external_table"}
+kernel.def export("read") @read() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  %table = global.load @external_table : buffer
+  %origin = index.constant 0 : offset
+  %source = buffer.view %table[%origin] : buffer -> view<1xi32>
+  %destination = buffer.view %output[%origin] : buffer -> view<1xi32>
+  %value = view.load %source[0] : view<1xi32> -> i32
+  view.store %value, %destination[0] : i32, view<1xi32>
+  kernel.return
+}

@@ -7,9 +7,7 @@
 #include "iree/hal/drivers/task/transient_buffer.h"
 
 #include "iree/base/threading/mutex.h"
-
-static iree_atomic_int64_t iree_hal_task_transient_buffer_next_profile_id =
-    IREE_ATOMIC_VAR_INIT(1);
+#include "iree/hal/virtual_buffer.h"
 
 typedef enum iree_hal_task_transient_buffer_deallocation_state_e {
   IREE_HAL_TASK_TRANSIENT_BUFFER_DEALLOCATION_STATE_IDLE = 0,
@@ -57,6 +55,11 @@ struct iree_hal_task_transient_buffer_t {
 
   // State controlling exclusive queue deallocation capture.
   iree_hal_task_transient_buffer_deallocation_state_t deallocation_state;
+
+  // Source-sized native table shared by subspans made before commitment. The
+  // caller orders native reads after commit and before decommit. Trailing
+  // native facts borrow the retained backing's allocation epoch.
+  iree_hal_buffer_native_binding_t bindings[];
 };
 
 static const iree_hal_buffer_vtable_t iree_hal_task_transient_buffer_vtable;
@@ -64,6 +67,12 @@ static const iree_hal_buffer_vtable_t iree_hal_task_transient_buffer_vtable;
 static iree_hal_task_transient_buffer_t* iree_hal_task_transient_buffer_cast(
     iree_hal_buffer_t* buffer) {
   return (iree_hal_task_transient_buffer_t*)buffer;
+}
+
+static const iree_hal_buffer_binding_layout_t*
+iree_hal_task_transient_buffer_binding_layout(const iree_hal_pool_t* pool) {
+  return pool->memory_contract ? &pool->memory_contract->binding_layout
+                               : iree_hal_heap_buffer_binding_layout();
 }
 
 static iree_status_t iree_hal_task_transient_buffer_retain_host_backing(
@@ -85,10 +94,11 @@ static iree_status_t iree_hal_task_transient_buffer_retain_host_backing(
 }
 
 iree_status_t iree_hal_task_transient_buffer_create(
-    iree_hal_buffer_placement_t placement, iree_hal_buffer_params_t params,
-    iree_device_size_t allocation_size, iree_device_size_t byte_length,
-    iree_hal_pool_t* source_pool, iree_allocator_t host_allocator,
-    iree_hal_buffer_t** out_buffer) {
+    iree_hal_buffer_placement_t placement, iree_hal_memory_type_t memory_type,
+    iree_hal_memory_access_t allowed_access,
+    iree_hal_buffer_usage_t allowed_usage, iree_device_size_t allocation_size,
+    iree_device_size_t byte_length, iree_hal_pool_t* source_pool,
+    iree_allocator_t host_allocator, iree_hal_buffer_t** out_buffer) {
   IREE_ASSERT_ARGUMENT(source_pool);
   IREE_ASSERT_ARGUMENT(out_buffer);
   if (IREE_UNLIKELY(byte_length > allocation_size)) {
@@ -99,19 +109,23 @@ iree_status_t iree_hal_task_transient_buffer_create(
   }
   IREE_TRACE_ZONE_BEGIN(z0);
 
+  const iree_hal_buffer_binding_layout_t* binding_layout =
+      iree_hal_task_transient_buffer_binding_layout(source_pool);
   iree_hal_task_transient_buffer_t* buffer = NULL;
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_allocator_malloc(host_allocator, sizeof(*buffer), (void**)&buffer));
+      z0, iree_allocator_malloc(host_allocator,
+                                sizeof(*buffer) + binding_layout->byte_length,
+                                (void**)&buffer));
 
   iree_hal_buffer_initialize(
       placement, /*allocated_buffer=*/&buffer->base, allocation_size,
-      /*byte_offset=*/0, byte_length, params.type, params.access, params.usage,
-      &iree_hal_task_transient_buffer_vtable, &buffer->base);
+      /*byte_offset=*/0, byte_length, memory_type, allowed_access,
+      allowed_usage, &iree_hal_task_transient_buffer_vtable, &buffer->base);
+  buffer->base.memory.bindings = buffer->bindings;
+  buffer->base.memory.contract = source_pool->memory_contract;
+  buffer->base.host_binding_index = binding_layout->host_binding_index;
   buffer->host_allocator = host_allocator;
-  buffer->profile_id = (uint64_t)iree_atomic_fetch_add(
-      &iree_hal_task_transient_buffer_next_profile_id, 1,
-      iree_memory_order_relaxed);
+  buffer->profile_id = iree_hal_buffer_allocation_next_id();
   iree_slim_mutex_initialize(&buffer->mutex);
   buffer->staged_backing = NULL;
   buffer->committed_backing = NULL;
@@ -131,11 +145,14 @@ bool iree_hal_task_transient_buffer_isa(const iree_hal_buffer_t* buffer) {
                               &iree_hal_task_transient_buffer_vtable);
 }
 
-uint64_t iree_hal_task_transient_buffer_profile_id(
+static iree_hal_buffer_allocation_profile_t
+iree_hal_task_transient_buffer_allocation_profile(
     iree_hal_buffer_t* base_buffer) {
   iree_hal_task_transient_buffer_t* buffer =
       iree_hal_task_transient_buffer_cast(base_buffer);
-  return buffer->profile_id;
+  return (iree_hal_buffer_allocation_profile_t){
+      .id = buffer->profile_id,
+  };
 }
 
 void iree_hal_task_transient_buffer_attach_reservation(
@@ -173,16 +190,35 @@ void iree_hal_task_transient_buffer_commit(iree_hal_buffer_t* base_buffer) {
   IREE_ASSERT_TRUE(buffer->staged_backing != NULL);
   IREE_ASSERT_TRUE(buffer->committed_backing == NULL);
   buffer->committed_backing = buffer->staged_backing;
+  if (buffer->source_pool->memory_contract) {
+    iree_hal_buffer_memory_copy_bindings(
+        &buffer->committed_backing->memory,
+        &buffer->source_pool->memory_contract->binding_layout,
+        buffer->bindings);
+  } else {
+    // Unscoped materialization qualifies only host access, whose slot may
+    // differ from the Task wrapper's single host representation.
+    buffer->bindings[0] = iree_hal_buffer_native_binding(
+        buffer->committed_backing,
+        (iree_hal_buffer_native_binding_slot_t){
+            .index = buffer->committed_backing->host_binding_index,
+            .type = IREE_HAL_BUFFER_INTERFACE_HOST,
+        });
+  }
   iree_slim_mutex_unlock(&buffer->mutex);
 }
 
-void iree_hal_task_transient_buffer_decommit(iree_hal_buffer_t* base_buffer) {
+static void iree_hal_task_transient_buffer_decommit(
+    iree_hal_buffer_t* base_buffer) {
   iree_hal_task_transient_buffer_t* buffer =
       iree_hal_task_transient_buffer_cast(base_buffer);
   iree_slim_mutex_lock(&buffer->mutex);
   iree_hal_buffer_t* staged_backing = buffer->staged_backing;
   buffer->staged_backing = NULL;
   buffer->committed_backing = NULL;
+  memset(buffer->bindings, 0,
+         iree_hal_task_transient_buffer_binding_layout(buffer->source_pool)
+             ->byte_length);
   iree_slim_mutex_unlock(&buffer->mutex);
   iree_hal_buffer_release(staged_backing);
 }
@@ -206,7 +242,7 @@ bool iree_hal_task_transient_buffer_query_reservation(
   return has_reservation;
 }
 
-iree_status_t iree_hal_task_transient_buffer_begin_dealloca(
+static iree_status_t iree_hal_task_transient_buffer_begin_dealloca(
     iree_hal_buffer_t* base_buffer, iree_hal_pool_t** out_pool) {
   iree_hal_task_transient_buffer_t* buffer =
       iree_hal_task_transient_buffer_cast(base_buffer);
@@ -226,7 +262,7 @@ iree_status_t iree_hal_task_transient_buffer_begin_dealloca(
   return status;
 }
 
-void iree_hal_task_transient_buffer_abort_dealloca(
+static void iree_hal_task_transient_buffer_abort_dealloca(
     iree_hal_buffer_t* base_buffer) {
   iree_hal_task_transient_buffer_t* buffer =
       iree_hal_task_transient_buffer_cast(base_buffer);
@@ -239,7 +275,7 @@ void iree_hal_task_transient_buffer_abort_dealloca(
   iree_slim_mutex_unlock(&buffer->mutex);
 }
 
-void iree_hal_task_transient_buffer_take_dealloca_reservation(
+static void iree_hal_task_transient_buffer_take_dealloca_reservation(
     iree_hal_buffer_t* base_buffer, iree_hal_pool_t** out_pool,
     iree_hal_pool_reservation_t* out_reservation) {
   iree_hal_task_transient_buffer_t* buffer =
@@ -274,6 +310,10 @@ void iree_hal_task_transient_buffer_release_reservation(
   }
   iree_slim_mutex_unlock(&buffer->mutex);
   if (had_reservation) {
+    if (!death_frontier || death_frontier->entry_count == 0) {
+      iree_hal_pool_advise_asan_reservations(
+          pool, 1, &reservation, IREE_HAL_ASAN_RANGE_ADVICE_FLAG_RELEASED);
+    }
     iree_hal_pool_release_reservations(pool, 1, &reservation, death_frontier);
   }
 }
@@ -297,9 +337,9 @@ static void iree_hal_task_transient_buffer_destroy(
 static iree_status_t iree_hal_task_transient_buffer_export_range(
     iree_hal_buffer_t* base_buffer, iree_device_size_t local_byte_offset,
     iree_device_size_t local_byte_length,
-    iree_hal_external_buffer_type_t requested_type,
-    iree_hal_external_buffer_flags_t requested_flags,
-    iree_hal_external_buffer_t* out_external_buffer) {
+    iree_hal_external_storage_class_t requested_class,
+    iree_hal_external_storage_t* out_storage,
+    iree_hal_buffer_range_t* out_logical_range) {
   iree_hal_task_transient_buffer_t* buffer =
       iree_hal_task_transient_buffer_cast(base_buffer);
   iree_hal_buffer_t* committed = NULL;
@@ -308,15 +348,14 @@ static iree_status_t iree_hal_task_transient_buffer_export_range(
   iree_status_t status =
       iree_hal_task_transient_buffer_committed_vtable(committed)->export_range(
           committed, iree_hal_buffer_byte_offset(committed) + local_byte_offset,
-          local_byte_length, requested_type, requested_flags,
-          out_external_buffer);
+          local_byte_length, requested_class, out_storage, out_logical_range);
   iree_hal_buffer_release(committed);
   return status;
 }
 
 static iree_status_t iree_hal_task_transient_buffer_map_range(
     iree_hal_buffer_t* base_buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access,
+    iree_hal_memory_access_t memory_access, iree_hal_buffer_map_flags_t flags,
     iree_device_size_t local_byte_offset, iree_device_size_t local_byte_length,
     iree_hal_buffer_mapping_t* mapping) {
   iree_hal_task_transient_buffer_t* buffer =
@@ -326,7 +365,8 @@ static iree_status_t iree_hal_task_transient_buffer_map_range(
       iree_hal_task_transient_buffer_retain_host_backing(buffer, &committed));
   iree_status_t status =
       iree_hal_task_transient_buffer_committed_vtable(committed)->map_range(
-          committed, mapping_mode, memory_access, local_byte_offset,
+          committed, mapping_mode, memory_access, flags,
+          iree_hal_buffer_byte_offset(committed) + local_byte_offset,
           local_byte_length, mapping);
   if (iree_status_is_ok(status)) {
     if (mapping->impl.is_persistent) {
@@ -337,6 +377,8 @@ static iree_status_t iree_hal_task_transient_buffer_map_range(
       // ownership from the transient wrapper to the committed backing buffer so
       // a queue-ordered decommit cannot invalidate the unmap path.
       mapping->buffer = committed;
+      mapping->impl.byte_offset =
+          iree_hal_buffer_byte_offset(committed) + local_byte_offset;
       iree_hal_buffer_release(mapped_buffer);
     }
   } else {
@@ -355,7 +397,8 @@ static iree_status_t iree_hal_task_transient_buffer_unmap_range(
       iree_hal_task_transient_buffer_retain_host_backing(buffer, &committed));
   iree_status_t status =
       iree_hal_task_transient_buffer_committed_vtable(committed)->unmap_range(
-          committed, local_byte_offset, local_byte_length, mapping);
+          committed, iree_hal_buffer_byte_offset(committed) + local_byte_offset,
+          local_byte_length, mapping);
   iree_hal_buffer_release(committed);
   return status;
 }
@@ -370,7 +413,10 @@ static iree_status_t iree_hal_task_transient_buffer_invalidate_range(
       iree_hal_task_transient_buffer_retain_host_backing(buffer, &committed));
   iree_status_t status =
       iree_hal_task_transient_buffer_committed_vtable(committed)
-          ->invalidate_range(committed, local_byte_offset, local_byte_length);
+          ->invalidate_range(
+              committed,
+              iree_hal_buffer_byte_offset(committed) + local_byte_offset,
+              local_byte_length);
   iree_hal_buffer_release(committed);
   return status;
 }
@@ -385,17 +431,75 @@ static iree_status_t iree_hal_task_transient_buffer_flush_range(
       iree_hal_task_transient_buffer_retain_host_backing(buffer, &committed));
   iree_status_t status =
       iree_hal_task_transient_buffer_committed_vtable(committed)->flush_range(
-          committed, local_byte_offset, local_byte_length);
+          committed, iree_hal_buffer_byte_offset(committed) + local_byte_offset,
+          local_byte_length);
   iree_hal_buffer_release(committed);
   return status;
 }
 
+static iree_hal_buffer_memory_view_t
+iree_hal_task_transient_buffer_query_memory(
+    const iree_hal_buffer_t* base_buffer) {
+  iree_hal_task_transient_buffer_t* buffer =
+      (iree_hal_task_transient_buffer_t*)base_buffer;
+  iree_hal_buffer_memory_view_t view = buffer->base.memory;
+  iree_slim_mutex_lock(&buffer->mutex);
+  if (buffer->committed_backing) {
+    view = iree_hal_buffer_memory_view(buffer->committed_backing);
+    view.bindings = buffer->base.memory.bindings;
+    view.binding_offset = 0;
+  }
+  iree_slim_mutex_unlock(&buffer->mutex);
+  return view;
+}
+
+static iree_hal_virtual_buffer_view_t
+iree_hal_task_transient_buffer_query_virtual(
+    const iree_hal_buffer_t* base_buffer) {
+  iree_hal_task_transient_buffer_t* buffer =
+      (iree_hal_task_transient_buffer_t*)base_buffer;
+  iree_hal_virtual_buffer_view_t view = {0};
+  iree_slim_mutex_lock(&buffer->mutex);
+  if (buffer->committed_backing) {
+    view = iree_hal_buffer_virtual_view(buffer->committed_backing);
+  }
+  iree_slim_mutex_unlock(&buffer->mutex);
+  return view;
+}
+
+static iree_status_t iree_hal_task_transient_buffer_detach_mappings(
+    iree_hal_buffer_t* base_buffer, uint32_t scope_id) {
+  iree_hal_task_transient_buffer_t* buffer =
+      (iree_hal_task_transient_buffer_t*)base_buffer;
+  iree_hal_buffer_t* committed = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_task_transient_buffer_retain_host_backing(buffer, &committed));
+  const iree_hal_memory_scope_t scope = {
+      .domain = base_buffer->memory.contract->domain, .id = scope_id};
+  iree_status_t status = iree_hal_virtual_buffer_detach(committed, scope);
+  iree_hal_buffer_release(committed);
+  return status;
+}
+
+static const iree_hal_buffer_allocation_vtable_t
+    iree_hal_task_transient_buffer_allocation_vtable = {
+        .profile = iree_hal_task_transient_buffer_allocation_profile,
+        .begin_dealloca = iree_hal_task_transient_buffer_begin_dealloca,
+        .abort_dealloca = iree_hal_task_transient_buffer_abort_dealloca,
+        .take_dealloca_reservation =
+            iree_hal_task_transient_buffer_take_dealloca_reservation,
+        .decommit = iree_hal_task_transient_buffer_decommit,
+};
+
 static const iree_hal_buffer_vtable_t iree_hal_task_transient_buffer_vtable = {
-    .recycle = iree_hal_buffer_recycle,
     .destroy = iree_hal_task_transient_buffer_destroy,
     .export_range = iree_hal_task_transient_buffer_export_range,
     .map_range = iree_hal_task_transient_buffer_map_range,
     .unmap_range = iree_hal_task_transient_buffer_unmap_range,
     .invalidate_range = iree_hal_task_transient_buffer_invalidate_range,
     .flush_range = iree_hal_task_transient_buffer_flush_range,
+    .query_memory = iree_hal_task_transient_buffer_query_memory,
+    .query_virtual = iree_hal_task_transient_buffer_query_virtual,
+    .detach_mappings = iree_hal_task_transient_buffer_detach_mappings,
+    .allocation = &iree_hal_task_transient_buffer_allocation_vtable,
 };

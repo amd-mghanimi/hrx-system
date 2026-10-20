@@ -20,6 +20,22 @@ typedef struct iree_hal_amdgpu_topology_t iree_hal_amdgpu_topology_t;
 typedef struct iree_hal_amdgpu_virtual_memory_state_t
     iree_hal_amdgpu_virtual_memory_state_t;
 
+// Borrowed native physical identity prepared by a mapping-source slab. The
+// owning buffer's allocation epoch covers every use of this descriptor.
+typedef struct iree_hal_amdgpu_vmem_source_t {
+  // Physical allocation accepted by hsa_amd_vmem_map.
+  hsa_amd_vmem_alloc_handle_t handle;
+  // Complete native allocation extent; ROCr maps this extent as one unit.
+  iree_device_size_t byte_length;
+} iree_hal_amdgpu_vmem_source_t;
+
+// Publishes changed VMM translations to the selected compute agents through
+// ROCr's ordinary KFD allocation path. Its VMM-only path does not consistently
+// invalidate active compute queues. One call covers a complete cold batch.
+iree_status_t iree_hal_amdgpu_virtual_memory_publish(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_amd_memory_pool_t memory_pool,
+    uint32_t agent_count, const hsa_agent_t* agents);
+
 // Placement and capability information selected by the AMDGPU allocator.
 // The virtual-memory component consumes this representation without owning the
 // allocator's broader pool-selection policy.
@@ -58,7 +74,7 @@ typedef struct iree_hal_amdgpu_virtual_memory_placement_t {
 } iree_hal_amdgpu_virtual_memory_placement_t;
 
 // Creates the virtual-memory context for one AMDGPU allocator.
-iree_status_t iree_hal_amdgpu_virtual_memory_state_create(
+iree_status_t iree_hal_amdgpu_virtual_memory_state_allocate(
     const iree_hal_amdgpu_libhsa_t* libhsa,
     const iree_hal_amdgpu_topology_t* topology, iree_hal_device_t* device,
     iree_hal_allocator_statistics_t* statistics,
@@ -66,7 +82,7 @@ iree_status_t iree_hal_amdgpu_virtual_memory_state_create(
     iree_hal_amdgpu_virtual_memory_state_t** out_state);
 
 // Destroys an allocator-owned VMM context after all handles are released.
-void iree_hal_amdgpu_virtual_memory_state_destroy(
+void iree_hal_amdgpu_virtual_memory_state_free(
     iree_hal_amdgpu_virtual_memory_state_t* state);
 
 // Reserves a virtual buffer with no physical backing or access permissions.

@@ -10,12 +10,75 @@
 iree_add_all_subdirs()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
-iree_cc_binary_benchmark(
+iree_cc_library(
   NAME
-    collective_benchmarks
+    backend
   SRCS
     "backend.cc"
   DEPS
+    iree::async
+    iree::base
+    iree::net::carrier::rdma::factory
+    iree::net::cts::transport_backend
+    iree::net::rdma::context
+    iree::net::rdma::region
+    iree::net::rdma::test_context
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_cc_library(
+  NAME
+    backend_unbatched
+  SRCS
+    "backend.cc"
+  DEPS
+    iree::async
+    iree::base
+    iree::net::carrier::rdma::factory
+    iree::net::cts::transport_backend
+    iree::net::rdma::context
+    iree::net::rdma::region
+    iree::net::rdma::test_context
+  DEFINES
+    "IREE_NET_RDMA_CTS_POST_BATCH_SIZE=1"
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_cc_library(
+  NAME
+    backend_segmented
+  SRCS
+    "backend.cc"
+  DEPS
+    iree::async
+    iree::base
+    iree::net::carrier::rdma::factory
+    iree::net::cts::transport_backend
+    iree::net::rdma::context
+    iree::net::rdma::region
+    iree::net::rdma::test_context
+  DEFINES
+    "IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH=257"
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_cc_binary_benchmark(
+  NAME
+    collective_benchmarks
+  DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -27,6 +90,8 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^(TensorAllReduce/.*/ranks:2/tensor_bytes:8192/block_bytes:4096/window:1/rounds:32/|Pipeline/.*/stages:2/activation_bytes:8192/block_bytes:4096/window:1/microbatches:32/depth:1/)"
   TESTONLY
 )
 endif()
@@ -35,9 +100,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     expert_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -49,6 +113,8 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^ExpertRoundTrip/.*/ranks:4/tokens:1/"
   TESTONLY
 )
 endif()
@@ -57,9 +123,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     gather_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -71,6 +136,8 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^RetainedGather/.*/ranks:2/shard_bytes:8192/block_bytes:4096/window:1/depth:1/gathers:16/"
   TESTONLY
 )
 endif()
@@ -79,9 +146,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     pipeline_round_trip_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -93,6 +159,8 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^BidirectionalPipeline/.*/stages:2/activation_bytes:8192/gradient_bytes:4096/block_bytes:4096/window:1/depth:1/microbatches:16/"
   TESTONLY
 )
 endif()
@@ -101,9 +169,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     direct_transfer_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -125,9 +192,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     direct_transfer_unbatched_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend_unbatched
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -139,8 +205,6 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
-  DEFINES
-    "IREE_NET_RDMA_CTS_POST_BATCH_SIZE=1"
   ARGS
     "--benchmark_filter=^CheckedDirectTransfer/"
   TESTONLY
@@ -179,9 +243,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_binary_benchmark(
   NAME
     transfer_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -193,6 +256,8 @@ iree_cc_binary_benchmark(
     iree::net::rdma::region
     iree::net::rdma::test_context
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^CheckedTransfer/.*/peers:1/bytes:64/batch:32/window:128/sg:1/records:2048/"
   TESTONLY
 )
 endif()
@@ -201,9 +266,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_test(
   NAME
     collective_trial_tests
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -220,10 +284,31 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_test(
   NAME
-    direct_transfer_trial_tests
-  SRCS
-    "backend.cc"
+    collective_trial_stress_tests
   DEPS
+    ::backend
+    iree::async
+    iree::async::cts::util::platform_backends
+    iree::base
+    iree::net::carrier::rdma::factory
+    iree::net::cts::collective_trial_stress_tests
+    iree::net::cts::transport_backend
+    iree::net::rdma::connection_test_main
+    iree::net::rdma::context
+    iree::net::rdma::region
+    iree::net::rdma::test_context
+  LABELS
+    "manual"
+    "stress"
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_cc_test(
+  NAME
+    direct_transfer_trial_tests
+  DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -241,11 +326,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_test(
   NAME
     direct_transfer_segmented_tests
-  SRCS
-    "backend.cc"
-  DEFINES
-    "IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH=257"
   DEPS
+    ::backend_segmented
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -263,9 +345,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_test(
   NAME
     transfer_trial_tests
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::async::cts::util::platform_backends
     iree::base
@@ -283,9 +364,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
 iree_cc_test(
   NAME
     transport_tests
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async
     iree::base
     iree::net::carrier::rdma::factory
@@ -295,6 +375,64 @@ iree_cc_test(
     iree::net::rdma::context
     iree::net::rdma::region
     iree::net::rdma::test_context
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_native_test(
+  NAME
+    "busy_poll_transfer_trial_tests"
+  SRC
+    ::transfer_trial_tests
+  ENV
+    "IREE_NET_RDMA_CTS_COMPLETION_MODE=busy_poll"
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_native_test(
+  NAME
+    "busy_poll_direct_transfer_trial_tests"
+  SRC
+    ::direct_transfer_trial_tests
+  ENV
+    "IREE_NET_RDMA_CTS_COMPLETION_MODE=busy_poll"
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_native_test(
+  NAME
+    "busy_poll_collective_trial_tests"
+  SRC
+    ::collective_trial_tests
+  ENV
+    "IREE_NET_RDMA_CTS_COMPLETION_MODE=busy_poll"
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_native_test(
+  NAME
+    "busy_poll_collective_trial_stress_tests"
+  SRC
+    ::collective_trial_stress_tests
+  ENV
+    "IREE_NET_RDMA_CTS_COMPLETION_MODE=busy_poll"
+  LABELS
+    "manual"
+    "stress"
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IREE_NET_RDMA)
+iree_cc_test(
+  NAME
+    receive_tests
+  DEPS
+    ::backend
+    iree::net::cts::receive_tests
+    iree::net::rdma::connection_test_main
 )
 endif()
 

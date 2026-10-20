@@ -2,37 +2,38 @@
 
 A high-performance streaming tokenizer library for ML inference and training,
 written in C. Loads HuggingFace `tokenizer.json` and OpenAI tiktoken
-`.tiktoken` files, producing identical output to the respective reference
-implementations, with full support for BPE, WordPiece, and Unigram models.
+`.tiktoken` files and implements BPE, WordPiece, and Unigram models.
 
 ## What This Is
 
 The IREE tokenizer is a format-agnostic tokenization engine with a pull-based
-streaming architecture. It processes arbitrarily long input with fixed memory,
-produces tokens incrementally, and tracks byte-exact offsets through the full
-normalization pipeline for training use cases.
+streaming architecture. It accepts input and produces tokens incrementally,
+with independent ownership for input storage, unresolved model state, and
+output delivery.
 
-The tokenizer is thread-safe and allocation-free in the hot path: all buffers
-are caller-provided, all state is in fixed-size structs, and the tokenizer
-object itself is immutable after construction. This makes it suitable for
-high-throughput inference servers (pool state objects, share the tokenizer
-across threads) as well as embedded systems (statically allocate everything).
+The tokenizer object is immutable after construction and can be shared across
+threads. Each encoder owns its progress, output credit, and workspace. Callers
+provide fixed state and transform storage, plus an explicit allocator for model
+workspace that grows with unresolved input. Reset reuses that capacity, making
+pooled encoders useful for repeated requests. Bounded allocators can enforce a
+request's memory budget; exhaustion fails explicitly without changing tokens.
 
 ### Key Properties
 
 - **Streaming-first**: `encode(text)` is just `initialize() -> feed(text) ->
-  finalize()`. Chunked input produces identical output regardless of chunk
-  boundaries.
-- **Bounded memory**: Fixed-size state (~1-2KB) plus a caller-provided
-  transform buffer. No hidden allocations during encode/decode. Processes
-  infinite-length I/O with constant memory.
-- **Offset tracking**: Every token maps back to its exact byte range in the
-  original input, propagated forward through normalization (NFC, lowercase,
-  etc.) using run-length encoded offset maps. Essential for training data
-  provenance and RAG chunking.
-- **HuggingFace compatible**: Bit-exact match against the HuggingFace
-  tokenizers library across all supported normalizers, pre-tokenizers, models,
-  and decoders.
+  finalize()`. Exact Unigram path selection is independent of input chunk
+  boundaries and output capacity.
+- **Explicit memory ownership**: Fixed state and transform buffers are
+  caller-provided. Exact Unigram paths and fused unknown spellings can outgrow
+  inline storage; their workspace uses the encoder's allocator and survives
+  reset. Deinitialization releases it.
+- **Stable model offsets**: Token spans use logical transformed-input bytes,
+  independent of ring wrap or reclamation. Byte-fallback tokens share the span
+  of the selected unknown piece. Recovering original-input coordinates through
+  length-changing normalization requires source maps from those transforms;
+  the model's byte positions alone do not provide that mapping.
+- **HuggingFace formats**: Loads vocabulary, normalization, segmentation,
+  model, decoder, and post-processing configuration from `tokenizer.json`.
 - **Tiktoken compatible**: Loads OpenAI tiktoken `.tiktoken` files
   (cl100k_base, o200k_base, r50k_base, p50k_base) and produces token-for-token
   identical output to the tiktoken Python library. Merge pairs are
@@ -160,36 +161,28 @@ needed to fill the output. Each stage maintains a small batch buffer (default
 
 ### Streaming Decode Pipeline
 
-```
-Token IDs ──┐
-            v
- ┌─────────────────────────────┐
- │ Vocabulary Lookup           │
- │ (id -> token string)        │
- └──────────────┬──────────────┘
-                │ token strings
-                v
-         ┌─────────────┐
-         │ UTF-8       │
-         │ Decoder     │
-         └──────┬──────┘
-                │ codepoints (batched)
-                v
- ┌──────────────────────────────┐
- │ Decoder Chain                │
- │ (ByteFallback, Metaspace,    │
- │  WordPiece strip, CTC, ...)  │
- └──────────────┬───────────────┘
-                │ codepoints (batched)
-                v
-         ┌─────────────┐
-         │ UTF-8       │
-         │ Encoder     │
-         └──────┬──────┘
-                │
-                v
-           Output bytes
-```
+Token IDs are looked up in the vocabulary and passed through token-local
+transforms such as ByteFallback, Metaspace, or WordPiece. When those transforms
+permit it, immutable predecoded vocabulary entries replace repeated decoding.
+First-position forms and byte-fallback state remain separate so incremental
+calls preserve the same text as one-shot decoding.
+
+HuggingFace `Fuse` joins the logical token strings. Transforms after that boundary
+consume one continuing text stream: for example, `Replace(▁, " ")`,
+`ByteFallback`, `Fuse`, `Strip(" ", 1, 0)` removes one leading space from the
+utterance while preserving spaces between words. ByteLevel also establishes a
+joined-string boundary. The native builder expresses the text stage with
+`iree_tokenizer_builder_set_decode_transform`.
+
+The token decoder retains accepted input, and a bounded byte buffer retains its
+output until the text transform accepts it. Finalization finishes the token
+decoder, drains that buffer, and then finalizes the text transform. Output credit
+can stop any stage without ending the logical string. A suffix strip therefore
+removes the utterance's suffix, independently of feed boundaries.
+
+An absent or null HuggingFace decoder joins tokens with ASCII spaces. An explicit
+`Fuse` or empty `Sequence` concatenates them. Native builders with no decoder
+create encode-only tokenizers.
 
 ### Data Flow
 
@@ -247,6 +240,11 @@ The pipeline is organized to keep working data in L1/L2 cache:
   segment at a time with O(n log n) merges where n is the segment length
   (typically 5-20 bytes, not the full input length). The heap is embedded in
   the encode state, not heap-allocated.
+- **Unigram**: F64 Viterbi paths retain one best predecessor per future end.
+  Only prefixes shared by every surviving path can publish before a segment
+  ends. Vocabulary width bounds the frontier and input lookahead; unresolved
+  paths retain their own workspace. Selected unknown pieces are fused before
+  vocabulary lookup or byte expansion.
 - **Trie-based vocabulary**: Token lookup during encoding uses a trie for
   longest-prefix matching, giving O(k) lookup where k is the max token length
   (bounded, typically < 50 bytes).
@@ -256,26 +254,31 @@ The pipeline is organized to keep working data in L1/L2 cache:
 
 ### Memory Consumption
 
-The tokenizer uses a fixed, small amount of memory for streaming state:
+Fixed storage is sized from the tokenizer configuration. Exact Unigram adds
+workspace only when retained paths or selected unknown text exceed inline space:
 
 | Component | Size | Notes |
 |-----------|------|-------|
-| Encode state | ~1-2 KB | Pipeline stage batch buffers + state |
+| Encode state | Configuration-dependent | Pipeline stages, model frontier, and inline workspace |
+| Unigram workspace | Input-dependent | Live ambiguous paths and fused unknown text; caller allocator |
 | Transform buffer | 4-64 KB | Caller-provided, tunable |
-| Decode state | ~1 KB | Vocab string batch buffer + decoder state |
+| Decode state | Configuration-dependent | Token decoder state, optional text transform, and a retained edge sized from the vocabulary |
 | Tokenizer (shared) | Varies | Vocabulary + merge table + regex DFA |
 
-The encode and decode state sizes are independent of input length. A 1-byte
-input and a 1-GB input use the same state allocation. This makes the tokenizer
-suitable for streaming/speculative decoding where you process tokens
-incrementally without ever needing to re-decode previous output.
+The fixed slabs and decode state are independent of input length. Unigram's
+retained path/output workspace depends on unresolved ambiguity. For example,
+with `a` scored -1 and `aa` scored -1.5, an odd-length run begins with `a` and an
+even-length run begins with `aa`: no fixed lookahead can settle its first token.
+The encoder retains that evidence until the segment ends. Ordinary resolved
+prefixes retire as input arrives, without retokenizing earlier text.
 
 ### Composability with Streaming Workflows
 
-Because the tokenizer processes input incrementally with bounded state:
+Incremental input and output have independent ownership:
 
-- **Speculative decoding**: Decode tentative tokens, discard on misprediction,
-  continue from the same state. No re-decode of accepted prefix.
+- **Speculative decoding**: Feed accepted tokens into the continuing decode
+  state after verification. The state retains the committed prefix; it has no
+  rollback operation for tentative tokens that have already been fed.
 - **Streaming chat**: Feed each LLM-generated token to the decoder as it
   arrives. UTF-8 output is produced as soon as complete characters are
   available.
@@ -320,8 +323,7 @@ HuggingFace-compatible template pair support and type ID assignment.
 
 ### Format Loaders
 
-**HuggingFace `tokenizer.json`**: Full coverage of the HuggingFace tokenizers
-library's JSON format, including all normalizer types, pre-tokenizer
+**HuggingFace `tokenizer.json`**: Loads normalizer and pre-tokenizer
 configurations, model types (BPE, WordPiece, Unigram), decoder chains, added
 tokens, and post-processor templates. A single `tokenizer.json` is
 self-contained — it carries the vocabulary, merge list, regex patterns, special
@@ -354,7 +356,8 @@ backtracking.
 
 ```
 tokenizer/
-  tokenizer.h/c          Core API: encode, decode, streaming state
+  tokenizer.h/c          Core API, construction, and encode state
+  decode.c               Decode execution and streaming state
   types.h                Shared types (token_id_t, offset_t, etc.)
   model.h/c              Model vtable interface
   normalizer.h/c         Normalizer vtable interface
@@ -479,6 +482,7 @@ iree_tokenizer_encode_state_initialize(
     iree_make_byte_span(transform_buffer, buffer_size),
     iree_tokenizer_offset_run_list_empty(),
     IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START,
+    iree_allocator_system(),
     &state);
 
 // Feed chunks as they arrive (network, file, etc.).

@@ -30,9 +30,9 @@ iree_status_t hrx_hal_queue_transfer_and_wait(
       .payload_values = &signal_value,
   };
   if (iree_status_is_ok(status)) {
-    status =
-        iree_hal_queue_transfer(queue, iree_hal_semaphore_list_empty(),
-                                signal_semaphores, operation_count, operations);
+    status = iree_hal_queue_transfer(queue, iree_hal_semaphore_list_empty(),
+                                     signal_semaphores, operation_count,
+                                     operations, /*barriers=*/NULL);
   }
   if (iree_status_is_ok(status)) {
     status = iree_hal_semaphore_wait(semaphore, signal_value,
@@ -69,7 +69,7 @@ static hrx_status_t hrx_stream_transfer(
   };
   iree_status_t iree_status = iree_hal_queue_transfer(
       stream->device->transfer_queue, wait_semaphores, signal_semaphores,
-      /*operation_count=*/1, operation);
+      /*operation_count=*/1, operation, /*barriers=*/NULL);
   if (iree_status_is_ok(iree_status)) {
     stream->timepoint = signal_value;
   }

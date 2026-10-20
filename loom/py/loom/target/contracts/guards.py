@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum, unique
+from enum import Enum, IntEnum, unique
 from typing import Self
 
 from loom.dsl import (
@@ -19,6 +19,7 @@ from loom.dsl import (
     ATTR_TYPE_FLAGS,
     ATTR_TYPE_I64,
     ATTR_TYPE_I64_ARRAY,
+    EncodingOperandSummaryDef,
     EnumCase,
     Op,
 )
@@ -42,50 +43,136 @@ _MAX_U32 = 0xFFFFFFFF
 
 
 @unique
+class UnsignedDivisorMagicKind(IntEnum):
+    """Arithmetic shape of an exact word-sized reciprocal recipe."""
+
+    MULTIPLY = 0
+    MULTIPLY_SHIFT = 1
+    MULTIPLY_ADD_SHIFT = 2
+
+    @property
+    def has_add(self) -> bool:
+        return self is self.MULTIPLY_ADD_SHIFT
+
+    @property
+    def has_shift(self) -> bool:
+        return self is not self.MULTIPLY
+
+
+@unique
+class SignedDivisorMagicKind(IntEnum):
+    """Arithmetic shape of an exact signed word-sized reciprocal recipe."""
+
+    MULTIPLY = 0
+    MULTIPLY_SHIFT = 1
+    MULTIPLY_ADD = 2
+    MULTIPLY_ADD_SHIFT = 3
+    MULTIPLY_SUBTRACT = 4
+    MULTIPLY_SUBTRACT_SHIFT = 5
+
+    @property
+    def numerator_factor(self) -> int:
+        if self in (self.MULTIPLY_ADD, self.MULTIPLY_ADD_SHIFT):
+            return 1
+        if self in (self.MULTIPLY_SUBTRACT, self.MULTIPLY_SUBTRACT_SHIFT):
+            return -1
+        return 0
+
+    @property
+    def has_shift(self) -> bool:
+        return self in (
+            self.MULTIPLY_SHIFT,
+            self.MULTIPLY_ADD_SHIFT,
+            self.MULTIPLY_SUBTRACT_SHIFT,
+        )
+
+
+@unique
 class GuardKind(Enum):
     """Selection guard kind for descriptor-rule contracts."""
 
     VALUE_TYPE = "value_type"
     ATTR_KIND = "attr_kind"
     ENUM_ATTR_EQUALS = "enum_attr_equals"
+    ENUM_ATTR_IN = "enum_attr_in"
     I64_RANGE = "i64_range"
+    I64_ATTRS_SUM_EQUALS = "i64_attrs_sum_equals"
     DESCRIPTOR_AVAILABLE = "descriptor_available"
     VALUE_MATERIALIZABLE = "value_materializable"
     LOW_VALUE_REGISTER_CLASS = "low_value_register_class"
+    LOW_VALUE_REPRESENTATION = "low_value_representation"
     LOW_VALUE_REGISTER_UNIT_COUNT = "low_value_register_unit_count"
     VALUE_STATIC_DIM0_MULTIPLE = "value_static_dim0_multiple"
     LOW_VALUE_REGISTER_UNIT_COUNT_EQ = "low_value_register_unit_count_eq"
     OPERAND_SEGMENT_COUNT = "operand_segment_count"
+    OPERAND_SEGMENT_EXACT_BITS = "operand_segment_exact_bits"
     I64_ARRAY_COUNT = "i64_array_count"
     I64_ARRAY_ELEMENT_RANGE = "i64_array_element_range"
     I64_ARRAY_ELEMENTS_RANGE = "i64_array_elements_range"
     VALUE_SIGNED_BIT_COUNT = "value_signed_bit_count"
     VALUE_UNSIGNED_BIT_COUNT = "value_unsigned_bit_count"
     VALUE_EXACT_I64 = "value_exact_i64"
+    VALUE_NOT_EXACT_I64 = "value_not_exact_i64"
     VALUE_EXACT_POWER_OF_TWO_I64 = "value_exact_power_of_two_i64"
-    VALUE_U32_DIVISOR_MAGIC_IS_ADD = "value_u32_divisor_magic_is_add"
+    VALUE_U32_DIVISOR_MAGIC_KIND = "value_u32_divisor_magic_kind"
+    VALUE_I32_DIVISOR_MAGIC_KIND = "value_i32_divisor_magic_kind"
     VALUE_EXACT_FLOAT = "value_exact_float"
+    VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS = "value_float_exactly_representable_as"
+    VALUE_EXACT_POWER_OF_TWO_FLOAT = "value_exact_power_of_two_float"
+    VALUE_NOT_NAN = "value_not_nan"
+    VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL = (
+        "value_not_subnormal_or_instance_flags_has_all"
+    )
     VALUE_I64_RANGE = "value_i64_range"
     VALUE_I64_RANGE_LE = "value_i64_range_le"
     VALUE_I64_RANGE_GE = "value_i64_range_ge"
+    VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE = "value_i64_equals_target_subgroup_size"
     VALUE_FLOAT_EQUALS = "value_float_equals"
     VALUE_STORAGE_ELEMENT_FORMAT = "value_storage_element_format"
+    VALUE_STORAGE_OPERAND_SCHEMA = "value_storage_operand_schema"
     VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES = "value_packed_integer_payload_from_lanes"
     VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD = "value_packed_integer_lanes_from_payload"
     VALUE_NO_USES = "value_no_uses"
+    VALUE_NO_USES_AFTER = "value_no_uses_after"
     INSTANCE_FLAGS_HAS_ALL = "instance_flags_has_all"
     INSTANCE_FLAGS_HAS_NONE = "instance_flags_has_none"
     VECTOR_EXTRACT_SHAPE = "vector_extract_shape"
     VALUE_STATIC_ELEMENT_COUNT_EQ = "value_static_element_count_eq"
     VALUE_MEMORY_SPACE = "value_memory_space"
+    TARGET_SUBGROUP_SIZE_RANGE = "target_subgroup_size_range"
+    TARGET_WHOLE_SUBGROUP = "target_whole_subgroup"
+    TARGET_CONTIGUOUS_SUBGROUP_CLUSTER = "target_contiguous_subgroup_cluster"
 
 
 _LOW_VALUE_GUARD_KINDS = (
     GuardKind.LOW_VALUE_REGISTER_CLASS,
+    GuardKind.LOW_VALUE_REPRESENTATION,
     GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT,
     GuardKind.VALUE_STATIC_DIM0_MULTIPLE,
     GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT_EQ,
 )
+
+_SOURCE_ATTR_GUARD_KINDS = (
+    GuardKind.ATTR_KIND,
+    GuardKind.ENUM_ATTR_EQUALS,
+    GuardKind.ENUM_ATTR_IN,
+    GuardKind.I64_RANGE,
+    GuardKind.I64_ATTRS_SUM_EQUALS,
+    GuardKind.TARGET_WHOLE_SUBGROUP,
+    GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+)
+
+
+def is_source_attr_guard_kind(kind: GuardKind) -> bool:
+    return kind in _SOURCE_ATTR_GUARD_KINDS
+
+
+def _validate_guard_bit_width(kind: GuardKind, bit_width: int | None) -> None:
+    if kind == GuardKind.OPERAND_SEGMENT_EXACT_BITS:
+        if bit_width not in (8, 16, 32, 64):
+            raise ValueError(f"{kind.value} bit width must be 8, 16, 32, or 64")
+    elif bit_width is not None:
+        raise ValueError(f"{kind.value} guard cannot carry a bit width")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,16 +214,22 @@ class Guard:
     other_field: str | None = None
     attr_field: str | None = None
     type_pattern: TypePattern | None = None
+    value_ref: ValueRef | None = None
     attr_type: str | None = None
     enum_keyword: str | None = None
+    enum_keywords: tuple[str, ...] = ()
     count: int | None = None
+    bit_width: int | None = None
     element: int | None = None
     minimum: int | None = None
     maximum: int | None = None
     # Signed bias applied before the exact-power-of-two predicate.
     addend: int = 0
+    # Exact signed payload carried by a kind-specific guard.
+    i64_value: int | None = None
     f64_value: float | None = None
     numeric_format_c_expression: str | None = None
+    storage_operand_schema: EncodingOperandSummaryDef | None = None
     descriptor: Descriptor | None = None
     register_class: str | None = None
     materializer: str | None = None
@@ -161,6 +254,69 @@ class Guard:
         )
 
     @classmethod
+    def exact_lane_origin_type(
+        cls,
+        field: str,
+        type_pattern: TypePattern,
+        *,
+        element: int = 0,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires an operand's exact whole-vector origin to have a type."""
+        return cls(
+            kind=GuardKind.VALUE_TYPE,
+            field=field,
+            element=element,
+            type_pattern=type_pattern,
+            value_ref=ValueRef.exact_lane_origin_operand(
+                field,
+                element=element,
+            ),
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def uniform_element_origin_type(
+        cls,
+        field: str,
+        type_pattern: TypePattern,
+        *,
+        element: int = 0,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires a same-type uniform scalar origin of an operand."""
+        return cls(
+            kind=GuardKind.VALUE_TYPE,
+            field=field,
+            element=element,
+            type_pattern=type_pattern,
+            value_ref=ValueRef.uniform_element_origin_operand(field, element=element),
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def exact_uniform_element_origin_type(
+        cls,
+        field: str,
+        type_pattern: TypePattern,
+        *,
+        element: int = 0,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires an operand's exact uniform scalar origin to have a type."""
+        return cls(
+            kind=GuardKind.VALUE_TYPE,
+            field=field,
+            element=element,
+            type_pattern=type_pattern,
+            value_ref=ValueRef.exact_uniform_element_origin_operand(
+                field,
+                element=element,
+            ),
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
     def enum_attr_equals(
         cls,
         field: str,
@@ -173,6 +329,25 @@ class Guard:
             kind=GuardKind.ENUM_ATTR_EQUALS,
             field=field,
             enum_keyword=keyword,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def enum_attr_in(
+        cls,
+        field: str,
+        enum_cases: Sequence[str | EnumCase],
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        keywords = tuple(
+            enum_case.keyword if isinstance(enum_case, EnumCase) else enum_case
+            for enum_case in enum_cases
+        )
+        return cls(
+            kind=GuardKind.ENUM_ATTR_IN,
+            field=field,
+            enum_keywords=keywords,
             diagnostic=diagnostic,
         )
 
@@ -205,6 +380,23 @@ class Guard:
             field=field,
             minimum=minimum,
             maximum=maximum,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def i64_attrs_sum_equals(
+        cls,
+        field: str,
+        other_field: str,
+        value: int,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.I64_ATTRS_SUM_EQUALS,
+            field=field,
+            other_field=other_field,
+            i64_value=value,
             diagnostic=diagnostic,
         )
 
@@ -249,6 +441,21 @@ class Guard:
             kind=GuardKind.LOW_VALUE_REGISTER_CLASS,
             field=field,
             register_class=register_class,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def low_value_representation(
+        cls,
+        field: str,
+        representation: int,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.LOW_VALUE_REPRESENTATION,
+            field=field,
+            count=representation,
             diagnostic=diagnostic,
         )
 
@@ -315,6 +522,15 @@ class Guard:
     @classmethod
     def operand_segment_count(cls, field: str, count: int) -> Self:
         return cls(kind=GuardKind.OPERAND_SEGMENT_COUNT, field=field, count=count)
+
+    @classmethod
+    def operand_segment_exact_bits(cls, field: str, *, bit_width: int) -> Self:
+        """Requires a nonempty scalar segment with exact declared-width bits."""
+        return cls(
+            kind=GuardKind.OPERAND_SEGMENT_EXACT_BITS,
+            field=field,
+            bit_width=bit_width,
+        )
 
     @classmethod
     def i64_array_count(cls, field: str, count: int) -> Self:
@@ -394,6 +610,10 @@ class Guard:
         )
 
     @classmethod
+    def value_not_exact_i64(cls, field: str) -> Self:
+        return cls(kind=GuardKind.VALUE_NOT_EXACT_I64, field=field)
+
+    @classmethod
     def value_exact_power_of_two_i64(
         cls,
         field: str,
@@ -409,17 +629,34 @@ class Guard:
         )
 
     @classmethod
-    def value_u32_divisor_magic_is_add(
+    def value_u32_divisor_magic_kind(
         cls,
-        field: str,
-        is_add: bool,
+        numerator: str,
+        divisor: str,
+        kind: UnsignedDivisorMagicKind,
         *,
         diagnostic: GuardDiagnostic | None = None,
     ) -> Self:
         return cls(
-            kind=GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD,
-            field=field,
-            count=1 if is_add else 0,
+            kind=GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+            field=divisor,
+            other_field=numerator,
+            count=kind,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def value_i32_divisor_magic_kind(
+        cls,
+        divisor: str,
+        kind: SignedDivisorMagicKind,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND,
+            field=divisor,
+            count=kind,
             diagnostic=diagnostic,
         )
 
@@ -433,6 +670,75 @@ class Guard:
         return cls(
             kind=GuardKind.VALUE_EXACT_FLOAT,
             field=field,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def value_float_exactly_representable_as(
+        cls,
+        field: str,
+        type_field: str,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires finite values exact in the other value's float element type.
+
+        NaN and infinity remain possible and need independent class guards.
+        """
+        return cls(
+            kind=GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
+            field=field,
+            other_field=type_field,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def value_exact_power_of_two_float(
+        cls,
+        field: str,
+        minimum_exponent: int,
+        maximum_exponent: int,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires an exact signed power of two in an exponent interval."""
+        return cls(
+            kind=GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+            field=field,
+            minimum=minimum_exponent,
+            maximum=maximum_exponent,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def value_not_nan(
+        cls,
+        field: str,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.VALUE_NOT_NAN,
+            field=field,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def value_not_subnormal_or_instance_flags_has_all(
+        cls,
+        value_field: str,
+        flags_field: str,
+        enum_case: str | EnumCase,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires a retained fact unless the source op permits the behavior."""
+        keyword = enum_case.keyword if isinstance(enum_case, EnumCase) else enum_case
+        return cls(
+            kind=GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL,
+            field=value_field,
+            attr_field=flags_field,
+            enum_keyword=keyword,
             diagnostic=diagnostic,
         )
 
@@ -484,6 +790,20 @@ class Guard:
         )
 
     @classmethod
+    def value_i64_equals_target_subgroup_size(
+        cls,
+        field: str,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires an exact integer value equal to the target subgroup size."""
+        return cls(
+            kind=GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
+            field=field,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
     def value_float_equals(
         cls,
         field: str,
@@ -514,6 +834,23 @@ class Guard:
         )
 
     @classmethod
+    def value_storage_operand_schema(
+        cls,
+        field: str,
+        schema: EncodingOperandSummaryDef,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        """Requires a value's complete encoded-operand schema to match."""
+
+        return cls(
+            kind=GuardKind.VALUE_STORAGE_OPERAND_SCHEMA,
+            field=field,
+            storage_operand_schema=schema,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
     def value_memory_space(
         cls,
         field: str,
@@ -526,6 +863,42 @@ class Guard:
             field=field,
             memory_spaces=tuple(memory_spaces),
             diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def target_subgroup_size_range(
+        cls,
+        minimum: int,
+        maximum: int,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.TARGET_SUBGROUP_SIZE_RANGE,
+            field="subgroup_size",
+            minimum=minimum,
+            maximum=maximum,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
+    def target_whole_subgroup(cls, size_field: str, stride_field: str) -> Self:
+        """Matches an absent size or the target's full width, at unit stride."""
+        return cls(
+            kind=GuardKind.TARGET_WHOLE_SUBGROUP,
+            field=size_field,
+            other_field=stride_field,
+        )
+
+    @classmethod
+    def target_contiguous_subgroup_cluster(
+        cls, size_field: str, stride_field: str
+    ) -> Self:
+        """Matches an explicit power-of-two size within the target subgroup."""
+        return cls(
+            kind=GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+            field=size_field,
+            other_field=stride_field,
         )
 
     @classmethod
@@ -586,6 +959,19 @@ class Guard:
         )
 
     @classmethod
+    def value_no_uses_after(
+        cls,
+        field: str,
+        *,
+        diagnostic: GuardDiagnostic | None = None,
+    ) -> Self:
+        return cls(
+            kind=GuardKind.VALUE_NO_USES_AFTER,
+            field=field,
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
     def vector_extract_shape(
         cls,
         source_field: str,
@@ -639,6 +1025,13 @@ class Guard:
             raise ValueError("power-of-two addend must fit in i64")
         if self.addend and self.kind != GuardKind.VALUE_EXACT_POWER_OF_TWO_I64:
             raise ValueError(f"{self.kind.value} guard cannot carry an addend")
+        if self.i64_value is not None and not -(2**63) <= self.i64_value < 2**63:
+            raise ValueError(f"{self.kind.value} i64 value must fit in i64")
+        if self.kind == GuardKind.I64_ATTRS_SUM_EQUALS:
+            if self.i64_value is None:
+                raise ValueError(f"{self.kind.value} guard needs an i64 value")
+        elif self.i64_value is not None:
+            raise ValueError(f"{self.kind.value} guard cannot carry an i64 value")
         if not self.field:
             raise ValueError(f"{self.kind.value} guard requires a field")
         if self.other_field is not None and not self.other_field:
@@ -649,8 +1042,18 @@ class Guard:
             raise ValueError(f"{self.kind.value} attr type must be non-empty")
         if self.enum_keyword is not None and not self.enum_keyword:
             raise ValueError(f"{self.kind.value} enum keyword must be non-empty")
+        if self.kind == GuardKind.ENUM_ATTR_IN:
+            if not self.enum_keywords:
+                raise ValueError(f"{self.kind.value} guard needs enum keywords")
+            if any(not keyword for keyword in self.enum_keywords):
+                raise ValueError(f"{self.kind.value} enum keywords must be non-empty")
+            if len(self.enum_keywords) != len(set(self.enum_keywords)):
+                raise ValueError(f"{self.kind.value} guard repeats an enum keyword")
+        elif self.enum_keywords:
+            raise ValueError(f"{self.kind.value} guard cannot carry enum keywords")
         if self.count is not None and self.count < 0:
             raise ValueError(f"{self.kind.value} count must be non-negative")
+        _validate_guard_bit_width(self.kind, self.bit_width)
         if self.element is not None and self.element < 0:
             raise ValueError(f"{self.kind.value} element must be non-negative")
         if (
@@ -680,6 +1083,15 @@ class Guard:
             raise ValueError(f"{self.kind.value} guard cannot carry a memory-space set")
         if self.kind == GuardKind.VALUE_FLOAT_EQUALS and self.f64_value is None:
             raise ValueError(f"{self.kind.value} guard needs an f64 value")
+        if self.value_ref is not None and self.kind != GuardKind.VALUE_TYPE:
+            raise ValueError(f"{self.kind.value} guard cannot carry a value ref")
+        if self.kind == GuardKind.TARGET_SUBGROUP_SIZE_RANGE and (
+            self.minimum is None
+            or self.maximum is None
+            or self.minimum <= 0
+            or self.maximum > _MAX_U32
+        ):
+            raise ValueError(f"{self.kind.value} guard needs a positive u32 range")
         if (
             self.kind == GuardKind.VALUE_STORAGE_ELEMENT_FORMAT
             and not self.numeric_format_c_expression
@@ -687,12 +1099,21 @@ class Guard:
             raise ValueError(
                 f"{self.kind.value} guard needs a numeric format C expression"
             )
+        if self.kind == GuardKind.VALUE_STORAGE_OPERAND_SCHEMA:
+            if self.storage_operand_schema is None:
+                raise ValueError(f"{self.kind.value} guard needs an operand schema")
+            if self.storage_operand_schema == EncodingOperandSummaryDef():
+                raise ValueError(
+                    f"{self.kind.value} guard cannot match an unknown operand schema"
+                )
 
     def validate(self, source_op: Op) -> None:
         subject = f"guard {self.kind.value}"
+        if self.kind == GuardKind.TARGET_SUBGROUP_SIZE_RANGE:
+            return
         if self.kind == GuardKind.VALUE_TYPE:
             _require_value(source_op, self.field, subject)
-            value_ref = (
+            value_ref = self.value_ref or (
                 ValueRef.operand(self.field, element=self.element or 0)
                 if source_op.operand(self.field) is not None
                 else ValueRef.result(self.field, element=self.element or 0)
@@ -701,41 +1122,8 @@ class Guard:
             if self.type_pattern is None:
                 raise ValueError(f"{source_op.name}: {subject} needs a type pattern")
             return
-        if self.kind == GuardKind.ATTR_KIND:
-            _require_attr(source_op, self.field, subject)
-            if self.attr_type is None:
-                raise ValueError(f"{source_op.name}: {subject} needs an attr type")
-            return
-        if self.kind == GuardKind.ENUM_ATTR_EQUALS:
-            attr = _require_attr(source_op, self.field, subject)
-            if attr.attr_type != ATTR_TYPE_ENUM:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    "must be an enum attr"
-                )
-            if self.enum_keyword is None:
-                raise ValueError(f"{source_op.name}: {subject} needs an enum keyword")
-            enum_def = attr.enum_def
-            if enum_def is None:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    "has no enum definition"
-                )
-            if self.enum_keyword not in enum_def.keywords:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    f"has no enum case '{self.enum_keyword}'"
-                )
-            return
-        if self.kind == GuardKind.I64_RANGE:
-            attr = _require_attr(source_op, self.field, subject)
-            if attr.attr_type not in (ATTR_TYPE_I64, ATTR_TYPE_ANY):
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    "must be an i64 or any attr"
-                )
-            if self.minimum is None or self.maximum is None:
-                raise ValueError(f"{source_op.name}: {subject} needs minimum/maximum")
+        if is_source_attr_guard_kind(self.kind):
+            _validate_source_attr_guard(self, source_op, subject)
             return
         if self.kind == GuardKind.DESCRIPTOR_AVAILABLE:
             if self.descriptor is None:
@@ -751,26 +1139,46 @@ class Guard:
             return
         if self.kind == GuardKind.OPERAND_SEGMENT_COUNT:
             operand = _require_operand(source_op, self.field, subject)
+            if not (operand.variadic or operand.optional):
+                raise ValueError(
+                    f"{source_op.name}: {subject} field '{self.field}' "
+                    "must be a variadic or optional operand"
+                )
+            if self.count is None:
+                raise ValueError(f"{source_op.name}: {subject} needs a count")
+            if operand.optional and self.count > 1:
+                raise ValueError(
+                    f"{source_op.name}: optional operand '{self.field}' "
+                    "count must be zero or one"
+                )
+            return
+        if self.kind == GuardKind.OPERAND_SEGMENT_EXACT_BITS:
+            operand = _require_operand(source_op, self.field, subject)
             if not operand.variadic:
                 raise ValueError(
                     f"{source_op.name}: {subject} field '{self.field}' "
                     "must be a variadic operand"
                 )
-            if self.count is None:
-                raise ValueError(f"{source_op.name}: {subject} needs a count")
             return
         if self.kind in (
             GuardKind.VALUE_SIGNED_BIT_COUNT,
             GuardKind.VALUE_UNSIGNED_BIT_COUNT,
             GuardKind.VALUE_EXACT_I64,
+            GuardKind.VALUE_NOT_EXACT_I64,
             GuardKind.VALUE_EXACT_POWER_OF_TWO_I64,
-            GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD,
+            GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+            GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND,
             GuardKind.VALUE_EXACT_FLOAT,
+            GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
+            GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+            GuardKind.VALUE_NOT_NAN,
             GuardKind.VALUE_I64_RANGE,
             GuardKind.VALUE_I64_RANGE_LE,
             GuardKind.VALUE_I64_RANGE_GE,
+            GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
             GuardKind.VALUE_FLOAT_EQUALS,
             GuardKind.VALUE_STORAGE_ELEMENT_FORMAT,
+            GuardKind.VALUE_STORAGE_OPERAND_SCHEMA,
             GuardKind.VALUE_MEMORY_SPACE,
             GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
             GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
@@ -778,7 +1186,18 @@ class Guard:
         ):
             _validate_value_fact_guard(self, source_op, subject)
             return
-        if self.kind == GuardKind.VALUE_NO_USES:
+        if self.kind == GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL:
+            _validate_value_fact_guard(self, source_op, subject)
+            if self.attr_field is None:
+                raise ValueError(
+                    f"{source_op.name}: {subject} needs a flags attribute field"
+                )
+            _validate_instance_flags_guard(self, source_op, subject, self.attr_field)
+            return
+        if self.kind in (
+            GuardKind.VALUE_NO_USES,
+            GuardKind.VALUE_NO_USES_AFTER,
+        ):
             _require_value(source_op, self.field, subject)
             return
         if self.kind == GuardKind.VECTOR_EXTRACT_SHAPE:
@@ -804,27 +1223,102 @@ class Guard:
             GuardKind.INSTANCE_FLAGS_HAS_ALL,
             GuardKind.INSTANCE_FLAGS_HAS_NONE,
         ):
-            attr = _require_attr(source_op, self.field, subject)
-            if attr.attr_type != ATTR_TYPE_FLAGS:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    "must be a flags attr"
-                )
-            if self.enum_keyword is None:
-                raise ValueError(f"{source_op.name}: {subject} needs a flag keyword")
-            enum_def = attr.enum_def
-            if enum_def is None:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    "has no enum definition"
-                )
-            if self.enum_keyword not in enum_def.keywords:
-                raise ValueError(
-                    f"{source_op.name}: {subject} field '{self.field}' "
-                    f"has no enum case '{self.enum_keyword}'"
-                )
+            _validate_instance_flags_guard(self, source_op, subject, self.field)
             return
         _validate_i64_array_guard(self, source_op, subject)
+
+
+def _validate_instance_flags_guard(
+    guard: Guard,
+    source_op: Op,
+    subject: str,
+    field: str,
+) -> None:
+    attr = _require_attr(source_op, field, subject)
+    if attr.attr_type != ATTR_TYPE_FLAGS:
+        raise ValueError(
+            f"{source_op.name}: {subject} field '{field}' must be a flags attr"
+        )
+    if guard.enum_keyword is None:
+        raise ValueError(f"{source_op.name}: {subject} needs a flag keyword")
+    enum_def = attr.enum_def
+    if enum_def is None:
+        raise ValueError(
+            f"{source_op.name}: {subject} field '{field}' has no enum definition"
+        )
+    if guard.enum_keyword not in enum_def.keywords:
+        raise ValueError(
+            f"{source_op.name}: {subject} field '{field}' has no enum case "
+            f"'{guard.enum_keyword}'"
+        )
+
+
+def _validate_source_attr_guard(
+    guard: Guard,
+    source_op: Op,
+    subject: str,
+) -> None:
+    attr = _require_attr(source_op, guard.field, subject)
+    if guard.kind == GuardKind.ATTR_KIND:
+        if guard.attr_type is None:
+            raise ValueError(f"{source_op.name}: {subject} needs an attr type")
+        return
+    if guard.kind in (GuardKind.ENUM_ATTR_EQUALS, GuardKind.ENUM_ATTR_IN):
+        if attr.attr_type != ATTR_TYPE_ENUM:
+            raise ValueError(
+                f"{source_op.name}: {subject} field '{guard.field}' "
+                "must be an enum attr"
+            )
+        enum_def = attr.enum_def
+        if enum_def is None:
+            raise ValueError(
+                f"{source_op.name}: {subject} field '{guard.field}' "
+                "has no enum definition"
+            )
+        keywords = (
+            (guard.enum_keyword,)
+            if guard.kind == GuardKind.ENUM_ATTR_EQUALS
+            else guard.enum_keywords
+        )
+        if keywords == (None,):
+            raise ValueError(f"{source_op.name}: {subject} needs an enum keyword")
+        for keyword in keywords:
+            assert keyword is not None
+            if keyword not in enum_def.keywords:
+                raise ValueError(
+                    f"{source_op.name}: {subject} field '{guard.field}' "
+                    f"has no enum case '{keyword}'"
+                )
+        return
+    if attr.attr_type not in (ATTR_TYPE_I64, ATTR_TYPE_ANY):
+        raise ValueError(
+            f"{source_op.name}: {subject} field '{guard.field}' "
+            "must be an i64 or any attr"
+        )
+    if guard.kind == GuardKind.I64_RANGE:
+        if guard.minimum is None or guard.maximum is None:
+            raise ValueError(f"{source_op.name}: {subject} needs minimum/maximum")
+        return
+    if guard.other_field is None:
+        raise ValueError(f"{source_op.name}: {subject} needs another field")
+    other_attr = _require_attr(source_op, guard.other_field, subject)
+    if guard.kind in (
+        GuardKind.TARGET_WHOLE_SUBGROUP,
+        GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+    ):
+        if any(
+            item.attr_type != ATTR_TYPE_I64 or not item.optional
+            for item in (attr, other_attr)
+        ):
+            raise ValueError(
+                f"{source_op.name}: {subject} requires optional i64 size and stride"
+            )
+        return
+    if other_attr.attr_type not in (ATTR_TYPE_I64, ATTR_TYPE_ANY):
+        raise ValueError(
+            f"{source_op.name}: {subject} field '{guard.other_field}' "
+            "must be an i64 or any attr"
+        )
 
 
 def _validate_low_value_guard(
@@ -836,6 +1330,12 @@ def _validate_low_value_guard(
     if guard.kind == GuardKind.LOW_VALUE_REGISTER_CLASS:
         if guard.register_class is None:
             raise ValueError(f"{source_op.name}: {subject} needs a register class")
+        return
+    if guard.kind == GuardKind.LOW_VALUE_REPRESENTATION:
+        if guard.count is None or guard.count < 0 or guard.count >= 0xFFFF:
+            raise ValueError(
+                f"{source_op.name}: {subject} needs a representation in [0, 65534]"
+            )
         return
     if guard.kind == GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT:
         if guard.count is None or guard.count <= 0:
@@ -872,6 +1372,7 @@ def _validate_value_fact_guard(
         GuardKind.VALUE_I64_RANGE_LE,
         GuardKind.VALUE_I64_RANGE_GE,
         GuardKind.VALUE_STATIC_ELEMENT_COUNT_EQ,
+        GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
     ):
         if guard.other_field is None:
             raise ValueError(f"{source_op.name}: {subject} needs another value")
@@ -884,16 +1385,29 @@ def _validate_value_fact_guard(
         if guard.count is None or guard.count <= 0:
             raise ValueError(f"{source_op.name}: {subject} needs a positive bit count")
         return
-    if guard.kind == GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD:
-        if guard.count not in (0, 1):
+    if guard.kind == GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND:
+        if guard.other_field is None:
+            raise ValueError(f"{source_op.name}: {subject} needs a numerator")
+        _require_value(source_op, guard.other_field, subject)
+        if not isinstance(guard.count, UnsignedDivisorMagicKind):
             raise ValueError(
-                f"{source_op.name}: {subject} needs an expected add indicator"
+                f"{source_op.name}: {subject} needs a reciprocal recipe kind"
+            )
+        return
+    if guard.kind == GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND:
+        if not isinstance(guard.count, SignedDivisorMagicKind):
+            raise ValueError(
+                f"{source_op.name}: {subject} needs a signed reciprocal recipe kind"
             )
         return
     if guard.kind == GuardKind.VALUE_I64_RANGE and (
         guard.minimum is None or guard.maximum is None
     ):
         raise ValueError(f"{source_op.name}: {subject} needs minimum/maximum")
+    if guard.kind == GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT and (
+        guard.minimum is None or guard.maximum is None
+    ):
+        raise ValueError(f"{source_op.name}: {subject} needs exponent bounds")
     if guard.kind == GuardKind.VALUE_FLOAT_EQUALS and guard.f64_value is None:
         raise ValueError(f"{source_op.name}: {subject} needs an f64 value")
     if guard.kind in (

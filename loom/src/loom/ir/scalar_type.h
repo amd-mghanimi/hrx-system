@@ -24,11 +24,12 @@ extern "C" {
 enum loom_scalar_type_e {
   // No scalar type. Zero so absent and zero-initialized fields remain invalid.
   LOOM_SCALAR_TYPE_NONE = 0,
-  // Signed target-width integer for loop bounds, dimension sizes, and general
-  // indexing arithmetic. Arithmetic follows signed semantics.
+  // Signed integer for loop bounds, dimension sizes, and general indexing
+  // arithmetic. Unconstrained parameters use the target's native index width;
+  // computed values can require wider carriers. Arithmetic is signed.
   LOOM_SCALAR_TYPE_INDEX = 1,
   // Unsigned target-selected-width integer for buffer byte offsets and
-  // addressing. Arithmetic follows unsigned semantics. Its target carrier may
+  // addressing. Arithmetic wraps modulo the selected carrier width, which may
   // be wider than the index carrier.
   LOOM_SCALAR_TYPE_OFFSET = 2,
   // 1-bit integer. Boolean results (comparisons, predicates).
@@ -112,6 +113,9 @@ enum loom_scalar_type_set_bits_e {
       LOOM_SCALAR_TYPE_SET_F32 | LOOM_SCALAR_TYPE_SET_F64,
   LOOM_SCALAR_TYPE_SET_16BIT_FLOAT =
       LOOM_SCALAR_TYPE_SET_F16 | LOOM_SCALAR_TYPE_SET_BF16,
+  LOOM_SCALAR_TYPE_SET_FLOAT_LE16 = LOOM_SCALAR_TYPE_SET_F8E4M3 |
+                                    LOOM_SCALAR_TYPE_SET_F8E5M2 |
+                                    LOOM_SCALAR_TYPE_SET_16BIT_FLOAT,
 };
 
 static inline bool loom_scalar_type_set_contains(loom_scalar_type_set_t set,

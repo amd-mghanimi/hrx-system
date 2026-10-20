@@ -81,6 +81,29 @@ IREE_API_EXPORT iree_status_t
 iree_byte_sequence_enumerate(const iree_byte_sequence_t* sequence,
                              iree_byte_sequence_segment_callback_t callback);
 
+// Enumerates the bytes in [offset, offset + length) without gathering them.
+//
+// Validates the range before invoking |callback|. Empty ranges invoke no
+// callbacks. Segment boundaries may split fields and returned spans are valid
+// only during their callback. A callback or source failure propagates
+// unchanged; earlier callbacks may have already consumed a prefix of the range.
+//
+// Contiguous storage is accessed directly. Segmented storage is traversed once
+// without allocating or copying. Callers processing many ranges should batch
+// them in one full enumeration instead of enumerating each range independently.
+IREE_API_EXPORT iree_status_t iree_byte_sequence_enumerate_range(
+    const iree_byte_sequence_t* sequence, uint64_t offset, uint64_t length,
+    iree_byte_sequence_segment_callback_t callback);
+
+// Reads |target.data_length| bytes starting at |offset| into caller storage.
+//
+// The source range and target pointer are validated before any writes. Source
+// and target storage must not overlap. A source failure may leave a prefix of
+// |target| populated; no allocation or rollback is performed.
+IREE_API_EXPORT iree_status_t
+iree_byte_sequence_read(const iree_byte_sequence_t* sequence, uint64_t offset,
+                        iree_byte_span_t target);
+
 // Creates a sequence by transferring ownership of |inout_span|.
 //
 // Any non-NULL span data must be an allocation owned by |host_allocator|. On
@@ -90,6 +113,20 @@ iree_byte_sequence_enumerate(const iree_byte_sequence_t* sequence,
 IREE_API_EXPORT iree_status_t iree_byte_sequence_create_from_span_move(
     iree_byte_span_t* inout_span, iree_allocator_t host_allocator,
     iree_byte_sequence_t** out_sequence);
+
+// Creates a sequence that logically concatenates |sequences| in order.
+//
+// The returned sequence retains each non-empty input without copying its
+// bytes. Enumeration visits every input's segments in logical order. Empty
+// inputs contribute no segments. When only one input contributes bytes it is
+// retained and returned directly; an all-empty input list similarly retains
+// one empty input. A zero-length list produces a real empty sequence.
+//
+// On success the caller owns |out_sequence| and the input ownership is
+// unchanged. On failure |out_sequence| is NULL and no input is retained.
+IREE_API_EXPORT iree_status_t iree_byte_sequence_create_concat(
+    iree_host_size_t sequence_count, iree_byte_sequence_t* const* sequences,
+    iree_allocator_t host_allocator, iree_byte_sequence_t** out_sequence);
 
 // Clones |sequence| into one contiguous caller-owned allocation.
 //

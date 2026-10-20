@@ -18,6 +18,7 @@ loom_cc_library(
     "source_to_low.c"
   DEPS
     iree::base
+    loom::analysis::storage_access
     loom::codegen::low::descriptors
     loom::codegen::low::launch_config_program
     loom::codegen::low::lower
@@ -25,6 +26,7 @@ loom_cc_library(
     loom::codegen::low::pipeline::pass_environment
     loom::ir
     loom::ops::low
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
@@ -43,6 +45,10 @@ loom_cc_library(
     "target_legalize.h"
   SRCS
     "target_legalize.c"
+    "target_legalize_options.c"
+    "target_legalize_options.h"
+    "target_legalize_preflight.c"
+    "target_legalize_preflight.h"
   DEPS
     iree::base
     iree::base::internal::arena
@@ -50,13 +56,16 @@ loom_cc_library(
     loom::codegen::low::lower
     loom::codegen::low::lower::source_selection
     loom::codegen::low::pipeline::pass_environment
+    loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::index
     loom::ops::kernel
     loom::ops::low
     loom::ops::op_defs
     loom::ops::scalar
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
@@ -68,7 +77,10 @@ loom_cc_library(
     loom::target::math_policy
     loom::target::pass_environment
     loom::target::reporting::report
+    loom::target::types
+    loom::transforms::vector::component_packet_legalization
     loom::util::adaptive_sort
+    loom::util::fact_table
     loom::util::walk
   PUBLIC
 )
@@ -84,6 +96,7 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::analysis::symbol_facts
+    loom::codegen::low::loop_execution
     loom::codegen::low::lower
     loom::codegen::low::lower::source_selection
     loom::codegen::low::text_asm
@@ -93,7 +106,9 @@ loom_cc_test(
     loom::error::error_defs
     loom::format::text::parser
     loom::ir
+    loom::ops::cfg
     loom::ops::func
+    loom::ops::index
     loom::ops::low
     loom::ops::pass
     loom::ops::sanitizer

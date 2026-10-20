@@ -13,6 +13,7 @@
 #include "loom/analysis/consumption.h"
 #include "loom/analysis/liveness.h"
 #include "loom/codegen/low/allocation/assignment.h"
+#include "loom/codegen/low/allocation/unit_liveness.h"
 #include "loom/codegen/low/placement.h"
 
 #ifdef __cplusplus
@@ -28,11 +29,22 @@ typedef struct loom_low_allocation_edge_alias_context_t {
   const loom_low_placement_table_t* placement;
   // Borrowed semantic live segments in the placement value domain.
   const loom_liveness_analysis_t* liveness;
+  // Physical component observations retained alongside unit lifetimes.
+  const loom_low_allocation_unit_liveness_t* unit_liveness;
   // Callback that lazily returns a consumption query for one relation region.
   loom_low_allocation_edge_alias_consumption_query_fn_t consumption_query;
   // Opaque caller state passed to consumption_query.
   void* user_data;
 } loom_low_allocation_edge_alias_context_t;
+
+// Returns whether the concrete storage units owned by |value_ordinal| have a
+// semantic or decomposed read dynamically reachable after |operation| and
+// before that value is recreated. The query follows the producer-retained
+// observation index rather than rediscovering decomposed reads from IR.
+iree_status_t loom_low_allocation_edge_alias_storage_range_used_after_operation(
+    const loom_low_allocation_edge_alias_context_t* context,
+    const loom_op_t* operation, loom_value_ordinal_t value_ordinal,
+    uint32_t unit_offset, uint32_t unit_count, bool* out_used_after);
 
 // Returns whether |interval| may share the edge destination units covered by
 // |relation| with |counterpart|. The query proves that neither the destination

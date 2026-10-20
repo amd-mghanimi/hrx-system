@@ -1,13 +1,13 @@
-// RUN: emit low-allocation-json @simd128_register_15 output=none fixed=%input:physical_register:15:1
-low.func.def target<x86.simd128.core> @simd128_register_15(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+// RUN: emit low-allocation-json @avx2_xmm_register_15 output=none fixed=%input:physical_register:15:1
+low.func.def target<x86.avx2.core> @avx2_xmm_register_15(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
   return %input
 }
 
 // ====
 
-// RUN: emit low-allocation-json @simd128_register_16 output=none fixed=%input:physical_register:16:1
-// ERROR@+1: BACKEND/022 {function_name="simd128_register_16", request_kind="fixed_value", register_class="x86.xmm", location_base="16", location_count="1", location_end="17", allocation_capacity="16"}
-low.func.def target<x86.simd128.core> @simd128_register_16(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+// RUN: emit low-allocation-json @avx2_xmm_register_16 output=none fixed=%input:physical_register:16:1
+// ERROR@+1: BACKEND/022 {function_name="avx2_xmm_register_16", request_kind="fixed_value", register_class="x86.xmm", location_base="16", location_count="1", location_end="17", allocation_capacity="16"}
+low.func.def target<x86.avx2.core> @avx2_xmm_register_16(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
   return %input
 }
 
@@ -50,12 +50,6 @@ low.func.decl target<x86.scalar.core> @scalar_absent_xmm(%input: reg<x86.xmm>)
 // ====
 
 // RUN: verify
-// ERROR@+1: PARSE/003 {actual_token="x86.ymm", expected="register class defined by the selected descriptor set"}
-low.func.decl target<x86.simd128.core> @simd128_absent_ymm(%input: reg<x86.ymm>)
-
-// ====
-
-// RUN: verify
 // ERROR@+1: PARSE/003 {actual_token="x86.zmm", expected="register class defined by the selected descriptor set"}
 low.func.decl target<x86.avx2.core> @avx2_absent_zmm(%input: reg<x86.zmm>)
 
@@ -64,3 +58,164 @@ low.func.decl target<x86.avx2.core> @avx2_absent_zmm(%input: reg<x86.zmm>)
 // RUN: verify
 // ERROR@+1: PARSE/003 {actual_token="x86.zmm", expected="register class defined by the selected descriptor set"}
 low.func.decl target<x86.avx_vnni.core> @avx_vnni_absent_zmm(%input: reg<x86.zmm>)
+
+// ====
+
+// RUN: emit low-allocation-json @x86_avx2_low_subset_rejects_high_xmm output=none fixed=%sum:physical_register:16:1
+x86.target<avx512> @x86_target
+
+low.func.def target<x86.avx512.core>(@x86_target) @x86_avx2_low_subset_rejects_high_xmm(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  // ERROR@+1: BACKEND/022 {function_name="x86_avx2_low_subset_rejects_high_xmm", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+  %sum = vpaddd.xmm %lhs, %rhs
+  return %sum
+}
+
+// ====
+
+// RUN: emit low-allocation-json @x86_avx_vnni_low_subset_rejects_high_ymm output=none fixed=%acc_copy:physical_register:16:1 fixed=%dot:physical_register:16:1
+x86.target<avx512_packed_dot> @x86_target
+
+low.func.def target<x86.avx512_features.core>(@x86_target) @x86_avx_vnni_low_subset_rejects_high_ymm(%acc: reg<x86.ymm>, %lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  // ERROR@+1: BACKEND/022 {function_name="x86_avx_vnni_low_subset_rejects_high_ymm", request_kind="fixed_value", register_class="x86.ymm", location_base="16", allocation_capacity="16"}
+  %acc_copy = copy %acc : reg<x86.ymm> -> reg<x86.ymm>
+  // ERROR@+1: BACKEND/022 {function_name="x86_avx_vnni_low_subset_rejects_high_ymm", request_kind="fixed_value", register_class="x86.ymm", location_base="16", allocation_capacity="16"}
+  %dot = avx_vnni.vpdpbusd.ymm %acc_copy, %lhs, %rhs
+  return %dot
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_scalar_load output=none fixed=%value:physical_register:16:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @vex_scalar_load(%pointer: reg<x86.gpr64>) -> (reg<x86.xmm>) asm {
+  // ERROR@+1: BACKEND/022 {function_name="vex_scalar_load", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+  %value = vmovss.load.xmm %pointer {disp32 = 0}
+  return %value
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_scalar_store output=none fixed=%value:physical_register:16:1
+x86.target<avx512> @target
+
+// ERROR@+1: BACKEND/022 {function_name="vex_scalar_store", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+low.func.def target<x86.avx512.core>(@target) @vex_scalar_store(%value: reg<x86.xmm>, %pointer: reg<x86.gpr64>, %index: reg<x86.gpr64>) asm {
+  vmovsd.store.indexed.xmm %value, %pointer, %index {disp32 = 8, scale = 8}
+  return
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_vector_load output=none fixed=%value:physical_register:16:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @vex_vector_load(%pointer: reg<x86.gpr64>) -> (reg<x86.xmm>) asm {
+  // ERROR@+1: BACKEND/022 {function_name="vex_vector_load", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+  %value = vmovdqu32.load.xmm %pointer {disp32 = 0}
+  return %value
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_vector_store output=none fixed=%value:physical_register:16:1
+x86.target<avx512> @target
+
+// ERROR@+1: BACKEND/022 {function_name="vex_vector_store", request_kind="fixed_value", register_class="x86.ymm", location_base="16", allocation_capacity="16"}
+low.func.def target<x86.avx512.core>(@target) @vex_vector_store(%value: reg<x86.ymm>, %pointer: reg<x86.gpr64>, %index: reg<x86.gpr64>) asm {
+  vmovdqu32.store.indexed.ymm %value, %pointer, %index {disp32 = 32, scale = 4}
+  return
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_conversion_result output=none fixed=%value:physical_register:16:1
+x86.target<avx512> @target
+
+low.func.def target<x86.avx512.core>(@target) @vex_conversion_result(%source: reg<x86.gpr32>, %passthrough: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  // ERROR@+1: BACKEND/022 {function_name="vex_conversion_result", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+  %value = vcvtsi2sd.xmm.gpr32 %passthrough, %source
+  return %value
+}
+
+// ====
+
+// RUN: emit low-allocation-json @vex_conversion_input output=none fixed=%passthrough:physical_register:16:1
+x86.target<avx512> @target
+
+// ERROR@+1: BACKEND/022 {function_name="vex_conversion_input", request_kind="fixed_value", register_class="x86.xmm", location_base="16", allocation_capacity="16"}
+low.func.def target<x86.avx512.core>(@target) @vex_conversion_input(%source: reg<x86.gpr64>, %passthrough: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %value = vcvtsi2ss.xmm.gpr64 %passthrough, %source
+  return %value
+}
+
+// ====
+
+// Eight masks cross the block boundary together. K is unspillable, so this
+// succeeds only when the complete abstract register set remains allocatable.
+// RUN: emit low-allocation-json @x86_avx512_eight_live_k_values output=none
+x86.target<avx512> @x86_target
+
+low.func.def target<x86.avx512.core>(@x86_target) @x86_avx512_eight_live_k_values(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.k>) asm {
+  %mask0 = vpcmpd.xmm %lhs, %rhs, 0
+  %mask1 = vpcmpd.xmm %lhs, %rhs, 1
+  %mask2 = vpcmpd.xmm %lhs, %rhs, 2
+  %mask3 = vpcmpd.xmm %lhs, %rhs, 3
+  %mask4 = vpcmpd.xmm %lhs, %rhs, 4
+  %mask5 = vpcmpd.xmm %lhs, %rhs, 5
+  %mask6 = vpcmpd.xmm %lhs, %rhs, 6
+  %mask7 = vpcmpd.xmm %lhs, %rhs, 7
+  low.br ^join(%mask0: reg<x86.k>, %mask1: reg<x86.k>, %mask2: reg<x86.k>, %mask3: reg<x86.k>, %mask4: reg<x86.k>, %mask5: reg<x86.k>, %mask6: reg<x86.k>, %mask7: reg<x86.k>)
+^join(%value0: reg<x86.k>, %value1: reg<x86.k>, %value2: reg<x86.k>, %value3: reg<x86.k>, %value4: reg<x86.k>, %value5: reg<x86.k>, %value6: reg<x86.k>, %value7: reg<x86.k>):
+  %pair0 = kandq %value0, %value1
+  %pair1 = kandq %value2, %value3
+  %pair2 = kandq %value4, %value5
+  %pair3 = kandq %value6, %value7
+  %quad0 = kandq %pair0, %pair1
+  %quad1 = kandq %pair2, %pair3
+  %result = kandq %quad0, %quad1
+  return %result
+}
+
+// ====
+
+// RUN: emit low-allocation-json @x86_avx512_compare_retains_eighth_k_location output=none fixed=%mask:physical_register:7:1
+x86.target<avx512> @x86_target
+
+low.func.def target<x86.avx512.core>(@x86_target) @x86_avx512_compare_retains_eighth_k_location(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.k>) asm {
+  %mask = vpcmpd.xmm %lhs, %rhs, 1
+  return %mask
+}
+
+// ====
+
+// RUN: emit low-allocation-json @x86_avx512_writemask_rejects_eighth_k_location output=none fixed=%mask:physical_register:7:1
+x86.target<avx512> @x86_target
+
+// ERROR@+1: BACKEND/022 {function_name="x86_avx512_writemask_rejects_eighth_k_location", request_kind="fixed_value", register_class="x86.k", location_base="7", allocation_capacity="7"}
+low.func.def target<x86.avx512.core>(@x86_target) @x86_avx512_writemask_rejects_eighth_k_location(%mask: reg<x86.k>, %true_value: reg<x86.xmm>, %false_value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %selected = vpblendmd.xmm %mask, %true_value, %false_value
+  return %selected
+}
+
+// ====
+
+// RCX aliases the ordinary GPR bank. The five-location test budget includes
+// reserved RSP, leaving four schedulable GPRs. Complete the count transaction
+// before opening the independent load so allocation needs no spill slot.
+// RUN: emit x86-frame @gpr64_count_overlap strategy=resource-stall x86.gpr64=5
+x86.target<scalar> @target
+
+low.func.def target<x86.scalar.core>(@target) @gpr64_count_overlap(%value: reg<x86.gpr64>, %count: reg<x86.gpr64>, %pointer: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %loaded = mov.load.gpr64 %pointer {disp32 = 0}
+  %value_copy = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %fixed_count = copy %count : reg<x86.gpr64> -> reg<x86.rcx>
+  %shifted = shl.cl.gpr64 %value_copy, %fixed_count
+  %with_load = add.gpr64 %shifted, %loaded
+  %with_count = add.gpr64 %with_load, %count
+  %result = add.gpr64 %with_count, %pointer
+  return %result
+}
+
+// ----
+callee-preserved: rbx

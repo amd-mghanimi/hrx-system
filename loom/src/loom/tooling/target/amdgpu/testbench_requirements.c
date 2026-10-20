@@ -7,8 +7,80 @@
 #include "loom/tooling/target/amdgpu/testbench_requirements.h"
 
 #include "loom/target/arch/amdgpu/profile.h"
+#include "loom/target/arch/amdgpu/target_identity.h"
 #include "loom/target/arch/amdgpu/target_info_defs.h"
 #include "loom/tooling/execution/hal/testbench_actual.h"
+#include "loomc/interop.h"
+
+// Copies the canonical identity while the selected profile is still owned.
+// The identity's target points into the process-lifetime target catalog.
+static iree_status_t loom_amdgpu_hal_testbench_select_device_identity(
+    loom_run_hal_testbench_context_t* context,
+    loom_amdgpu_target_identity_t* out_identity) {
+  loomc_iree_hal_target_selection_t selection = {0};
+  loomc_result_t* result = NULL;
+  iree_status_t status = loom_run_hal_testbench_context_select_target(
+      context, loomc_make_cstring_view("AMDGPU testbench requirement"),
+      /*target_profile=*/NULL, &selection, &result);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_require_successful_result(
+        result, IREE_SV("AMDGPU HAL target selection failed"));
+  }
+  if (iree_status_is_ok(status)) {
+    const loom_amdgpu_target_profile_t* profile =
+        loom_amdgpu_target_profile_cast(
+            loomc_target_profile_get_interop_view(selection.target_profile));
+    *out_identity = profile->identity;
+  }
+  loomc_result_release(result);
+  loomc_target_profile_release(selection.target_profile);
+  return status;
+}
+
+static bool loom_amdgpu_hal_testbench_has_device(
+    const loom_run_hal_testbench_context_t* context,
+    loom_testbench_requirement_provider_result_t* out_result) {
+  if (iree_string_view_equal(context->driver_name, IREE_SV("amdgpu"))) {
+    return true;
+  }
+  *out_result = (loom_testbench_requirement_provider_result_t){
+      .state = LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_UNAVAILABLE,
+      .provider_code = IREE_SV("hal_driver_mismatch"),
+      .display_message =
+          IREE_SV("AMDGPU requirement requires an AMDGPU HAL device"),
+  };
+  return false;
+}
+
+// Validates every selector before optional device matching. This keeps
+// malformed metadata deterministic even when the current runner has no AMDGPU
+// device.
+static iree_status_t loom_amdgpu_hal_testbench_evaluate_targets(
+    const loom_module_t* module, loom_string_id_array_t targets,
+    const loom_amdgpu_target_identity_t* actual_identity, bool* out_satisfied) {
+  *out_satisfied = false;
+  if (targets.count == 0) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "requirement attr 'targets' must contain at least one target");
+  }
+  for (iree_host_size_t i = 0; i < targets.count; ++i) {
+    const iree_string_view_t selector =
+        loom_string_table_get(&module->strings, targets.values[i]);
+    const loom_amdgpu_target_profile_t* required_profile = NULL;
+    iree_status_t status =
+        loom_amdgpu_target_profile_select(selector, &required_profile);
+    if (!iree_status_is_ok(status)) {
+      return iree_status_annotate_f(
+          status, "requirement attr 'targets[%" PRIhsz "]'", i);
+    }
+    if (actual_identity && loom_amdgpu_target_identity_satisfies_requirement(
+                               actual_identity, &required_profile->identity)) {
+      *out_satisfied = true;
+    }
+  }
+  return iree_ok_status();
+}
 
 static iree_status_t loom_amdgpu_hal_testbench_query_descriptor_set_requirement(
     void* user_data, const loom_module_t* module, loom_named_attr_slice_t attrs,
@@ -25,50 +97,87 @@ static iree_status_t loom_amdgpu_hal_testbench_query_descriptor_set_requirement(
   iree_string_view_t required_descriptor_set = iree_string_view_empty();
   IREE_RETURN_IF_ERROR(loom_testbench_requirement_read_string_attr(
       module, attrs, IREE_SV("descriptor_set"), &required_descriptor_set));
-  if (context->device_provider == NULL ||
-      !iree_string_view_equal(context->device_provider->driver_name,
-                              IREE_SV("amdgpu"))) {
-    *out_result = (loom_testbench_requirement_provider_result_t){
-        .state = LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_UNAVAILABLE,
-        .provider_code = IREE_SV("hal_driver_mismatch"),
-        .display_message =
-            IREE_SV("AMDGPU requirement requires an AMDGPU HAL device"),
-    };
+  if (!loom_amdgpu_hal_testbench_has_device(context, out_result)) {
     return iree_ok_status();
   }
-  IREE_RETURN_IF_ERROR(loom_run_hal_testbench_context_ensure_runtime(context));
-  if (context->device_provider->select_target == NULL) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "AMDGPU requirement provider is missing a device "
-                            "target selection hook");
-  }
-
-  loom_device_target_t target = {0};
-  IREE_RETURN_IF_ERROR(context->device_provider->select_target(
-      context->device_provider, &context->runtime, context->host_allocator,
-      &target));
-  const loom_amdgpu_target_profile_t* target_profile =
-      loom_amdgpu_target_profile_cast(target.artifact_target.target_profile);
-  const bool satisfied =
-      target_profile != NULL &&
-      iree_string_view_equal(
-          target_profile->identity.target->descriptor_set_key,
-          required_descriptor_set);
-  out_result->state =
-      satisfied ? LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_SATISFIED
-                : LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_UNSATISFIED;
-  if (satisfied) {
-    out_result->provider_code = iree_string_view_empty();
-    out_result->display_message = iree_string_view_empty();
-  }
-  if (context->device_provider->deinitialize_target != NULL) {
-    context->device_provider->deinitialize_target(
-        context->device_provider, &target, context->host_allocator);
+  loom_amdgpu_target_identity_t identity;
+  IREE_RETURN_IF_ERROR(
+      loom_amdgpu_hal_testbench_select_device_identity(context, &identity));
+  if (iree_string_view_equal(identity.target->descriptor_set_key,
+                             required_descriptor_set)) {
+    *out_result = (loom_testbench_requirement_provider_result_t){
+        .state = LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_SATISFIED,
+    };
   }
   return iree_ok_status();
 }
 
-void loom_amdgpu_hal_testbench_requirement_provider_initialize(
+static iree_status_t loom_amdgpu_hal_testbench_query_target_requirement(
+    void* user_data, const loom_module_t* module, loom_named_attr_slice_t attrs,
+    loom_testbench_requirement_provider_result_t* out_result) {
+  loom_run_hal_testbench_context_t* context =
+      (loom_run_hal_testbench_context_t*)user_data;
+  *out_result = (loom_testbench_requirement_provider_result_t){
+      .state = LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_UNSATISFIED,
+      .provider_code = IREE_SV("target_mismatch"),
+      .display_message =
+          IREE_SV("AMDGPU device does not satisfy requested target"),
+  };
+
+  const loom_named_attr_t* target_attr =
+      loom_testbench_requirement_find_attr(module, attrs, IREE_SV("target"));
+  const loom_named_attr_t* targets_attr =
+      loom_testbench_requirement_find_attr(module, attrs, IREE_SV("targets"));
+  const bool has_targets = targets_attr != NULL;
+  if (!target_attr && !targets_attr) {
+    iree_string_view_t unused = iree_string_view_empty();
+    return loom_testbench_requirement_read_string_attr(
+        module, attrs, IREE_SV("target"), &unused);
+  }
+  if (target_attr && targets_attr) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "AMDGPU target requirement accepts exactly one of 'target' or "
+        "'targets'");
+  }
+
+  const loom_amdgpu_target_profile_t* required_profile = NULL;
+  loom_string_id_array_t required_targets = loom_string_id_array_empty();
+  if (target_attr) {
+    iree_string_view_t required_target = iree_string_view_empty();
+    IREE_RETURN_IF_ERROR(loom_testbench_requirement_read_string_attr(
+        module, attrs, IREE_SV("target"), &required_target));
+    IREE_RETURN_IF_ERROR(
+        loom_amdgpu_target_profile_select(required_target, &required_profile));
+  } else {
+    IREE_RETURN_IF_ERROR(loom_testbench_requirement_read_string_array_attr(
+        module, attrs, IREE_SV("targets"), &required_targets));
+    bool unused_satisfied = false;
+    IREE_RETURN_IF_ERROR(loom_amdgpu_hal_testbench_evaluate_targets(
+        module, required_targets, /*actual_identity=*/NULL, &unused_satisfied));
+  }
+  if (!loom_amdgpu_hal_testbench_has_device(context, out_result)) {
+    return iree_ok_status();
+  }
+  loom_amdgpu_target_identity_t identity;
+  IREE_RETURN_IF_ERROR(
+      loom_amdgpu_hal_testbench_select_device_identity(context, &identity));
+  bool satisfies_requirement =
+      required_profile && loom_amdgpu_target_identity_satisfies_requirement(
+                              &identity, &required_profile->identity);
+  if (has_targets) {
+    IREE_RETURN_IF_ERROR(loom_amdgpu_hal_testbench_evaluate_targets(
+        module, required_targets, &identity, &satisfies_requirement));
+  }
+  if (satisfies_requirement) {
+    *out_result = (loom_testbench_requirement_provider_result_t){
+        .state = LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_SATISFIED,
+    };
+  }
+  return iree_ok_status();
+}
+
+void loom_amdgpu_hal_descriptor_set_testbench_requirement_provider_initialize(
     loom_run_hal_testbench_context_t* context,
     loom_testbench_requirement_provider_t* out_provider) {
   IREE_ASSERT_ARGUMENT(context);
@@ -77,5 +186,17 @@ void loom_amdgpu_hal_testbench_requirement_provider_initialize(
       .name = IREE_SV("hal.amdgpu.descriptor_set"),
       .user_data = context,
       .query = loom_amdgpu_hal_testbench_query_descriptor_set_requirement,
+  };
+}
+
+void loom_amdgpu_hal_target_testbench_requirement_provider_initialize(
+    loom_run_hal_testbench_context_t* context,
+    loom_testbench_requirement_provider_t* out_provider) {
+  IREE_ASSERT_ARGUMENT(context);
+  IREE_ASSERT_ARGUMENT(out_provider);
+  *out_provider = (loom_testbench_requirement_provider_t){
+      .name = IREE_SV("hal.amdgpu.target"),
+      .user_data = context,
+      .query = loom_amdgpu_hal_testbench_query_target_requirement,
   };
 }

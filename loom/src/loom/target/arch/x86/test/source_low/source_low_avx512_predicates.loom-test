@@ -1,0 +1,272 @@
+// RUN: emit source-low output=low
+
+// AVX-512 comparisons stay in K registers inside a function and expand into
+// the platform ABI carrier only when a predicate escapes through a callable.
+x86.target<avx512> @target
+
+func.def target(@target) @i64x8_compare_return(%lhs: vector<8xi64>, %rhs: vector<8xi64>) -> (vector<8xi1>) {
+  %result = vector.cmpi slt, %lhs, %rhs : vector<8xi64> -> vector<8xi1>
+  func.return %result : vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi64>, vector<8xi64>) -> (vector<8xi1>)}) @i64x8_compare_return(%lhs: reg<x86.zmm>, %rhs: reg<x86.zmm>) -> (reg<x86.xmm>) asm {
+  %7 = vpcmpq %lhs, %rhs, 1
+  %result = avx512.vpmovm2w.xmm.k %7
+  return %result
+}
+
+// ====
+
+// Callable predicates arrive in SIMD carriers and compress once at a native
+// masked consumer.
+x86.target<avx512> @target
+
+func.def target(@target) @f64x8_select_argument(%condition: vector<8xi1>, %true_value: vector<8xf64>, %false_value: vector<8xf64>) -> (vector<8xf64>) {
+  %result = vector.select %condition, %true_value, %false_value : vector<8xf64>
+  func.return %result : vector<8xf64>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi1>, vector<8xf64>, vector<8xf64>) -> (vector<8xf64>)}) @f64x8_select_argument(%condition: reg<x86.xmm>, %true_value: reg<x86.zmm>, %false_value: reg<x86.zmm>) -> (reg<x86.zmm>) asm {
+  %9 = avx512.vpmovw2m.k.xmm %condition
+  %result = vblendmpd %9, %true_value, %false_value
+  return %result
+}
+
+// ====
+
+// The widest predicate carrier uses one byte lane per predicate bit.
+x86.target<avx512> @target
+
+func.def target(@target) @construct_i1x64() -> (vector<64xi1>) {
+  %result = vector.constant 1 : vector<64xi1>
+  func.return %result : vector<64xi1>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = () -> (vector<64xi1>)}) @construct_i1x64() -> (reg<x86.zmm>) asm {
+  %3 = mov.imm64 -1
+  %4 = avx512.kmovq.k.gpr64 %3
+  %result = avx512.vpmovm2b.zmm.k %4
+  return %result
+}
+
+// ====
+
+// Scalar lane access compresses the callable carrier into a K mask before
+// extracting one logical bit.
+x86.target<avx512> @target
+
+func.def target(@target) @extract_i1x8(%source: vector<8xi1>) -> (i1) {
+  %result = vector.extract %source[3] : vector<8xi1> -> i1
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi1>) -> (i1)}) @extract_i1x8(%source: reg<x86.xmm>) -> (reg<x86.gpr32>) asm {
+  %5 = vpextrw.xmm %source, 3
+  %result = and.imm.gpr32 %5 {imm32 = 1}
+  return %result
+}
+
+// ====
+
+// Scalar insertion preserves callable carrier representation across the
+// function boundary while performing the update in the native K form.
+x86.target<avx512> @target
+
+func.def target(@target) @insert_i1x8(%value: i1, %dest: vector<8xi1>) -> (vector<8xi1>) {
+  %result = vector.insert %value into %dest[3] : i1, vector<8xi1>
+  func.return %result : vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (i1, vector<8xi1>) -> (vector<8xi1>)}) @insert_i1x8(%value: reg<x86.gpr32>, %dest: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %7 = mov.imm32 0
+  %8 = sub.gpr32 %7, %value
+  %result = vpinsrw.xmm %dest, %8, 3
+  return %result
+}
+
+// ====
+
+// A compare consumed only by scalar extraction expands once into the shorter
+// SIMD lane-extraction path.
+x86.target<avx512> @target
+
+func.def target(@target) @compare_extract_i1x8(%lhs: vector<8xi64>, %rhs: vector<8xi64>) -> (i1) {
+  %mask = vector.cmpi slt, %lhs, %rhs : vector<8xi64> -> vector<8xi1>
+  %result = vector.extract %mask[3] : vector<8xi1> -> i1
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi64>, vector<8xi64>) -> (i1)}) @compare_extract_i1x8(%lhs: reg<x86.zmm>, %rhs: reg<x86.zmm>) -> (reg<x86.gpr32>) asm {
+  %8 = vpcmpq %lhs, %rhs, 1
+  %mask = avx512.vpmovm2w.xmm.k %8
+  %10 = vpextrw.xmm %mask, 3
+  %result = and.imm.gpr32 %10 {imm32 = 1}
+  return %result
+}
+
+// ====
+
+// A predicate inserted and consumed inside the function remains in K form.
+x86.target<avx512> @target
+
+func.def target(@target) @compare_insert_select_i1x8(%value: i1, %lhs: vector<8xi64>, %rhs: vector<8xi64>, %true_value: vector<8xi64>, %false_value: vector<8xi64>) -> (vector<8xi64>) {
+  %mask = vector.cmpi slt, %lhs, %rhs : vector<8xi64> -> vector<8xi1>
+  %updated = vector.insert %value into %mask[3] : i1, vector<8xi1>
+  %result = vector.select %updated, %true_value, %false_value : vector<8xi64>
+  func.return %result : vector<8xi64>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (i1, vector<8xi64>, vector<8xi64>, vector<8xi64>, vector<8xi64>) -> (vector<8xi64>)}) @compare_insert_select_i1x8(%value: reg<x86.gpr32>, %lhs: reg<x86.zmm>, %rhs: reg<x86.zmm>, %true_value: reg<x86.zmm>, %false_value: reg<x86.zmm>) -> (reg<x86.zmm>) asm {
+  %15 = vpcmpq %lhs, %rhs, 1
+  %mask = avx512.vpmovm2w.xmm.k %15
+  %17 = mov.imm32 0
+  %18 = sub.gpr32 %17, %value
+  %updated = vpinsrw.xmm %mask, %18, 3
+  %20 = avx512.vpmovw2m.k.xmm %updated
+  %result = vpblendmq %20, %true_value, %false_value
+  return %result
+}
+
+// ====
+
+// CFG edges preserve the K representation chosen by the eventual masked
+// consumer.
+x86.target<avx512> @target
+
+func.def target(@target) @compare_cfg_select(%lhs: vector<16xi32>, %rhs: vector<16xi32>, %true_value: vector<16xi32>, %false_value: vector<16xi32>) -> (vector<16xi32>) {
+  %condition = vector.cmpi slt, %lhs, %rhs : vector<16xi32> -> vector<16xi1>
+  cfg.br ^select(%condition: vector<16xi1>)
+^select(%carried: vector<16xi1>):
+  %result = vector.select %carried, %true_value, %false_value : vector<16xi32>
+  func.return %result : vector<16xi32>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi32>, vector<16xi32>, vector<16xi32>, vector<16xi32>) -> (vector<16xi32>)}) @compare_cfg_select(%lhs: reg<x86.zmm>, %rhs: reg<x86.zmm>, %true_value: reg<x86.zmm>, %false_value: reg<x86.zmm>) -> (reg<x86.zmm>) asm {
+  %condition = vpcmpd %lhs, %rhs, 1
+  %result = vpblendmd %condition, %true_value, %false_value
+  return %result
+}
+
+// ====
+
+// Predicate logic remains in K registers between comparisons and selection.
+x86.target<avx512> @target
+
+func.def target(@target) @compare_logic_select(%lhs: vector<64xi8>, %rhs: vector<64xi8>, %true_value: vector<64xi8>, %false_value: vector<64xi8>) -> (vector<64xi8>) {
+  %less = vector.cmpi slt, %lhs, %rhs : vector<64xi8> -> vector<64xi1>
+  %equal = vector.cmpi eq, %lhs, %rhs : vector<64xi8> -> vector<64xi1>
+  %condition = vector.ori %less, %equal : vector<64xi1>
+  %result = vector.select %condition, %true_value, %false_value : vector<64xi8>
+  func.return %result : vector<64xi8>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<64xi8>, vector<64xi8>, vector<64xi8>, vector<64xi8>) -> (vector<64xi8>)}) @compare_logic_select(%lhs: reg<x86.zmm>, %rhs: reg<x86.zmm>, %true_value: reg<x86.zmm>, %false_value: reg<x86.zmm>) -> (reg<x86.zmm>) asm {
+  %less = vpcmpb %lhs, %rhs, 1
+  %equal = vpcmpb %lhs, %rhs, 0
+  %condition = korq %less, %equal
+  %result = vpblendmb %condition, %true_value, %false_value
+  return %result
+}
+
+// ====
+
+// AVX-512 profiles reuse the packed AVX2 representation for a 64-bit payload
+// and do not round-trip its predicate through a K mask.
+x86.target<avx512> @target
+
+func.def target(@target) @packed_compare_select(%lhs: vector<8xi8>, %rhs: vector<8xi8>, %true_value: vector<8xi8>, %false_value: vector<8xi8>) -> (vector<8xi8>) {
+  %condition = vector.cmpi slt, %lhs, %rhs : vector<8xi8> -> vector<8xi1>
+  %result = vector.select %condition, %true_value, %false_value : vector<8xi8>
+  func.return %result : vector<8xi8>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>) -> (vector<8xi8>)}) @packed_compare_select(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %true_value: reg<x86.xmm>, %false_value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %condition = vpcmpgtb.xmm %rhs, %lhs
+  %result = vpblendvb.xmm %false_value, %true_value, %condition
+  return %result
+}
+
+// ====
+
+// Predicate conversions cross the callable SIMD, native K, and ZMM
+// representations without expanding through scalar lanes.
+x86.target<avx512> @target
+
+func.def target(@target) @extend_predicate_to_zmm(%predicate: vector<8xi1>) -> (vector<8xi64>, vector<8xi64>) {
+  %signed = vector.extsi %predicate : vector<8xi1> to vector<8xi64>
+  %unsigned = vector.extui %predicate : vector<8xi1> to vector<8xi64>
+  func.return %signed, %unsigned : vector<8xi64>, vector<8xi64>
+}
+
+func.def target(@target) @truncate_zmm_to_predicate(%input: vector<8xi64>) -> (vector<8xi1>) {
+  %predicate = vector.trunci %input : vector<8xi64> to vector<8xi1>
+  func.return %predicate : vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi1>) -> (vector<8xi64>, vector<8xi64>)}) @extend_predicate_to_zmm(%predicate: reg<x86.xmm>) -> (reg<x86.zmm>, reg<x86.zmm>) asm {
+  %signed = avx512.vpmovsxwq.zmm.xmm %predicate
+  %unsigned = avx512.vpsrlq.zmm %signed, 63
+  return %signed, %unsigned
+}
+
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi64>) -> (vector<8xi1>)}) @truncate_zmm_to_predicate(%input: reg<x86.zmm>) -> (reg<x86.xmm>) asm {
+  %16 = avx512.vpsllq.zmm %input, 63
+  %17 = avx512.vpmovq2m.k.zmm %16
+  %predicate = avx512.vpmovm2w.xmm.k %17
+  return %predicate
+}
+
+// ====
+
+// A predicate internal to the function stays in K form across truncation and
+// signed extension; unsigned extension normalizes the same native mask.
+x86.target<avx512> @target
+
+func.def target(@target) @roundtrip_predicate16(%input: vector<16xi32>) -> (vector<16xi32>, vector<16xi32>) {
+  %predicate = vector.trunci %input : vector<16xi32> to vector<16xi1>
+  %signed = vector.extsi %predicate : vector<16xi1> to vector<16xi32>
+  %unsigned = vector.extui %predicate : vector<16xi1> to vector<16xi32>
+  func.return %signed, %unsigned : vector<16xi32>, vector<16xi32>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi32>) -> (vector<16xi32>, vector<16xi32>)}) @roundtrip_predicate16(%input: reg<x86.zmm>) -> (reg<x86.zmm>, reg<x86.zmm>) asm {
+  %9 = avx512.vpslld.zmm %input, 31
+  %predicate = avx512.vpmovd2m.k.zmm %9
+  %signed = avx512.vpmovm2d.zmm.k %predicate
+  %unsigned = avx512.vpsrld.zmm %signed, 31
+  return %signed, %unsigned
+}
+
+// ====
+
+// Scalar floating comparison rules are inherited intact by AVX-512 profiles.
+x86.target<avx512> @target
+
+func.def target(@target) @scalar_float_comparison(%lhs: f32, %rhs: f32) -> (i1, f32) {
+  %result = scalar.cmpf one, %lhs, %rhs : f32
+  %condition = scalar.cmpf ugt, %lhs, %rhs : f32
+  %selected = scf.select %condition, %lhs, %rhs : f32
+  func.return %result, %selected : i1, f32
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (f32, f32) -> (i1, f32)}) @scalar_float_comparison(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.gpr32>, reg<x86.xmm>) asm {
+  %11 = avx2.vcmpps.xmm %lhs, %rhs, 12
+  %12 = vmovd.gpr32.xmm %11
+  %result = and.imm.gpr32 %12 {imm32 = 1}
+  %14 = avx2.vcmpps.xmm %lhs, %rhs, 22
+  %selected = vpblendvb.xmm %rhs, %lhs, %14
+  return %result, %selected
+}

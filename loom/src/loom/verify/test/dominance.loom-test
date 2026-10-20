@@ -364,14 +364,14 @@ func.def @nonreturning_continuation(%row: i32) -> (i32) {
 
 // Consuming on one branch must not poison a mutually exclusive sibling.
 // RUN: verify
-func.def @sibling_consumption(%condition: i1, %resource: pool<16>) {
+func.def @sibling_consumption(%condition: i1, %resource: pool) {
   cfg.cond_br %condition, ^left, ^right
 ^left:
-  %left_resource = test.resource.move %resource : pool<16> -> pool<16>
-  test.resource.release %left_resource : pool<16>
+  %left_resource = test.resource.move %resource : pool -> pool
+  test.resource.release %left_resource : pool
   func.return
 ^right:
-  test.resource.borrow %resource : pool<16>
+  test.resource.borrow %resource : pool
   func.return
 }
 
@@ -379,15 +379,15 @@ func.def @sibling_consumption(%condition: i1, %resource: pool<16>) {
 
 // Consumption checks use CFG reachability even when the use is listed first.
 // RUN: verify
-func.def @nonlexical_consumption(%resource: pool<16>) {
+func.def @nonlexical_consumption(%resource: pool) {
   cfg.br ^consume
 ^use:
   // ERROR@+1: DOMINANCE/002
-  test.resource.borrow %resource : pool<16>
+  test.resource.borrow %resource : pool
   func.return
 ^consume:
-  %moved_resource = test.resource.move %resource : pool<16> -> pool<16>
-  test.resource.release %moved_resource : pool<16>
+  %moved_resource = test.resource.move %resource : pool -> pool
+  test.resource.release %moved_resource : pool
   cfg.br ^use
 }
 
@@ -411,11 +411,11 @@ func.def @operation_after_branch(%row: i32) -> (i32) {
 func.def @recreated_result_across_blocks(%size: index, %again: i1) {
   cfg.br ^produce
 ^produce:
-  %fresh = test.resource.alloc %size : index -> pool<16>
+  %fresh = test.resource.alloc %size : index -> pool
   cfg.br ^consume
 ^consume:
-  %moved = test.resource.move %fresh : pool<16> -> pool<16>
-  test.resource.release %moved : pool<16>
+  %moved = test.resource.move %fresh : pool -> pool
+  test.resource.release %moved : pool
   cfg.cond_br %again, ^produce, ^exit
 ^exit:
   func.return
@@ -427,12 +427,12 @@ func.def @recreated_result_across_blocks(%size: index, %again: i1) {
 // consumed resource; a cycle alone does not create a new dynamic instance.
 // RUN: verify
 func.def @repeated_consumer_without_recreation(%size: index, %again: i1) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   cfg.br ^consume
 ^consume:
   // ERROR@+1: DOMINANCE/002
-  %moved = test.resource.move %resource : pool<16> -> pool<16>
-  test.resource.release %moved : pool<16>
+  %moved = test.resource.move %resource : pool -> pool
+  test.resource.release %moved : pool
   cfg.cond_br %again, ^consume, ^exit
 ^exit:
   func.return

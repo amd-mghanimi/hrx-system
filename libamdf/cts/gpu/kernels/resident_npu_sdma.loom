@@ -1,0 +1,166 @@
+// The NPU supplies Qg. One resident GPU workitem selects an immutable source
+// page and a nonzero copy prefix from Qg[0], publishes SDMA, acquires its result
+// and returns Rg[i] = 3 * copied[i] + Qg[i] + g modulo 2^32. Short copies leave
+// the preceding destination tail intact. Every destination word feeds R and
+// the NPU's next Q. Closing Q(N+1) issues no copy or return.
+//
+// Q/R slots, startup, final ACK and NPU configuration follow the same ownership
+// protocol as resident_npu_initiated.loom. GPU-only source pages have a runtime
+// stride, with their payload at byte 64. The destination and completion bindings
+// point directly to their guarded payloads. All owners outlive native joins.
+// No SDMA or payload access occurs for zero work or prestart ABORT.
+//
+// Each row contains generation, return generation, source page, copied word
+// count, command frontier low/high, start/end raw ticks, every Q word and every
+// destination word. Closing page/count are zero; its frontier and destination
+// remain unchanged. Ticks retain the predecessor's carried-sample convention.
+
+template.decl @completed_tick() -> (i32)
+template.decl @sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64)
+
+kernel.def export("resident_npu_sdma") @resident_npu_sdma() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%request: buffer, %response: buffer, %startup: buffer, %control: buffer, %records: buffer, %ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %destination: buffer, %completion: buffer, %source_address: i64, %destination_address: i64, %completion_address: i64, %capacity: offset, %source_stride: i64, %round_count: i32, %payload_word_count: i32, %payload_word_offset: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) {
+  %request_aligned = buffer.assume.alignment %request {minimum_alignment = 64} : buffer
+  %response_aligned = buffer.assume.alignment %response {minimum_alignment = 64} : buffer
+  %startup_aligned = buffer.assume.alignment %startup {minimum_alignment = 64} : buffer
+  %control_aligned = buffer.assume.alignment %control {minimum_alignment = 64} : buffer
+  %records_aligned = buffer.assume.alignment %records {minimum_alignment = 64} : buffer
+  %destination_aligned = buffer.assume.alignment %destination {minimum_alignment = 64} : buffer
+  %origin = index.constant 0 : offset
+  %word_bytes = index.constant 4 : offset
+  %return_count_input = index.cast %round_count : i32 to offset
+  %return_count = index.assume %return_count_input [range(%return_count_input, 0, 4294967294)] : offset
+  %return_count_word = index.cast %return_count : offset to i32
+  %element_count_input = index.cast %payload_word_count : i32 to offset
+  %element_count = index.assume %element_count_input [range(%element_count_input, 1, 1024)] : offset
+  %element_limit = index.cast %element_count : offset to index
+  %element_count_word = index.cast %element_count : offset to i32
+  %copied_words = buffer.view %destination_aligned[%origin] : buffer -> view<[%element_limit]xi32>
+  %payload_offset_input = index.cast %payload_word_offset : i32 to offset
+  %payload_offset_count = index.assume %payload_offset_input [range(%payload_offset_input, 1, 16)] : offset
+  %payload_offset_words = index.cast %payload_offset_count : offset to index
+  %payload_offset = index.scale %payload_offset_words, %word_bytes : index, offset -> offset
+  %request_ready = buffer.view %request_aligned[%origin] : buffer -> view<1xi32>
+  %response_ready = buffer.view %response_aligned[%origin] : buffer -> view<1xi32>
+  %request_words = buffer.view %request_aligned[%payload_offset] : buffer -> view<[%element_limit]xi32>
+  %response_words = buffer.view %response_aligned[%payload_offset] : buffer -> view<[%element_limit]xi32>
+  %startup_word = buffer.view %startup_aligned[%origin] : buffer -> view<1xi32>
+  %control_words = buffer.view %control_aligned[%origin] : buffer -> view<64xi32>
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %aborted_state = scalar.constant 2 : i32
+  %return_scale = scalar.constant 3 : i32
+  %first_element = index.constant 0 : index
+  %element_step = index.constant 1 : index
+  %c7 = scalar.constant 7 : i32
+  %c8 = scalar.constant 8 : i32
+  %c1023 = scalar.constant 1023 : i32
+  %zero64 = scalar.constant 0 : i64
+  %high_shift = scalar.constant 32 : i64
+  %page_payload_offset = scalar.constant 64 : i64
+  %length_limit = scalar.subi %element_count_word, %c1 : i32
+  %record_header_words = index.constant 8 : index
+  %record_copy_offset = index.add %element_limit, %record_header_words : index
+  %record_word_count = index.add %element_limit, %record_copy_offset : index
+  %record_byte_stride = index.scale %record_word_count, %word_bytes : index, offset -> offset
+
+  %start = scf.while(%state = %c0 : i32) -> (i32) {
+    %waiting_state = scalar.cmpi eq, %state, %c0 : i32
+    scf.condition %waiting_state, %state : i1, i32
+  } do(%state: i32) {
+    %observed = view.atomic.load %startup_word[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+    scf.yield %observed : i32
+  }
+  buffer.fence scope(system) ordering(acquire)
+  %running_state = scalar.cmpi eq, %start, %c1 : i32
+  %has_returns = scalar.cmpi ne, %return_count_word, %c0 : i32
+  %has_rows = scalar.andi %running_state, %has_returns : i1
+  %positive_row_count = scalar.addi %return_count_word, %c1 : i32
+  %row_count = scf.select %has_rows, %positive_row_count, %c0 : i32
+  %cold_tick = scf.if %has_rows -> (i32) {
+    %tick = template.apply<@completed_tick>() : () -> (i32)
+    scf.yield %tick : i32
+  } else {
+    scf.yield %c0 : i32
+  }
+
+  %completed_rows, %final_tick, %final_frontier = scf.while(%row = %c0 : i32, %start_tick = %cold_tick : i32, %frontier = %zero64 : i64) -> (i32, i32, i64) {
+    %remaining = scalar.cmpi ult, %row, %row_count : i32
+    scf.condition %remaining, %row, %start_tick, %frontier : i1, i32, i32, i64
+  } do(%row: i32, %start_tick: i32, %frontier: i64) {
+    %generation = scalar.addi %row, %c1 : i32
+    %produces_return = scalar.cmpi ult, %row, %return_count_word : i32
+    %return_generation = scf.select %produces_return, %generation, %c0 : i32
+    %response_generation = scf.while(%seen = %c0 : i32) -> (i32) {
+      %pending = scalar.cmpi ne, %seen, %generation : i32
+      scf.condition %pending, %seen : i1, i32
+    } do(%seen: i32) {
+      %observed_generation = view.atomic.load %response_ready[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+      scf.yield %observed_generation : i32
+    }
+    buffer.fence scope(system) ordering(acquire)
+    %page, %copy_word_count, %next_frontier = scf.if %produces_return -> (i32, i32, i64) {
+      %request_word = view.load %response_words[0] : view<[%element_limit]xi32> -> i32
+      %selected_page = scalar.andi %request_word, %c7 : i32
+      %length_bits = scalar.shrui %request_word, %c8 : i32
+      %bounded_bits = scalar.andi %length_bits, %c1023 : i32
+      %is_short = scalar.cmpi ult, %bounded_bits, %length_limit : i32
+      %length_minus_one = scf.select %is_short, %bounded_bits, %length_limit : i32
+      %length = scalar.addi %length_minus_one, %c1 : i32
+      %page64 = scalar.extui %selected_page : i32 to i64
+      %page_base = scalar.muli %page64, %source_stride : i64
+      %source_offset = scalar.addi %page_base, %page_payload_offset : i64
+      %source = scalar.addi %source_address, %source_offset : i64
+      %published = template.apply<@sdma_copy>(%ring, %read_index, %write_index, %notification, %completion, %source, %destination_address, %completion_address, %capacity, %frontier, %generation, %length, %copy_control, %fence_header, %cache_flags) : (buffer, buffer, buffer, buffer, buffer, i64, i64, i64, offset, i64, i32, i32, i32, i32, i32) -> (i64)
+      scf.yield %selected_page, %length, %published : i32, i32, i64
+    } else {
+      scf.yield %c0, %c0, %frontier : i32, i32, i64
+    }
+    %unsigned_row = index.cast %row : i32 to offset
+    %row_index = index.cast %unsigned_row : offset to index
+    %record_offset = index.scale %row_index, %record_byte_stride : index, offset -> offset
+    %record = buffer.view %records_aligned[%record_offset] : buffer -> view<8xi32>
+    %header_bytes = index.constant 32 : offset
+    %payload_bytes = index.scale %element_limit, %word_bytes : index, offset -> offset
+    %q_record_offset = index.add %record_offset, %header_bytes : offset
+    %copy_record_offset = index.add %q_record_offset, %payload_bytes : offset
+    %record_q = buffer.view %records_aligned[%q_record_offset] : buffer -> view<[%element_limit]xi32>
+    %record_copy = buffer.view %records_aligned[%copy_record_offset] : buffer -> view<[%element_limit]xi32>
+    scf.for %element = [%first_element to %element_limit step %element_step] {
+      %value = view.load %response_words[%element] : view<[%element_limit]xi32> -> i32
+      view.store %value, %record_q[%element] : i32, view<[%element_limit]xi32>
+      %copied = view.load %copied_words[%element] : view<[%element_limit]xi32> -> i32
+      view.store %copied, %record_copy[%element] : i32, view<[%element_limit]xi32>
+      scf.if %produces_return {
+        %scaled_value = scalar.muli %copied, %return_scale : i32
+        %mixed_value = scalar.addi %scaled_value, %value : i32
+        %return_value = scalar.addi %mixed_value, %generation : i32
+        view.store %return_value, %request_words[%element] : i32, view<[%element_limit]xi32>
+      }
+    }
+    view.store %generation, %record[0] : i32, view<8xi32>
+    view.store %return_generation, %record[1] : i32, view<8xi32>
+    %frontier_low = scalar.trunci %next_frontier : i64 to i32
+    %frontier_high64 = scalar.shrui %next_frontier, %high_shift : i64
+    %frontier_high = scalar.trunci %frontier_high64 : i64 to i32
+    view.store %page, %record[2] : i32, view<8xi32>
+    view.store %copy_word_count, %record[3] : i32, view<8xi32>
+    view.store %frontier_low, %record[4] : i32, view<8xi32>
+    view.store %frontier_high, %record[5] : i32, view<8xi32>
+    view.store %start_tick, %record[6] : i32, view<8xi32>
+    %end_tick = template.apply<@completed_tick>() : () -> (i32)
+    view.store %end_tick, %record[7] : i32, view<8xi32>
+    scf.if %produces_return {
+      view.atomic.store %generation, %request_ready[0] {ordering = release, scope = system} : i32, view<1xi32>
+    }
+    // The last row advances to the exclusive count; its generation is never
+    // incremented, including when that generation is UINT32_MAX.
+    %next_row = scalar.addi %row, %c1 : i32
+    scf.yield %next_row, %end_tick, %next_frontier : i32, i32, i64
+  }
+  %terminal = scf.select %running_state, %c1, %aborted_state : i32
+  view.atomic.store %terminal, %control_words[48] {ordering = release, scope = system} : i32, view<64xi32>
+  kernel.return
+}

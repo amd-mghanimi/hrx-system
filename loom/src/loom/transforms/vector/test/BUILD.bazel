@@ -4,6 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+load("//build_tools/bazel:python.bzl", "iree_py_test")
 load("//loom/build_tools/bazel:loom_check.bzl", "loom_check_test_suite")
 
 package(
@@ -17,15 +18,65 @@ loom_check_test_suite(
     srcs = [
         "bank_sroa.loom-test",
         "dynamic_extract.loom-test",
+        "mask_range_relations.loom-test",
         "memory_footprint.loom-test",
+        "memory_footprint_affine_preimage.loom-test",
+        "memory_footprint_bitwise.loom-test",
+        "memory_footprint_blocked.loom-test",
         "memory_footprint_cfg_identities.loom-test",
         "memory_footprint_condition_loops.loom-test",
         "memory_footprint_conditions.loom-test",
+        "memory_footprint_coordinates.loom-test",
         "memory_footprint_induction.loom-test",
+        "memory_footprint_inverse_quotient.loom-test",
+        "memory_footprint_masked_conditions.loom-test",
+        "memory_footprint_products.loom-test",
+        "memory_footprint_quotient.loom-test",
+        "memory_footprint_remainder.loom-test",
+        "memory_footprint_root_relations.loom-test",
+        "memory_legalization.loom-test",
         "memory_to_scalar.loom-test",
         "packed_memory_consumers.loom-test",
         "reduce_axes_to_scalar.loom-test",
         "sink_single_use_reads.loom-test",
         "to_scalar.loom-test",
+        "to_scalar_divrem.loom-test",
+        "to_scalar_e8m0.loom-test",
+        "to_scalar_float_formats.loom-test",
+    ],
+)
+
+iree_py_test(
+    name = "bitstream_packet_legalization_test",
+    size = "small",
+    srcs = ["bitstream_packet_legalization_test.py"],
+    args = [
+        "$(location //loom/src/loom/tools/loom-check:loom-check-test)",
+        "$(location //loom/src/loom/tools/loom-compile)",
+    ],
+    data = [
+        "//loom/src/loom/tools/loom-check:loom-check-test",
+        "//loom/src/loom/tools/loom-compile",
+    ],
+    main = "bitstream_packet_legalization_test.py",
+)
+
+iree_py_test(
+    name = "bitstream_packet_legalization_exhaustive_test",
+    size = "small",
+    srcs = ["bitstream_packet_legalization_test.py"],
+    args = [
+        "$(location //loom/src/loom/tools/loom-check:loom-check-test)",
+        "$(location //loom/src/loom/tools/loom-compile)",
+        "--exhaustive",
+    ],
+    data = [
+        "//loom/src/loom/tools/loom-check:loom-check-test",
+        "//loom/src/loom/tools/loom-compile",
+    ],
+    main = "bitstream_packet_legalization_test.py",
+    tags = [
+        "manual",
+        "stress",
     ],
 )

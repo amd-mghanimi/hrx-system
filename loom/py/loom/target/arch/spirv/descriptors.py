@@ -34,46 +34,66 @@ from loom.target.arch.spirv.atomic import (
     float_atomic_descriptor_key,
     float_atomic_native_feature_bits,
 )
+from loom.target.arch.spirv.barrier import (
+    CONTROL_BARRIER_CASES,
+    ControlBarrierCase,
+)
 from loom.target.arch.spirv.builtins import (
     BUILTIN_DIMENSIONS,
     BUILTIN_INDEX_QUERIES,
+    BUILTIN_SCALAR_INDEX_QUERIES,
 )
 from loom.target.arch.spirv.cooperative_matrix import (
     COOPERATIVE_MATRIX_CASES,
+    COOPERATIVE_MATRIX_TYPES,
     CooperativeMatrixCase,
+    CooperativeMatrixMemory,
+    CooperativeMatrixType,
     cooperative_matrix_descriptor_key,
+    cooperative_matrix_memory_variants,
+)
+from loom.target.arch.spirv.extended_math import (
+    EXTENDED_MATH_INSTRUCTIONS,
+    ExtendedMathInstruction,
 )
 from loom.target.arch.spirv.features import feature_bit_value
 from loom.target.arch.spirv.ordinary_vector import (
     ORDINARY_VECTOR_INSTRUCTIONS,
+    ORDINARY_VECTOR_SHUFFLE_INSTRUCTIONS,
     OrdinaryVectorComponentKind,
     OrdinaryVectorComponentType,
     OrdinaryVectorInstruction,
     OrdinaryVectorInstructionType,
+    OrdinaryVectorShuffleInstruction,
     OrdinaryVectorType,
 )
 from loom.target.arch.spirv.ordinary_vector_bit_layout import (
     ORDINARY_VECTOR_BIT_LAYOUT_INSTRUCTIONS,
 )
+from loom.target.arch.spirv.ordinary_vector_conversion import (
+    ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS,
+)
 from loom.target.arch.spirv.ordinary_vector_float import (
     ORDINARY_VECTOR_FLOAT_BINARY_INSTRUCTIONS,
+    ORDINARY_VECTOR_FLOAT_COMPARE_INSTRUCTIONS,
+    ORDINARY_VECTOR_FLOAT_SCALE_INSTRUCTIONS,
 )
 from loom.target.arch.spirv.ordinary_vector_integer import (
+    INTEGER_BIT_COUNT_INSTRUCTIONS,
     ORDINARY_VECTOR_INTEGER_INSTRUCTIONS,
-)
-from loom.target.arch.spirv.ordinary_vector_integer_conversion import (
-    ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS,
 )
 from loom.target.arch.spirv.scalar_alu import (
     BOOLEAN_BINARY_OPERATIONS,
     BOOLEAN_CONSTANTS,
     FLOAT_BINARY_OPERATIONS,
+    FLOAT_COMPARE_PREDICATES,
+    FLOAT_COMPARE_TYPES,
     FLOAT_SCALAR_ALU_TYPES,
     INTEGER_BITWISE_BINARY_OPERATIONS,
     INTEGER_SCALAR_ALU_TYPE_PAIRS,
     OFFSET64_ALU_TYPE,
     OFFSET64_COMPARE_PREDICATES,
-    SCALAR_ALU_TYPES,
+    SCALAR_SELECT_TYPES,
     SIGNED_INTEGER_BINARY_OPERATIONS,
     SIGNED_INTEGER_COMPARE_PREDICATES,
     SIGNED_INTEGER_SCALAR_ALU_TYPES,
@@ -81,8 +101,8 @@ from loom.target.arch.spirv.scalar_alu import (
     UNSIGNED_INTEGER_SCALAR_ALU_TYPES,
     UNSIGNED_ORDERED_INTEGER_COMPARE_PREDICATES,
     BooleanConstant,
+    ComparePredicate,
     IntegerAluTypePair,
-    IntegerComparePredicate,
     ScalarAluType,
     ScalarBinaryOperation,
 )
@@ -101,6 +121,11 @@ from loom.target.arch.spirv.scalar_memory import (
     RAW_STORAGE_BUFFER_BYTE,
     STORAGE_BUFFER_SCALARS,
     StorageBufferScalar,
+)
+from loom.target.arch.spirv.subgroup import (
+    SPIRV_SUBGROUP_BALLOT_PACKING_INSTRUCTIONS,
+    SPIRV_SUBGROUP_INSTRUCTIONS,
+    SpirvSubgroupInstruction,
 )
 from loom.target.low_descriptors import (
     AsmForm,
@@ -350,9 +375,10 @@ def _binary_same_type_descriptor(
 
 
 def _compare_descriptor(
-    predicate: IntegerComparePredicate,
+    predicate: ComparePredicate,
     *,
     scalar: ScalarAluType,
+    feature_bits: int,
     operands: tuple[Operand, Operand, Operand],
 ) -> Descriptor:
     suffix = scalar.suffix
@@ -365,7 +391,7 @@ def _compare_descriptor(
         mnemonic=mnemonic,
         semantic_tag=key,
         operands=operands,
-        feature_mask_words=(scalar.feature_bits,) if scalar.feature_bits else (),
+        feature_mask_words=(feature_bits,) if feature_bits else (),
         asm_forms=_asm(
             results=("dst",),
             operands=("lhs", "rhs"),
@@ -465,6 +491,25 @@ def _builtin_index_descriptors() -> tuple[Descriptor, ...]:
         )
         for query in BUILTIN_INDEX_QUERIES
         for dimension in BUILTIN_DIMENSIONS
+    )
+
+
+def _builtin_scalar_index_descriptors() -> tuple[Descriptor, ...]:
+    return tuple(
+        Descriptor(
+            key=f"spirv.op_load_builtin.{query.descriptor_suffix}",
+            mnemonic=f"OpLoadBuiltin.{query.mnemonic_suffix}",
+            semantic_tag=f"spirv.op_load_builtin.{query.descriptor_suffix}",
+            operands=(_id_result(),),
+            feature_mask_words=(query.feature_bits,) if query.feature_bits else (),
+            asm_forms=_asm(
+                results=("dst",),
+                result_value_types=(_scalar_result_value_type("index"),),
+            ),
+            schedule_class=_SCHEDULE_LOAD,
+            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+        )
+        for query in BUILTIN_SCALAR_INDEX_QUERIES
     )
 
 
@@ -633,6 +678,113 @@ def _ordinary_vector_descriptor(row: OrdinaryVectorInstruction) -> Descriptor:
     )
 
 
+def _ordinary_vector_shuffle_descriptor(
+    row: OrdinaryVectorShuffleInstruction,
+) -> Descriptor:
+    return Descriptor(
+        key=row.key,
+        mnemonic=row.mnemonic,
+        semantic_tag=row.key,
+        operands=(
+            _ordinary_vector_result(row.result_type),
+            _ordinary_vector_operand("source0", row.source0_type),
+            _ordinary_vector_operand("source1", row.source1_type),
+        ),
+        immediates=tuple(
+            Immediate(
+                name,
+                ImmediateKind.UNSIGNED,
+                bit_width=32,
+                unsigned_max=row.selector_maximum,
+            )
+            for name in row.selector_names
+        ),
+        feature_mask_words=(row.feature_bits,) if row.feature_bits else (),
+        asm_forms=_asm(
+            results=("dst",),
+            operands=("source0", "source1"),
+            immediates=row.selector_names,
+            result_value_types=(_ordinary_vector_result_value_type(row.result_type),),
+        ),
+        schedule_class=_SCHEDULE_ALU,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _subgroup_instruction_descriptor(row: SpirvSubgroupInstruction) -> Descriptor:
+    result_value_type = _ordinary_vector_result_value_type(row.result_type)
+    return Descriptor(
+        key=row.key,
+        mnemonic=row.mnemonic,
+        semantic_tag=row.key,
+        instruction_classes=(InstructionClass.OTHER,),
+        operands=(
+            _ordinary_vector_result(row.result_type),
+            *(
+                _ordinary_vector_operand(name, operand_type)
+                for name, operand_type in zip(
+                    row.operand_names, row.operand_types, strict=True
+                )
+            ),
+        ),
+        immediates=(
+            (
+                Immediate(
+                    "cluster_size",
+                    ImmediateKind.UNSIGNED,
+                    bit_width=32,
+                    unsigned_max=(1 << 32) - 1,
+                ),
+            )
+            if row.clustered
+            else ()
+        ),
+        effects=(
+            Effect(
+                EffectKind.CONVERGENT,
+                flags=(EffectFlag.ORDERED,),
+            ),
+        ),
+        feature_mask_words=(row.feature_bits,),
+        asm_forms=_asm(
+            results=("dst",),
+            operands=row.operand_names,
+            immediates=("cluster_size",) if row.clustered else (),
+            result_value_types=(
+                (result_value_type,) if result_value_type is not None else ()
+            ),
+        ),
+        schedule_class=_SCHEDULE_VARIABLE,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _extended_math_descriptor(row: ExtendedMathInstruction) -> Descriptor:
+    result_value_type = _ordinary_vector_result_value_type(row.value_type)
+    return Descriptor(
+        key=row.descriptor_key,
+        mnemonic=row.mnemonic,
+        semantic_tag=row.descriptor_key,
+        operands=(
+            _ordinary_vector_result(row.value_type),
+            *(
+                _ordinary_vector_operand(operand_name, row.value_type)
+                for operand_name in row.operation.operand_names
+            ),
+        ),
+        feature_mask_words=((row.feature_bits,) if row.feature_bits else ()),
+        asm_forms=_asm(
+            results=("dst",),
+            operands=row.operation.operand_names,
+            result_value_types=(
+                (result_value_type,) if result_value_type is not None else ()
+            ),
+        ),
+        schedule_class=_SCHEDULE_ALU,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
 def _address_conversion_descriptors() -> tuple[Descriptor, ...]:
     descriptors: list[Descriptor] = []
     for scalar_pair in INTEGER_SCALAR_ALU_TYPE_PAIRS:
@@ -713,18 +865,15 @@ def _workgroup_effect(
     )
 
 
-def _cooperative_matrix_effect(
-    kind: EffectKind,
-    *,
-    byte_width: int,
-    rows: int,
-    columns: int,
-) -> Effect:
+def _cooperative_matrix_effect(kind: EffectKind, memory_space: str) -> Effect:
+    # The stride operand determines the footprint; a compact tile byte count
+    # would understate padded or transposed accesses.
     return Effect(
         kind,
-        memory_space=MemorySpace.GLOBAL,
+        memory_space=(
+            MemorySpace.WORKGROUP if memory_space == "workgroup" else MemorySpace.GLOBAL
+        ),
         flags=(EffectFlag.DEPENDENCY,),
-        width_bits=byte_width * rows * columns * 8,
     )
 
 
@@ -1156,7 +1305,9 @@ def _access_chain_workgroup_descriptor(
             if coordinate == "byte_offset"
             else _id_operand(coordinate),
         ),
-        feature_mask_words=(scalar.feature_bits,) if scalar.feature_bits else (),
+        feature_mask_words=(scalar.register_feature_bits,)
+        if scalar.register_feature_bits
+        else (),
         asm_forms=_asm(results=("ptr",), operands=("base", coordinate)),
         schedule_class=_SCHEDULE_VARIABLE,
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
@@ -1176,7 +1327,9 @@ def _load_workgroup_descriptor(scalar: StorageBufferScalar) -> Descriptor:
         semantic_tag=f"spirv.op_load.workgroup.{scalar.suffix}",
         operands=(_id_result(), _ptr_workgroup_scalar_operand(scalar, "ptr")),
         effects=(_workgroup_effect(EffectKind.READ, scalar),),
-        feature_mask_words=(scalar.feature_bits,) if scalar.feature_bits else (),
+        feature_mask_words=(scalar.register_feature_bits,)
+        if scalar.register_feature_bits
+        else (),
         asm_forms=_asm(
             results=("dst",),
             operands=("ptr",),
@@ -1197,7 +1350,9 @@ def _store_workgroup_descriptor(scalar: StorageBufferScalar) -> Descriptor:
             _id_operand("value"),
         ),
         effects=(_workgroup_effect(EffectKind.WRITE, scalar),),
-        feature_mask_words=(scalar.feature_bits,) if scalar.feature_bits else (),
+        feature_mask_words=(scalar.register_feature_bits,)
+        if scalar.register_feature_bits
+        else (),
         asm_forms=_asm(operands=("ptr", "value")),
         schedule_class=_SCHEDULE_STORE,
         flags=(DescriptorFlag.SIDE_EFFECTING,),
@@ -1216,18 +1371,21 @@ def _workgroup_descriptors() -> tuple[Descriptor, ...]:
     return tuple(descriptors)
 
 
-def _control_barrier_descriptor(execution_scope: str) -> Descriptor:
-    key = f"spirv.op_control_barrier.{execution_scope}.workgroup.acq_rel"
+def _control_barrier_descriptor(case: ControlBarrierCase) -> Descriptor:
+    memory_space = {
+        "global": MemorySpace.GLOBAL,
+        "workgroup": MemorySpace.WORKGROUP,
+    }[case.memory_space.source_keyword]
     return Descriptor(
-        key=key,
-        mnemonic=f"OpControlBarrier.{execution_scope}.workgroup.acq_rel",
-        semantic_tag=key,
+        key=case.descriptor_key,
+        mnemonic=case.mnemonic,
+        semantic_tag=case.descriptor_key,
         instruction_classes=(InstructionClass.EXECUTION_BARRIER,),
         operands=(),
         effects=(
             Effect(
                 EffectKind.BARRIER,
-                memory_space=MemorySpace.WORKGROUP,
+                memory_space=memory_space,
                 flags=(EffectFlag.ORDERED, EffectFlag.DEPENDENCY),
             ),
             Effect(
@@ -1242,51 +1400,43 @@ def _control_barrier_descriptor(execution_scope: str) -> Descriptor:
 
 
 def _control_barrier_descriptors() -> tuple[Descriptor, ...]:
-    return (
-        _control_barrier_descriptor("subgroup"),
-        _control_barrier_descriptor("workgroup"),
-    )
+    return tuple(_control_barrier_descriptor(case) for case in CONTROL_BARRIER_CASES)
+
+
+_COOPERATIVE_MATRIX_LAYOUT_IMMEDIATE = Immediate(
+    "memory_layout", ImmediateKind.UNSIGNED, bit_width=1, unsigned_max=1
+)
 
 
 def _cooperative_matrix_load_descriptor(
     *,
     role: str,
-    case: CooperativeMatrixCase,
-    scalar: StorageBufferScalar,
-    rows: int,
-    columns: int,
-    feature_bits: int,
+    matrix_type: CooperativeMatrixType,
+    memory: CooperativeMatrixMemory,
 ) -> Descriptor:
-    key = cooperative_matrix_descriptor_key(
-        "op_cooperative_matrix_load_khr",
-        role=role,
-        element=case.element,
-        m_size=case.m_size,
-        n_size=case.n_size,
-        k_size=case.k_size,
-        accumulator=case.accumulator,
-        scope="subgroup",
-        layout="row_major",
+    key = matrix_type.memory_key(role, memory)
+    feature_bits = matrix_type.feature_bits | memory.feature_bits
+    pointer = (
+        _ptr_workgroup_scalar_operand(memory.carrier, "ptr")
+        if memory.space == "workgroup"
+        else _ptr_storage_buffer_operand("ptr")
     )
     return Descriptor(
         key=key,
-        mnemonic=(
-            f"OpCooperativeMatrixLoadKHR.{role}.{case.element}."
-            f"{case.m_size}x{case.n_size}x{case.k_size}."
-            f"{case.accumulator}.subgroup.row_major"
+        mnemonic=key.replace(
+            "spirv.op_cooperative_matrix_load_khr", "OpCooperativeMatrixLoadKHR"
         ),
         semantic_tag=key,
-        operands=(_id_result(), _ptr_storage_buffer_operand("ptr")),
+        operands=(_id_result(), pointer, _id_operand("stride")),
+        immediates=(_COOPERATIVE_MATRIX_LAYOUT_IMMEDIATE,),
         effects=(
-            _cooperative_matrix_effect(
-                EffectKind.READ,
-                byte_width=scalar.byte_width,
-                rows=rows,
-                columns=columns,
-            ),
+            _cooperative_matrix_effect(EffectKind.READ, memory.space),
+            Effect(EffectKind.CONVERGENT, flags=(EffectFlag.ORDERED,)),
         ),
         feature_mask_words=(feature_bits,),
-        asm_forms=_asm(results=("dst",), operands=("ptr",)),
+        asm_forms=_asm(
+            results=("dst",), operands=("ptr", "stride"), immediates=("memory_layout",)
+        ),
         schedule_class=_SCHEDULE_LOAD,
         flags=(DescriptorFlag.SIDE_EFFECTING,),
     )
@@ -1294,42 +1444,32 @@ def _cooperative_matrix_load_descriptor(
 
 def _cooperative_matrix_store_descriptor(
     *,
-    case: CooperativeMatrixCase,
-    scalar: StorageBufferScalar,
-    rows: int,
-    columns: int,
-    feature_bits: int,
+    matrix_type: CooperativeMatrixType,
+    memory: CooperativeMatrixMemory,
 ) -> Descriptor:
-    key = cooperative_matrix_descriptor_key(
-        "op_cooperative_matrix_store_khr",
-        role="result",
-        element=case.element,
-        m_size=case.m_size,
-        n_size=case.n_size,
-        k_size=case.k_size,
-        accumulator=case.accumulator,
-        scope="subgroup",
-        layout="row_major",
+    key = matrix_type.memory_key("result", memory)
+    feature_bits = matrix_type.feature_bits | memory.feature_bits
+    pointer = (
+        _ptr_workgroup_scalar_operand(memory.carrier, "ptr")
+        if memory.space == "workgroup"
+        else _ptr_storage_buffer_operand("ptr")
     )
     return Descriptor(
         key=key,
-        mnemonic=(
-            f"OpCooperativeMatrixStoreKHR.result.{case.element}."
-            f"{case.m_size}x{case.n_size}x{case.k_size}."
-            f"{case.accumulator}.subgroup.row_major"
+        mnemonic=key.replace(
+            "spirv.op_cooperative_matrix_store_khr", "OpCooperativeMatrixStoreKHR"
         ),
         semantic_tag=key,
-        operands=(_ptr_storage_buffer_operand("ptr"), _id_operand("value")),
+        operands=(pointer, _id_operand("value"), _id_operand("stride")),
+        immediates=(_COOPERATIVE_MATRIX_LAYOUT_IMMEDIATE,),
         effects=(
-            _cooperative_matrix_effect(
-                EffectKind.WRITE,
-                byte_width=scalar.byte_width,
-                rows=rows,
-                columns=columns,
-            ),
+            _cooperative_matrix_effect(EffectKind.WRITE, memory.space),
+            Effect(EffectKind.CONVERGENT, flags=(EffectFlag.ORDERED,)),
         ),
         feature_mask_words=(feature_bits,),
-        asm_forms=_asm(operands=("ptr", "value")),
+        asm_forms=_asm(
+            operands=("ptr", "value", "stride"), immediates=("memory_layout",)
+        ),
         schedule_class=_SCHEDULE_STORE,
         flags=(DescriptorFlag.SIDE_EFFECTING,),
     )
@@ -1372,49 +1512,37 @@ def _cooperative_matrix_mul_add_descriptor(
     )
 
 
-def _cooperative_matrix_descriptors_for_case(
-    case: CooperativeMatrixCase,
-) -> tuple[Descriptor, ...]:
-    return (
-        _cooperative_matrix_load_descriptor(
-            role="lhs",
-            case=case,
-            scalar=case.lhs_scalar,
-            rows=case.lhs_rows,
-            columns=case.lhs_columns,
-            feature_bits=case.memory_feature_bits(case.lhs_scalar),
-        ),
-        _cooperative_matrix_load_descriptor(
-            role="rhs",
-            case=case,
-            scalar=case.rhs_scalar,
-            rows=case.rhs_rows,
-            columns=case.rhs_columns,
-            feature_bits=case.memory_feature_bits(case.rhs_scalar),
-        ),
-        _cooperative_matrix_load_descriptor(
-            role="init",
-            case=case,
-            scalar=case.accumulator_scalar,
-            rows=case.accumulator_rows,
-            columns=case.accumulator_columns,
-            feature_bits=case.memory_feature_bits(case.accumulator_scalar),
-        ),
-        _cooperative_matrix_mul_add_descriptor(case=case),
-        _cooperative_matrix_store_descriptor(
-            case=case,
-            scalar=case.result_scalar,
-            rows=case.accumulator_rows,
-            columns=case.accumulator_columns,
-            feature_bits=case.memory_feature_bits(case.result_scalar),
-        ),
-    )
-
-
 def _cooperative_matrix_descriptors() -> tuple[Descriptor, ...]:
-    descriptors: list[Descriptor] = []
-    for case in COOPERATIVE_MATRIX_CASES:
-        descriptors.extend(_cooperative_matrix_descriptors_for_case(case))
+    descriptors = [
+        Descriptor(
+            key=matrix_type.constructor_key,
+            mnemonic=matrix_type.constructor_key.replace(
+                "spirv.op_composite_construct", "OpCompositeConstruct"
+            ),
+            semantic_tag=matrix_type.constructor_key,
+            operands=(_id_result(), _id_operand("component")),
+            feature_mask_words=(matrix_type.feature_bits,),
+            effects=(Effect(EffectKind.CONVERGENT, flags=(EffectFlag.ORDERED,)),),
+            asm_forms=_asm(results=("dst",), operands=("component",)),
+            schedule_class=_SCHEDULE_ALU,
+            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+        )
+        for matrix_type in COOPERATIVE_MATRIX_TYPES
+    ]
+    descriptors.extend(
+        _cooperative_matrix_store_descriptor(matrix_type=matrix_type, memory=memory)
+        if role == "result"
+        else _cooperative_matrix_load_descriptor(
+            role=role, matrix_type=matrix_type, memory=memory
+        )
+        for matrix_type in COOPERATIVE_MATRIX_TYPES
+        for role in matrix_type.source_roles
+        for memory in cooperative_matrix_memory_variants(matrix_type.scalar)
+    )
+    descriptors.extend(
+        _cooperative_matrix_mul_add_descriptor(case=case)
+        for case in COOPERATIVE_MATRIX_CASES
+    )
     return tuple(descriptors)
 
 
@@ -1541,6 +1669,7 @@ def _compare_descriptors() -> tuple[Descriptor, ...]:
         _compare_descriptor(
             predicate,
             scalar=scalar,
+            feature_bits=scalar.feature_bits,
             operands=(
                 _id_result(),
                 _id_operand("lhs"),
@@ -1555,6 +1684,7 @@ def _compare_descriptors() -> tuple[Descriptor, ...]:
             _compare_descriptor(
                 predicate,
                 scalar=scalar_pair.unsigned,
+                feature_bits=scalar_pair.unsigned.feature_bits,
                 operands=(
                     _id_result(),
                     _id_operand("lhs"),
@@ -1569,7 +1699,24 @@ def _compare_descriptors() -> tuple[Descriptor, ...]:
         [
             _compare_descriptor(
                 predicate,
+                scalar=compare_type.scalar,
+                feature_bits=compare_type.feature_bits,
+                operands=(
+                    _id_result(),
+                    _id_operand("lhs"),
+                    _id_operand("rhs"),
+                ),
+            )
+            for compare_type in FLOAT_COMPARE_TYPES
+            for predicate in FLOAT_COMPARE_PREDICATES
+        ]
+    )
+    descriptors.extend(
+        [
+            _compare_descriptor(
+                predicate,
                 scalar=OFFSET64_ALU_TYPE,
+                feature_bits=OFFSET64_ALU_TYPE.feature_bits,
                 operands=(
                     _id_result(),
                     _offset64_operand("lhs"),
@@ -1598,7 +1745,7 @@ def _select_descriptors() -> tuple[Descriptor, ...]:
             result_value_type=_scalar_alu_result_value_type(scalar),
             feature_bits=scalar.feature_bits,
         )
-        for scalar in SCALAR_ALU_TYPES
+        for scalar in SCALAR_SELECT_TYPES
     ]
     descriptors.append(
         _select_descriptor(
@@ -1797,8 +1944,16 @@ SPIRV_LOGICAL_CORE_DESCRIPTOR_SET = DescriptorSet(
         *_conversion_descriptors(),
         *(_ordinary_vector_descriptor(row) for row in ORDINARY_VECTOR_INSTRUCTIONS),
         *(
+            _ordinary_vector_shuffle_descriptor(row)
+            for row in ORDINARY_VECTOR_SHUFFLE_INSTRUCTIONS
+        ),
+        *(
             _ordinary_vector_descriptor(row)
-            for row in ORDINARY_VECTOR_FLOAT_BINARY_INSTRUCTIONS
+            for row in (
+                *ORDINARY_VECTOR_FLOAT_BINARY_INSTRUCTIONS,
+                *ORDINARY_VECTOR_FLOAT_SCALE_INSTRUCTIONS,
+                *ORDINARY_VECTOR_FLOAT_COMPARE_INSTRUCTIONS,
+            )
         ),
         *(
             _ordinary_vector_descriptor(row)
@@ -1806,12 +1961,18 @@ SPIRV_LOGICAL_CORE_DESCRIPTOR_SET = DescriptorSet(
         ),
         *(
             _ordinary_vector_descriptor(row)
-            for row in ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS
+            for row in ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS
         ),
         *(
             _ordinary_vector_descriptor(row)
             for row in ORDINARY_VECTOR_BIT_LAYOUT_INSTRUCTIONS
         ),
+        *(
+            _ordinary_vector_descriptor(row)
+            for row in SPIRV_SUBGROUP_BALLOT_PACKING_INSTRUCTIONS
+        ),
+        *(_subgroup_instruction_descriptor(row) for row in SPIRV_SUBGROUP_INSTRUCTIONS),
+        *(_extended_math_descriptor(row) for row in EXTENDED_MATH_INSTRUCTIONS),
         _coordinate_copy_descriptor(),
         _ternary_same_type_descriptor(
             key="spirv.op_imul_add.i32",
@@ -1858,15 +2019,10 @@ SPIRV_LOGICAL_CORE_DESCRIPTOR_SET = DescriptorSet(
             ),
             result_value_type=None,
         ),
-        _unary_typed_descriptor(
-            key="spirv.op_bit_count.i32",
-            mnemonic="OpBitCount",
-            semantic_tag="spirv.op_bit_count.i32",
-            operands=(_id_result(), _id_operand("input")),
-            result_value_type=_scalar_result_value_type("i32"),
-        ),
+        *(_ordinary_vector_descriptor(row) for row in INTEGER_BIT_COUNT_INSTRUCTIONS),
         *_address_conversion_descriptors(),
         *_builtin_index_descriptors(),
+        *_builtin_scalar_index_descriptors(),
         *_compare_descriptors(),
         *_select_descriptors(),
         *_storage_buffer_descriptors(),

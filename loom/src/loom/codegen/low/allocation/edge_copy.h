@@ -22,6 +22,8 @@ extern "C" {
 
 // Immutable allocation facts needed to plan branch edge copies.
 typedef struct loom_low_allocation_edge_copy_context_t {
+  // Optional retained allocation relations requested by downstream consumers.
+  loom_low_allocation_flags_t flags;
   // Function-local placement relations over the move plan's liveness.
   const loom_low_placement_table_t* placement;
   // Allocation-wide finalized move rows and sequencing scratch.
@@ -34,6 +36,9 @@ typedef struct loom_low_allocation_edge_copy_plan_t {
   loom_low_allocation_edge_copy_t* copies;
   // Number of records in |copies|.
   iree_host_size_t copy_count;
+  // First coalesced incoming copy by local value ordinal, or NULL when not
+  // retained.
+  uint32_t* first_coalesced_incoming_copy_by_value_ordinal;
   // Per-low.br groups indexing |copies|.
   loom_low_allocation_edge_copy_group_t* groups;
   // Number of records in |groups|.

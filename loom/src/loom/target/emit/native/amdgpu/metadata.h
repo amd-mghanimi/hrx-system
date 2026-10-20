@@ -16,6 +16,7 @@
 #define LOOM_TARGET_EMIT_NATIVE_AMDGPU_METADATA_H_
 
 #include "iree/base/api.h"
+#include "iree/base/internal/arena.h"
 #include "iree/base/string_builder.h"
 #include "loom/target/arch/amdgpu/target_info.h"
 #include "loom/target/types.h"
@@ -67,16 +68,21 @@ typedef struct loom_amdgpu_metadata_kernel_t {
   uint32_t group_segment_fixed_size;
   // Fixed scratch/private segment size in bytes.
   uint32_t private_segment_fixed_size;
-  // Physical SGPR high-water count for the kernel body.
+  // SGPR high-water count including body, ABI and entry requirements.
   uint32_t sgpr_count;
-  // Physical VGPR high-water count for the kernel body.
+  // Total vector register allocation before hardware granulation. On CDNA this
+  // includes the aligned architectural VGPR bank followed by any AGPRs.
   uint32_t vgpr_count;
+  // AGPR high-water count, including structural move temporaries.
+  uint32_t agpr_count;
   // Maximum flat workgroup size advertised for dispatch validation/tuning.
   uint32_t max_flat_workgroup_size;
   // Required workgroup size, when |has_required_workgroup_size| is true.
   loom_target_workgroup_size_t required_workgroup_size;
   // True when |required_workgroup_size| should be emitted.
   bool has_required_workgroup_size;
+  // True on targets with accumulator registers, including zero AGPR usage.
+  bool has_agpr_count;
   // Required nontrivial workgroup-cluster size, when
   // |has_workgroup_cluster_size| is true.
   loom_target_workgroup_cluster_size_t workgroup_cluster_size;
@@ -117,15 +123,16 @@ iree_status_t loom_amdgpu_metadata_append_msgpack(
     const loom_amdgpu_code_object_metadata_t* metadata,
     iree_string_builder_t* builder);
 
-// Appends one complete AMDGPU ELF note record containing MessagePack metadata.
+// Builds one complete AMDGPU ELF note record containing MessagePack metadata.
 //
+// The record is allocated from |arena| after one allocation-free sizing pass.
 // The returned bytes are not a complete ELF file, section, or program segment.
 // Direct object emitters can place the record in a SHT_NOTE section and expose
 // the same bytes through a PT_NOTE segment. The note name is `AMDGPU` and the
 // note type is NT_AMDGPU_METADATA.
-iree_status_t loom_amdgpu_metadata_append_elf_note(
+iree_status_t loom_amdgpu_metadata_build_elf_note(
     const loom_amdgpu_code_object_metadata_t* metadata,
-    iree_string_builder_t* builder);
+    iree_const_byte_span_t* out_note, iree_arena_allocator_t* arena);
 
 #ifdef __cplusplus
 }  // extern "C"

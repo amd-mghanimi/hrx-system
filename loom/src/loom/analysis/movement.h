@@ -219,7 +219,8 @@ typedef struct loom_movement_request_t {
   loom_movement_endpoint_t dest;
 
   // Exact transferred byte count when LOOM_MOVEMENT_REQUEST_STATIC_TRANSFER is
-  // set.
+  // set. Counts logical payload bytes, excluding endpoint padding and counting
+  // repeated source addresses once for each logical element transferred.
   int64_t transferred_byte_count;
 
   // Optional mask or predicate SSA value, or LOOM_VALUE_ID_INVALID.

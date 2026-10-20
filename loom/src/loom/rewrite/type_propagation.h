@@ -124,6 +124,11 @@ iree_status_t loom_type_propagator_apply_op(loom_type_propagator_t* propagator,
 loom_type_t loom_type_transfer_value_type(
     const loom_type_transfer_context_t* context, loom_value_id_t value_id);
 
+// Rejects the current transaction when candidate types violate an op's semantic
+// constraint. No candidates are committed; retained facts remain available to
+// lowering without redeclaring the value types.
+void loom_type_transfer_reject(loom_type_transfer_context_t* context);
+
 // Seeds a candidate refinement for |value_id|. The transaction owns conflict
 // handling and commit; callers must not mutate the IR directly.
 iree_status_t loom_type_transfer_seed_candidate(

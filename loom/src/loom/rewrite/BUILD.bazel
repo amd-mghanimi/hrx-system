@@ -38,6 +38,37 @@ loom_cc_library(
 )
 
 loom_cc_test(
+    name = "cfg_facts_test",
+    srcs = ["cfg_facts_test.cc"],
+    deps = [
+        ":rewriter",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "erasure_test",
+    srcs = ["erasure_test.cc"],
+    deps = [
+        ":rewriter",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
     name = "pattern_registry_test",
     srcs = ["pattern_registry_test.cc"],
     deps = [
@@ -87,11 +118,15 @@ loom_cc_test(
 
 loom_cc_library(
     name = "remap",
-    srcs = ["remap.c"],
+    srcs = [
+        "remap.c",
+        "remap_payload.c",
+    ],
     hdrs = ["remap.h"],
     deps = [
         "//loom/src/loom/ir",
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
     ],
 )
@@ -143,10 +178,13 @@ loom_cc_test(
     srcs = ["loop_like_test.cc"],
     deps = [
         ":loop_like",
+        ":materialize",
+        ":remap",
         ":rewriter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/test",
+        "//loom/src/loom/util:fact_table",
         "//loom/src/loom/verify",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
@@ -251,6 +289,7 @@ loom_cc_library(
         "//loom/src/loom/target:registers",
         "//loom/src/loom/util:cfg_graph",
         "//loom/src/loom/util:fact_table",
+        "//loom/src/loom/util:segmented_storage",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
     ],

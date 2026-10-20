@@ -16,6 +16,7 @@ from loom.target.contracts import (
     Guard,
     Scalar,
     TypePattern,
+    UnsignedDivisorMagicKind,
     ValueProject,
     ValueRef,
     descriptor_by_key,
@@ -28,11 +29,15 @@ _RHS = ValueRef.operand("rhs")
 
 
 def _magic_rule(
-    source_op: Op, type_pattern: TypePattern, *, is_add: bool, remainder: bool
+    source_op: Op,
+    type_pattern: TypePattern,
+    *,
+    kind: UnsignedDivisorMagicKind,
+    remainder: bool,
 ) -> DescriptorRule:
     program = ScalarProgram()
     magic = program.constant(
-        "magic", ValueProject.u32_divisor_magic_multiplier_as_i32("rhs")
+        "magic", ValueProject.u32_divisor_magic_multiplier_as_i32("lhs", "rhs")
     )
     mask = program.constant("mask16", 0xFFFF)
     right16 = program.constant("right16", -16)
@@ -51,22 +56,28 @@ def _magic_rule(
     middle_high = program.binary("middle_high", "lshl.i32", middle, right16)
     product_high = program.multiply_add("product_high", middle_high, high, magic_high)
     next_high = program.binary("next_high", "lshl.i32", next_word, right16)
-    quotient = program.binary("raw_quotient", "add.i32", product_high, next_high)
-    if is_add:
+    quotient = program.binary(
+        "raw_quotient" if kind.has_shift or remainder else None,
+        "add.i32",
+        product_high,
+        next_high,
+    )
+    if kind.has_add:
         right_one = program.constant("right_one", -1)
         difference = program.binary("difference", "sub.i32", _LHS, quotient)
         half = program.binary("half_difference", "lshl.i32", difference, right_one)
         quotient = program.binary("adjusted_quotient", "add.i32", half, quotient)
-    shift = program.constant(
-        "post_shift",
-        ValueProject.u32_divisor_magic_shift("rhs", product_bit_width=32),
-        descriptor_key="amd.xdna.aie2p.constant.i32.short",
-    )
-    zero = program.constant("zero", 0)
-    right_shift = program.binary("right_shift", "sub.i32", zero, shift)
-    quotient = program.binary(
-        "quotient" if remainder else None, "lshl.i32", quotient, right_shift
-    )
+    if kind.has_shift:
+        shift = program.constant(
+            "post_shift",
+            ValueProject.u32_divisor_magic_shift("lhs", "rhs", product_bit_width=32),
+            descriptor_key="amd.xdna.aie2p.constant.i32.short",
+        )
+        zero = program.constant("zero", 0)
+        right_shift = program.binary("right_shift", "sub.i32", zero, shift)
+        quotient = program.binary(
+            "quotient" if remainder else None, "lshl.i32", quotient, right_shift
+        )
     if remainder:
         product = program.binary("quotient_product", "mul.i32", quotient, _RHS)
         program.binary(None, "sub.i32", _LHS, product)
@@ -83,7 +94,7 @@ def _magic_rule(
             ),
             Guard.value_exact_i64("rhs"),
             Guard.value_i64_range("rhs", 2, (1 << 31) - 1),
-            Guard.value_u32_divisor_magic_is_add("rhs", is_add),
+            Guard.value_u32_divisor_magic_kind("lhs", "rhs", kind),
         ),
         emit=tuple(program.emits),
     )
@@ -115,14 +126,14 @@ def _high_bit_rule(source_op: Op, *, remainder: bool) -> DescriptorRule:
 
 AIE2P_INTEGER_DIVISION_RULES = (
     *(
-        _magic_rule(source_op, type_pattern, is_add=is_add, remainder=remainder)
+        _magic_rule(source_op, type_pattern, kind=kind, remainder=remainder)
         for source_op, type_pattern, remainder in (
             (index.index_div, _INDEX, False),
             (index.index_rem, _INDEX, True),
             (scalar_arithmetic.scalar_divui, _I32, False),
             (scalar_arithmetic.scalar_remui, _I32, True),
         )
-        for is_add in (False, True)
+        for kind in UnsignedDivisorMagicKind
     ),
     _high_bit_rule(scalar_arithmetic.scalar_divui, remainder=False),
     _high_bit_rule(scalar_arithmetic.scalar_remui, remainder=True),

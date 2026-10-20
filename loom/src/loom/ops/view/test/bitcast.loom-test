@@ -1,0 +1,106 @@
+// RUN: roundtrip
+
+func.def @packet_bytes(%channel: channel<tile<7168xi32>>) -> (i8) {
+  %read, %packet = channel.acquire %channel : channel<tile<7168xi32>> -> (read<tile<7168xi32>>, view<7168xi32>)
+  %bytes = view.bitcast %packet : view<7168xi32> -> view<28672xi8>
+  %value = view.load %bytes[17] : view<28672xi8> -> i8
+  channel.release %read : read<tile<7168xi32>>
+  func.return %value : i8
+}
+
+// ====
+
+func.def @dynamic_bytes(%count: index, %words: view<[%count]xi32>) -> (view<[%count]x4xi8>) {
+  %bytes = view.bitcast %words : view<[%count]xi32> -> view<[%count]x4xi8>
+  func.return %bytes : view<[%count]x4xi8>
+}
+
+// ====
+// RUN: pass canonicalize
+
+// Slot selection and word offsets survive reinterpretation. The byte subview
+// advances by bytes rather than inheriting the source's four-byte element size.
+func.def @selected_packet_facts(%slot: index) -> (i1, i64, i64, i64, i64, i64) {
+  %length = index.constant 576 : offset
+  %origin = index.constant 64 : offset
+  %storage = buffer.alloca<workgroup> align(64) %length : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<128xi32>
+  %position = index.assume %slot [range(%slot, 0, 64), multiple_of(%slot, 64)] : index
+  %packet = view.subview %slots[%position] : view<128xi32> -> view<64xi32>
+  %bytes = view.bitcast %packet : view<64xi32> -> view<256xi8>
+  %tail = view.subview %bytes[3] : view<256xi8> -> view<13xi8>
+  %same_root = test.fact_view_root_matches %bytes, %storage : view<256xi8>, buffer -> i1
+  %space = test.fact_view_memory_space %bytes : view<256xi8> -> i64
+  %begin = test.fact_view_byte_offset_lo %bytes : view<256xi8> -> i64
+  %end = test.fact_view_byte_offset_hi %bytes : view<256xi8> -> i64
+  %extent = test.fact_view_byte_length_hi %bytes : view<256xi8> -> i64
+  %tail_begin = test.fact_view_byte_offset_lo %tail : view<13xi8> -> i64
+  func.return %same_root, %space, %begin, %end, %extent, %tail_begin : i1, i64, i64, i64, i64, i64
+}
+
+// ----
+func.def @selected_packet_facts(%slot: index) -> (i1, i64, i64, i64, i64, i64) {
+  %same_root = scalar.constant true : i1
+  %space = scalar.constant 2 : i64
+  %begin = scalar.constant 64 : i64
+  %end = scalar.constant 320 : i64
+  %extent = scalar.constant 256 : i64
+  %tail_begin = scalar.constant 67 : i64
+  func.return %same_root, %space, %begin, %end, %extent, %tail_begin : i1, i64, i64, i64, i64, i64
+}
+
+// ====
+// RUN: pass canonicalize
+
+// Changing element types never turns an access requirement into address proof.
+func.def @bitcast_alignment(%buffer: buffer) -> (i64, i64) {
+  %odd = index.constant 3 : offset
+  %bytes = buffer.view %buffer[%odd] : buffer -> view<16xi8>
+  %words = view.bitcast %bytes : view<16xi8> -> view<4xi32>
+  %origin = test.fact_view_min_alignment %words : view<4xi32> -> i64
+  %root = test.fact_view_root_min_alignment %words : view<4xi32> -> i64
+  func.return %origin, %root : i64, i64
+}
+
+// ----
+func.def @bitcast_alignment(%buffer: buffer) -> (i64, i64) {
+  %origin = scalar.constant 1 : i64
+  %root = scalar.constant 1 : i64
+  func.return %origin, %root : i64, i64
+}
+
+// ====
+// RUN: verify
+
+func.def @unequal_extent(%words: view<4xi32>) {
+  // ERROR@+1: TYPE/004 "result" "view<15xi8>" "provably same total bit count as source"
+  %bytes = view.bitcast %words : view<4xi32> -> view<15xi8>
+  func.return
+}
+
+// ====
+// RUN: verify
+
+func.def @encoded_source(%layout: encoding<layout>, %words: view<4xi32, %layout>) {
+  // ERROR@+1: TYPE/003 "source" "dense unencoded view with byte-addressable scalar elements"
+  %bytes = view.bitcast %words : view<4xi32, %layout> -> view<16xi8>
+  func.return
+}
+
+// ====
+// RUN: verify
+
+func.def @encoded_result(%layout: encoding<layout>, %words: view<4xi32>) {
+  // ERROR@+1: TYPE/004 "result" "dense unencoded view with byte-addressable scalar elements"
+  %bytes = view.bitcast %words : view<4xi32> -> view<16xi8, %layout>
+  func.return
+}
+
+// ====
+// RUN: verify
+
+func.def @packed_source(%bits: view<32xi1>) {
+  // ERROR@+1: TYPE/003 "source" "dense unencoded view with byte-addressable scalar elements"
+  %word = view.bitcast %bits : view<32xi1> -> view<1xi32>
+  func.return
+}

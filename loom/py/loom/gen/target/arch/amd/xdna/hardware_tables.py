@@ -25,6 +25,8 @@ from loom.target.arch.amd.xdna.array.model import (
     StreamDirection,
     StreamPort,
     TileKind,
+    maximum_encoded_dma_transfer_length,
+    tile_resource_totals,
     validate_array_family,
 )
 from loom.target.arch.amd.xdna.array.npu2 import (
@@ -110,8 +112,10 @@ def emit_array_facts() -> str:
             for window in tile.memory.load_windows
         )
         register_module_bits = " | ".join(f"LOOM_XDNA_REGISTER_MODULE_BIT({_REGISTER_MODULE_IDS[module]})" for module in tile.register_modules)
+        resource_totals = tile_resource_totals(family, tile)
         dma = tile.dma
         assert dma is not None
+        maximum_encoded_transfer_length = maximum_encoded_dma_transfer_length(tile)
         dma_flags = (
             int(dma.supports_compression) | (int(dma.supports_padding) << 1) | (int(dma.supports_out_of_order) << 2) | (int(dma.supports_tokens) << 3) | (int(dma.supports_tlast_suppression) << 4)
         )
@@ -124,10 +128,19 @@ def emit_array_facts() -> str:
                 f"        .lock_count = {tile.lock_count},",
                 f"        .lock_value_minimum = {tile.lock_value_minimum},",
                 f"        .lock_value_maximum = {tile.lock_value_maximum},",
+                f"        .packet_arbiter_count = {tile.packet_arbiter_count},",
+                f"        .packet_master_select_count = {tile.packet_master_select_count},",
                 f"        .register_module_bits = {register_module_bits},",
+                "        .array_resources = {",
+                f"            .physical_tile_count = {resource_totals.physical_tile_count},",
+                f"            .lock_count = {resource_totals.lock_count},",
+                f"            .dma_channel_count_per_direction = {resource_totals.dma_channel_count_per_direction},",
+                f"            .dma_buffer_descriptor_count = {resource_totals.dma_buffer_descriptor_count},",
+                "        },",
                 "        .memory = {",
                 f"            .local_base = UINT32_C(0x{tile.memory.local_base:08x}),",
                 f"            .local_capacity = UINT32_C(0x{tile.memory.local_capacity:08x}),",
+                f"            .local_load_base = UINT32_C(0x{tile.memory.local_load_base:08x}),",
                 f"            .program_base = UINT32_C(0x{tile.memory.program_base:08x}),",
                 f"            .program_capacity = UINT32_C(0x{tile.memory.program_capacity:08x}),",
                 f"            .program_load_base = UINT32_C(0x{tile.memory.program_load_base:08x}),",
@@ -137,6 +150,7 @@ def emit_array_facts() -> str:
                 "        },",
                 "        .dma = {",
                 f"            .address_maximum = UINT64_C(0x{dma.address_maximum:016x}),",
+                f"            .maximum_encoded_transfer_length = UINT32_C(0x{maximum_encoded_transfer_length:08x}),",
                 f"            .buffer_descriptor_count = {dma.buffer_descriptor_count},",
                 f"            .maximum_task_repeat_count = {dma.maximum_task_repeat_count},",
                 f"            .channel_count_per_direction = {dma.channel_count_per_direction},",
@@ -161,15 +175,20 @@ def emit_array_facts() -> str:
         )
 
     event_lines = [f"    {{.module = {_REGISTER_MODULE_IDS[event.module]}, .event_count = {event.event_count}, .named_event_count = {event.named_event_count}}}," for event in family.events]
-    stream_lines = [
-        "    {"
-        f".tile_kind = {_TILE_KIND_IDS[row.tile_kind]}, "
-        f".direction = {_STREAM_DIRECTION_IDS[row.direction]}, "
-        f".port = {_STREAM_PORT_IDS[row.port]}, "
-        f".ordinal = {row.ordinal}, .count = {row.count}"
-        "},"
-        for row in family.stream_ports
-    ]
+    stream_lines: list[str] = []
+    connection_lines: list[str] = []
+    for row in family.stream_ports:
+        connection_offset = len(connection_lines) if row.connections else 0
+        connection_lines.extend(f"    UINT32_C(0x{mask:08x})," for mask in row.connections)
+        stream_lines.append(
+            "    {"
+            f".tile_kind = {_TILE_KIND_IDS[row.tile_kind]}, "
+            f".direction = {_STREAM_DIRECTION_IDS[row.direction]}, "
+            f".port = {_STREAM_PORT_IDS[row.port]}, "
+            f".ordinal = {row.ordinal}, .count = {row.count}, "
+            f".connection_offset = {connection_offset}"
+            "},"
+        )
     lines = [
         *_header(),
         "static const loom_xdna_address_window_t kLoomXdnaNpu2AddressWindows[] = {",
@@ -186,6 +205,10 @@ def emit_array_facts() -> str:
         "",
         "static const loom_xdna_stream_port_range_t kLoomXdnaNpu2StreamPorts[] = {",
         *stream_lines,
+        "};",
+        "",
+        "static const uint32_t kLoomXdnaNpu2StreamConnections[] = {",
+        *connection_lines,
         "};",
         "",
         "static const loom_xdna_array_family_t kLoomXdnaNpu2ArrayFamily = {",
@@ -206,6 +229,7 @@ def emit_array_facts() -> str:
         f"    .event_count = {len(family.events)},",
         "    .stream_ports = kLoomXdnaNpu2StreamPorts,",
         f"    .stream_port_count = {len(family.stream_ports)},",
+        "    .stream_connections = kLoomXdnaNpu2StreamConnections,",
         f'    .aie_rt_source_commit = "{AIE_RT_SOURCE_COMMIT}",',
         f'    .mlir_aie_source_commit = "{MLIR_AIE_SOURCE_COMMIT}",',
         f'    .register_database_version = "{REGISTER_DATABASE_VERSION}",',

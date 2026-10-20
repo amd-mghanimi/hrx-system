@@ -176,9 +176,8 @@ loom_low_packet_descriptor_operand_assignment(
   const loom_low_descriptor_t* descriptor = packet->descriptor;
   const loom_low_descriptor_set_t* descriptor_set =
       allocation->target.descriptor_set;
-  const loom_low_operand_t* descriptor_operand =
-      &descriptor_set
-           ->operands[descriptor->operand_start + descriptor_operand_index];
+  const loom_low_operand_t* descriptor_operand = loom_low_descriptor_operand(
+      descriptor_set, descriptor, descriptor_operand_index);
   const loom_low_allocation_assignment_t* assignment =
       descriptor_operand_index < descriptor->result_count
           ? loom_low_packet_result_assignment(
@@ -201,37 +200,6 @@ loom_named_attr_slice_t loom_low_packet_attrs(
 loom_attribute_t loom_low_packet_immediate_attr(
     const loom_low_packet_view_t* packet,
     const loom_low_immediate_t* immediate);
-
-// Optional selected asm-form table for scheduled packets. Target legality or
-// target emitters populate this table when descriptor-backed packets have
-// multiple legal asm forms. Entries are indexed by packet ordinal; structural
-// packets and descriptor packets that should use their unique canonical form
-// use LOOM_LOW_ASM_FORM_ORDINAL_NONE.
-typedef struct loom_low_packet_asm_form_table_t {
-  // Module containing the packetized low function.
-  const loom_module_t* module;
-  // Target-low function operation packetized by this table.
-  const loom_op_t* function_op;
-  // Resolved target context selected by |function_op|.
-  loom_low_resolved_target_t target;
-  // Selected asm-form ordinals indexed by scheduled packet ordinal.
-  const uint32_t* asm_form_ordinals;
-  // Number of records in |asm_form_ordinals|.
-  iree_host_size_t asm_form_ordinal_count;
-} loom_low_packet_asm_form_table_t;
-
-// Verifies that |asm_forms| describes selected asm forms for |schedule|.
-iree_status_t loom_low_packet_validate_asm_form_table(
-    const loom_low_schedule_table_t* schedule,
-    const loom_low_packet_asm_form_table_t* asm_forms);
-
-// Resolves the asm form for |packet|. A selected asm-form table overrides the
-// descriptor canonical form when it names a valid form for the packet's
-// descriptor; otherwise the descriptor must have a unique canonical form.
-iree_status_t loom_low_packet_lookup_asm_form(
-    const loom_low_schedule_table_t* schedule,
-    const loom_low_packet_asm_form_table_t* asm_forms,
-    const loom_low_packet_view_t* packet, uint32_t* out_asm_form_ordinal);
 
 // Returns the region-block index for |block|, or LOOM_LOW_PACKET_INDEX_NONE
 // when |block| does not belong to |schedule|.

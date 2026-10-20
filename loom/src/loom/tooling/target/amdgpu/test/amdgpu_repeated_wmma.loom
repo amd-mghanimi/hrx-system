@@ -1,0 +1,122 @@
+// Independent matrix jobs reuse one worker and its reduction loop. Every job
+// starts from the same pre-loop scalar zero, transported through a decomposed
+// concat edge. A=1 and B=1..32 produce exactly 528 in every output element;
+// retaining a previous job's accumulator violates that per-job reset.
+
+amdgpu.target<gfx11-generic> @repeated_wmma_target {subgroup_size = 32}
+
+low.func.def target<amdgpu.gfx11.generic.core>(@repeated_wmma_target) @repeated_wmma(%workitem: reg<amdgpu.vgpr>, %lhs_view: reg<amdgpu.sgpr x2>, %rhs_view: reg<amdgpu.sgpr x2>, %out_view: reg<amdgpu.sgpr x2>, %job_count: reg<amdgpu.sgpr>) asm {
+  %lane = v_and_b32_src0_inline %workitem, 15
+  %lane_input_offset = v_lshlrev_b32_src0_inline %lane, 6
+  %lane_output_offset = v_lshlrev_b32_src0_inline %workitem, 2
+  %zero = v_mov_b32 0
+  %zero_accumulator = concat(%zero, %zero, %zero, %zero, %zero, %zero, %zero, %zero) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x8>
+  %begin = s_mov_b32 0
+  %step = s_mov_b32 1
+  %tile_count = s_mov_b32 2
+  %tile_shift = s_mov_b32 5
+  %job_shift = s_mov_b32 10
+  low.br ^job_header(%begin: reg<amdgpu.sgpr>)
+^job_header(%job: reg<amdgpu.sgpr>):
+  %more_jobs = s_cmp_lt_u32 %job, %job_count
+  low.cond_br %more_jobs, ^initialize, ^exit : reg<amdgpu.scc>
+^initialize:
+  low.br ^tile_header(%begin: reg<amdgpu.sgpr>, %zero_accumulator: reg<amdgpu.vgpr x8>)
+^tile_header(%tile: reg<amdgpu.sgpr>, %accumulator: reg<amdgpu.vgpr x8>):
+  %more_tiles = s_cmp_lt_u32 %tile, %tile_count
+  low.cond_br %more_tiles, ^multiply, ^store : reg<amdgpu.scc>
+^multiply:
+  %tile_offset = s_lshl_b32 %tile, %tile_shift
+  %tile_address = v_mov_b32_copy %tile_offset
+  %input_offset = v_add_u32 %lane_input_offset, %tile_address
+  %lhs_low = global_load_b128_saddr %input_offset, %lhs_view
+  %lhs_high = global_load_b128_saddr %input_offset, %lhs_view {offset = 16}
+  %lhs = concat(%lhs_low, %lhs_high) : (reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>) -> reg<amdgpu.vgpr x8>
+  %rhs_low = global_load_b128_saddr %input_offset, %rhs_view
+  %rhs_high = global_load_b128_saddr %input_offset, %rhs_view {offset = 16}
+  %rhs = concat(%rhs_low, %rhs_high) : (reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>) -> reg<amdgpu.vgpr x8>
+  %accumulator_copy = copy %accumulator : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr x8>
+  %partial = v_wmma_f32_16x16x16_bf16 %lhs, %rhs, %accumulator_copy
+  %next_tile = s_add_u32 %tile, %step
+  low.br ^tile_header(%next_tile: reg<amdgpu.sgpr>, %partial: reg<amdgpu.vgpr x8>)
+^store:
+  %job_offset = s_lshl_b32 %job, %job_shift
+  %job_address = v_mov_b32_copy %job_offset
+  %output_offset = v_add_u32 %lane_output_offset, %job_address
+  %result0 = slice %accumulator[0] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result0, %out_view
+  %result1 = slice %accumulator[1] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result1, %out_view {offset = 128}
+  %result2 = slice %accumulator[2] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result2, %out_view {offset = 256}
+  %result3 = slice %accumulator[3] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result3, %out_view {offset = 384}
+  %result4 = slice %accumulator[4] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result4, %out_view {offset = 512}
+  %result5 = slice %accumulator[5] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result5, %out_view {offset = 640}
+  %result6 = slice %accumulator[6] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result6, %out_view {offset = 768}
+  %result7 = slice %accumulator[7] : reg<amdgpu.vgpr x8> -> reg<amdgpu.vgpr>
+  global_store_b32_saddr %output_offset, %result7, %out_view {offset = 896}
+  %next_job = s_add_u32 %job, %step
+  low.br ^job_header(%next_job: reg<amdgpu.sgpr>)
+^exit:
+  return
+}
+
+kernel.def target(@repeated_wmma_target) @repeated_wmma_jobs() {
+  %unit = index.constant 1 : index
+  %width = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%lhs: buffer, %rhs: buffer, %output: buffer, %job_count: i32) {
+  %workitem = kernel.workitem.id<x> : index
+  %workitem_i32 = index.cast %workitem : index to i32
+  %lane = vector.splat %workitem_i32 : vector<1xi32>
+  low.invoke @repeated_wmma(%lane, %lhs, %rhs, %output, %job_count) : (vector<1xi32>, buffer, buffer, buffer, i32)
+  kernel.return
+}
+
+check.case public @repeated_wmma_jobs_0 {
+  %lhs = check.generate.fill value(1.0) : tensor<16x32xbf16>
+  %rhs = check.generate.iota offset(1.0) step(1.0) period(32) : tensor<16x32xbf16>
+  %output = check.generate.fill value(-1.0) : tensor<256xf32>
+  %expected = check.generate.fill value(-1.0) : tensor<256xf32>
+  %count = check.literal value(0) : i32
+  kernel.launch @repeated_wmma_jobs(%lhs, %rhs, %output, %count) : (tensor<16x32xbf16>, tensor<16x32xbf16>, tensor<256xf32>, i32)
+  check.expect.equal actual(%output) expected(%expected) : tensor<256xf32>
+  check.return
+}
+
+check.case public @repeated_wmma_jobs_1 {
+  %lhs = check.generate.fill value(1.0) : tensor<16x32xbf16>
+  %rhs = check.generate.iota offset(1.0) step(1.0) period(32) : tensor<16x32xbf16>
+  %output = check.generate.fill value(-1.0) : tensor<256xf32>
+  %expected = check.generate.fill value(528.0) : tensor<256xf32>
+  %count = check.literal value(1) : i32
+  kernel.launch @repeated_wmma_jobs(%lhs, %rhs, %output, %count) : (tensor<16x32xbf16>, tensor<16x32xbf16>, tensor<256xf32>, i32)
+  check.expect.equal actual(%output) expected(%expected) : tensor<256xf32>
+  check.return
+}
+
+check.case public @repeated_wmma_jobs_2 {
+  %lhs = check.generate.fill value(1.0) : tensor<16x32xbf16>
+  %rhs = check.generate.iota offset(1.0) step(1.0) period(32) : tensor<16x32xbf16>
+  %output = check.generate.fill value(-1.0) : tensor<512xf32>
+  %expected = check.generate.fill value(528.0) : tensor<512xf32>
+  %count = check.literal value(2) : i32
+  kernel.launch @repeated_wmma_jobs(%lhs, %rhs, %output, %count) : (tensor<16x32xbf16>, tensor<16x32xbf16>, tensor<512xf32>, i32)
+  check.expect.equal actual(%output) expected(%expected) : tensor<512xf32>
+  check.return
+}
+
+check.case public @repeated_wmma_jobs_4 {
+  %lhs = check.generate.fill value(1.0) : tensor<16x32xbf16>
+  %rhs = check.generate.iota offset(1.0) step(1.0) period(32) : tensor<16x32xbf16>
+  %output = check.generate.fill value(-1.0) : tensor<1024xf32>
+  %expected = check.generate.fill value(528.0) : tensor<1024xf32>
+  %count = check.literal value(4) : i32
+  kernel.launch @repeated_wmma_jobs(%lhs, %rhs, %output, %count) : (tensor<16x32xbf16>, tensor<16x32xbf16>, tensor<1024xf32>, i32)
+  check.expect.equal actual(%output) expected(%expected) : tensor<1024xf32>
+  check.return
+}

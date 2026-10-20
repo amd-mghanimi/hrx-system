@@ -92,8 +92,8 @@ static uint64_t loom_cfg_condition_relation_publication_page_hash(
       continue;
     }
     hash = loom_cfg_condition_relation_hash_combine(hash, row->left);
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       hash = loom_cfg_condition_relation_hash_combine(hash,
                                                       row->excluded[outcome]);
     }
@@ -293,13 +293,29 @@ static iree_status_t loom_cfg_condition_relation_plan_pages(
 
 static iree_status_t loom_cfg_condition_relation_table_publish_domain(
     const loom_cfg_condition_operand_domain_t* source,
+    const loom_cfg_condition_relation_anchor_builder_t* derived_anchors,
     loom_cfg_condition_operand_domain_t** out_domain,
     iree_arena_allocator_t* arena) {
   *out_domain = NULL;
+  const uint32_t derived_anchor_count =
+      loom_cfg_condition_relation_anchor_builder_count(derived_anchors);
+  iree_host_size_t derived_anchor_size = 0;
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_anchor_builder_storage_size(
+      derived_anchors, &derived_anchor_size));
+  iree_host_size_t allocation_size = 0;
+  if (!iree_host_size_checked_add(sizeof(*source), derived_anchor_size,
+                                  &allocation_size)) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "condition relation anchors exceed host size");
+  }
   loom_cfg_condition_operand_domain_t* domain = NULL;
   IREE_RETURN_IF_ERROR(
-      iree_arena_allocate(arena, sizeof(*domain), (void**)&domain));
+      iree_arena_allocate(arena, allocation_size, (void**)&domain));
   *domain = *source;
+  if (derived_anchor_count != 0) {
+    loom_cfg_condition_relation_anchor_builder_publish(derived_anchors,
+                                                       domain + 1);
+  }
   if (domain->value_count != 0) {
     loom_value_id_t* values = NULL;
     IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
@@ -337,7 +353,9 @@ iree_status_t loom_cfg_condition_relation_table_publish(
 
   const uint64_t root_count =
       (uint64_t)builder->view_count * 2 +
-      unique_live_row_count * LOOM_CONDITION_RELATION_OUTCOME_COUNT;
+      unique_live_row_count * LOOM_INTEGER_ORDER_OUTCOME_COUNT +
+      loom_cfg_condition_relation_anchor_builder_count(
+          builder->derived_anchors);
   if (root_count > IREE_HOST_SIZE_MAX) {
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "condition relation roots exceed host size");
@@ -370,10 +388,19 @@ iree_status_t loom_cfg_condition_relation_table_publish(
       if (loom_condition_relation_matrix_row_is_empty(source_row)) {
         continue;
       }
-      for (loom_condition_relation_outcome_t outcome = 0;
-           outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+      for (loom_integer_order_outcome_t outcome = 0;
+           outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
         roots[root_position++] = source_row->excluded[outcome];
       }
+    }
+  }
+  if (builder->derived_anchors != NULL) {
+    const uint32_t entry_count =
+        loom_cfg_condition_relation_anchor_builder_count(
+            builder->derived_anchors);
+    for (uint32_t i = 0; i < entry_count; ++i) {
+      roots[root_position++] = loom_cfg_condition_relation_anchor_builder_root(
+          builder->derived_anchors, i);
     }
   }
   IREE_ASSERT_EQ(root_position, root_count);
@@ -403,10 +430,19 @@ iree_status_t loom_cfg_condition_relation_table_publish(
       if (loom_condition_relation_matrix_row_is_empty(target_row)) {
         continue;
       }
-      for (loom_condition_relation_outcome_t outcome = 0;
-           outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+      for (loom_integer_order_outcome_t outcome = 0;
+           outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
         target_row->excluded[outcome] = roots[root_position++];
       }
+    }
+  }
+  if (builder->derived_anchors != NULL) {
+    const uint32_t entry_count =
+        loom_cfg_condition_relation_anchor_builder_count(
+            builder->derived_anchors);
+    for (uint32_t i = 0; i < entry_count; ++i) {
+      loom_cfg_condition_relation_anchor_builder_set_root(
+          builder->derived_anchors, i, roots[root_position++]);
     }
   }
   IREE_ASSERT_EQ(root_position, root_count);
@@ -488,7 +524,8 @@ iree_status_t loom_cfg_condition_relation_table_publish(
   }
   loom_cfg_condition_operand_domain_t* operand_domain = NULL;
   IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_table_publish_domain(
-      builder->operand_domain, &operand_domain, arena));
+      builder->operand_domain, builder->derived_anchors, &operand_domain,
+      arena));
   *out_table = (loom_cfg_condition_relation_table_t){
       .operand_domain = operand_domain,
       .set_index = set_index,
@@ -497,6 +534,8 @@ iree_status_t loom_cfg_condition_relation_table_publish(
       .view_count = builder->view_count,
       .block_count = builder->block_count,
       .edge_count = builder->edge_count,
+      .derived_anchor_count = loom_cfg_condition_relation_anchor_builder_count(
+          builder->derived_anchors),
   };
   return iree_ok_status();
 }
@@ -538,7 +577,7 @@ bool loom_cfg_condition_relation_view_query_boolean(
   return true;
 }
 
-loom_condition_relation_outcome_bits_t
+loom_integer_order_outcome_bits_t
 loom_cfg_condition_relation_view_query_excluded_outcomes(
     const loom_cfg_condition_relation_table_t* table,
     const loom_cfg_condition_relation_view_t* view,
@@ -551,7 +590,7 @@ loom_cfg_condition_relation_view_query_excluded_outcomes(
                                              left, left_variants);
   loom_cfg_condition_operand_domain_variants(table->operand_domain, fact_table,
                                              right, right_variants);
-  loom_condition_relation_outcome_bits_t exclusions = 0;
+  loom_integer_order_outcome_bits_t exclusions = 0;
   for (uint8_t left_index = 0; left_index < 2; ++left_index) {
     if (left_variants[left_index] == LOOM_CFG_CONDITION_OPERAND_INVALID) {
       continue;
@@ -566,11 +605,11 @@ loom_cfg_condition_relation_view_query_excluded_outcomes(
       if (right_variants[right_index] == LOOM_CFG_CONDITION_OPERAND_INVALID) {
         continue;
       }
-      for (loom_condition_relation_outcome_t outcome = 0;
-           outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+      for (loom_integer_order_outcome_t outcome = 0;
+           outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
         if (loom_condition_relation_set_index_contains(
                 &table->set_index, row[outcome], right_variants[right_index])) {
-          exclusions |= (loom_condition_relation_outcome_bits_t)(1u << outcome);
+          exclusions |= (loom_integer_order_outcome_bits_t)(1u << outcome);
         }
       }
     }
@@ -579,36 +618,12 @@ loom_cfg_condition_relation_view_query_excluded_outcomes(
 }
 
 static bool loom_cfg_condition_relation_from_exclusions(
-    loom_condition_relation_outcome_bits_t exclusions,
+    loom_integer_order_outcome_bits_t exclusions,
     loom_symbolic_integer_relation_t* out_relation) {
-  const loom_condition_relation_outcome_bits_t outcomes =
-      LOOM_CONDITION_RELATION_OUTCOME_BIT_ALL &
-      (loom_condition_relation_outcome_bits_t)~exclusions;
-  switch (outcomes) {
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_EQ;
-      return true;
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-        LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_NE;
-      return true;
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_LT;
-      return true;
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-        LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_LE;
-      return true;
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_GT;
-      return true;
-    case LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL |
-        LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER:
-      *out_relation = LOOM_SYMBOLIC_INTEGER_RELATION_GE;
-      return true;
-    default:
-      return false;
-  }
+  const loom_integer_order_outcome_bits_t outcomes =
+      LOOM_INTEGER_ORDER_OUTCOME_BIT_ALL &
+      (loom_integer_order_outcome_bits_t)~exclusions;
+  return loom_symbolic_integer_relation_from_outcomes(outcomes, out_relation);
 }
 
 typedef struct loom_cfg_condition_relation_visit_state_t {
@@ -618,8 +633,8 @@ typedef struct loom_cfg_condition_relation_visit_state_t {
   // Three excluded-outcome roots for the anchored row.
   const loom_condition_relation_set_id_t* excluded;
 
-  // Caller-provided anchor preserved across exact-value variants.
-  loom_condition_integer_operand_t anchor;
+  // Authored left operand represented by the retained row.
+  loom_condition_integer_operand_t left;
 
   // Caller visitor.
   loom_cfg_condition_relation_visit_fn_t visit;
@@ -628,14 +643,14 @@ typedef struct loom_cfg_condition_relation_visit_state_t {
   void* user_data;
 
   // Outcome root currently being enumerated.
-  loom_condition_relation_outcome_t outcome;
+  loom_integer_order_outcome_t outcome;
 } loom_cfg_condition_relation_visit_state_t;
 
 static bool loom_cfg_condition_relation_visit_member(void* user_data,
                                                      uint32_t right) {
   loom_cfg_condition_relation_visit_state_t* state =
       (loom_cfg_condition_relation_visit_state_t*)user_data;
-  for (loom_condition_relation_outcome_t outcome = 0; outcome < state->outcome;
+  for (loom_integer_order_outcome_t outcome = 0; outcome < state->outcome;
        ++outcome) {
     if (loom_condition_relation_set_index_contains(
             &state->table->set_index, state->excluded[outcome], right)) {
@@ -643,12 +658,12 @@ static bool loom_cfg_condition_relation_visit_member(void* user_data,
     }
   }
 
-  loom_condition_relation_outcome_bits_t exclusions = 0;
-  for (loom_condition_relation_outcome_t outcome = 0;
-       outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+  loom_integer_order_outcome_bits_t exclusions = 0;
+  for (loom_integer_order_outcome_t outcome = 0;
+       outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
     if (loom_condition_relation_set_index_contains(
             &state->table->set_index, state->excluded[outcome], right)) {
-      exclusions |= (loom_condition_relation_outcome_bits_t)(1u << outcome);
+      exclusions |= (loom_integer_order_outcome_bits_t)(1u << outcome);
     }
   }
   loom_symbolic_integer_relation_t relation = 0;
@@ -657,11 +672,81 @@ static bool loom_cfg_condition_relation_visit_member(void* user_data,
   }
   const loom_condition_integer_relation_t retained_relation = {
       .relation = relation,
-      .left = state->anchor,
+      .left = state->left,
       .right = loom_cfg_condition_operand_domain_expand(
           state->table->operand_domain, right),
   };
   return state->visit(state->user_data, &retained_relation);
+}
+
+static bool loom_cfg_condition_relation_visit_operand_rows(
+    const loom_cfg_condition_relation_table_t* table,
+    const loom_cfg_condition_relation_view_t* view,
+    loom_cfg_condition_operand_t operand, loom_condition_integer_operand_t left,
+    loom_cfg_condition_relation_visit_fn_t visit, void* user_data) {
+  const loom_condition_relation_set_id_t* excluded =
+      loom_condition_relation_matrix_view_find(&view->integer_relations,
+                                               operand);
+  if (excluded == NULL) {
+    return true;
+  }
+  loom_cfg_condition_relation_visit_state_t state = {
+      .table = table,
+      .excluded = excluded,
+      .left = left,
+      .visit = visit,
+      .user_data = user_data,
+  };
+  for (loom_integer_order_outcome_t outcome = 0;
+       outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
+    state.outcome = outcome;
+    if (!loom_condition_relation_set_index_for_each_while(
+            &table->set_index, excluded[outcome],
+            loom_cfg_condition_relation_visit_member, &state)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static loom_condition_relation_set_id_t
+loom_cfg_condition_relation_table_lookup_derived_anchors(
+    const loom_cfg_condition_relation_table_t* table,
+    loom_value_id_t anchor_value_id) {
+  if (table->derived_anchor_count == 0) {
+    return LOOM_CONDITION_RELATION_SET_EMPTY;
+  }
+  const void* retained_storage = table->operand_domain + 1;
+  const loom_cfg_condition_relation_anchor_index_t* index =
+      (const loom_cfg_condition_relation_anchor_index_t*)retained_storage;
+  return loom_cfg_condition_relation_anchor_index_lookup(
+      index, table->derived_anchor_count, table->operand_domain,
+      anchor_value_id);
+}
+
+typedef struct loom_cfg_condition_derived_relation_visit_state_t {
+  // Table owning the derived incidence and relation operand domain.
+  const loom_cfg_condition_relation_table_t* table;
+
+  // View whose relation rows are being queried.
+  const loom_cfg_condition_relation_view_t* view;
+
+  // Caller visitor.
+  loom_cfg_condition_relation_visit_fn_t visit;
+
+  // Caller visitor state.
+  void* user_data;
+} loom_cfg_condition_derived_relation_visit_state_t;
+
+static bool loom_cfg_condition_relation_visit_derived_operand(
+    void* user_data, uint32_t operand) {
+  loom_cfg_condition_derived_relation_visit_state_t* state =
+      (loom_cfg_condition_derived_relation_visit_state_t*)user_data;
+  return loom_cfg_condition_relation_visit_operand_rows(
+      state->table, state->view, operand,
+      loom_cfg_condition_operand_domain_expand(state->table->operand_domain,
+                                               operand),
+      state->visit, state->user_data);
 }
 
 bool loom_cfg_condition_relation_view_for_each_while(
@@ -677,28 +762,28 @@ bool loom_cfg_condition_relation_view_for_each_while(
     if (anchor_variants[anchor_index] == LOOM_CFG_CONDITION_OPERAND_INVALID) {
       continue;
     }
-    const loom_condition_relation_set_id_t* excluded =
-        loom_condition_relation_matrix_view_find(&view->integer_relations,
-                                                 anchor_variants[anchor_index]);
-    if (excluded == NULL) {
-      continue;
+    if (!loom_cfg_condition_relation_visit_operand_rows(
+            table, view, anchor_variants[anchor_index], anchor, visit,
+            user_data)) {
+      return false;
     }
-    loom_cfg_condition_relation_visit_state_t state = {
-        .table = table,
-        .excluded = excluded,
-        .anchor = anchor,
-        .visit = visit,
-        .user_data = user_data,
-    };
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
-      state.outcome = outcome;
-      if (!loom_condition_relation_set_index_for_each_while(
-              &table->set_index, excluded[outcome],
-              loom_cfg_condition_relation_visit_member, &state)) {
-        return false;
-      }
-    }
+  }
+  if (anchor.kind != LOOM_CONDITION_INTEGER_OPERAND_VALUE) {
+    return true;
+  }
+  const loom_condition_relation_set_id_t derived_operands =
+      loom_cfg_condition_relation_table_lookup_derived_anchors(table,
+                                                               anchor.value_id);
+  loom_cfg_condition_derived_relation_visit_state_t state = {
+      .table = table,
+      .view = view,
+      .visit = visit,
+      .user_data = user_data,
+  };
+  if (!loom_condition_relation_set_index_for_each_while(
+          &table->set_index, derived_operands,
+          loom_cfg_condition_relation_visit_derived_operand, &state)) {
+    return false;
   }
   return true;
 }

@@ -21,8 +21,6 @@
 extern "C" {
 #endif
 
-typedef struct loom_tooling_config_set_t loom_tooling_config_set_t;
-
 typedef enum iree_benchmark_loom_artifact_bundle_policy_e {
   // Artifact bundling is disabled.
   IREE_BENCHMARK_LOOM_ARTIFACT_BUNDLE_POLICY_NONE = 0,
@@ -51,7 +49,7 @@ typedef enum iree_benchmark_loom_output_format_e {
 } iree_benchmark_loom_output_format_t;
 
 enum {
-  // Default device-buffer ring byte target used to reduce hot-cache artifacts.
+  // Default reachable binding-ring byte target for reducing hot-cache effects.
   IREE_BENCHMARK_LOOM_DEFAULT_INPUT_RING_MIN_BYTES = 32 * 1024 * 1024,
 };
 
@@ -72,7 +70,7 @@ typedef struct iree_benchmark_loom_bool_flag_t {
 typedef struct iree_benchmark_loom_options_t {
   // Source format, provider options, and retained diagnostic path remapping.
   loom_input_options_t input;
-  // Optional check.case symbol selected for execution.
+  // Optional check.case or check.scenario symbol selected for execution.
   iree_string_view_t selected_case;
   // Optional check.benchmark symbol selected for execution.
   iree_string_view_t selected_benchmark;
@@ -90,21 +88,19 @@ typedef struct iree_benchmark_loom_options_t {
   iree_string_view_list_t config_assignments;
   // Config object file paths parsed from repeated --config-file=path flags.
   iree_string_view_list_t config_files;
-  // Materialized config set owned by the active benchmark run.
-  const loom_tooling_config_set_t* config_set;
   // Explicit result output path, or empty to use stdout or bundle defaults.
   iree_string_view_t output;
   // Selected result output format.
   iree_benchmark_loom_output_format_t output_format;
-  // Explicit directory receiving check.file.write.* outputs.
-  iree_string_view_t file_output_dir;
+  // Explicit root for check.file.write.* output paths.
+  iree_string_view_t file_output_root;
   // Explicit artifact bundle root directory, or empty when disabled.
   iree_string_view_t artifact_bundle_dir;
   // Artifact bundle policy controlling sidecar artifact classes.
   iree_benchmark_loom_artifact_bundle_policy_t artifact_bundle_policy;
   // True when the run stops after planning selected benchmarks.
   bool dry_run;
-  // Measurement mode requested for selected benchmarks.
+  // Requested measurement mode, including automatic subject-based selection.
   iree_string_view_t measure;
   // Structured compile-report request.
   iree_string_view_t compile_report;
@@ -116,7 +112,7 @@ typedef struct iree_benchmark_loom_options_t {
   iree_string_view_list_t profile_counters;
   // Explicit directory receiving raw HAL profile artifacts.
   iree_string_view_t profile_artifacts_dir;
-  // Minimum total byte size for generated dispatch input rings.
+  // Minimum total reachable byte size for generated dispatch input rings.
   int64_t input_ring_min_bytes;
   // Exact dispatch input ring count, or zero for byte-size based selection.
   iree_host_size_t input_ring_count;

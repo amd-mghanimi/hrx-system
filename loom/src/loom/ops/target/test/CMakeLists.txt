@@ -13,6 +13,8 @@ loom_check_test_suite(
   NAME
     test
   SRCS
+    "folding.loom-test"
+    "motion.loom-test"
     "roundtrip.loom-test"
     "verify.loom-test"
 )

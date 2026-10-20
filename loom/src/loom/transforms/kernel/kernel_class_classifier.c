@@ -11,6 +11,7 @@
 #include "iree/base/internal/math.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/template/ops.h"
+#include "loom/transforms/kernel/kernel_specialization.h"
 #include "loom/util/adaptive_sort.h"
 
 //===----------------------------------------------------------------------===//
@@ -311,10 +312,14 @@ iree_status_t loom_kernel_class_classifier_build(
   const loom_value_id_t* kernel_argument_ids =
       loom_func_like_arg_ids(kernel, &kernel_argument_count);
   out_classifier->kernel_argument_count = kernel_argument_count;
+  out_classifier->specialization_count =
+      (uint16_t)loom_func_like_specialization_count(kernel);
 
+  const loom_symbol_reference_symbol_occurrences_t kernel_references =
+      loom_symbol_reference_table_symbol(references, kernel_symbol_id);
   uint32_t decision_count = 0;
   loom_template_demand_id_t demand_id =
-      references->symbols[kernel_symbol_id].first_template_demand_id;
+      kernel_references.first_template_demand_id;
   while (demand_id != LOOM_TEMPLATE_DEMAND_ID_INVALID) {
     const loom_template_demand_t* demand =
         &references->template_demands.values[demand_id];
@@ -339,7 +344,7 @@ iree_status_t loom_kernel_class_classifier_build(
   iree_host_size_t binding_value_count = 0;
   iree_host_size_t feature_count = 0;
   iree_host_size_t action_count = 0;
-  demand_id = references->symbols[kernel_symbol_id].first_template_demand_id;
+  demand_id = kernel_references.first_template_demand_id;
   while (demand_id != LOOM_TEMPLATE_DEMAND_ID_INVALID) {
     const loom_template_demand_t* demand =
         &references->template_demands.values[demand_id];
@@ -757,7 +762,8 @@ static bool loom_kernel_class_action_is_publishable(
 
 iree_status_t loom_kernel_class_classifier_collect(
     const loom_kernel_class_classifier_t* classifier,
-    const loom_kernel_class_site_t* sites, iree_host_size_t site_count,
+    const loom_module_t* site_module, const loom_kernel_class_site_t* sites,
+    iree_host_size_t site_count,
     const loom_kernel_class_collection_options_t* options,
     iree_arena_allocator_t* arena,
     loom_kernel_class_collection_t* out_collection) {
@@ -772,6 +778,13 @@ iree_status_t loom_kernel_class_classifier_collect(
   IREE_RETURN_IF_ERROR(loom_decision_class_partition_initialize(
       site_count, options->class_limit,
       iree_max(1u, classifier->maximum_provider_count), arena, &partition));
+
+  const loom_kernel_specialization_value_t** site_specializations = NULL;
+  if (classifier->specialization_count != 0) {
+    IREE_RETURN_IF_ERROR(loom_kernel_specializations_collect(
+        site_module, sites, classifier->specialization_count, &partition, arena,
+        &site_specializations));
+  }
 
   loom_kernel_class_decision_result_t* decision_results = NULL;
   loom_kernel_class_trace_id_t* current_trace_ids = NULL;
@@ -940,10 +953,14 @@ iree_status_t loom_kernel_class_classifier_collect(
     };
   }
   for (iree_host_size_t i = 0; i < site_count; ++i) {
-    ++classes[partition.site_classes[i]].member_count;
+    loom_kernel_class_t* entry = &classes[partition.site_classes[i]];
+    ++entry->member_count;
+    entry->specializations =
+        site_specializations ? site_specializations[i] : NULL;
   }
 
   *out_collection = (loom_kernel_class_collection_t){
+      .specialization_module = site_module,
       .site_classes = partition.site_classes,
       .classes = classes,
       .traces = traces,

@@ -1,5 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/memory_float8.loom
-// TEMPLATE-EXCLUDE: @extend_float8 The FP8 decoder requires Boolean scalar selection.
 // RUN: emit source-low target=x86:avx2 output=low
 
 // Both FP8 formats retain their bytes, including NaN payloads, through storage.
@@ -70,14 +68,14 @@ func.def @copy_float8_tail(%input: buffer, %output: buffer) {
 
 // ----
 low.func.def target<x86.avx2.core> abi(object_function) @copy_float8_tail(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
-  %26 = movzx.load.u8.gpr32 %input {disp32 = 1}
-  %27 = movzx.load.u8.gpr32 %input {disp32 = 2}
-  %28 = movzx.load.u8.gpr32 %input {disp32 = 3}
-  %29 = movzx.load.u8.gpr32 %input {disp32 = 4}
-  mov.store.u8.gpr32 %26, %output {disp32 = 1}
-  mov.store.u8.gpr32 %27, %output {disp32 = 2}
-  mov.store.u8.gpr32 %28, %output {disp32 = 3}
-  mov.store.u8.gpr32 %29, %output {disp32 = 4}
+  %12 = movzx.load.u16.gpr32 %input {disp32 = 1}
+  %e4m3 = vmovd.xmm.gpr32 %12
+  %14 = movzx.load.u16.gpr32 %input {disp32 = 3}
+  %e5m2 = vmovd.xmm.gpr32 %14
+  %16 = vmovd.gpr32.xmm %e4m3
+  mov.store.u16.gpr32 %16, %output {disp32 = 1}
+  %17 = vmovd.gpr32.xmm %e5m2
+  mov.store.u16.gpr32 %17, %output {disp32 = 3}
   return
 }
 
@@ -105,15 +103,9 @@ low.func.def target<x86.avx2.core> abi(object_function) @copy_float8_index(%inpu
   %18 = copy %base : reg<x86.gpr64> -> reg<x86.gpr64>
   %19 = add.gpr64 %18, %position
   %e4m3 = movzx.load.indexed.u8.gpr32 %input, %19 {disp32 = 0, scale = 1}
-  %21 = copy %base : reg<x86.gpr64> -> reg<x86.gpr64>
-  %22 = add.gpr64 %21, %position
-  %e5m2 = movzx.load.indexed.u8.gpr32 %input, %22 {disp32 = 16, scale = 1}
-  %24 = copy %base : reg<x86.gpr64> -> reg<x86.gpr64>
-  %25 = add.gpr64 %24, %position
-  mov.store.indexed.u8.gpr32 %e4m3, %output, %25 {disp32 = 0, scale = 1}
-  %26 = copy %base : reg<x86.gpr64> -> reg<x86.gpr64>
-  %27 = add.gpr64 %26, %position
-  mov.store.indexed.u8.gpr32 %e5m2, %output, %27 {disp32 = 16, scale = 1}
+  %e5m2 = movzx.load.indexed.u8.gpr32 %input, %19 {disp32 = 16, scale = 1}
+  mov.store.indexed.u8.gpr32 %e4m3, %output, %19 {disp32 = 0, scale = 1}
+  mov.store.indexed.u8.gpr32 %e5m2, %output, %19 {disp32 = 16, scale = 1}
   return
 }
 

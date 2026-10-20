@@ -28,6 +28,7 @@ TEST(TopologyTest, Empty) {
   iree_task_topology_initialize(&topology);
 
   EXPECT_EQ(0, iree_task_topology_group_count(&topology));
+  EXPECT_EQ(IREE_NUMA_NODE_ANY, iree_task_topology_query_numa_node(&topology));
   EXPECT_EQ(NULL, iree_task_topology_get_group(&topology, 0));
   EXPECT_EQ(NULL, iree_task_topology_get_group(&topology, 100));
 

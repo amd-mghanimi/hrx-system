@@ -1,0 +1,155 @@
+// RUN: verify
+#include <loomcxx/check.h>
+
+// ERROR@+1: LOWERING/059 "unconfigured check_scenario requires void()"
+[[loom::check_scenario]] void wrong_signature(int value) {}
+
+// ====
+#include <loomcxx/check.h>
+
+// ERROR@+1: LOWERING/059 "configured check_scenario requires void(ordinal, entropy)"
+[[loom::check_scenario(4)]] void missing_configuration_parameters() {}
+
+// ====
+#include <loomcxx/check.h>
+
+// ERROR@+1: LOWERING/059 "configured check_scenario first parameter must be loom::check::ordinal"
+[[loom::check_scenario(4)]] void wrong_configuration_ordinal(
+    unsigned long long configuration, loom::check::entropy entropy) {}
+
+// ====
+#include <loomcxx/check.h>
+
+// ERROR@+1: LOWERING/059 "configured check_scenario requires one positive i64 configuration count"
+[[loom::check_scenario(0)]] void empty_configuration_domain() {}
+
+// ====
+#include <loomcxx/check.h>
+
+LOOM_CHECK_SCENARIO(empty_scenario) {
+  // ERROR@-1: LOWERING/059 "check scenarios require at least one trial"
+}
+
+// ====
+#include <loomcxx/check.h>
+
+void subject() {}
+
+LOOM_CHECK_SCENARIO(wrong_trial_signature) {
+  loom::check::trial<1>(
+      // ERROR@+1: LOWERING/059 "check.trial lambda requires (loom::check::ordinal, loom::check::entropy)"
+      [](int trial, loom::check::entropy entropy) {
+        loom::check::invoke<subject>();
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+unsigned long long runtime_ordinal() { return 0; }
+void entropy_subject() {}
+
+LOOM_CHECK_SCENARIO(runtime_entropy_ordinal) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        const auto position = loom::check::generate<runtime_ordinal>();
+        // ERROR@+1: LOWERING/059 "dynamic check entropy ordinals require loom::check::ordinal"
+        const auto word = loom::check::read(entropy, position);
+        loom::check::invoke<entropy_subject>();
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+LOOM_CHECK_SCENARIO(missing_action) {
+  loom::check::trial<1>(
+      // ERROR@+1: LOWERING/059 "check trial requires one final compare or invoke"
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        const auto storage = loom::check::fill<1, unsigned>(0u);
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+int identity(int value) { return value; }
+
+LOOM_CHECK_SCENARIO(nonfinal_action) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        // ERROR@+1: LOWERING/059 "check trial compare or invoke must be final"
+        loom::check::compare<identity>(
+            1, [](int actual, int expected) {
+              loom::check::expect_equal(actual, expected);
+            });
+        loom::check::invoke<identity>(2);
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+int identity(int value) { return value; }
+
+LOOM_CHECK_SCENARIO(wrong_comparison_signature) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        loom::check::compare<identity>(
+            1,
+            // ERROR@+1: LOWERING/059 "value-returning check subjects require actual and expected comparison parameters"
+            [](int actual) { loom::check::expect_equal(actual, actual); });
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+void pointer_subject(unsigned* output) { output[0] = 1u; }
+
+LOOM_CHECK_SCENARIO(ordinary_pointer_argument) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        const auto output = loom::check::fill<1, unsigned>(0u);
+        // ERROR@+1: LOWERING/059 "ordinary C++ pointer parameters retain a byte offset and cannot bind a check tensor handle"
+        loom::check::compare<pointer_subject>(output, [] {});
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+#include <loomcxx/view.h>
+
+void wrong_buffer_element(loom::type::buffer<float> output) {}
+
+LOOM_CHECK_SCENARIO(mismatched_buffer_element) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        const auto output = loom::check::fill<1, unsigned>(0u);
+        // ERROR@+1: LOWERING/059 "check tensor element type must match the subject buffer element type"
+        loom::check::invoke<wrong_buffer_element>(output);
+      });
+}
+
+// ====
+#include <loomcxx/check.h>
+
+LOOM_CHECK_CASE(misplaced_trial) {
+  // ERROR@+1: LOWERING/059 "structured check operation appears outside its region"
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {});
+}
+
+// ====
+#include <loomcxx/check.h>
+
+int identity(int value) { return value; }
+
+LOOM_CHECK_SCENARIO(implicit_runtime_call) {
+  loom::check::trial<1>(
+      [](loom::check::ordinal trial, loom::check::entropy entropy) {
+        // ERROR@+1: LOWERING/059 "ordinary trial calls must use loom::check::generate<function>"
+        const auto value = identity(1);
+        loom::check::invoke<identity>(value);
+      });
+}

@@ -19,11 +19,15 @@ package(
 
 loom_cc_library(
     name = "op_defs",
-    srcs = ["op_defs.c"],
+    srcs = [
+        "op_defs.c",
+        "use_list.c",
+    ],
     hdrs = [
         "attribute_accessors.h",
         "builder_macros.h",
         "op_defs.h",
+        "use_list.h",
     ],
     deps = [
         ":format",
@@ -48,6 +52,22 @@ loom_cc_library(
         "//loom/src/loom/ir",
         "//loom/src/loom/util:bstring",
         "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_test(
+    name = "use_list_test",
+    srcs = ["use_list_test.cc"],
+    deps = [
+        ":op_defs",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/low",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/target:registers",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 
@@ -87,6 +107,7 @@ loom_cc_library(
         ":op_defs",
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/target:condition",
         "//loom/src/loom/target:projection",
@@ -179,6 +200,7 @@ loom_cc_library(
     deps = [
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//runtime/src/iree/base",
     ],
@@ -198,6 +220,7 @@ loom_cc_library(
     deps = [
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//runtime/src/iree/base",
     ],
@@ -207,7 +230,20 @@ loom_cc_library(
     name = "combining",
     srcs = ["combining.c"],
     hdrs = ["combining.h"],
-    deps = ["//runtime/src/iree/base"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_test(
+    name = "combining_test",
+    srcs = ["combining_test.cc"],
+    deps = [
+        ":combining",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
 )
 
 loom_generated_file_family(
@@ -243,6 +279,7 @@ loom_cc_library(
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/channel",
         "//loom/src/loom/ops/check",
         "//loom/src/loom/ops/command",
         "//loom/src/loom/ops/config",

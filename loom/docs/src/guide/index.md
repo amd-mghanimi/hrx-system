@@ -68,6 +68,7 @@ semantically because it is a guide.
 | Run a tool or diagnose a failure | A workflow page, with concise public commands before advanced evidence. |
 | Package or embed Loom | Integration guides and the generated [`loomc` C API](../reference/c-api/index.md). |
 | Set up or tune one architecture | Its target guide; reusable language chapters remain target-independent. |
+| Build a resident program with channels and tile workers | [Resident pipelines on XDNA](../targets/xdna-pipelines.md), with a complete source-to-native example. |
 | Look up exact syntax | The generated [language reference](../reference/index.md). |
 
 ## Reading source at library scale

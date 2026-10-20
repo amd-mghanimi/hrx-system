@@ -467,38 +467,6 @@ ERR_BACKEND_020 = ErrorDef(
     ),
 )
 
-# ERR_BACKEND_021: Final emission-frame preparation failed.
-ERR_BACKEND_021 = ErrorDef(
-    domain=ErrorDomain.BACKEND,
-    code=21,
-    severity=Severity.ERROR,
-    summary="Final emission frame is not target-ready.",
-    message=(
-        "target '{target_key}' export '{export_name}' config '{config_key}' "
-        "could not prepare a final emission frame for '@{function_name}': "
-        "{failure_code}; iteration {iteration_count} of {iteration_limit}, "
-        "{spill_plan_count} pending spill plan(s), "
-        "{spill_assignment_count} spill-slot assignment(s), and "
-        "{scheduled_packet_count} scheduled packet(s)"
-    ),
-    params=(
-        ErrorParam("target_key", ParamKind.STRING),
-        ErrorParam("export_name", ParamKind.STRING),
-        ErrorParam("config_key", ParamKind.STRING),
-        ErrorParam("function_name", ParamKind.STRING),
-        ErrorParam("failure_code", ParamKind.STRING),
-        ErrorParam("iteration_count", ParamKind.U64),
-        ErrorParam("iteration_limit", ParamKind.U64),
-        ErrorParam("spill_plan_count", ParamKind.U64),
-        ErrorParam("spill_assignment_count", ParamKind.U64),
-        ErrorParam("scheduled_packet_count", ParamKind.U64),
-    ),
-    fix_hint=(
-        "Implement target lowering for the remaining spill or address-state "
-        "traffic, or constrain allocation so final emission is target-ready"
-    ),
-)
-
 # ERR_BACKEND_022: Register location exceeds the allocation capacity.
 ERR_BACKEND_022 = ErrorDef(
     domain=ErrorDomain.BACKEND,
@@ -1123,30 +1091,32 @@ ERR_BACKEND_044 = ErrorDef(
     ),
 )
 
-# ERR_BACKEND_045: Allocation rematerialization decision was recorded.
+# ERR_BACKEND_045: Allocation rematerialization batch was recorded.
 ERR_BACKEND_045 = ErrorDef(
     domain=ErrorDomain.BACKEND,
     code=45,
     severity=Severity.REMARK,
-    summary="Allocation rematerialization decision recorded.",
+    summary="Allocation rematerialization batch recorded.",
     message=(
         "target '{target_key}' export '{export_name}' config '{config_key}' "
-        "rematerialized value '{value_name}' for value class "
-        "'{value_class}' in '@{function_name}' after '{trigger_kind}' by "
+        "repaired {repaired_value_count} value(s) in '@{function_name}' "
+        "after '{trigger_kind}' in trigger class '{trigger_value_class}' by "
         "cloning {cloned_packet_count} packet(s), rewriting "
-        "{rewritten_operand_count} operand use(s), and applying reason key "
-        "'{reason_key}'"
+        "{rewritten_operand_count} operand use(s), retaining "
+        "{retained_placement_count} producer placement(s), and applying "
+        "reason key '{reason_key}'"
     ),
     params=(
         ErrorParam("target_key", ParamKind.STRING),
         ErrorParam("export_name", ParamKind.STRING),
         ErrorParam("config_key", ParamKind.STRING),
         ErrorParam("function_name", ParamKind.STRING),
-        ErrorParam("value_name", ParamKind.STRING),
-        ErrorParam("value_class", ParamKind.STRING),
+        ErrorParam("trigger_value_class", ParamKind.STRING),
         ErrorParam("trigger_kind", ParamKind.STRING),
+        ErrorParam("repaired_value_count", ParamKind.U32),
         ErrorParam("cloned_packet_count", ParamKind.U32),
         ErrorParam("rewritten_operand_count", ParamKind.U32),
+        ErrorParam("retained_placement_count", ParamKind.U32),
         ErrorParam("reason_key", ParamKind.STRING),
     ),
 )
@@ -1275,6 +1245,92 @@ ERR_BACKEND_050 = ErrorDef(
     fix_hint="Choose a nonconflicting location or remove the fixed binding",
 )
 
+# ERR_BACKEND_051: Allocation synthesis received a retained assignment mode.
+ERR_BACKEND_051 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=51,
+    severity=Severity.ERROR,
+    summary="Allocation synthesis requires virtual registers.",
+    message=(
+        "cannot synthesize physical allocation for '@{function_name}': "
+        "allocation({allocation_mode}) is not a virtual-allocation contract, "
+        "and this compiler entry has no retained allocation table"
+    ),
+    params=(
+        ErrorParam("function_name", ParamKind.STRING),
+        ErrorParam("allocation_mode", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Use allocation(virtual) when asking the compiler to assign physical registers"
+    ),
+)
+
+ERR_BACKEND_052 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=52,
+    severity=Severity.ERROR,
+    summary="Task entry contract is not satisfied.",
+    message="task entry requires {constraint}",
+    params=(ErrorParam("constraint", ParamKind.STRING),),
+)
+
+ERR_BACKEND_053 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=53,
+    severity=Severity.ERROR,
+    summary="Task parameter is not representable.",
+    message=(
+        "task parameter {parameter_index} of type {actual_type} requires {constraint}"
+    ),
+    params=(
+        ErrorParam("parameter_index", ParamKind.I64),
+        ErrorParam("actual_type", ParamKind.TYPE),
+        ErrorParam("constraint", ParamKind.STRING),
+    ),
+)
+
+ERR_BACKEND_054 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=54,
+    severity=Severity.ERROR,
+    summary="Task ABI layout field is invalid.",
+    message="task ABI field '{field_name}' requires {constraint}",
+    params=(
+        ErrorParam("field_name", ParamKind.STRING),
+        ErrorParam("constraint", ParamKind.STRING),
+    ),
+)
+
+ERR_BACKEND_055 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=55,
+    severity=Severity.ERROR,
+    summary="Native artifact contract is not satisfied.",
+    message="native artifact requires {constraint}",
+    params=(ErrorParam("constraint", ParamKind.STRING),),
+)
+
+ERR_BACKEND_056 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=56,
+    severity=Severity.ERROR,
+    summary="Native exports have the same external name.",
+    message="duplicate native export '{symbol_name}'",
+    params=(ErrorParam("symbol_name", ParamKind.STRING),),
+)
+
+ERR_BACKEND_057 = ErrorDef(
+    domain=ErrorDomain.BACKEND,
+    code=57,
+    severity=Severity.ERROR,
+    summary="A native symbol does not satisfy the artifact contract.",
+    message="native symbol '{symbol_name}' requires {constraint}",
+    params=(
+        ErrorParam("symbol_name", ParamKind.STRING),
+        ErrorParam("constraint", ParamKind.STRING),
+    ),
+)
+
 ALL_BACKEND_ERRORS: tuple[ErrorDef, ...] = (
     ERR_BACKEND_003,
     ERR_BACKEND_005,
@@ -1290,7 +1346,6 @@ ALL_BACKEND_ERRORS: tuple[ErrorDef, ...] = (
     ERR_BACKEND_018,
     ERR_BACKEND_019,
     ERR_BACKEND_020,
-    ERR_BACKEND_021,
     ERR_BACKEND_022,
     ERR_BACKEND_023,
     ERR_BACKEND_024,
@@ -1320,4 +1375,11 @@ ALL_BACKEND_ERRORS: tuple[ErrorDef, ...] = (
     ERR_BACKEND_048,
     ERR_BACKEND_049,
     ERR_BACKEND_050,
+    ERR_BACKEND_051,
+    ERR_BACKEND_052,
+    ERR_BACKEND_053,
+    ERR_BACKEND_054,
+    ERR_BACKEND_055,
+    ERR_BACKEND_056,
+    ERR_BACKEND_057,
 )

@@ -75,6 +75,13 @@ static iree_status_t loom_buffer_meet_reference_extension(
           lhs_reference.root_value_id == rhs_reference.root_value_id
               ? lhs_reference.root_value_id
               : LOOM_VALUE_ID_INVALID,
+      .root_symbol = loom_symbol_ref_null(),
+      .has_root_symbol = lhs_reference.has_root_symbol &&
+                         rhs_reference.has_root_symbol &&
+                         lhs_reference.root_symbol.module_id ==
+                             rhs_reference.root_symbol.module_id &&
+                         lhs_reference.root_symbol.symbol_id ==
+                             rhs_reference.root_symbol.symbol_id,
       .alias_scope_id =
           lhs_reference.alias_scope_id == rhs_reference.alias_scope_id
               ? lhs_reference.alias_scope_id
@@ -83,6 +90,9 @@ static iree_status_t loom_buffer_meet_reference_extension(
                          ? lhs_reference.nullability
                          : LOOM_VALUE_FACT_REFERENCE_NULLABILITY_UNKNOWN,
   };
+  if (reference.has_root_symbol) {
+    reference.root_symbol = lhs_reference.root_symbol;
+  }
   reference.origin = loom_value_fact_reference_origin_meet(
       lhs_reference.origin, rhs_reference.origin);
   loom_value_facts_meet(&lhs_extent, &rhs_extent,
@@ -122,7 +132,8 @@ iree_status_t loom_buffer_alloca_facts(loom_fact_context_t* context,
     origin.kind = LOOM_VALUE_FACT_REFERENCE_ORIGIN_ALLOCATION;
   }
   loom_value_fact_buffer_reference_t reference = {
-      .maximum_byte_extent = loom_buffer_clamp_nonnegative(operand_facts[0]),
+      .maximum_byte_extent =
+          loom_buffer_clamp_nonnegative(operand_facts[op->operand_count - 1]),
       .minimum_alignment = base_alignment > 0 ? (uint64_t)base_alignment : 1,
       .memory_space = loom_buffer_alloca_memory_space(op),
       .root_value_id = loom_buffer_alloca_result(op),
@@ -273,6 +284,8 @@ iree_status_t loom_buffer_assume_same_root_facts(
                                                 &root_reference);
   reference.root_value_id = loom_value_fact_buffer_reference_resolve_root_value(
       root_reference, loom_buffer_assume_same_root_root(op));
+  reference.root_symbol = root_reference.root_symbol;
+  reference.has_root_symbol = root_reference.has_root_symbol;
   reference.alias_scope_id = root_reference.alias_scope_id;
   reference.origin = root_reference.origin;
   if (reference.memory_space == LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN) {

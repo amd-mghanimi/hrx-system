@@ -1,0 +1,51 @@
+// RUN: emit source-low target=x86:scalar output=low
+
+func.def @byte_signed_minimum() -> (i8) {
+  %value = scalar.constant -128 : i8
+  func.return %value : i8
+}
+
+// ----
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = () -> (i8)}) @byte_signed_minimum() -> (reg<x86.gpr32>) asm {
+  %value = mov.imm32 -128
+  return %value
+}
+
+// ====
+
+func.def @byte_signed_maximum() -> (i8) {
+  %value = scalar.constant 127 : i8
+  func.return %value : i8
+}
+
+// ----
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = () -> (i8)}) @byte_signed_maximum() -> (reg<x86.gpr32>) asm {
+  %value = mov.imm32 127
+  return %value
+}
+
+// ====
+
+func.def @halfword_signed_minimum() -> (i16) {
+  %value = scalar.constant -32768 : i16
+  func.return %value : i16
+}
+
+// ----
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = () -> (i16)}) @halfword_signed_minimum() -> (reg<x86.gpr32>) asm {
+  %value = mov.imm32 -32768
+  return %value
+}
+
+// ====
+
+func.def @halfword_signed_maximum() -> (i16) {
+  %value = scalar.constant 32767 : i16
+  func.return %value : i16
+}
+
+// ----
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = () -> (i16)}) @halfword_signed_maximum() -> (reg<x86.gpr32>) asm {
+  %value = mov.imm32 32767
+  return %value
+}

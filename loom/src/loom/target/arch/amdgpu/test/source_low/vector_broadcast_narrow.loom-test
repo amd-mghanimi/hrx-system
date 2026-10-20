@@ -1,0 +1,290 @@
+// RUN: emit source-low target=amdgpu:gfx942 output=low
+
+func.def @half_fma(%factor_input: f32, %values: vector<8xf16>, %addend_input: f32) -> (vector<8xf16>) {
+  %factor = scalar.fptrunc %factor_input : f32 to f16
+  %addend = scalar.fptrunc %addend_input : f32 to f16
+  %factors = vector.splat %factor : vector<8xf16>
+  %addends = vector.splat %addend : vector<8xf16>
+  %result = vector.fmaf %factors, %values, %addends : vector<8xf16>
+  func.return %result : vector<8xf16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @half_fma(%factor_input: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x4>, %addend_input: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x4>) asm {
+  %factor = v_cvt_f16_f32 %factor_input
+  %addend = v_cvt_f16_f32 %addend_input
+  %15 = slice %values[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %16 = v_pk_fma_f16.broadcast_a_c %factor, %15, %addend
+  %17 = slice %values[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %18 = v_pk_fma_f16.broadcast_a_c %factor, %17, %addend
+  %19 = slice %values[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %20 = v_pk_fma_f16.broadcast_a_c %factor, %19, %addend
+  %21 = slice %values[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %22 = v_pk_fma_f16.broadcast_a_c %factor, %21, %addend
+  %result = concat(%16, %18, %20, %22) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  return %result
+}
+
+// ====
+
+func.def @integer_mad(%factor: i16, %values: vector<8xi16>, %addend: i16) -> (vector<8xi16>) {
+  %factors = vector.splat %factor : vector<8xi16>
+  %addends = vector.splat %addend : vector<8xi16>
+  %result = vector.fmai %factors, %values, %addends : vector<8xi16>
+  func.return %result : vector<8xi16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @integer_mad(%factor: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x4>, %addend: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x4>) asm {
+  %11 = slice %values[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %12 = v_pk_mad_i16.broadcast_a_c %factor, %11, %addend
+  %13 = slice %values[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %14 = v_pk_mad_i16.broadcast_a_c %factor, %13, %addend
+  %15 = slice %values[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %16 = v_pk_mad_i16.broadcast_a_c %factor, %15, %addend
+  %17 = slice %values[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %18 = v_pk_mad_i16.broadcast_a_c %factor, %17, %addend
+  %result = concat(%12, %14, %16, %18) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  return %result
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx1250 output=low
+
+func.def @brain_fma(%factor: bf16, %values: vector<8xbf16>, %addend: bf16) -> (vector<8xbf16>) {
+  %factors = vector.splat %factor : vector<8xbf16>
+  %addends = vector.splat %addend : vector<8xbf16>
+  %result = vector.fmaf %factors, %values, %addends : vector<8xbf16>
+  func.return %result : vector<8xbf16>
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.gfx125x.core> abi(hal_kernel) @brain_fma(%factor: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x4>, %addend: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x4>) asm {
+  %11 = slice %values[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %12 = v_pk_fma_bf16.broadcast_a_c %factor, %11, %addend
+  %13 = slice %values[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %14 = v_pk_fma_bf16.broadcast_a_c %factor, %13, %addend
+  %15 = slice %values[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %16 = v_pk_fma_bf16.broadcast_a_c %factor, %15, %addend
+  %17 = slice %values[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %18 = v_pk_fma_bf16.broadcast_a_c %factor, %17, %addend
+  %result = concat(%12, %14, %16, %18) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  return %result
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx1200 output=low
+
+func.def @half_literal(%values: vector<4xf16>, %addend: f16) -> (vector<4xf16>) {
+  %factor = scalar.constant 0.333251953125 : f16
+  %factors = vector.splat %factor : vector<4xf16>
+  %addends = vector.splat %addend : vector<4xf16>
+  %result = vector.fmaf %factors, %values, %addends : vector<4xf16>
+  func.return %result : vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.core> abi(hal_kernel) @half_literal(%values: reg<amdgpu.vgpr x2>, %addend: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x2>) asm {
+  %11 = v_mov_b32 894776661
+  %15 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %16 = v_pk_fma_f16.broadcast_c %11, %15, %addend
+  %18 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %19 = v_pk_fma_f16.broadcast_c %11, %18, %addend
+  %result = concat(%16, %19) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %result
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx942 output=low
+
+func.def @half_subtract(%offset: f16, %values: vector<4xf16>) -> (vector<4xf16>, vector<4xf16>) {
+  %offsets = vector.splat %offset : vector<4xf16>
+  %left = vector.subf %offsets, %values : vector<4xf16>
+  %right = vector.subf %values, %offsets : vector<4xf16>
+  func.return %left, %right : vector<4xf16>, vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @half_subtract(%offset: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %11 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %12 = v_pk_add_f16.broadcast_lhs %offset, %11 {neg_lo = 2, neg_hi = 2}
+  %13 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %14 = v_pk_add_f16.broadcast_lhs %offset, %13 {neg_lo = 2, neg_hi = 2}
+  %left = concat(%12, %14) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %17 = v_pk_add_f16.broadcast_rhs %11, %offset {neg_lo = 2, neg_hi = 2}
+  %19 = v_pk_add_f16.broadcast_rhs %13, %offset {neg_lo = 2, neg_hi = 2}
+  %right = concat(%17, %19) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %left, %right
+}
+
+// ====
+
+// IEEE extrema preserve their independent availability and NaN semantics.
+// RUN: emit source-low target=amdgpu:gfx1200 output=low
+
+func.def @half_ieee(%lower: f16, %upper: f16, %values: vector<4xf16>) -> (vector<4xf16>, vector<4xf16>) {
+  %lowers = vector.splat %lower : vector<4xf16>
+  %uppers = vector.splat %upper : vector<4xf16>
+  %minimum = vector.minimumf %lowers, %uppers : vector<4xf16>
+  %clamped = vector.clampf<ieee> %values, %lowers, %uppers : vector<4xf16>
+  func.return %minimum, %clamped : vector<4xf16>, vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.core> abi(hal_kernel) @half_ieee(%lower: reg<amdgpu.vgpr>, %upper: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %14 = v_pk_minimum_f16.broadcast_lhs_rhs %lower, %upper
+  %minimum = concat(%14, %14) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %17 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %18 = v_pk_maximum_f16.broadcast_rhs %17, %lower
+  %19 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %20 = v_pk_maximum_f16.broadcast_rhs %19, %lower
+  %23 = v_pk_minimum_f16.broadcast_rhs %18, %upper
+  %25 = v_pk_minimum_f16.broadcast_rhs %20, %upper
+  %clamped = concat(%23, %25) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %minimum, %clamped
+}
+
+// ====
+
+// Clamp reuses an ordinary maximum when its first packet needs no selectors.
+// RUN: emit source-low target=amdgpu:gfx942 output=low
+
+func.def @shared_clamp_lower(%values: vector<4xf16>, %lower: vector<4xf16>, %upper: f16) -> (vector<4xf16>, vector<4xf16>) {
+  %uppers = vector.splat %upper : vector<4xf16>
+  %maximum = vector.maxnumf %values, %lower : vector<4xf16>
+  %clamped = vector.clampf<number> %values, %lower, %uppers : vector<4xf16>
+  func.return %maximum, %clamped : vector<4xf16>, vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @shared_clamp_lower(%values: reg<amdgpu.vgpr x2>, %lower: reg<amdgpu.vgpr x2>, %upper: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %13 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %15 = v_pk_max_f16 %13, %13
+  %16 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %18 = v_pk_max_f16 %16, %16
+  %20 = slice %lower[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %22 = v_pk_max_f16 %20, %20
+  %23 = slice %lower[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %25 = v_pk_max_f16 %23, %23
+  %29 = v_pk_max_f16 %15, %22
+  %32 = v_pk_max_f16 %18, %25
+  %maximum = concat(%29, %32) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %48 = v_pk_max_f16.broadcast_lhs_rhs %upper, %upper
+  %57 = v_pk_min_f16.broadcast_rhs %29, %48
+  %59 = v_pk_min_f16.broadcast_rhs %32, %48
+  %clamped = concat(%57, %59) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %maximum, %clamped
+}
+
+// ====
+
+func.def @shift_roles(%value: i16, %shift: i16, %values: vector<7xi16>, %shifts: vector<7xi16>) -> (vector<7xi16>, vector<7xi16>) {
+  %broadcast_value = vector.splat %value : vector<7xi16>
+  %broadcast_shift = vector.splat %shift : vector<7xi16>
+  %left = vector.shli %values, %broadcast_shift : vector<7xi16>
+  %right = vector.shrsi %broadcast_value, %shifts : vector<7xi16>
+  func.return %left, %right : vector<7xi16>, vector<7xi16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @shift_roles(%value: reg<amdgpu.vgpr>, %shift: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x4>, %shifts: reg<amdgpu.vgpr x4>) -> (reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>) asm {
+  %16 = slice %values[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %17 = v_pk_lshlrev_b16.broadcast_shift %shift, %16
+  %18 = slice %values[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %19 = v_pk_lshlrev_b16.broadcast_shift %shift, %18
+  %20 = slice %values[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %21 = v_pk_lshlrev_b16.broadcast_shift %shift, %20
+  %22 = slice %values[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %23 = v_pk_lshlrev_b16.broadcast_shift %shift, %22
+  %left = concat(%17, %19, %21, %23) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  %25 = slice %shifts[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %26 = v_pk_ashrrev_i16.broadcast_value %25, %value
+  %27 = slice %shifts[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %28 = v_pk_ashrrev_i16.broadcast_value %27, %value
+  %29 = slice %shifts[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %30 = v_pk_ashrrev_i16.broadcast_value %29, %value
+  %31 = slice %shifts[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %32 = v_pk_ashrrev_i16.broadcast_value %31, %value
+  %right = concat(%26, %28, %30, %32) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  return %left, %right
+}
+
+// ====
+
+func.def @half_number(%threshold_input: f32, %values: vector<4xf16>) -> (vector<4xf16>, vector<4xf16>) {
+  %threshold = scalar.fptrunc %threshold_input : f32 to f16
+  %thresholds = vector.splat %threshold : vector<4xf16>
+  %lower = vector.minnumf %thresholds, %values : vector<4xf16>
+  %upper = vector.maxnumf %values, %thresholds : vector<4xf16>
+  func.return %lower, %upper : vector<4xf16>, vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @half_number(%threshold_input: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %threshold = v_cvt_f16_f32 %threshold_input
+  %13 = v_pk_max_f16.broadcast_lhs_rhs %threshold, %threshold
+  %14 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %16 = v_pk_max_f16 %14, %14
+  %17 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %19 = v_pk_max_f16 %17, %17
+  %22 = v_pk_min_f16.broadcast_lhs %13, %16
+  %24 = v_pk_min_f16.broadcast_lhs %13, %19
+  %lower = concat(%22, %24) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %35 = v_pk_max_f16.broadcast_rhs %16, %13
+  %37 = v_pk_max_f16.broadcast_rhs %19, %13
+  %upper = concat(%35, %37) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %lower, %upper
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx942 output=low
+
+func.def @half_clamp(%value: f16, %lower: f16, %upper: vector<4xf16>) -> (vector<4xf16>) {
+  %values = vector.splat %value : vector<4xf16>
+  %lowers = vector.splat %lower : vector<4xf16>
+  %result = vector.clampf<number> %values, %lowers, %upper : vector<4xf16>
+  func.return %result : vector<4xf16>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @half_clamp(%value: reg<amdgpu.vgpr>, %lower: reg<amdgpu.vgpr>, %upper: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>) asm {
+  %11 = v_pk_max_f16.broadcast_lhs_rhs %value, %value
+  %12 = v_pk_max_f16.broadcast_lhs_rhs %lower, %lower
+  %13 = slice %upper[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %15 = v_pk_max_f16 %13, %13
+  %16 = slice %upper[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %18 = v_pk_max_f16 %16, %16
+  %20 = v_pk_max_f16.broadcast_lhs_rhs %11, %12
+  %22 = v_pk_min_f16 %20, %15
+  %24 = v_pk_min_f16 %20, %18
+  %result = concat(%22, %24) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %result
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx1250 output=low
+
+func.def @brain_subtract(%offset: bf16, %values: vector<4xbf16>) -> (vector<4xbf16>, vector<4xbf16>) {
+  %offsets = vector.splat %offset : vector<4xbf16>
+  %left = vector.subf %offsets, %values : vector<4xbf16>
+  %right = vector.subf %values, %offsets : vector<4xbf16>
+  func.return %left, %right : vector<4xbf16>, vector<4xbf16>
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.gfx125x.core> abi(hal_kernel) @brain_subtract(%offset: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %11 = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %12 = v_pk_add_bf16.broadcast_lhs %offset, %11 {neg_lo = 2, neg_hi = 2}
+  %13 = slice %values[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %14 = v_pk_add_bf16.broadcast_lhs %offset, %13 {neg_lo = 2, neg_hi = 2}
+  %left = concat(%12, %14) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %17 = v_pk_add_bf16.broadcast_rhs %11, %offset {neg_lo = 2, neg_hi = 2}
+  %19 = v_pk_add_bf16.broadcast_rhs %13, %offset {neg_lo = 2, neg_hi = 2}
+  %right = concat(%17, %19) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  return %left, %right
+}

@@ -8,7 +8,7 @@ load(
     "//loom/build_tools/bazel:build_defs.bzl",
     "loom_cc_test",
     "loom_generated_cc_library",
-    "loom_generated_file",
+    "loom_generated_file_family",
 )
 
 package(
@@ -17,36 +17,48 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
-loom_generated_file(
+loom_generated_file_family(
     name = "scalarization_rows_gen",
     generator = "//loom/py/loom/gen/ops:c_vector_scalarization",
-    output = "scalarization_rows.inl",
-    output_flag = "--rows",
+    output_flags = [
+        "--cast-legalizer-rows",
+        "--rows",
+    ],
+    outputs = [
+        "cast_legalizer_rows.inl",
+        "scalarization_rows.inl",
+    ],
 )
 
 loom_generated_cc_library(
     name = "vector",
     srcs = [
         "canonicalize.c",
+        "combining.c",
         "construction.c",
         "facts.c",
         "fragment.c",
+        "interleave.c",
         "memory.c",
         "scalarization.c",
         "storage.c",
         "table.c",
+        "transpose.c",
         "type_transfer.c",
         "verify.c",
     ],
     hdrs = [
+        "combining.h",
         "construction.h",
         "fragment.h",
+        "interleave.h",
         "memory.h",
         "ops.h",
         "scalarization.h",
         "storage.h",
         "table.h",
         "tables.h",
+        "transpose.h",
     ],
     args = ["--dialect=vector"],
     extra_output_flags = ["--ops-include"],
@@ -66,6 +78,7 @@ loom_generated_cc_library(
         "--table-shard=integer_arithmetic",
         "--table-shard=math",
         "--table-shard=memory",
+        "--table-shard=refinement",
         "--table-shard=reduction",
         "--table-shard=table",
     ],
@@ -84,17 +97,20 @@ loom_generated_cc_library(
         "tables/integer_arithmetic.c",
         "tables/math.c",
         "tables/memory.c",
+        "tables/refinement.c",
         "tables/reduction.c",
         "tables/table.c",
     ],
     generator = "//loom/py/loom/gen/ops:c_tables_vector_generator",
     textual_hdrs = [
+        ":cast_legalizer_rows.inl",
         "ops.inc",
         ":scalarization_rows.inl",
     ],
     deps = [
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops:atomic",
@@ -103,6 +119,7 @@ loom_generated_cc_library(
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/encoding",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/index:cast",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/view",
@@ -123,6 +140,16 @@ loom_cc_test(
         ":vector",
         "//loom/src/loom/ir",
         "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "interleave_test",
+    srcs = ["interleave_test.cc"],
+    deps = [
+        ":vector",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],

@@ -193,6 +193,263 @@ TEST_F(RemapTest, RemapsTypesNestedInParameterizedTypeSlots) {
   EXPECT_EQ(loom_type_dim_value_id_at(target_vector_type, 0), target_dim);
 }
 
+TEST_F(RemapTest, SharedMixedTypeGraphUsesCallScopedScratch) {
+  const auto index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const auto source_dimension = DefineValue(source_, index);
+  DefineValue(target_, index);
+  const auto target_dimension = DefineValue(target_, index);
+  loom_string_id_t name;
+  IREE_ASSERT_OK(
+      loom_module_intern_string(source_, IREE_SV("container"), &name));
+  loom_type_t type =
+      loom_type_shaped_1d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32,
+                          loom_dim_pack_dynamic(source_dimension), 0);
+  constexpr int kDepth = 2048;
+  for (int i = 0; i < kDepth; ++i) {
+    switch (i % 4) {
+      case 0:
+        IREE_ASSERT_OK(loom_module_intern_function_type(source_, &type, 1,
+                                                        &type, 1, &type));
+        break;
+      case 1:
+        IREE_ASSERT_OK(loom_module_intern_type(
+            source_, loom_type_dialect(name, 1, &type), &type));
+        break;
+      case 2:
+        IREE_ASSERT_OK(
+            loom_module_intern_register_type(source_, 0, 0, type, &type));
+        break;
+      default: {
+        loom_type_id_t child;
+        IREE_ASSERT_OK(loom_module_intern_type_id(source_, type, &child));
+        IREE_ASSERT_OK(loom_test_array_type_make(
+            source_, 0, child, 0, loom_named_attr_slice_empty(), &type));
+        break;
+      }
+    }
+  }
+  auto remap = InitializeRemap();
+  IREE_ASSERT_OK(
+      loom_ir_remap_map_value(&remap, source_dimension, target_dimension));
+  const auto scratch_before = remap_arena_.used_allocation_size;
+  loom_type_t result;
+  IREE_ASSERT_OK(loom_ir_remap_type(&remap, type, &result));
+  EXPECT_EQ(remap_arena_.used_allocation_size, scratch_before);
+  const auto target_bytes = target_->arena.used_allocation_size;
+  loom_type_t repeated;
+  IREE_ASSERT_OK(loom_ir_remap_type(&remap, type, &repeated));
+  EXPECT_TRUE(loom_type_equal(result, repeated));
+  EXPECT_EQ(target_->arena.used_allocation_size, target_bytes);
+  iree_arena_reset(&remap_arena_);
+  for (int i = kDepth - 1; i >= 0; --i) {
+    switch (i % 4) {
+      case 0: {
+        ASSERT_EQ(loom_type_kind(result), LOOM_TYPE_FUNCTION);
+        const auto* data = loom_type_func_data(result);
+        ASSERT_EQ(data->arg_count, 1);
+        ASSERT_EQ(data->result_count, 1);
+        EXPECT_TRUE(loom_type_equal(data->types[0], data->types[1]));
+        result = data->types[0];
+        break;
+      }
+      case 1:
+        ASSERT_EQ(loom_type_kind(result), LOOM_TYPE_DIALECT);
+        EXPECT_TRUE(iree_string_view_equal(
+            loom_string_table_get(&target_->strings,
+                                  loom_type_dialect_name_id(result)),
+            IREE_SV("container")));
+        result = loom_type_dialect_params(result)[0];
+        break;
+      case 2:
+        ASSERT_TRUE(loom_type_register_has_value_type(result));
+        result = *loom_type_register_value_type(result);
+        break;
+      default:
+        ASSERT_TRUE(loom_test_array_type_isa(result));
+        result = loom_type_table_get(&target_->types,
+                                     loom_test_array_type_element_type(result));
+        break;
+    }
+  }
+  EXPECT_EQ(loom_type_dim_value_id_at(result, 0), target_dimension);
+}
+
+TEST_F(RemapTest, SharedTypesFollowBindingsInstalledBetweenCalls) {
+  const auto index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const auto original = DefineValue(source_, index);
+  const auto first = DefineValue(source_, index);
+  const auto second = DefineValue(source_, index);
+  const auto view = loom_type_shaped_1d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32,
+                                        loom_dim_pack_dynamic(original), 0);
+  loom_type_t signature;
+  IREE_ASSERT_OK(loom_module_intern_function_type(source_, &view, 1, &view, 1,
+                                                  &signature));
+  for (auto map_kind : {LOOM_IR_REMAP_VALUE_MAP_SPARSE,
+                        LOOM_IR_REMAP_VALUE_MAP_SOURCE_INDEXED}) {
+    loom_ir_remap_options_t options = {
+        .allow_unmapped_values = true,
+        .value_map_kind = map_kind,
+    };
+    loom_ir_remap_t remap;
+    IREE_ASSERT_OK(loom_ir_remap_initialize(source_, source_, &remap_arena_,
+                                            &options, &remap));
+    for (const auto expected : {original, first, second, original}) {
+      if (expected != original || remap.mapped_value_count != 0) {
+        IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, original, expected));
+      }
+      loom_type_t result;
+      IREE_ASSERT_OK(loom_ir_remap_type(&remap, signature, &result));
+      const auto* data = loom_type_func_data(result);
+      EXPECT_EQ(loom_type_dim_value_id_at(data->types[0], 0), expected);
+      EXPECT_TRUE(loom_type_equal(data->types[0], data->types[1]));
+    }
+  }
+}
+
+TEST_F(RemapTest, FailedTypeRemapCanBeRetriedAfterInstallingMissingBinding) {
+  const auto index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const auto first = DefineValue(source_, index);
+  const auto second = DefineValue(source_, index);
+  const auto target = DefineValue(target_, index);
+  loom_type_t first_type = loom_type_shaped_1d(
+      LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32, loom_dim_pack_dynamic(first), 0);
+  IREE_ASSERT_OK(loom_module_intern_function_type(source_, &first_type, 1,
+                                                  &first_type, 1, &first_type));
+  const auto second_type = loom_type_shaped_1d(
+      LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32, loom_dim_pack_dynamic(second), 0);
+  loom_type_t signature;
+  IREE_ASSERT_OK(loom_module_intern_function_type(source_, &first_type, 1,
+                                                  &second_type, 1, &signature));
+  auto remap = InitializeRemap();
+  IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, first, target));
+  const auto scratch_before = remap_arena_.used_allocation_size;
+  loom_type_t result;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_NOT_FOUND,
+                        loom_ir_remap_type(&remap, signature, &result));
+  EXPECT_TRUE(loom_type_equal(signature, result));
+  EXPECT_EQ(remap_arena_.used_allocation_size, scratch_before);
+  IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, second, target));
+  IREE_ASSERT_OK(loom_ir_remap_type(&remap, signature, &result));
+  EXPECT_EQ(
+      loom_type_dim_value_id_at(loom_type_func_result_types(result)[0], 0),
+      target);
+}
+
+TEST_F(RemapTest, AllocationFailuresReleaseTraversalAndPermitRetry) {
+  const auto index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const auto dimension = DefineValue(source_, index);
+  loom_type_t type = loom_type_shaped_1d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32,
+                                         loom_dim_pack_dynamic(dimension), 0);
+  for (int i = 0; i < 32; ++i) {
+    IREE_ASSERT_OK(
+        loom_module_intern_function_type(source_, &type, 1, &type, 1, &type));
+  }
+  struct AllocationState {
+    // Backing allocation to fail, relative to the current remap attempt.
+    size_t failure = SIZE_MAX;
+    // Number of backing allocations attempted since injection began.
+    size_t attempts = 0;
+    // Allocations still owned by the pool or its active arenas.
+    size_t live = 0;
+  } state;
+  const iree_allocator_t allocator = {
+      &state,
+      [](void* self, iree_allocator_command_t command, const void* parameters,
+         void** pointer) -> iree_status_t {
+        auto* state = static_cast<AllocationState*>(self);
+        if (command != IREE_ALLOCATOR_COMMAND_FREE &&
+            state->attempts++ == state->failure) {
+          return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                                  "injected allocation failure");
+        }
+        const bool was_allocated = *pointer != nullptr;
+        const auto system = iree_allocator_system();
+        const auto status =
+            system.ctl(system.self, command, parameters, pointer);
+        if (iree_status_is_ok(status)) {
+          if (command == IREE_ALLOCATOR_COMMAND_FREE && was_allocated) {
+            --state->live;
+          } else if (!was_allocated && *pointer != nullptr) {
+            ++state->live;
+          }
+        }
+        return status;
+      }};
+  for (size_t failure = 0;; ++failure) {
+    SCOPED_TRACE(failure);
+    state.failure = SIZE_MAX;
+    iree_arena_block_pool_t pool;
+    iree_arena_block_pool_initialize(1024, allocator, &pool);
+    loom_module_t* target;
+    IREE_ASSERT_OK(loom_module_allocate(&context_, IREE_SV("target"), &pool,
+                                        nullptr, iree_allocator_system(),
+                                        &target));
+    const auto target_dimension = DefineValue(target, index);
+    iree_arena_allocator_t scratch;
+    iree_arena_initialize(&pool, &scratch);
+    loom_ir_remap_t remap;
+    IREE_ASSERT_OK(
+        loom_ir_remap_initialize(source_, target, &scratch, nullptr, &remap));
+    IREE_ASSERT_OK(
+        loom_ir_remap_map_value(&remap, dimension, target_dimension));
+    const auto scratch_before = scratch.used_allocation_size;
+    state.failure = failure;
+    state.attempts = 0;
+    loom_type_t result;
+    auto status = loom_ir_remap_type(&remap, type, &result);
+    const bool succeeded = iree_status_is_ok(status);
+    state.failure = SIZE_MAX;
+    EXPECT_EQ(scratch.used_allocation_size, scratch_before);
+    if (!succeeded) {
+      IREE_EXPECT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED, status);
+      EXPECT_EQ(state.attempts, failure + 1);
+      EXPECT_TRUE(loom_type_equal(type, result));
+      status = loom_ir_remap_type(&remap, type, &result);
+    }
+    const bool have_result = iree_status_is_ok(status);
+    IREE_EXPECT_OK(status);
+    iree_arena_deinitialize(&scratch);
+    if (have_result) {
+      for (int i = 0; i < 32; ++i) {
+        result = loom_type_func_arg_types(result)[0];
+      }
+      EXPECT_EQ(loom_type_dim_value_id_at(result, 0), target_dimension);
+    }
+    loom_module_free(target);
+    iree_arena_block_pool_deinitialize(&pool);
+    EXPECT_EQ(state.live, 0u);
+    if (succeeded) {
+      break;
+    }
+  }
+}
+
+TEST_F(RemapTest, TemporaryTypePayloadCanChangeBetweenCalls) {
+  const auto index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const auto first = DefineValue(source_, index);
+  const auto second = DefineValue(source_, index);
+  const auto target_first = DefineValue(target_, index);
+  const auto target_second = DefineValue(target_, index);
+  loom_string_id_t name;
+  IREE_ASSERT_OK(
+      loom_module_intern_string(source_, IREE_SV("container"), &name));
+  auto remap = InitializeRemap();
+  IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, first, target_first));
+  IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, second, target_second));
+  loom_type_t child = loom_type_shaped_1d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32,
+                                          loom_dim_pack_dynamic(first), 0);
+  const auto temporary = loom_type_dialect(name, 1, &child);
+  loom_type_t result;
+  IREE_ASSERT_OK(loom_ir_remap_type(&remap, temporary, &result));
+  EXPECT_EQ(loom_type_dim_value_id_at(loom_type_dialect_params(result)[0], 0),
+            target_first);
+  child = loom_type_shaped_1d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I32,
+                              loom_dim_pack_dynamic(second), 0);
+  IREE_ASSERT_OK(loom_ir_remap_type(&remap, temporary, &result));
+  EXPECT_EQ(loom_type_dim_value_id_at(loom_type_dialect_params(result)[0], 0),
+            target_second);
+}
+
 TEST_F(RemapTest, RejectsSourceValuesDefinedAfterRemapInitialization) {
   loom_ir_remap_t remap = InitializeRemap();
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
@@ -247,10 +504,10 @@ TEST_F(RemapTest, MapsSourceIndexedValuesWithoutPopulatingSparseStorage) {
   loom_value_id_t second_target = DefineValue(target_, index_type);
 
   const loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/{},
-      /*.remap_symbol=*/{},
-      /*.remap_same_module_symbols=*/{},
-      /*.value_map_kind=*/LOOM_IR_REMAP_VALUE_MAP_SOURCE_INDEXED,
+      .allow_unmapped_values = {},
+      .remap_symbol = {},
+      .remap_same_module_symbols = {},
+      .value_map_kind = LOOM_IR_REMAP_VALUE_MAP_SOURCE_INDEXED,
   };
   loom_ir_remap_t remap = InitializeRemap(&options);
   ASSERT_NE(remap.target_values_by_source, nullptr);
@@ -282,7 +539,7 @@ TEST_F(RemapTest, AllowsUnmappedValuesOnlyWithinSameModule) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_value_id_t source_value = DefineValue(source_, index_type);
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/true,
+      .allow_unmapped_values = true,
   };
 
   loom_ir_remap_t cross_module_remap = InitializeRemap(&options);
@@ -301,8 +558,7 @@ TEST_F(RemapTest, AllowsUnmappedValuesOnlyWithinSameModule) {
 
 TEST_F(RemapTest, RejectsUnknownTypeKind) {
   loom_ir_remap_t remap = InitializeRemap();
-  loom_type_t malformed = {};
-  malformed.header = UINT32_MAX;
+  loom_type_t malformed = {.header = UINT32_MAX};
   loom_type_t target_type = {};
 
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
@@ -318,18 +574,18 @@ TEST_F(RemapTest, RemapsPredicateListsInsideDictAttributes) {
   IREE_ASSERT_OK(loom_module_intern_string(source_, IREE_SV("predicates"),
                                            &source_predicates_name));
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_MUL,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/
-      {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST, LOOM_PRED_ARG_NONE},
-      /*.reserved=*/{},
-      /*.args=*/{(int64_t)source_value, 16, 0},
+      .kind = LOOM_PREDICATE_MULTIPLE_OF,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
+                   LOOM_PRED_ARG_NONE},
+      .reserved = {},
+      .args = {(int64_t)source_value, 16, 0},
   };
   loom_named_attr_t source_entries[] = {
       {
-          /*.name_id=*/source_predicates_name,
-          /*.reserved=*/0,
-          /*.value=*/loom_attr_predicate_list(&predicate, 1),
+          .name_id = source_predicates_name,
+          .reserved = 0,
+          .value = loom_attr_predicate_list(&predicate, 1),
       },
   };
   loom_attribute_t source_dict = {};
@@ -400,12 +656,12 @@ TEST_F(RemapTest, RemapsCompactParameterizedAttributeSlotsByDescriptor) {
 TEST_F(RemapTest, RejectsMalformedPredicateListsWithoutReadingPastPayload) {
   loom_ir_remap_t remap = InitializeRemap();
   loom_predicate_t malformed = {
-      /*.kind=*/LOOM_PREDICATE_EQ,
-      /*.arg_count=*/4,
-      /*.arg_tags=*/
-      {LOOM_PRED_ARG_CONST, LOOM_PRED_ARG_CONST, LOOM_PRED_ARG_CONST},
-      /*.reserved=*/{},
-      /*.args=*/{1, 1, 0},
+      .kind = LOOM_PREDICATE_EQ,
+      .arg_count = 4,
+      .arg_tags = {LOOM_PRED_ARG_CONST, LOOM_PRED_ARG_CONST,
+                   LOOM_PRED_ARG_CONST},
+      .reserved = {},
+      .args = {1, 1, 0},
   };
   loom_predicate_t* target_predicates = nullptr;
   IREE_EXPECT_STATUS_IS(
@@ -422,17 +678,17 @@ TEST_F(RemapTest, RemapsStaticEncodingDependenciesAcrossModules) {
       loom_module_intern_string(source_, IREE_SV("block"), &source_block_id));
   loom_named_attr_t source_attrs[] = {
       {
-          /*.name_id=*/source_block_id,
-          /*.reserved=*/0,
-          /*.value=*/loom_attr_i64(32),
+          .name_id = source_block_id,
+          .reserved = 0,
+          .value = loom_attr_i64(32),
       },
   };
   loom_encoding_t source_encoding = {
-      /*.name_id=*/source_family_id,
-      /*.alias_id=*/LOOM_STRING_ID_INVALID,
-      /*.attribute_count=*/IREE_ARRAYSIZE(source_attrs),
-      /*.family=*/{},
-      /*.attributes=*/source_attrs,
+      .name_id = source_family_id,
+      .alias_id = LOOM_STRING_ID_INVALID,
+      .attribute_count = IREE_ARRAYSIZE(source_attrs),
+      .family = {},
+      .attributes = source_attrs,
   };
   uint16_t source_encoding_id = 0;
   IREE_ASSERT_OK(
@@ -466,11 +722,11 @@ TEST_F(RemapTest, RemapsOverflowDimsAndEncodingBeforeInterning) {
   IREE_ASSERT_OK(loom_module_intern_string(source_, IREE_SV("source_layout"),
                                            &source_family_id));
   loom_encoding_t source_encoding = {
-      /*.name_id=*/source_family_id,
-      /*.alias_id=*/LOOM_STRING_ID_INVALID,
-      /*.attribute_count=*/0,
-      /*.family=*/{},
-      /*.attributes=*/NULL,
+      .name_id = source_family_id,
+      .alias_id = LOOM_STRING_ID_INVALID,
+      .attribute_count = 0,
+      .family = {},
+      .attributes = NULL,
   };
   uint16_t source_encoding_id = 0;
   IREE_ASSERT_OK(
@@ -480,11 +736,11 @@ TEST_F(RemapTest, RemapsOverflowDimsAndEncodingBeforeInterning) {
   IREE_ASSERT_OK(loom_module_intern_string(
       target_, IREE_SV("preexisting_layout"), &target_dummy_family_id));
   loom_encoding_t target_dummy_encoding = {
-      /*.name_id=*/target_dummy_family_id,
-      /*.alias_id=*/LOOM_STRING_ID_INVALID,
-      /*.attribute_count=*/0,
-      /*.family=*/{},
-      /*.attributes=*/NULL,
+      .name_id = target_dummy_family_id,
+      .alias_id = LOOM_STRING_ID_INVALID,
+      .attribute_count = 0,
+      .family = {},
+      .attributes = NULL,
   };
   uint16_t target_dummy_encoding_id = 0;
   IREE_ASSERT_OK(loom_module_add_encoding(target_, &target_dummy_encoding,
@@ -497,11 +753,11 @@ TEST_F(RemapTest, RemapsOverflowDimsAndEncodingBeforeInterning) {
   source_dims[1] = loom_dim_pack_static(4);
   source_dims[2] = loom_dim_pack_static(8);
   loom_type_t source_type = {
-      /*.header=*/
-      loom_type_make_header(LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32, 3, 0),
-      /*.encoding_id=*/source_encoding_id,
-      /*.encoding_flags=*/0,
-      /*.dims=*/{(uint64_t)(uintptr_t)source_dims, 0},
+      .header =
+          loom_type_make_header(LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32, 3, 0),
+      .encoding_id = source_encoding_id,
+      .encoding_flags = 0,
+      .dims = {(uint64_t)(uintptr_t)source_dims, 0},
   };
 
   loom_ir_remap_t remap = InitializeRemap();
@@ -528,29 +784,33 @@ TEST_F(RemapTest, RemapsOverflowDimsAndEncodingBeforeInterning) {
       loom_type_equal(loom_type_table_get(&target_->types, 2), target_type));
 }
 
-TEST_F(RemapTest, RejectsDeepStaticEncodingNesting) {
+TEST_F(RemapTest, RemapsSharedDeepStaticEncodingsWithoutRecursion) {
   loom_string_id_t family_id = LOOM_STRING_ID_INVALID;
   loom_string_id_t next_id = LOOM_STRING_ID_INVALID;
+  loom_string_id_t other_id = LOOM_STRING_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_intern_string(source_, IREE_SV("nested"), &family_id));
   IREE_ASSERT_OK(loom_module_intern_string(source_, IREE_SV("next"), &next_id));
 
+  IREE_ASSERT_OK(
+      loom_module_intern_string(source_, IREE_SV("other"), &other_id));
   uint16_t previous_encoding_id = 0;
-  for (uint16_t i = 0; i < 18; ++i) {
-    uint8_t attribute_count = previous_encoding_id == 0 ? 0 : 1;
+  for (uint16_t i = 0; i < 256; ++i) {
+    uint8_t attribute_count = previous_encoding_id == 0 ? 0 : 2;
     loom_named_attr_t attrs[] = {
         {
-            /*.name_id=*/next_id,
-            /*.reserved=*/0,
-            /*.value=*/loom_attr_encoding(previous_encoding_id),
+            .name_id = next_id,
+            .reserved = 0,
+            .value = loom_attr_encoding(previous_encoding_id),
         },
+        {other_id, 0, loom_attr_encoding(previous_encoding_id)},
     };
     loom_encoding_t encoding = {
-        /*.name_id=*/family_id,
-        /*.alias_id=*/LOOM_STRING_ID_INVALID,
-        /*.attribute_count=*/attribute_count,
-        /*.family=*/{},
-        /*.attributes=*/attribute_count == 0 ? nullptr : attrs,
+        .name_id = family_id,
+        .alias_id = LOOM_STRING_ID_INVALID,
+        .attribute_count = attribute_count,
+        .family = {},
+        .attributes = attribute_count == 0 ? nullptr : attrs,
     };
     IREE_ASSERT_OK(
         loom_module_add_encoding(source_, &encoding, &previous_encoding_id));
@@ -558,9 +818,19 @@ TEST_F(RemapTest, RejectsDeepStaticEncodingNesting) {
 
   loom_ir_remap_t remap = InitializeRemap();
   uint16_t target_encoding_id = 0;
-  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
-                        loom_ir_remap_encoding_id(&remap, previous_encoding_id,
-                                                  &target_encoding_id));
+  IREE_ASSERT_OK(loom_ir_remap_encoding_id(&remap, previous_encoding_id,
+                                           &target_encoding_id));
+  EXPECT_EQ(remap_arena_.used_allocation_size, 0u);
+  iree_arena_reset(&remap_arena_);
+  for (int i = 0; i < 255; ++i) {
+    const auto* encoding = loom_module_encoding(target_, target_encoding_id);
+    ASSERT_EQ(encoding->attribute_count, 2);
+    EXPECT_EQ(encoding->attributes[0].value.encoding_id,
+              encoding->attributes[1].value.encoding_id);
+    target_encoding_id = encoding->attributes[0].value.encoding_id;
+  }
+  EXPECT_EQ(loom_module_encoding(target_, target_encoding_id)->attribute_count,
+            0);
 }
 
 TEST_F(RemapTest, RemapsTypeAttributesAcrossModules) {
@@ -605,23 +875,25 @@ TEST_F(RemapTest, RemapsLocationsAcrossModules) {
   IREE_ASSERT_OK(
       loom_module_add_location(source_, file_entry, &file_location_id));
   loom_location_field_span_t field_span = {
-      /*.kind=*/LOOM_LOCATION_FIELD_OPERAND,
-      /*.index=*/0,
-      /*.start_line=*/2,
-      /*.start_col=*/3,
-      /*.end_line=*/2,
-      /*.end_col=*/7,
+      .kind = LOOM_LOCATION_FIELD_OPERAND,
+      .index = 0,
+      .start_line = 70002,
+      .start_col = 70003,
+      .end_line = 70002,
+      .end_col = 70007,
   };
   IREE_ASSERT_OK(loom_module_attach_location_field_spans(
-      source_, file_location_id, &field_span, 1));
+      source_, file_location_id,
+      loom_location_field_span_array_wide(&field_span, 1)));
 
   loom_location_id_t* fused_children = nullptr;
   IREE_ASSERT_OK(iree_arena_allocate_array(
       &source_->arena, 1, sizeof(loom_location_id_t), (void**)&fused_children));
   fused_children[0] = file_location_id;
-  loom_location_entry_t fused_entry = {};
-  fused_entry.kind = LOOM_LOCATION_FUSED;
-  fused_entry.flags = LOOM_LOCATION_FLAG_SYNTHETIC;
+  loom_location_entry_t fused_entry = {
+      .kind = LOOM_LOCATION_FUSED,
+      .flags = LOOM_LOCATION_FLAG_SYNTHETIC,
+  };
   fused_entry.fused.count = 1;
   fused_entry.fused.children = fused_children;
   loom_location_id_t fused_location_id = LOOM_LOCATION_UNKNOWN;
@@ -653,9 +925,13 @@ TEST_F(RemapTest, RemapsLocationsAcrossModules) {
       IREE_SV("model.loom")));
   EXPECT_EQ(target_child.file.start_line, 2u);
   ASSERT_EQ(target_child.file.field_span_count, 1u);
-  ASSERT_NE(target_child.file.field_spans, nullptr);
-  EXPECT_NE(target_child.file.field_spans, &field_span);
-  EXPECT_EQ(target_child.file.field_spans[0].end_col, 7u);
+  EXPECT_EQ(target_child.file.field_span_format,
+            LOOM_LOCATION_FIELD_SPAN_FORMAT_WIDE);
+  ASSERT_NE(target_child.file.field_span_data, nullptr);
+  EXPECT_NE(target_child.file.field_span_data, &field_span);
+  const auto target_span = loom_location_file_field_span_at(&target_child, 0);
+  EXPECT_EQ(target_span.start_line, 70002u);
+  EXPECT_EQ(target_span.end_col, 70007u);
 }
 
 TEST_F(RemapTest, RemapsTaggedLocationsAcrossModules) {
@@ -724,8 +1000,39 @@ static iree_status_t RemapSymbolByName(void* user_data,
     IREE_RETURN_IF_ERROR(loom_module_add_symbol(target_module, target_name_id,
                                                 &target_symbol_id));
   }
-  *out_target_ref = {/*.module_id=*/0, /*.symbol_id=*/target_symbol_id};
+  *out_target_ref = {.module_id = 0, .symbol_id = target_symbol_id};
   return iree_ok_status();
+}
+
+TEST_F(RemapTest, RemapsOrderedStringArraysAcrossModules) {
+  loom_string_id_t source_ids[] = {
+      LOOM_STRING_ID_INVALID, LOOM_STRING_ID_INVALID, LOOM_STRING_ID_INVALID};
+  IREE_ASSERT_OK(loom_module_intern_string(source_, IREE_SV("gfx12-generic"),
+                                           &source_ids[0]));
+  IREE_ASSERT_OK(
+      loom_module_intern_string(source_, IREE_SV("gfx1250"), &source_ids[1]));
+  source_ids[2] = source_ids[0];
+  loom_string_id_t unused = LOOM_STRING_ID_INVALID;
+  IREE_ASSERT_OK(
+      loom_module_intern_string(target_, IREE_SV("sentinel"), &unused));
+
+  loom_ir_remap_t remap = InitializeRemap();
+  loom_attribute_t target_attr = loom_attr_absent();
+  IREE_ASSERT_OK(loom_ir_remap_attribute(
+      &remap, loom_attr_string_array(source_ids, IREE_ARRAYSIZE(source_ids)),
+      &target_attr));
+
+  const loom_string_id_array_t target_ids =
+      loom_attr_as_string_array(target_attr);
+  ASSERT_EQ(target_ids.count, IREE_ARRAYSIZE(source_ids));
+  EXPECT_NE(target_ids.values, source_ids);
+  EXPECT_EQ(target_ids.values[0], target_ids.values[2]);
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(&target_->strings, target_ids.values[0]),
+      IREE_SV("gfx12-generic")));
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(&target_->strings, target_ids.values[1]),
+      IREE_SV("gfx1250")));
 }
 
 TEST_F(RemapTest, RemapsOrderedSymbolArraysAcrossModules) {
@@ -743,19 +1050,19 @@ TEST_F(RemapTest, RemapsOrderedSymbolArraysAcrossModules) {
       loom_module_add_symbol(source_, beta_name_id, &beta_symbol_id));
 
   const loom_symbol_ref_t source_refs[] = {
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/alpha_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
+      {.module_id = 0, .symbol_id = alpha_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
   };
   const loom_symbol_ref_t equal_refs[] = {
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/alpha_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
+      {.module_id = 0, .symbol_id = alpha_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
   };
   const loom_symbol_ref_t reordered_refs[] = {
-      {/*.module_id=*/0, /*.symbol_id=*/alpha_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
-      {/*.module_id=*/0, /*.symbol_id=*/beta_symbol_id},
+      {.module_id = 0, .symbol_id = alpha_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
+      {.module_id = 0, .symbol_id = beta_symbol_id},
   };
   loom_attribute_t source_attr =
       loom_attr_symbol_array(source_refs, IREE_ARRAYSIZE(source_refs));
@@ -769,8 +1076,9 @@ TEST_F(RemapTest, RemapsOrderedSymbolArraysAcrossModules) {
   EXPECT_FALSE(loom_attribute_equal(&source_attr, &reordered_attr));
 
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/{}, /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
+      .allow_unmapped_values = {},
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
   };
   loom_ir_remap_t remap = InitializeRemap(&options);
   loom_attribute_t target_attr = loom_attr_absent();
@@ -831,8 +1139,9 @@ TEST_F(RemapTest, RemapsParameterizedAttributeArraysAcrossModules) {
       &source_array));
 
   loom_ir_remap_options_t remap_options = {
-      /*.allow_unmapped_values=*/{}, /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
+      .allow_unmapped_values = {},
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
   };
   loom_ir_remap_t remap = InitializeRemap(&remap_options);
   IREE_ASSERT_OK(loom_ir_remap_map_value(&remap, source_dim, target_dim));
@@ -875,7 +1184,7 @@ static iree_status_t RemapSymbolToMissingTarget(
   (void)source_module;
   (void)target_module;
   (void)source_ref;
-  *out_target_ref = {/*.module_id=*/0, /*.symbol_id=*/42};
+  *out_target_ref = {.module_id = 0, .symbol_id = 42};
   return iree_ok_status();
 }
 
@@ -937,8 +1246,10 @@ TEST_F(RemapTest, SameModuleSymbolsRemapOnlyWhenEnabled) {
   uint16_t source_symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_add_symbol(source_, source_name_id, &source_symbol_id));
-  const loom_symbol_ref_t source_ref = {/*.module_id=*/0,
-                                        /*.symbol_id=*/source_symbol_id};
+  const loom_symbol_ref_t source_ref = {
+      .module_id = 0,
+      .symbol_id = source_symbol_id,
+  };
 
   loom_string_id_t target_name_id = LOOM_STRING_ID_INVALID;
   IREE_ASSERT_OK(
@@ -946,18 +1257,20 @@ TEST_F(RemapTest, SameModuleSymbolsRemapOnlyWhenEnabled) {
   uint16_t target_symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_add_symbol(source_, target_name_id, &target_symbol_id));
-  const loom_symbol_ref_t target_ref = {/*.module_id=*/0,
-                                        /*.symbol_id=*/target_symbol_id};
+  const loom_symbol_ref_t target_ref = {
+      .module_id = 0,
+      .symbol_id = target_symbol_id,
+  };
 
   SameModuleSymbolRemap state = {
-      /*.source_ref=*/source_ref,
-      /*.target_ref=*/target_ref,
-      /*.invocation_count=*/0,
+      .source_ref = source_ref,
+      .target_ref = target_ref,
+      .invocation_count = 0,
   };
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/false,
-      /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSameModuleSymbol, &state),
+      .allow_unmapped_values = false,
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSameModuleSymbol, &state),
   };
   loom_ir_remap_t identity_remap = {};
   IREE_ASSERT_OK(loom_ir_remap_initialize(source_, source_, &remap_arena_,
@@ -991,19 +1304,19 @@ TEST_F(RemapTest, SymbolSetRemapCanonicalizesByTargetSymbolName) {
     IREE_ASSERT_OK(loom_module_intern_string(source_, names[i], &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(source_, name_id, &symbol_id));
-    refs[i] = {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    refs[i] = {.module_id = 0, .symbol_id = symbol_id};
   }
 
   SymbolPairRemap state = {
-      /*.source_refs=*/{refs[0], refs[1]},
-      /*.target_refs=*/{refs[2], refs[3]},
-      /*.invocation_count=*/0,
+      .source_refs = {refs[0], refs[1]},
+      .target_refs = {refs[2], refs[3]},
+      .invocation_count = 0,
   };
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/false,
-      /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolPair, &state),
-      /*.remap_same_module_symbols=*/true,
+      .allow_unmapped_values = false,
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolPair, &state),
+      .remap_same_module_symbols = true,
   };
   loom_ir_remap_t remap = {};
   IREE_ASSERT_OK(loom_ir_remap_initialize(source_, source_, &remap_arena_,
@@ -1033,8 +1346,10 @@ TEST_F(RemapTest, CrossModuleSymbolRefsRequirePolicy) {
   uint16_t source_symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_add_symbol(source_, source_name_id, &source_symbol_id));
-  loom_symbol_ref_t source_ref = {/*.module_id=*/0,
-                                  /*.symbol_id=*/source_symbol_id};
+  loom_symbol_ref_t source_ref = {
+      .module_id = 0,
+      .symbol_id = source_symbol_id,
+  };
 
   loom_ir_remap_t strict_remap = InitializeRemap();
   loom_attribute_t target_attr = {};
@@ -1044,8 +1359,9 @@ TEST_F(RemapTest, CrossModuleSymbolRefsRequirePolicy) {
                               &target_attr));
 
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/{}, /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
+      .allow_unmapped_values = {},
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
   };
   loom_ir_remap_t policy_remap = InitializeRemap(&options);
   IREE_ASSERT_OK(loom_ir_remap_attribute(
@@ -1079,8 +1395,9 @@ TEST_F(RemapTest, RemapsSymbolsNestedInParameterizedTypes) {
       (loom_symbol_ref_t){0, source_symbol_id}, &source_type));
 
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/{}, /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
+      .allow_unmapped_values = {},
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolByName, NULL),
   };
   loom_ir_remap_t remap = InitializeRemap(&options);
   loom_type_t target_type = {};
@@ -1097,6 +1414,59 @@ TEST_F(RemapTest, RemapsSymbolsNestedInParameterizedTypes) {
       IREE_SV("target")));
 }
 
+TEST_F(RemapTest, SharedTypesObserveSymbolPolicyChangesBetweenCalls) {
+  loom_string_id_t name;
+  loom_symbol_id_t source_symbol;
+  IREE_ASSERT_OK(loom_module_intern_string(source_, IREE_SV("source"), &name));
+  IREE_ASSERT_OK(loom_module_add_symbol(source_, name, &source_symbol));
+  loom_symbol_id_t targets[2];
+  IREE_ASSERT_OK(loom_module_intern_string(target_, IREE_SV("first"), &name));
+  IREE_ASSERT_OK(loom_module_add_symbol(target_, name, &targets[0]));
+  IREE_ASSERT_OK(loom_module_intern_string(target_, IREE_SV("second"), &name));
+  IREE_ASSERT_OK(loom_module_add_symbol(target_, name, &targets[1]));
+  loom_type_id_t scalar;
+  IREE_ASSERT_OK(loom_module_intern_type_id(
+      source_, loom_type_scalar(LOOM_SCALAR_TYPE_BF16), &scalar));
+  loom_type_t type;
+  IREE_ASSERT_OK(loom_test_matrix_type_make(
+      source_, LOOM_TEST_MATRIX_TYPE_BUILD_FLAG_HAS_TARGET, scalar,
+      LOOM_TEST_MATRIX_TYPE_SCOPE_SUBGROUP, 16, {0, source_symbol}, &type));
+  for (int i = 0; i < 32; ++i) {
+    IREE_ASSERT_OK(
+        loom_module_intern_function_type(source_, &type, 1, &type, 1, &type));
+  }
+  struct SymbolPolicy {
+    // Current source-to-target correspondence, fixed during each call.
+    loom_symbol_id_t target;
+    // Callback visits for the shared symbol-bearing leaf.
+    int visits;
+  } policy = {};
+  loom_ir_remap_options_t options = {
+      .remap_symbol = loom_ir_remap_symbol_callback_make(
+          [](void* user_data, const loom_module_t*, loom_module_t*,
+             loom_symbol_ref_t, loom_symbol_ref_t* result) {
+            auto* policy = static_cast<SymbolPolicy*>(user_data);
+            ++policy->visits;
+            *result = {0, policy->target};
+            return iree_ok_status();
+          },
+          &policy),
+  };
+  auto remap = InitializeRemap(&options);
+  for (auto target : targets) {
+    policy.target = target;
+    policy.visits = 0;
+    loom_type_t result;
+    IREE_ASSERT_OK(loom_ir_remap_type(&remap, type, &result));
+    EXPECT_EQ(policy.visits, 1);
+    for (int i = 0; i < 32; ++i) {
+      result = loom_type_func_arg_types(result)[0];
+    }
+    ASSERT_TRUE(loom_test_matrix_type_isa(result));
+    EXPECT_EQ(loom_test_matrix_type_target(result).symbol_id, target);
+  }
+}
+
 TEST_F(RemapTest, CrossModuleSymbolPolicyMustReturnTargetSymbol) {
   loom_string_id_t source_name_id = LOOM_STRING_ID_INVALID;
   IREE_ASSERT_OK(
@@ -1104,12 +1474,15 @@ TEST_F(RemapTest, CrossModuleSymbolPolicyMustReturnTargetSymbol) {
   uint16_t source_symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_ASSERT_OK(
       loom_module_add_symbol(source_, source_name_id, &source_symbol_id));
-  loom_symbol_ref_t source_ref = {/*.module_id=*/0,
-                                  /*.symbol_id=*/source_symbol_id};
+  loom_symbol_ref_t source_ref = {
+      .module_id = 0,
+      .symbol_id = source_symbol_id,
+  };
 
   loom_ir_remap_options_t options = {
-      /*.allow_unmapped_values=*/{}, /*.remap_symbol=*/
-      loom_ir_remap_symbol_callback_make(RemapSymbolToMissingTarget, NULL),
+      .allow_unmapped_values = {},
+      .remap_symbol =
+          loom_ir_remap_symbol_callback_make(RemapSymbolToMissingTarget, NULL),
   };
   loom_ir_remap_t remap = InitializeRemap(&options);
   loom_attribute_t target_attr = {};

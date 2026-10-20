@@ -11,12 +11,38 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    kernel_specialization
+  HDRS
+    "kernel_specialization.h"
+  SRCS
+    "kernel_specialization.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::type_refinement
+    loom::decision::class_partition
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::scalar
+    loom::ops::special_values
+    loom::ops::vector
+    loom::ops::view
+    loom::rewrite::remap
+    loom::rewrite::rewriter
+    loom::util::fact_table
+    loom::util::predicate_facts
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     kernel_class_classifier
   HDRS
     "kernel_class_classifier.h"
   SRCS
     "kernel_class_classifier.c"
   DEPS
+    ::kernel_specialization
     iree::base
     iree::base::internal
     iree::base::internal::arena
@@ -77,6 +103,7 @@ loom_cc_library(
     "kernel_class_materializer.c"
   DEPS
     ::kernel_class_classifier
+    ::kernel_specialization
     iree::base
     iree::base::internal::arena
     loom::ir
@@ -193,6 +220,7 @@ loom_cc_test(
     loom::link::module_index
     loom::ops::kernel
     loom::ops::op_registry
+    loom::ops::scalar
     loom::testing::module_ptr
     loom::util::fact_table
     loom::verify
@@ -200,14 +228,14 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
-    kernel_async_legality
+    kernel_synchronization_legality
   HDRS
-    "kernel_async_legality.h"
+    "kernel_synchronization_legality.h"
   SRCS
-    "kernel_async_legality.c"
+    "kernel_synchronization_legality.c"
   DEPS
     iree::base
-    loom::analysis::kernel_async_legality
+    loom::analysis::kernel_synchronization_legality
     loom::ir
     loom::ops::op_defs
     loom::pass::types
@@ -229,8 +257,84 @@ loom_cc_library(
     loom::ops::buffer
     loom::ops::index
     loom::ops::op_defs
+    loom::ops::pipeline
     loom::pass::types
     loom::pass::value_facts
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    workgroup_collective_legalization
+  HDRS
+    "workgroup_collective_legalization.h"
+  SRCS
+    "workgroup_collective_legalization.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::atomic
+    loom::ops::buffer
+    loom::ops::combining
+    loom::ops::index
+    loom::ops::kernel
+    loom::ops::scalar
+    loom::ops::scf
+    loom::ops::vector
+    loom::ops::view
+    loom::rewrite::rewriter
+    loom::target::launch
+    loom::target::legalization
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    workgroup_collective_legalization_test
+  SRCS
+    "workgroup_collective_legalization_test.cc"
+  DEPS
+    ::workgroup_collective_legalization
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::buffer
+    loom::ops::index
+    loom::ops::kernel
+    loom::ops::scalar
+    loom::ops::scf
+    loom::ops::test
+    loom::ops::vector
+    loom::ops::view
+    loom::rewrite::rewriter
+    loom::target::facts
+    loom::target::legalization
+    loom::verify
+)
+
+loom_cc_library(
+  NAME
+    target_legalization
+  HDRS
+    "target_legalization.h"
+  SRCS
+    "target_legalization.c"
+  DEPS
+    ::workgroup_collective_legalization
+    iree::base
+    loom::analysis::control_uniformity
+    loom::ir
+    loom::ops::combining
+    loom::ops::index
+    loom::ops::kernel
+    loom::ops::scalar
+    loom::ops::scf
+    loom::ops::vector
+    loom::rewrite::rewriter
+    loom::target::legalization
+    loom::transforms::vector::packet_legalization
   PUBLIC
 )
 
@@ -247,13 +351,35 @@ loom_cc_library(
     loom::analysis::symbol_references
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::func
     loom::ops::kernel
     loom::ops::op_defs
+    loom::ops::pipeline
     loom::rewrite::remap
     loom::rewrite::rewriter
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    resolve_launches_test
+  SRCS
+    "resolve_launches_test.cc"
+  DEPS
+    ::resolve_launches
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::analysis::symbol_references
+    loom::ir
+    loom::ops::command
+    loom::ops::func
+    loom::ops::index
+    loom::ops::kernel
+    loom::ops::op_registry
+    loom::verify
 )
 
 loom_cc_library(

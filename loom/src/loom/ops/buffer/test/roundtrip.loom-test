@@ -1,5 +1,14 @@
 // RUN: roundtrip
 
+func.def @explicit_scratch_pool(%memory: pool, %bytes: offset, %pattern: i32) {
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %begin = index.constant 0 : offset
+  buffer.fill %pattern, %storage[%begin], %bytes : i32
+  func.return
+}
+
+// ====
+
 func.def @thread_memory_fences() {
   buffer.fence scope(system) ordering(acquire)
   buffer.fence scope(system) ordering(release)

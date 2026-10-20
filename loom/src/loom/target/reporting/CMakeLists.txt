@@ -49,6 +49,7 @@ loom_cc_library(
     report
   HDRS
     "loop_pipeline.h"
+    "memory_summary.h"
     "pipeline_plan.h"
     "report.h"
     "residency.h"
@@ -57,8 +58,9 @@ loom_cc_library(
     "config_bindings.c"
     "config_bindings.h"
     "loop_pipeline.c"
+    "memory_interval.c"
+    "memory_interval.h"
     "memory_summary.c"
-    "memory_summary.h"
     "pipeline_plan.c"
     "report.c"
     "residency.c"
@@ -68,6 +70,7 @@ loom_cc_library(
   DEPS
     iree::base
     iree::base::internal
+    iree::base::internal::arena
     loom::analysis::native_layout
     loom::codegen::low::planning_statistics
     loom::ir
@@ -75,6 +78,8 @@ loom_cc_library(
     loom::target::function_version
     loom::target::residency
     loom::target::types
+    loom::util::adaptive_sort
+    loom::util::segmented_storage
   PUBLIC
 )
 
@@ -145,6 +150,7 @@ loom_cc_library(
     ::report
     iree::base
     iree::base::internal
+    iree::base::internal::arena
     loom::analysis::liveness
     loom::analysis::loop_domain
     loom::codegen::low::descriptors
@@ -156,6 +162,8 @@ loom_cc_library(
     loom::ir
     loom::ops::low
     loom::target::registers
+    loom::util::adaptive_sort
+    loom::util::cfg_execution
     loom::util::cfg_graph
     loom::util::cfg_loop
     loom::util::fact_table
@@ -210,6 +218,7 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ir
+    loom::ops::low
     loom::ops::test
     loom::target::facts_builder
     loom::target::registers
@@ -226,8 +235,11 @@ loom_cc_test(
     "format_planning_test.cc"
     "format_test.cc"
     "memory_summary_test.cc"
+    "memory_summary_test_util.h"
+    "selection_summary_test.cc"
   DEPS
     ::format
+    ::report
     iree::base::internal::arena
     iree::base::internal::json
     iree::testing::gtest

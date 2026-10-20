@@ -13,7 +13,7 @@
 #include "iree/hal/allocator.h"
 #include "iree/hal/atomic.h"
 #include "iree/hal/buffer.h"
-#include "iree/hal/memory/asan.h"
+#include "iree/hal/memory/asan_pool.h"
 #include "iree/hal/queue.h"
 #include "iree/hal/semaphore.h"
 #include "iree/hal/topology.h"
@@ -369,7 +369,8 @@ typedef enum iree_hal_device_virtual_memory_spec_flag_bits_e {
   IREE_HAL_DEVICE_VIRTUAL_MEMORY_SPEC_FLAG_NONE = 0u,
 } iree_hal_device_virtual_memory_spec_flag_bits_t;
 
-// Stable virtual memory facts for the device allocator.
+// Stable native virtual memory facts. Reservation and pool queries qualify
+// these capabilities for a concrete device group, scope, and backing class.
 typedef struct iree_hal_device_virtual_memory_spec_t {
   // Number of virtual memory class records.
   iree_host_size_t class_count;
@@ -408,6 +409,9 @@ typedef enum iree_hal_queue_family_spec_flag_bits_e {
 
   // Additional exact hardware queues may be acquired after device creation.
   IREE_HAL_QUEUE_FAMILY_SPEC_FLAG_DYNAMIC_ACQUISITION = 1u << 0,
+  // Barriers may execute qualified HOST_DIRECT and HOST_API cache recipes
+  // through prepared CPU execution bindings, independently of public maps.
+  IREE_HAL_QUEUE_FAMILY_SPEC_FLAG_HOST_MEMORY_BARRIERS = 1u << 1,
 } iree_hal_queue_family_spec_flag_bits_t;
 
 // Canonical ordinal of one execution-resource constraint group within a queue

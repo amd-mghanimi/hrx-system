@@ -11,6 +11,7 @@
 #include "loom/util/cfg_dominance.h"
 #include "loom/util/cfg_graph.h"
 #include "loom/verify/verify_constraints.h"
+#include "loom/verify/verify_consumption.h"
 #include "loom/verify/verify_diagnostics.h"
 #include "loom/verify/verify_ownership.h"
 #include "loom/verify/verify_state.h"
@@ -25,6 +26,8 @@ typedef struct loom_verify_region_contract_t {
   const loom_op_vtable_t* vtable;
   // Generated structural requirements for the region.
   const loom_region_descriptor_t* descriptor;
+  // Error count before verification of the owning operation began.
+  uint32_t owner_initial_error_count;
   // Region ordinal within the owning operation.
   uint8_t region_index;
 } loom_verify_region_contract_t;
@@ -142,12 +145,14 @@ loom_verify_command_effect_scope(loom_verify_state_t* state,
   if (!state->region_scope.command_effects_only) {
     return;
   }
-  if (!loom_traits_may_read(traits) && !loom_traits_may_write(traits) &&
-      !loom_traits_are_convergent(traits) &&
-      !loom_traits_have_observable_effects(traits)) {
+  if (iree_any_bit_set(vtable->traits, LOOM_TRAIT_COMMAND_EFFECT)) {
     return;
   }
-  if (iree_any_bit_set(vtable->traits, LOOM_TRAIT_COMMAND_EFFECT)) {
+  const loom_trait_flags_t forbidden_traits =
+      LOOM_TRAIT_WRITES_MEMORY | LOOM_TRAIT_NON_DETERMINISTIC |
+      LOOM_TRAIT_UNKNOWN_EFFECTS | LOOM_TRAIT_CONVERGENT |
+      LOOM_TRAIT_MEMORY_FENCE | LOOM_TRAIT_OBSERVABLE_EFFECT;
+  if (!iree_any_bit_set(traits, forbidden_traits)) {
     return;
   }
   loom_verify_emit_non_command_effect(state, op, vtable);
@@ -239,13 +244,24 @@ static iree_status_t loom_verify_region(
     }
     return iree_ok_status();
   }
+  if (contract && region->block_count == 0) {
+    return loom_verify_emit_missing_terminator(state, contract);
+  }
   if (contract &&
       iree_any_bit_set(contract->descriptor->flags, LOOM_REGION_SINGLE_BLOCK) &&
       region->block_count != 1) {
     IREE_RETURN_IF_ERROR(loom_verify_emit_single_block_region(
         state, contract, region->block_count));
   }
-  // Single-block regions need only the ordinary lexical scope. Multi-block
+  const loom_op_t* callable_op = NULL;
+  if (contract && contract->descriptor->terminator != LOOM_OP_KIND_UNKNOWN &&
+      loom_verify_has_func_signature_scope(contract->vtable) &&
+      contract->vtable->func_like->body_region_index ==
+          contract->region_index &&
+      state->result->error_count == contract->owner_initial_error_count) {
+    callable_op = contract->op;
+  }
+  // One-block dominance needs only the ordinary lexical scope. Multi-block
   // regions share one graph between dominance and consumed-value queries.
   // Keep the indexed tree local: per-use checks remain a depth-table lookup.
   loom_cfg_graph_t graph = {0};
@@ -263,22 +279,16 @@ static iree_status_t loom_verify_region(
           (void**)&block_scope_ends));
     }
   }
-  const loom_region_t* saved_region = state->region_scope.current;
-  loom_consumption_region_query_t* saved_consumption_query =
-      state->region_scope.consumption_query;
-  const bool saved_command_effects_only =
-      state->region_scope.command_effects_only;
-  loom_consumption_region_query_t consumption_query;
+  const loom_verify_region_scope_t saved_region_scope = state->region_scope;
+  uint32_t region_index = 0;
+  IREE_RETURN_IF_ERROR(loom_verify_consumption_record_region(
+      state, region, contract ? contract->op : NULL,
+      contract ? contract->descriptor->execution : LOOM_REGION_EXECUTION_ONCE,
+      &graph,
+      saved_region_scope.current ? saved_region_scope.index : UINT32_MAX,
+      &region_index));
   state->region_scope.current = region;
-  if (region->block_count > 1) {
-    loom_consumption_region_query_initialize_with_cfg_graph(
-        state->module, region, &graph, NULL, NULL, &state->arena,
-        &consumption_query);
-  } else {
-    loom_consumption_region_query_initialize(state->module, region,
-                                             &state->arena, &consumption_query);
-  }
-  state->region_scope.consumption_query = &consumption_query;
+  state->region_scope.index = region_index;
   if (contract && iree_any_bit_set(contract->descriptor->flags,
                                    LOOM_REGION_COMMAND_EFFECTS_ONLY)) {
     state->region_scope.command_effects_only = true;
@@ -312,6 +322,7 @@ static iree_status_t loom_verify_region(
       }
       b = source_block_index++;
     }
+    const uint32_t block_initial_error_count = state->result->error_count;
     loom_verify_restore_definitions(state, block_watermark);
     if (dominance.available && position >= dominance.preorder.count) {
       if (!unreachable_definitions.block_offsets) {
@@ -375,20 +386,27 @@ static iree_status_t loom_verify_region(
     }
     if (contract && iree_status_is_ok(status) &&
         !loom_verify_at_error_limit(state)) {
-      const bool is_cfg =
-          iree_any_bit_set(region->flags, LOOM_REGION_INSTANCE_FLAG_CFG);
-      // A branch marks its containing region as CFG, but cannot relax the
-      // declared terminator of a single-block structured region.
-      const bool requires_declared_terminator =
-          !is_cfg || iree_any_bit_set(contract->descriptor->flags,
-                                      LOOM_REGION_SINGLE_BLOCK);
-      if (!terminator_op && requires_declared_terminator) {
+      // Every block requires a terminator. Only an actual branch in a
+      // CFG-capable region may continue without using its declared exit kind.
+      if (!terminator_op) {
         status = loom_verify_emit_missing_terminator(state, contract);
-      } else if (terminator_op && requires_declared_terminator &&
-                 contract->descriptor->terminator != LOOM_OP_KIND_UNKNOWN &&
-                 terminator_op->kind != contract->descriptor->terminator) {
+      } else if (!loom_region_descriptor_matches_terminator(
+                     contract->descriptor, terminator_op->kind) &&
+                 (terminator_op->successor_count == 0 ||
+                  iree_any_bit_set(contract->descriptor->flags,
+                                   LOOM_REGION_SINGLE_BLOCK))) {
         status =
             loom_verify_emit_wrong_terminator(state, contract, terminator_op);
+      }
+    }
+    if (callable_op && iree_status_is_ok(status) &&
+        !loom_verify_at_error_limit(state) &&
+        state->result->error_count == block_initial_error_count &&
+        terminator_op &&
+        terminator_op->kind == contract->descriptor->terminator) {
+      status = loom_verify_func_like_exit(state, callable_op, terminator_op);
+      if (iree_status_is_ok(status)) {
+        status = loom_verify_pending_diagnostic_status(state);
       }
     }
     if (block_scope_ends) {
@@ -409,9 +427,7 @@ static iree_status_t loom_verify_region(
   if (scope_pushed) {
     loom_verify_pop_scope(state);
   }
-  state->region_scope.current = saved_region;
-  state->region_scope.consumption_query = saved_consumption_query;
-  state->region_scope.command_effects_only = saved_command_effects_only;
+  state->region_scope = saved_region_scope;
   return status;
 }
 
@@ -487,9 +503,10 @@ IREE_ATTRIBUTE_ALWAYS_INLINE static inline iree_status_t loom_verify_op(
       loom_verify_op_effective_trait_consistency(state, op, vtable);
   IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
 
-  // Command programs may perform observable work only through explicit
-  // command operations. This consumes the effective trait word already cached
-  // on the op while the ordinary verifier traversal is visiting it.
+  // Command programs may perform writes and other observable work only through
+  // explicit command operations. Ordinary preparation may be deterministic
+  // and read-only. This consumes the effective trait word already cached on
+  // the op while the ordinary verifier traversal is visiting it.
   loom_verify_command_effect_scope(state, op, vtable, effective_traits);
   IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
 
@@ -535,6 +552,12 @@ IREE_ATTRIBUTE_ALWAYS_INLINE static inline iree_status_t loom_verify_op(
   if (op->attribute_count) {
     loom_verify_attribute_value_refs(state, op, vtable);
     IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
+    if (state->result->error_count == initial_error_count &&
+        iree_any_bit_set(vtable->vtable_flags,
+                         LOOM_OP_VTABLE_HAS_PREDICATE_LIST)) {
+      IREE_RETURN_IF_ERROR(loom_verify_predicate_attributes(state, op, vtable));
+      IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
+    }
   }
 
   // Poison may flow through pure SSA computation, but it must not be consumed
@@ -548,7 +571,7 @@ IREE_ATTRIBUTE_ALWAYS_INLINE static inline iree_status_t loom_verify_op(
   loom_verify_semantic_constraints(state, op, vtable);
   IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
 
-  // Tied result validation and linear tied/moved source consume marking.
+  // Tied result validation and path-sensitive tied/moved source consumption.
   IREE_RETURN_IF_ERROR(loom_verify_tied_results(state, op, vtable));
   IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
   IREE_RETURN_IF_ERROR(loom_verify_moved_results(state, op));
@@ -560,16 +583,20 @@ IREE_ATTRIBUTE_ALWAYS_INLINE static inline iree_status_t loom_verify_op(
   loom_verify_symbol_references(state, op, vtable);
   IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
   if (vtable->call_like &&
-      vtable->call_like->purity_attr_index != LOOM_ATTR_INDEX_NONE) {
-    loom_verify_call_purity(state, op, vtable);
+      vtable->call_like->effect_contract_attr_index != LOOM_ATTR_INDEX_NONE) {
+    loom_verify_call_effect_contract(state, op, vtable);
     IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
+  }
+
+  if (state->result->error_count == initial_error_count) {
+    IREE_RETURN_IF_ERROR(loom_verify_consumption_record_aliases(state, op));
   }
 
   // Define result values. Must happen after all checks on this op
   // so that a result cannot appear to dominate its own defining op.
   if (has_signature_scope) {
     loom_verify_pop_scope(state);
-  } else {
+  } else if (!loom_op_vtable_has_signature_only_results(vtable)) {
     for (uint16_t i = 0; i < op->result_count; ++i) {
       IREE_RETURN_IF_ERROR(
           loom_verify_define_value(state, loom_op_const_results(op)[i]));
@@ -578,28 +605,32 @@ IREE_ATTRIBUTE_ALWAYS_INLINE static inline iree_status_t loom_verify_op(
 
   // Isolated regions start with only their own block arguments. Other regions
   // inherit enclosing definitions, including this op's results defined above.
-  loom_region_t** regions = loom_op_regions(op);
-  for (uint8_t i = 0; i < op->region_count; ++i) {
-    if (loom_verify_at_error_limit(state)) {
-      break;
+  if (op->region_count != 0) {
+    loom_region_t** regions = loom_op_regions(op);
+    for (uint8_t i = 0; i < op->region_count; ++i) {
+      if (loom_verify_at_error_limit(state)) {
+        break;
+      }
+      const loom_region_descriptor_t* descriptor =
+          loom_op_vtable_region_descriptor(vtable, i);
+      loom_verify_region_contract_t contract = {
+          .op = op,
+          .vtable = vtable,
+          .descriptor = descriptor,
+          .owner_initial_error_count = initial_error_count,
+          .region_index = i,
+      };
+      IREE_RETURN_IF_ERROR(loom_verify_region(
+          state, regions[i], descriptor ? &contract : NULL, isolated));
     }
-    const loom_region_descriptor_t* descriptor =
-        loom_op_vtable_region_descriptor(vtable, i);
-    loom_verify_region_contract_t contract = {
-        .op = op,
-        .vtable = vtable,
-        .descriptor = descriptor,
-        .region_index = i,
-    };
-    IREE_RETURN_IF_ERROR(loom_verify_region(
-        state, regions[i], descriptor ? &contract : NULL, isolated));
-  }
-  loom_verify_func_purity_body_effects(state, op, vtable);
-  IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
-
-  if (vtable->loop_like && state->result->error_count == initial_error_count) {
-    loom_verify_loop_entry_types(state, op, vtable->loop_like);
+    loom_verify_func_effect_contract_body_effects(state, op, vtable);
     IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
+
+    if (vtable->loop_like &&
+        state->result->error_count == initial_error_count) {
+      loom_verify_loop_entry_types(state, op, vtable->loop_like);
+      IREE_RETURN_IF_ERROR(loom_verify_pending_diagnostic_status(state));
+    }
   }
 
   // Op-specific verification callback. Runs last, and only when this op and
@@ -639,39 +670,20 @@ static iree_status_t loom_verify_state_initialize(
 
   iree_host_size_t value_count = module->values.count;
   iree_host_size_t value_capacity = value_count > 0 ? value_count : 1;
-  // Ensure at least 1 word so we always have valid pointers.
-  state->consumed_word_count = (value_capacity + 63) / 64;
   state->visibility.minimum_depth = 1;
 
   // Initialize scratch arena from the module's block pool. All
   // verification-time allocations go here; bulk O(1) free on exit.
   iree_arena_initialize(module->arena.block_pool, &state->arena);
 
-  // Allocate visibility, consumption and definition storage. Arena allocation
+  // Allocate visibility and definition storage. Arena allocation
   // uses checked multiplication (overflow → RESOURCE_EXHAUSTED).
   // On any failure, deinitialize returns all arena blocks to the pool.
   iree_status_t status =
       iree_arena_allocate_array(&state->arena, value_capacity, sizeof(uint8_t),
                                 (void**)&state->visibility.definition_depths);
   if (iree_status_is_ok(status)) {
-    status = iree_arena_allocate_array(
-        &state->arena, state->consumed_word_count, sizeof(uint64_t),
-        (void**)&state->consumed_bits);
-  }
-  if (iree_status_is_ok(status)) {
-    iree_host_size_t consuming_op_count = value_count > 0 ? value_count : 1;
-    status = iree_arena_allocate_array(&state->arena, consuming_op_count,
-                                       sizeof(state->consuming_ops[0]),
-                                       (void**)&state->consuming_ops);
-    if (iree_status_is_ok(status)) {
-      memset(state->consuming_ops, 0,
-             consuming_op_count * sizeof(state->consuming_ops[0]));
-    }
-  }
-  if (iree_status_is_ok(status)) {
     memset(state->visibility.definition_depths, 0, value_capacity);
-    memset(state->consumed_bits, 0,
-           state->consumed_word_count * sizeof(uint64_t));
   }
   if (iree_status_is_ok(status)) {
     // Allocate defined stack. Start with value_count/4 capacity (most
@@ -816,6 +828,14 @@ iree_status_t loom_verify_module(const loom_module_t* module,
     }
   }
 
+  if (out_result->error_count == 0) {
+    diagnostic_status = loom_verify_consumption_check(&state);
+    if (!iree_status_is_ok(diagnostic_status)) {
+      loom_verify_state_deinitialize(&state);
+      return diagnostic_status;
+    }
+  }
+
   // Static encoding aliases may be authored without an operation or type use.
   // Diagnose only those malformed records not already attributed during the
   // operation walk.
@@ -882,6 +902,9 @@ iree_status_t loom_verify_functions(const loom_module_t* module,
     }
   }
 
+  if (iree_status_is_ok(verify_status) && out_result->error_count == 0) {
+    verify_status = loom_verify_consumption_check(&state);
+  }
   loom_verify_state_deinitialize(&state);
   return verify_status;
 }

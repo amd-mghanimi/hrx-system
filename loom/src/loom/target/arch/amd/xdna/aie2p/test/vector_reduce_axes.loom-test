@@ -1,0 +1,101 @@
+// RUN: pass target=amd.xdna.aie2p:core target-legalize{mode=final},dce,canonicalize
+
+// A non-leading reduced axis is transposed ahead of the retained axis so each
+// reduction term becomes one contiguous result-shaped slice.
+func.def @reduce_nonleading_axis(%values: vector<2x3xi32>, %init: vector<2xi32>) -> (vector<2xi32>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [1] : vector<2x3xi32>, vector<2xi32>
+  func.return %result : vector<2xi32>
+}
+
+// ----
+func.def @reduce_nonleading_axis(%values: vector<2x3xi32>, %init: vector<2xi32>) -> (vector<2xi32>) {
+  %4 = vector.transpose<[1, 0]> %values : vector<2x3xi32> -> vector<3x2xi32>
+  %5 = vector.bitcast %4 : vector<3x2xi32> to vector<6xi32>
+  %6 = vector.slice %5[0] : vector<6xi32> -> vector<2xi32>
+  %7 = vector.slice %5[2] : vector<6xi32> -> vector<2xi32>
+  %8 = vector.slice %5[4] : vector<6xi32> -> vector<2xi32>
+  %9 = vector.addi %7, %8 : vector<2xi32>
+  %10 = vector.addi %6, %9 : vector<2xi32>
+  %result = vector.addi %init, %10 : vector<2xi32>
+  func.return %result : vector<2xi32>
+}
+
+// ====
+
+// RUN: pass target=amd.xdna.aie2p:core target-legalize{mode=final},dce,canonicalize
+
+// Multiple reduced axes preserve their source lexicographic order while the
+// retained multidimensional result stays vectorized.
+func.def @reduce_multiple_axes(%values: vector<2x2x3x2xi16>, %init: vector<2x2xi16>) -> (vector<2x2xi16>) {
+  %result = vector.reduce.axes<maxsi> %values, %init axes [0, 2] : vector<2x2x3x2xi16>, vector<2x2xi16>
+  func.return %result : vector<2x2xi16>
+}
+
+// ----
+func.def @reduce_multiple_axes(%values: vector<2x2x3x2xi16>, %init: vector<2x2xi16>) -> (vector<2x2xi16>) {
+  %4 = vector.transpose<[0, 2, 1, 3]> %values : vector<2x2x3x2xi16> -> vector<2x3x2x2xi16>
+  %5 = vector.bitcast %4 : vector<2x3x2x2xi16> to vector<24xi16>
+  %6 = vector.bitcast %init : vector<2x2xi16> to vector<4xi16>
+  %7 = vector.slice %5[0] : vector<24xi16> -> vector<4xi16>
+  %8 = vector.slice %5[4] : vector<24xi16> -> vector<4xi16>
+  %9 = vector.slice %5[8] : vector<24xi16> -> vector<4xi16>
+  %10 = vector.maxsi %8, %9 : vector<4xi16>
+  %11 = vector.maxsi %7, %10 : vector<4xi16>
+  %12 = vector.slice %5[12] : vector<24xi16> -> vector<4xi16>
+  %13 = vector.slice %5[16] : vector<24xi16> -> vector<4xi16>
+  %14 = vector.slice %5[20] : vector<24xi16> -> vector<4xi16>
+  %15 = vector.maxsi %13, %14 : vector<4xi16>
+  %16 = vector.maxsi %12, %15 : vector<4xi16>
+  %17 = vector.maxsi %11, %16 : vector<4xi16>
+  %18 = vector.maxsi %6, %17 : vector<4xi16>
+  %result = vector.bitcast %18 : vector<4xi16> to vector<2x2xi16>
+  func.return %result : vector<2x2xi16>
+}
+
+// ====
+
+// RUN: pass target=amd.xdna.aie2p:core target-legalize{mode=final},dce,canonicalize
+
+// Ordered floating-point reductions fold the initial value and source terms
+// strictly from left to right.
+func.def @reduce_ordered_float(%values: vector<3x2xf32>, %init: vector<2xf32>) -> (vector<2xf32>) {
+  %result = vector.reduce.axes<addf> %values, %init axes [0] : vector<3x2xf32>, vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ----
+func.def @reduce_ordered_float(%values: vector<3x2xf32>, %init: vector<2xf32>) -> (vector<2xf32>) {
+  %4 = vector.bitcast %values : vector<3x2xf32> to vector<6xf32>
+  %5 = vector.slice %4[0] : vector<6xf32> -> vector<2xf32>
+  %6 = vector.addf %init, %5 : vector<2xf32>
+  %7 = vector.slice %4[2] : vector<6xf32> -> vector<2xf32>
+  %8 = vector.addf %6, %7 : vector<2xf32>
+  %9 = vector.slice %4[4] : vector<6xf32> -> vector<2xf32>
+  %result = vector.addf %8, %9 : vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ====
+
+// RUN: pass target=amd.xdna.aie2p:core target-legalize{mode=final},dce,canonicalize
+
+// Reassociation permits a balanced source tree before the initial value is
+// combined with that tree.
+func.def @reduce_reassociated_float(%values: vector<4x2xf32>, %init: vector<2xf32>) -> (vector<2xf32>) {
+  %result = vector.reduce.axes<addf, reassoc|nnan|nsz> %values, %init axes [0] : vector<4x2xf32>, vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ----
+func.def @reduce_reassociated_float(%values: vector<4x2xf32>, %init: vector<2xf32>) -> (vector<2xf32>) {
+  %4 = vector.bitcast %values : vector<4x2xf32> to vector<8xf32>
+  %5 = vector.slice %4[0] : vector<8xf32> -> vector<2xf32>
+  %6 = vector.slice %4[2] : vector<8xf32> -> vector<2xf32>
+  %7 = vector.addf<reassoc|nnan|nsz> %5, %6 : vector<2xf32>
+  %8 = vector.slice %4[4] : vector<8xf32> -> vector<2xf32>
+  %9 = vector.slice %4[6] : vector<8xf32> -> vector<2xf32>
+  %10 = vector.addf<reassoc|nnan|nsz> %8, %9 : vector<2xf32>
+  %11 = vector.addf<reassoc|nnan|nsz> %7, %10 : vector<2xf32>
+  %result = vector.addf<reassoc|nnan|nsz> %init, %11 : vector<2xf32>
+  func.return %result : vector<2xf32>
+}

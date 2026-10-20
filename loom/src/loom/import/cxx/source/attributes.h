@@ -19,9 +19,62 @@ namespace loom::cxx_import {
 
 class Diagnostics;
 
-// Source positions with distinct binding owners. Declaration bindings own
-// namespace-scope symbols/configs; parameter bindings own entry preconditions.
-enum class BindingAttributeScope { Declaration, Parameter, Local };
+// Returns a semantic Loom annotation attached to a resolved source symbol, or
+// null when the canonical declaration has no annotation with this spelling.
+inline const cxx::Attribute* annotation(cxx::Symbol* symbol,
+                                        std::string_view spelling) {
+  if (!symbol) {
+    return nullptr;
+  }
+  const auto* attributes = symbol->canonical()->attributes();
+  if (!attributes) {
+    return nullptr;
+  }
+  for (const auto& attribute : *attributes) {
+    if (attribute.attributeNamespace && attribute.name &&
+        attribute.attributeNamespace->name() == "loom" &&
+        attribute.name->name() == spelling) {
+      return &attribute;
+    }
+  }
+  return nullptr;
+}
+
+// Source positions with distinct binding owners. Namespace declarations,
+// function prototypes, parameters and automatic declarations each admit their
+// own leading attributes; all other source positions are local and unowned.
+enum class BindingAttributeScope {
+  Declaration,
+  Function,
+  Parameter,
+  LocalDeclaration,
+  Statement,
+  CheckStatement,
+  Local,
+};
+
+// Returns the raw leading attribute list carried by one statement or automatic
+// declaration. C++ represents a declaration statement's leading attributes on
+// its nested simple declaration.
+inline cxx::List<cxx::AttributeSpecifierAST*>* statement_attributes(
+    cxx::StatementAST* statement) {
+  if (auto* declaration =
+          cxx::ast_cast<cxx::DeclarationStatementAST>(statement)) {
+    if (auto* simple = cxx::ast_cast<cxx::SimpleDeclarationAST>(
+            declaration->declaration)) {
+      return simple->attributeList;
+    }
+  }
+  cxx::List<cxx::AttributeSpecifierAST*>* attributes = nullptr;
+  cxx::visit(
+      [&](auto* node) {
+        if constexpr (requires { node->attributeList; }) {
+          attributes = node->attributeList;
+        }
+      },
+      statement);
+  return attributes;
+}
 
 // Rejects binding annotations outside their owning source positions.
 void reject_misplaced_binding_attributes(
@@ -37,27 +90,16 @@ void reject_misplaced_binding_declarator(
     cxx::FunctionDeclaratorChunkAST* parameter_owner = nullptr);
 
 // Checks one statement's leading attributes during its owner's body walk.
+// Scope distinguishes ordinary translated statements from check records,
+// whose bodies admit a different binding vocabulary.
 void reject_misplaced_binding_statement(cxx::TranslationUnit& unit,
                                         Diagnostics& diagnostics,
-                                        cxx::StatementAST* statement);
+                                        cxx::StatementAST* statement,
+                                        BindingAttributeScope scope);
 
 // Queries a semantic Loom annotation attached to a resolved source symbol.
 inline bool annotated(cxx::Symbol* symbol, std::string_view spelling) {
-  if (!symbol) {
-    return false;
-  }
-  const auto* attributes = symbol->canonical()->attributes();
-  if (!attributes) {
-    return false;
-  }
-  for (const auto& attribute : *attributes) {
-    if (attribute.attributeNamespace && attribute.name &&
-        attribute.attributeNamespace->name() == "loom" &&
-        attribute.name->name() == spelling) {
-      return true;
-    }
-  }
-  return false;
+  return annotation(symbol, spelling) != nullptr;
 }
 
 // Visits raw C++ Loom attributes, including duplicates and numeric arguments

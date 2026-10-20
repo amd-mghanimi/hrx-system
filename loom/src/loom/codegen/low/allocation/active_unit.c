@@ -10,6 +10,7 @@
 
 #include "loom/codegen/low/allocation/live_range.h"
 #include "loom/codegen/low/allocation/storage.h"
+#include "loom/util/segmented_storage.h"
 
 enum {
   // Tiny functions are cheaper to scan linearly than to index.
@@ -31,6 +32,395 @@ struct loom_low_allocation_active_unit_entry_t {
   loom_low_allocation_location_kind_t location_kind;
   // Physical register or target ID for this unit.
   uint32_t location;
+};
+
+typedef struct loom_low_allocation_active_occupancy_entry_t {
+  // Counted location, or UINT32_MAX after removal or expiration.
+  uint32_t slot;
+  // Calendar point activating or retiring this reservation.
+  uint32_t point;
+  // End after a pending activation, or zero while occupancy is active.
+  uint32_t next_point;
+  // Next sparse segment for a scalar owner, or UINT32_MAX after its last span.
+  uint32_t next_segment;
+  // Next activation or retirement at the same point.
+  uint32_t next;
+  // Previous activation or retirement at the same point.
+  uint32_t previous;
+} loom_low_allocation_active_occupancy_entry_t;
+
+// The dense window proves conflicts at the acquisition point. Counts preserve
+// tied owners; each unit has one calendar event for activation or retirement.
+// Sparse scalars consume each segment once. Sparse aggregates stay on the exact
+// query path, avoiding the product of segment count and aggregate width.
+struct loom_low_allocation_active_occupancy_t {
+  // Borrowed lifetime facts; assignments are removed before those facts change.
+  const loom_low_allocation_unit_liveness_t* unit_liveness;
+  // Bitmap word offsets by register class, followed by one terminal offset.
+  uint32_t* word_offsets;
+  // Count of active owners for each indexed class-local location.
+  uint32_t* counts;
+  // Definite occupied locations at the current acquisition point.
+  uint64_t* words;
+  // Event links indexed by the corresponding active-unit hash entry.
+  loom_segmented_storage_t entries;
+  // First event at each program point, or UINT32_MAX.
+  loom_segmented_storage_t calendar;
+  // Calendar extent; advancing beyond it drains all remaining reservations.
+  iree_host_size_t program_point_count;
+  // Current monotone acquisition point.
+  uint32_t point;
+  // First calendar point not yet consumed; may equal UINT32_MAX + 1.
+  iree_host_size_t next_point;
+};
+
+enum {
+  // 24 KiB event payloads and 16 KiB calendar payloads stay in pooled blocks.
+  LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_SHIFT = 10,
+  LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_CAPACITY =
+      1u << LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_SHIFT,
+  LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_SHIFT = 12,
+  LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_CAPACITY =
+      1u << LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_SHIFT,
+};
+
+static loom_low_allocation_active_occupancy_entry_t*
+loom_low_allocation_active_occupancy_entry(
+    loom_low_allocation_active_unit_index_t* index, uint32_t entry_index) {
+  loom_low_allocation_active_occupancy_entry_t* segment =
+      loom_segmented_storage_segment(
+          &index->occupancy->entries,
+          entry_index >> LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_SHIFT);
+  return &segment[entry_index &
+                  (LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_CAPACITY - 1u)];
+}
+
+static uint32_t* loom_low_allocation_active_occupancy_head(
+    loom_low_allocation_active_unit_index_t* index, uint32_t point) {
+  uint32_t* segment = loom_segmented_storage_segment(
+      &index->occupancy->calendar,
+      point >> LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_SHIFT);
+  return &segment[point & (LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_CAPACITY - 1u)];
+}
+
+iree_status_t loom_low_allocation_active_unit_index_initialize_occupancy(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_unit_liveness_t* unit_liveness,
+    iree_host_size_t program_point_count, iree_arena_allocator_t* arena) {
+  if (index->bucket_count == 0) {
+    return iree_ok_status();
+  }
+  const uint32_t class_count = index->descriptor_set->reg_class_count;
+  uint32_t word_count = 0;
+  for (uint32_t i = 0; i < class_count; ++i) {
+    const loom_low_reg_class_t* reg_class =
+        &index->descriptor_set->reg_classes[i];
+    if (!loom_low_reg_class_uses_explicit_physical_registers(reg_class)) {
+      word_count +=
+          (iree_min(reg_class->allocatable_count,
+                    LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_LOCATION_COUNT) +
+           63u) /
+          64u;
+    }
+  }
+  if (word_count == 0) {
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(iree_arena_allocate(arena, sizeof(*index->occupancy),
+                                           (void**)&index->occupancy));
+  *index->occupancy = (loom_low_allocation_active_occupancy_t){
+      .unit_liveness = unit_liveness,
+      .program_point_count = program_point_count,
+  };
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      arena, class_count + 1, sizeof(*index->occupancy->word_offsets),
+      (void**)&index->occupancy->word_offsets));
+  uint32_t word_offset = 0;
+  for (uint32_t i = 0; i < class_count; ++i) {
+    index->occupancy->word_offsets[i] = word_offset;
+    const loom_low_reg_class_t* reg_class =
+        &index->descriptor_set->reg_classes[i];
+    if (!loom_low_reg_class_uses_explicit_physical_registers(reg_class)) {
+      word_offset +=
+          (iree_min(reg_class->allocatable_count,
+                    LOOM_LOW_ALLOCATION_ACTIVE_CONFLICT_LOCATION_COUNT) +
+           63u) /
+          64u;
+    }
+  }
+  index->occupancy->word_offsets[class_count] = word_offset;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      arena, word_count, sizeof(*index->occupancy->words),
+      (void**)&index->occupancy->words));
+  memset(index->occupancy->words, 0,
+         word_count * sizeof(*index->occupancy->words));
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      arena, word_count * 64u, sizeof(*index->occupancy->counts),
+      (void**)&index->occupancy->counts));
+  memset(index->occupancy->counts, 0,
+         word_count * 64u * sizeof(*index->occupancy->counts));
+  loom_segmented_storage_initialize(
+      iree_min(index->entry_capacity,
+               LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_CAPACITY) *
+          sizeof(loom_low_allocation_active_occupancy_entry_t),
+      iree_alignof(loom_low_allocation_active_occupancy_entry_t),
+      &index->occupancy->entries);
+  iree_status_t status = iree_ok_status();
+  for (uint32_t base = 0;
+       base < index->entry_capacity && iree_status_is_ok(status);
+       base += LOOM_LOW_ALLOCATION_OCCUPANCY_ENTRY_CAPACITY) {
+    void* segment = NULL;
+    status = loom_segmented_storage_append(&index->occupancy->entries, arena,
+                                           &segment);
+  }
+  IREE_RETURN_IF_ERROR(status);
+  loom_segmented_storage_initialize(
+      iree_min(program_point_count,
+               LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_CAPACITY) *
+          sizeof(uint32_t),
+      iree_alignof(uint32_t), &index->occupancy->calendar);
+  for (iree_host_size_t base = 0;
+       base < program_point_count && iree_status_is_ok(status);
+       base += LOOM_LOW_ALLOCATION_OCCUPANCY_POINT_CAPACITY) {
+    void* segment = NULL;
+    status = loom_segmented_storage_append(&index->occupancy->calendar, arena,
+                                           &segment);
+    if (iree_status_is_ok(status)) {
+      memset(segment, 0xFF, index->occupancy->calendar.segment_size);
+    }
+  }
+  return status;
+}
+
+static void loom_low_allocation_active_occupancy_remove(
+    loom_low_allocation_active_unit_index_t* index, uint32_t entry_index) {
+  loom_low_allocation_active_occupancy_entry_t* entry =
+      loom_low_allocation_active_occupancy_entry(index, entry_index);
+  if (entry->slot == UINT32_MAX) {
+    return;
+  }
+  if (entry->next_point == 0 && --index->occupancy->counts[entry->slot] == 0) {
+    index->occupancy->words[entry->slot / 64u] &=
+        ~(UINT64_C(1) << (entry->slot % 64u));
+  }
+  if (entry->previous == UINT32_MAX) {
+    *loom_low_allocation_active_occupancy_head(index, entry->point) =
+        entry->next;
+  } else {
+    loom_low_allocation_active_occupancy_entry(index, entry->previous)->next =
+        entry->next;
+  }
+  if (entry->next != UINT32_MAX) {
+    loom_low_allocation_active_occupancy_entry(index, entry->next)->previous =
+        entry->previous;
+  }
+  entry->slot = UINT32_MAX;
+}
+
+static void loom_low_allocation_active_occupancy_schedule(
+    loom_low_allocation_active_unit_index_t* index, uint32_t entry_index,
+    uint32_t slot, uint32_t point, uint32_t next_point, uint32_t next_segment) {
+  loom_low_allocation_active_occupancy_entry_t* entry =
+      loom_low_allocation_active_occupancy_entry(index, entry_index);
+  *entry = (loom_low_allocation_active_occupancy_entry_t){
+      .slot = slot,
+      .point = point,
+      .next_point = next_point,
+      .next_segment = next_segment,
+      .next = *loom_low_allocation_active_occupancy_head(index, point),
+      .previous = UINT32_MAX,
+  };
+  if (entry->next != UINT32_MAX) {
+    loom_low_allocation_active_occupancy_entry(index, entry->next)->previous =
+        entry_index;
+  }
+  *loom_low_allocation_active_occupancy_head(index, point) = entry_index;
+  if (next_point == 0) {
+    ++index->occupancy->counts[slot];
+    index->occupancy->words[slot / 64u] |= UINT64_C(1) << (slot % 64u);
+  }
+}
+
+static void loom_low_allocation_active_occupancy_insert(
+    loom_low_allocation_active_unit_index_t* index, uint32_t entry_index,
+    const loom_low_allocation_assignment_t* assignment, uint32_t unit,
+    uint32_t segment_cursor, uint32_t point);
+
+void loom_low_allocation_active_unit_index_advance(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* assignments, uint32_t point) {
+  if (index->occupancy == NULL) {
+    return;
+  }
+  const iree_host_size_t end_point =
+      iree_min((uint64_t)point + 1, index->occupancy->program_point_count);
+  while (index->occupancy->next_point < end_point) {
+    uint32_t* head = loom_low_allocation_active_occupancy_head(
+        index, (uint32_t)index->occupancy->next_point++);
+    while (*head != UINT32_MAX) {
+      const uint32_t entry_index = *head;
+      const loom_low_allocation_active_occupancy_entry_t entry =
+          *loom_low_allocation_active_occupancy_entry(index, entry_index);
+      loom_low_allocation_active_occupancy_remove(index, entry_index);
+      if (entry.next_point != 0) {
+        loom_low_allocation_active_occupancy_schedule(
+            index, entry_index, entry.slot, entry.next_point, 0,
+            entry.next_segment);
+      } else if (entry.next_segment != UINT32_MAX) {
+        loom_low_allocation_active_occupancy_insert(
+            index, entry_index,
+            &assignments[index->entries[entry_index].assignment_index], 0,
+            entry.next_segment, entry.point);
+      }
+    }
+  }
+  index->occupancy->point = point;
+}
+
+static void loom_low_allocation_active_occupancy_insert(
+    loom_low_allocation_active_unit_index_t* index, uint32_t entry_index,
+    const loom_low_allocation_assignment_t* assignment, uint32_t unit,
+    uint32_t segment_cursor, uint32_t point) {
+  loom_low_allocation_active_occupancy_entry_t* entry =
+      loom_low_allocation_active_occupancy_entry(index, entry_index);
+  entry->slot = UINT32_MAX;
+  const uint32_t class_id = assignment->descriptor_reg_class_id;
+  const uint32_t word_start = index->occupancy->word_offsets[class_id];
+  const uint32_t word_count =
+      index->occupancy->word_offsets[class_id + 1] - word_start;
+  const uint32_t location = assignment->location_base + unit;
+  if (assignment->location_kind !=
+          LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER ||
+      location >= word_count * 64u ||
+      (assignment->liveness_segments.count > 1 &&
+       assignment->location_count != 1)) {
+    return;
+  }
+  const loom_low_allocation_unit_liveness_t* liveness =
+      index->occupancy->unit_liveness;
+  uint32_t start = loom_low_allocation_live_range_assignment_unit_start_point(
+      liveness->start_points, liveness->point_count, assignment, unit);
+  uint32_t end = loom_low_allocation_live_range_assignment_unit_end_point(
+      liveness->end_points, liveness->point_count, assignment, unit);
+  uint32_t next_segment = UINT32_MAX;
+  if (assignment->liveness_segments.count != 0) {
+    const uint32_t segment_end = assignment->liveness_segments.start +
+                                 assignment->liveness_segments.count;
+    const uint32_t first_point = iree_max(start, point);
+    if (segment_cursor < segment_end &&
+        liveness->storage_segments.entries[segment_cursor].end_point <=
+            first_point) {
+      // A relocated assignment can re-enter after a long sparse prefix. Seek
+      // directly instead of replaying its history; calendar transitions retain
+      // the next segment and normally need no seek.
+      uint32_t count = segment_end - segment_cursor;
+      while (count != 0) {
+        const uint32_t half = count / 2;
+        const uint32_t middle = segment_cursor + half;
+        if (liveness->storage_segments.entries[middle].end_point <=
+            first_point) {
+          segment_cursor = middle + 1;
+          count -= half + 1;
+        } else {
+          count = half;
+        }
+      }
+    }
+    if (segment_cursor == segment_end) {
+      return;
+    }
+    const loom_liveness_segment_t* segment =
+        &liveness->storage_segments.entries[segment_cursor];
+    start = iree_max(start, segment->start_point);
+    end = iree_min(end, segment->end_point);
+    if (segment_cursor + 1 < segment_end) {
+      next_segment = segment_cursor + 1;
+    }
+  }
+  if (start >= end || end <= point) {
+    return;
+  }
+  loom_low_allocation_active_occupancy_schedule(
+      index, entry_index, word_start * 64u + location,
+      start > point ? start : end, start > point ? end : 0, next_segment);
+}
+
+void loom_low_allocation_active_unit_index_project_conflicts(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate, uint64_t* conflicts) {
+  if (index->occupancy == NULL ||
+      candidate->location_kind !=
+          LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER ||
+      candidate->start_point != index->occupancy->point) {
+    return;
+  }
+  const uint32_t class_id = candidate->descriptor_reg_class_id;
+  const uint32_t word_start = index->occupancy->word_offsets[class_id];
+  const uint32_t word_count =
+      index->occupancy->word_offsets[class_id + 1] - word_start;
+  if (word_count == 0) {
+    return;
+  }
+  const loom_low_allocation_unit_liveness_t* liveness =
+      index->occupancy->unit_liveness;
+  if (candidate->liveness_segments.count != 0 &&
+      !iree_any_bit_set(
+          candidate->flags,
+          LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_EXPANDED_EXECUTION_DEFINITION) &&
+      !loom_liveness_segment_range_contains(liveness->storage_segments.entries,
+                                            candidate->liveness_segments,
+                                            index->occupancy->point)) {
+    return;
+  }
+  const uint32_t unit_count =
+      iree_min(candidate->location_count, word_count * 64u);
+  for (uint32_t unit = 0; unit < unit_count; ++unit) {
+    if (loom_low_allocation_live_range_assignment_unit_start_point(
+            liveness->start_points, liveness->point_count, candidate, unit) >
+            index->occupancy->point ||
+        loom_low_allocation_live_range_assignment_unit_end_point(
+            liveness->end_points, liveness->point_count, candidate, unit) <=
+            index->occupancy->point) {
+      continue;
+    }
+    const uint32_t shift_words = unit / 64u;
+    const uint32_t shift_bits = unit % 64u;
+    for (uint32_t word = 0; word + shift_words < word_count; ++word) {
+      uint64_t bits =
+          index->occupancy->words[word_start + word + shift_words] >>
+          shift_bits;
+      if (shift_bits != 0 && word + shift_words + 1 < word_count) {
+        bits |= index->occupancy->words[word_start + word + shift_words + 1]
+                << (64u - shift_bits);
+      }
+      conflicts[word] |= bits;
+    }
+  }
+}
+
+// One distinct continuously occupied scalar location in an AVL tree. Subtree
+// bounds and density let ordered searches skip contiguous runs in one step
+// while owner_count preserves overlapping tied assignments.
+struct loom_low_allocation_active_location_node_t {
+  // Linear physical-register or target-ID location.
+  uint32_t location;
+  // Smallest location in this subtree.
+  uint32_t subtree_minimum;
+  // Largest location in this subtree.
+  uint32_t subtree_maximum;
+  // Left child node, or UINT32_MAX.
+  uint32_t left;
+  // Right child node, or UINT32_MAX.
+  uint32_t right;
+  // AVL height in the low bits and subtree density in the high bit.
+  uint32_t height_and_dense;
+  // Number of active assignments occupying |location|.
+  uint32_t owner_count;
+};
+
+enum {
+  LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_DENSE_BIT = UINT32_C(1) << 31,
+  LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_HEIGHT_MASK = UINT32_C(0xFF),
 };
 
 static uint32_t loom_low_allocation_round_up_to_power_of_two_u32(
@@ -58,6 +448,361 @@ static uint32_t loom_low_allocation_active_unit_hash(
   hash *= 0xC2B2AE35u;
   hash ^= hash >> 16;
   return hash;
+}
+
+static uint32_t loom_low_allocation_active_location_kind_ordinal(
+    loom_low_allocation_location_kind_t location_kind) {
+  IREE_ASSERT(
+      loom_low_allocation_location_kind_is_register_like(location_kind));
+  return location_kind == LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER ? 0
+                                                                         : 1;
+}
+
+static bool loom_low_allocation_active_location_is_dense(
+    const loom_low_allocation_active_location_node_t* node) {
+  return (node->height_and_dense &
+          LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_DENSE_BIT) != 0;
+}
+
+static uint32_t loom_low_allocation_active_location_height(
+    const loom_low_allocation_active_unit_index_t* index, uint32_t node_index) {
+  return node_index == UINT32_MAX
+             ? 0
+             : index->active_location_nodes[node_index].height_and_dense &
+                   LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_HEIGHT_MASK;
+}
+
+static void loom_low_allocation_active_location_recompute(
+    loom_low_allocation_active_unit_index_t* index, uint32_t node_index) {
+  loom_low_allocation_active_location_node_t* node =
+      &index->active_location_nodes[node_index];
+  node->subtree_minimum =
+      node->left == UINT32_MAX
+          ? node->location
+          : index->active_location_nodes[node->left].subtree_minimum;
+  node->subtree_maximum =
+      node->right == UINT32_MAX
+          ? node->location
+          : index->active_location_nodes[node->right].subtree_maximum;
+  const bool left_dense =
+      node->left == UINT32_MAX ||
+      (loom_low_allocation_active_location_is_dense(
+           &index->active_location_nodes[node->left]) &&
+       index->active_location_nodes[node->left].subtree_maximum != UINT32_MAX &&
+       index->active_location_nodes[node->left].subtree_maximum + 1u ==
+           node->location);
+  const bool right_dense =
+      node->right == UINT32_MAX ||
+      (loom_low_allocation_active_location_is_dense(
+           &index->active_location_nodes[node->right]) &&
+       node->location != UINT32_MAX &&
+       node->location + 1u ==
+           index->active_location_nodes[node->right].subtree_minimum);
+  const uint32_t height =
+      1u +
+      iree_max(loom_low_allocation_active_location_height(index, node->left),
+               loom_low_allocation_active_location_height(index, node->right));
+  IREE_ASSERT_LE(height, LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_HEIGHT_MASK);
+  node->height_and_dense =
+      height |
+      (left_dense && right_dense ? LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_DENSE_BIT
+                                 : 0);
+}
+
+static uint32_t loom_low_allocation_active_location_rotate_left(
+    loom_low_allocation_active_unit_index_t* index, uint32_t root_index) {
+  loom_low_allocation_active_location_node_t* root =
+      &index->active_location_nodes[root_index];
+  const uint32_t new_root_index = root->right;
+  loom_low_allocation_active_location_node_t* new_root =
+      &index->active_location_nodes[new_root_index];
+  root->right = new_root->left;
+  new_root->left = root_index;
+  loom_low_allocation_active_location_recompute(index, root_index);
+  loom_low_allocation_active_location_recompute(index, new_root_index);
+  return new_root_index;
+}
+
+static uint32_t loom_low_allocation_active_location_rotate_right(
+    loom_low_allocation_active_unit_index_t* index, uint32_t root_index) {
+  loom_low_allocation_active_location_node_t* root =
+      &index->active_location_nodes[root_index];
+  const uint32_t new_root_index = root->left;
+  loom_low_allocation_active_location_node_t* new_root =
+      &index->active_location_nodes[new_root_index];
+  root->left = new_root->right;
+  new_root->right = root_index;
+  loom_low_allocation_active_location_recompute(index, root_index);
+  loom_low_allocation_active_location_recompute(index, new_root_index);
+  return new_root_index;
+}
+
+static uint32_t loom_low_allocation_active_location_rebalance(
+    loom_low_allocation_active_unit_index_t* index, uint32_t root_index) {
+  loom_low_allocation_active_location_recompute(index, root_index);
+  loom_low_allocation_active_location_node_t* root =
+      &index->active_location_nodes[root_index];
+  const int32_t balance =
+      (int32_t)loom_low_allocation_active_location_height(index, root->left) -
+      (int32_t)loom_low_allocation_active_location_height(index, root->right);
+  if (balance > 1) {
+    loom_low_allocation_active_location_node_t* left =
+        &index->active_location_nodes[root->left];
+    if (loom_low_allocation_active_location_height(index, left->left) <
+        loom_low_allocation_active_location_height(index, left->right)) {
+      root->left =
+          loom_low_allocation_active_location_rotate_left(index, root->left);
+    }
+    return loom_low_allocation_active_location_rotate_right(index, root_index);
+  }
+  if (balance < -1) {
+    loom_low_allocation_active_location_node_t* right =
+        &index->active_location_nodes[root->right];
+    if (loom_low_allocation_active_location_height(index, right->right) <
+        loom_low_allocation_active_location_height(index, right->left)) {
+      root->right =
+          loom_low_allocation_active_location_rotate_right(index, root->right);
+    }
+    return loom_low_allocation_active_location_rotate_left(index, root_index);
+  }
+  return root_index;
+}
+
+static uint32_t loom_low_allocation_active_location_insert_node(
+    loom_low_allocation_active_unit_index_t* index, uint32_t root_index,
+    uint32_t inserted_index) {
+  if (root_index == UINT32_MAX) {
+    return inserted_index;
+  }
+  loom_low_allocation_active_location_node_t* root =
+      &index->active_location_nodes[root_index];
+  const loom_low_allocation_active_location_node_t* inserted =
+      &index->active_location_nodes[inserted_index];
+  if (inserted->location < root->location) {
+    root->left = loom_low_allocation_active_location_insert_node(
+        index, root->left, inserted_index);
+  } else {
+    root->right = loom_low_allocation_active_location_insert_node(
+        index, root->right, inserted_index);
+  }
+  return loom_low_allocation_active_location_rebalance(index, root_index);
+}
+
+static uint32_t loom_low_allocation_active_location_leftmost(
+    const loom_low_allocation_active_unit_index_t* index, uint32_t root_index) {
+  while (index->active_location_nodes[root_index].left != UINT32_MAX) {
+    root_index = index->active_location_nodes[root_index].left;
+  }
+  return root_index;
+}
+
+static uint32_t loom_low_allocation_active_location_remove_node(
+    loom_low_allocation_active_unit_index_t* index, uint32_t root_index,
+    uint32_t location, uint32_t* out_removed_index) {
+  loom_low_allocation_active_location_node_t* root =
+      &index->active_location_nodes[root_index];
+  if (location < root->location) {
+    root->left = loom_low_allocation_active_location_remove_node(
+        index, root->left, location, out_removed_index);
+  } else if (location > root->location) {
+    root->right = loom_low_allocation_active_location_remove_node(
+        index, root->right, location, out_removed_index);
+  } else {
+    if (root->left == UINT32_MAX || root->right == UINT32_MAX) {
+      *out_removed_index = root_index;
+      return root->left == UINT32_MAX ? root->right : root->left;
+    }
+    const uint32_t successor_index =
+        loom_low_allocation_active_location_leftmost(index, root->right);
+    const loom_low_allocation_active_location_node_t* successor =
+        &index->active_location_nodes[successor_index];
+    root->location = successor->location;
+    root->owner_count = successor->owner_count;
+    root->right = loom_low_allocation_active_location_remove_node(
+        index, root->right, successor->location, out_removed_index);
+  }
+  return loom_low_allocation_active_location_rebalance(index, root_index);
+}
+
+static uint32_t loom_low_allocation_active_location_find_node(
+    const loom_low_allocation_active_unit_index_t* index, uint32_t root_index,
+    uint32_t location) {
+  while (root_index != UINT32_MAX) {
+    const loom_low_allocation_active_location_node_t* node =
+        &index->active_location_nodes[root_index];
+    if (location == node->location) {
+      return root_index;
+    }
+    root_index = location < node->location ? node->left : node->right;
+  }
+  return UINT32_MAX;
+}
+
+static uint32_t loom_low_allocation_active_location_space_index(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* assignment) {
+  const loom_low_reg_class_t* reg_class =
+      &index->descriptor_set->reg_classes[assignment->descriptor_reg_class_id];
+  const uint32_t storage_space = reg_class->alias_set_id != 0
+                                     ? reg_class->alias_set_id - 1u
+                                     : index->active_location_alias_set_count +
+                                           assignment->descriptor_reg_class_id;
+  const uint32_t kind_ordinal =
+      loom_low_allocation_active_location_kind_ordinal(
+          assignment->location_kind);
+  return storage_space * 2u + kind_ordinal;
+}
+
+static void loom_low_allocation_active_location_insert(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* assignment) {
+  const uint32_t location = assignment->location_base;
+  const uint32_t space_index =
+      loom_low_allocation_active_location_space_index(index, assignment);
+  IREE_ASSERT_NE(space_index, UINT32_MAX);
+  uint32_t* root = &index->active_location_roots[space_index];
+  const uint32_t existing_index =
+      loom_low_allocation_active_location_find_node(index, *root, location);
+  if (existing_index != UINT32_MAX) {
+    ++index->active_location_nodes[existing_index].owner_count;
+    return;
+  }
+  uint32_t node_index = index->free_active_location_head;
+  if (node_index != UINT32_MAX) {
+    index->free_active_location_head =
+        index->active_location_nodes[node_index].left;
+  } else {
+    IREE_ASSERT_LT(index->active_location_count,
+                   index->active_location_capacity);
+    node_index = index->active_location_count++;
+  }
+  index->active_location_nodes[node_index] =
+      (loom_low_allocation_active_location_node_t){
+          .location = location,
+          .subtree_minimum = location,
+          .subtree_maximum = location,
+          .left = UINT32_MAX,
+          .right = UINT32_MAX,
+          .height_and_dense =
+              1u | LOOM_LOW_ALLOCATION_ACTIVE_LOCATION_DENSE_BIT,
+          .owner_count = 1,
+      };
+  *root =
+      loom_low_allocation_active_location_insert_node(index, *root, node_index);
+}
+
+static void loom_low_allocation_active_location_remove(
+    loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* assignment) {
+  const uint32_t location = assignment->location_base;
+  const uint32_t space_index =
+      loom_low_allocation_active_location_space_index(index, assignment);
+  IREE_ASSERT_NE(space_index, UINT32_MAX);
+  uint32_t* root = &index->active_location_roots[space_index];
+  const uint32_t existing_index =
+      loom_low_allocation_active_location_find_node(index, *root, location);
+  IREE_ASSERT_NE(existing_index, UINT32_MAX);
+  loom_low_allocation_active_location_node_t* existing =
+      &index->active_location_nodes[existing_index];
+  IREE_ASSERT_NE(existing->owner_count, 0u);
+  if (--existing->owner_count != 0) {
+    return;
+  }
+  uint32_t removed_index = UINT32_MAX;
+  *root = loom_low_allocation_active_location_remove_node(
+      index, *root, location, &removed_index);
+  IREE_ASSERT_NE(removed_index, UINT32_MAX);
+  index->active_location_nodes[removed_index].left =
+      index->free_active_location_head;
+  index->free_active_location_head = removed_index;
+}
+
+static bool loom_low_allocation_active_location_subtree_is_dense(
+    const loom_low_allocation_active_location_node_t* node) {
+  return loom_low_allocation_active_location_is_dense(node);
+}
+
+static bool loom_low_allocation_active_location_find_first_gap(
+    const loom_low_allocation_active_unit_index_t* index, uint32_t node_index,
+    uint64_t maximum, uint64_t* cursor, uint64_t* out_key) {
+  if (node_index == UINT32_MAX || *cursor > maximum) {
+    return false;
+  }
+  const loom_low_allocation_active_location_node_t* node =
+      &index->active_location_nodes[node_index];
+  if (node->subtree_maximum < *cursor || node->subtree_minimum > maximum) {
+    return false;
+  }
+  if (node->subtree_minimum > *cursor) {
+    *out_key = *cursor;
+    return true;
+  }
+  if (loom_low_allocation_active_location_subtree_is_dense(node) &&
+      *cursor >= node->subtree_minimum && *cursor <= node->subtree_maximum) {
+    *cursor = node->subtree_maximum + 1u;
+    return false;
+  }
+  if (loom_low_allocation_active_location_find_first_gap(
+          index, node->left, maximum, cursor, out_key)) {
+    return true;
+  }
+  if (*cursor > maximum) {
+    return false;
+  }
+  if (*cursor < node->location) {
+    *out_key = *cursor;
+    return true;
+  }
+  if (*cursor == node->location) {
+    ++*cursor;
+  }
+  return loom_low_allocation_active_location_find_first_gap(
+      index, node->right, maximum, cursor, out_key);
+}
+
+static bool loom_low_allocation_active_location_find_last_gap(
+    const loom_low_allocation_active_unit_index_t* index, uint32_t node_index,
+    uint64_t minimum, uint64_t* cursor, uint64_t* out_key) {
+  if (node_index == UINT32_MAX || *cursor < minimum) {
+    return false;
+  }
+  const loom_low_allocation_active_location_node_t* node =
+      &index->active_location_nodes[node_index];
+  if (node->subtree_maximum < minimum || node->subtree_minimum > *cursor) {
+    return false;
+  }
+  if (node->subtree_maximum < *cursor) {
+    *out_key = *cursor;
+    return true;
+  }
+  if (loom_low_allocation_active_location_subtree_is_dense(node) &&
+      *cursor >= node->subtree_minimum && *cursor <= node->subtree_maximum) {
+    if (node->subtree_minimum == 0) {
+      *cursor = 0;
+      return false;
+    }
+    *cursor = node->subtree_minimum - 1u;
+    return false;
+  }
+  if (loom_low_allocation_active_location_find_last_gap(
+          index, node->right, minimum, cursor, out_key)) {
+    return true;
+  }
+  if (*cursor < minimum) {
+    return false;
+  }
+  if (*cursor > node->location) {
+    *out_key = *cursor;
+    return true;
+  }
+  if (*cursor == node->location) {
+    if (*cursor == 0) {
+      return false;
+    }
+    --*cursor;
+  }
+  return loom_low_allocation_active_location_find_last_gap(
+      index, node->left, minimum, cursor, out_key);
 }
 
 static uint32_t loom_low_allocation_active_unit_bucket_index(
@@ -98,44 +843,103 @@ static bool loom_low_allocation_active_unit_mark_assignment_seen(
   return false;
 }
 
-static bool loom_low_allocation_value_id_is_ignored(
-    loom_value_id_t value_id, const loom_value_id_t* ignored_value_ids,
-    uint16_t ignored_value_count) {
-  for (uint16_t i = 0; i < ignored_value_count; ++i) {
-    if (ignored_value_ids[i] == value_id) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static bool loom_low_allocation_active_assignment_conflicts(
+    loom_low_allocation_live_range_sweep_t* live_range_sweep,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_allocation_unit_liveness_t* unit_liveness,
-    const loom_low_allocation_assignment_t* existing,
+    const loom_low_allocation_assignment_t* assignments,
+    iree_host_size_t assignment_count, uint32_t existing_assignment_index,
     const loom_low_allocation_assignment_t* candidate,
     const loom_value_id_t* ignored_value_ids, uint16_t ignored_value_count) {
+  IREE_ASSERT_ARGUMENT(live_range_sweep);
   IREE_ASSERT_ARGUMENT(unit_liveness);
-  if (loom_low_allocation_value_id_is_ignored(
-          existing->value_id, ignored_value_ids, ignored_value_count)) {
+  IREE_ASSERT_LT(existing_assignment_index, assignment_count);
+  const loom_low_allocation_assignment_t* existing =
+      &assignments[existing_assignment_index];
+  if (loom_low_allocation_unit_liveness_storage_is_ignored(
+          unit_liveness, existing->value_id, ignored_value_ids,
+          ignored_value_count)) {
     return false;
   }
   if (existing->location_kind != candidate->location_kind) {
     return false;
   }
-  return loom_low_allocation_live_range_assignments_conflict(
+  if (existing->liveness_segments.count <
+      LOOM_LOW_ALLOCATION_LIVE_RANGE_CURSOR_MIN_SEGMENT_COUNT) {
+    return loom_low_allocation_live_range_assignments_conflict(
+        descriptor_set, unit_liveness->storage_segments.entries,
+        unit_liveness->start_points, unit_liveness->end_points,
+        unit_liveness->point_count, existing, candidate);
+  }
+  return loom_low_allocation_live_range_sweep_assignments_conflict(
+      live_range_sweep->point,
+      &live_range_sweep
+           ->segment_starts_by_assignment_index[existing_assignment_index],
       descriptor_set, unit_liveness->storage_segments.entries,
       unit_liveness->start_points, unit_liveness->end_points,
       unit_liveness->point_count, existing, candidate);
 }
 
+static iree_status_t loom_low_allocation_active_location_initialize(
+    const loom_low_descriptor_set_t* descriptor_set,
+    iree_host_size_t unit_capacity, iree_arena_allocator_t* arena,
+    loom_low_allocation_active_unit_index_t* index) {
+  uint32_t alias_set_count = 0;
+  bool has_ordered_class = false;
+  for (uint16_t reg_class_id = 0;
+       reg_class_id < descriptor_set->reg_class_count; ++reg_class_id) {
+    const loom_low_reg_class_t* reg_class =
+        &descriptor_set->reg_classes[reg_class_id];
+    alias_set_count = iree_max(alias_set_count, reg_class->alias_set_id);
+    has_ordered_class |=
+        reg_class->allocatable_count == 0 &&
+        !loom_low_reg_class_uses_explicit_physical_registers(reg_class);
+  }
+  if (!has_ordered_class) {
+    return iree_ok_status();
+  }
+
+  iree_host_size_t storage_space_count = 0;
+  iree_host_size_t location_space_count = 0;
+  if (!iree_host_size_checked_add(alias_set_count,
+                                  descriptor_set->reg_class_count,
+                                  &storage_space_count) ||
+      !iree_host_size_checked_mul(storage_space_count, 2,
+                                  &location_space_count) ||
+      location_space_count > UINT32_MAX) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "active allocation location-space table exceeds uint32_t");
+  }
+  index->active_location_alias_set_count = alias_set_count;
+  index->active_location_space_count = (uint32_t)location_space_count;
+
+  IREE_RETURN_IF_ERROR(
+      iree_arena_allocate_array(arena, index->active_location_space_count,
+                                sizeof(*index->active_location_roots),
+                                (void**)&index->active_location_roots));
+  for (uint32_t i = 0; i < index->active_location_space_count; ++i) {
+    index->active_location_roots[i] = UINT32_MAX;
+  }
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      arena, unit_capacity, sizeof(*index->active_location_nodes),
+      (void**)&index->active_location_nodes));
+  index->active_location_capacity = (uint32_t)unit_capacity;
+  index->free_active_location_head = UINT32_MAX;
+  return iree_ok_status();
+}
+
 iree_status_t loom_low_allocation_active_unit_index_initialize(
+    const loom_low_descriptor_set_t* descriptor_set,
     iree_host_size_t assignment_capacity, iree_host_size_t unit_capacity,
     iree_arena_allocator_t* arena,
     loom_low_allocation_active_unit_index_t* out_index) {
+  IREE_ASSERT_ARGUMENT(descriptor_set);
   IREE_ASSERT_ARGUMENT(arena);
   IREE_ASSERT_ARGUMENT(out_index);
   *out_index = (loom_low_allocation_active_unit_index_t){0};
+  out_index->descriptor_set = descriptor_set;
+  out_index->free_active_location_head = UINT32_MAX;
   if (unit_capacity < LOOM_LOW_ALLOCATION_ACTIVE_UNIT_INDEX_MIN_CAPACITY) {
     return iree_ok_status();
   }
@@ -168,6 +972,9 @@ iree_status_t loom_low_allocation_active_unit_index_initialize(
                                                  sizeof(*out_index->entries),
                                                  (void**)&out_index->entries));
 
+  IREE_RETURN_IF_ERROR(loom_low_allocation_active_location_initialize(
+      descriptor_set, unit_capacity, arena, out_index));
+
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
       arena, assignment_capacity,
       sizeof(*out_index->entry_starts_by_assignment_index),
@@ -192,8 +999,83 @@ bool loom_low_allocation_active_unit_index_is_enabled(
   return index->bucket_count != 0;
 }
 
+bool loom_low_allocation_active_unit_index_can_order_candidate(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate) {
+  IREE_ASSERT_ARGUMENT(index);
+  IREE_ASSERT_ARGUMENT(candidate);
+  if (index->active_location_nodes == NULL ||
+      candidate->descriptor_reg_class_id >=
+          index->descriptor_set->reg_class_count ||
+      !loom_low_allocation_location_kind_is_register_like(
+          candidate->location_kind)) {
+    return false;
+  }
+  const loom_low_reg_class_t* reg_class =
+      &index->descriptor_set->reg_classes[candidate->descriptor_reg_class_id];
+  return reg_class->allocatable_count == 0 &&
+         !loom_low_reg_class_uses_explicit_physical_registers(reg_class) &&
+         candidate->unit_count == 1 && candidate->location_count == 1 &&
+         candidate->liveness_segments.count == 0 &&
+         !iree_any_bit_set(
+             candidate->flags,
+             LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_REFINED_UNIT_STARTS) &&
+         !loom_low_allocation_storage_assignment_uses_explicit_physical_register(
+             index->descriptor_set, candidate);
+}
+
+bool loom_low_allocation_active_unit_index_find_unoccupied_location(
+    const loom_low_allocation_active_unit_index_t* index,
+    const loom_low_allocation_assignment_t* candidate, uint32_t minimum_base,
+    uint32_t maximum_base,
+    loom_low_allocation_location_search_direction_t direction,
+    uint32_t* out_base) {
+  IREE_ASSERT_ARGUMENT(index);
+  IREE_ASSERT_ARGUMENT(candidate);
+  IREE_ASSERT_ARGUMENT(out_base);
+  IREE_ASSERT_TRUE(loom_low_allocation_active_unit_index_can_order_candidate(
+      index, candidate));
+  if (minimum_base > maximum_base) {
+    return false;
+  }
+  const uint64_t minimum = minimum_base;
+  const uint64_t maximum = maximum_base;
+  const uint32_t space_index =
+      loom_low_allocation_active_location_space_index(index, candidate);
+  const uint32_t root = index->active_location_roots[space_index];
+  uint64_t result = 0;
+  bool found = false;
+  if (direction == LOOM_LOW_ALLOCATION_LOCATION_SEARCH_DESCENDING) {
+    uint64_t cursor = maximum;
+    found = loom_low_allocation_active_location_find_last_gap(
+        index, root, minimum, &cursor, &result);
+    if (!found && cursor >= minimum &&
+        loom_low_allocation_active_location_find_node(
+            index, root, (uint32_t)cursor) == UINT32_MAX) {
+      result = cursor;
+      found = true;
+    }
+  } else {
+    uint64_t cursor = minimum;
+    found = loom_low_allocation_active_location_find_first_gap(
+        index, root, maximum, &cursor, &result);
+    if (!found && cursor <= maximum &&
+        loom_low_allocation_active_location_find_node(
+            index, root, (uint32_t)cursor) == UINT32_MAX) {
+      result = cursor;
+      found = true;
+    }
+  }
+  if (!found) {
+    return false;
+  }
+  *out_base = (uint32_t)result;
+  return true;
+}
+
 bool loom_low_allocation_active_unit_index_conflicts(
     loom_low_allocation_active_unit_index_t* index,
+    loom_low_allocation_live_range_sweep_t* live_range_sweep,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_allocation_unit_liveness_t* unit_liveness,
     const loom_low_allocation_assignment_t* assignments,
@@ -201,6 +1083,7 @@ bool loom_low_allocation_active_unit_index_conflicts(
     const loom_low_allocation_assignment_t* candidate,
     const loom_value_id_t* ignored_value_ids, uint16_t ignored_value_count) {
   IREE_ASSERT_ARGUMENT(index);
+  IREE_ASSERT_ARGUMENT(live_range_sweep);
   IREE_ASSERT_ARGUMENT(descriptor_set);
   IREE_ASSERT_ARGUMENT(assignments);
   IREE_ASSERT_ARGUMENT(candidate);
@@ -236,8 +1119,9 @@ bool loom_low_allocation_active_unit_index_conflicts(
           !loom_low_allocation_active_unit_mark_assignment_seen(
               index, assignment_index, generation) &&
           loom_low_allocation_active_assignment_conflicts(
-              descriptor_set, unit_liveness, existing, candidate,
-              ignored_value_ids, ignored_value_count)) {
+              live_range_sweep, descriptor_set, unit_liveness, assignments,
+              assignment_count, assignment_index, candidate, ignored_value_ids,
+              ignored_value_count)) {
         return true;
       }
       entry_index = entry->next_entry;
@@ -248,6 +1132,7 @@ bool loom_low_allocation_active_unit_index_conflicts(
 
 iree_status_t loom_low_allocation_active_unit_index_collect_conflicts(
     loom_low_allocation_active_unit_index_t* index,
+    loom_low_allocation_live_range_sweep_t* live_range_sweep,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_allocation_unit_liveness_t* unit_liveness,
     const loom_low_allocation_assignment_t* assignments,
@@ -288,8 +1173,9 @@ iree_status_t loom_low_allocation_active_unit_index_collect_conflicts(
           !loom_low_allocation_active_unit_mark_assignment_seen(
               index, assignment_index, generation) &&
           loom_low_allocation_active_assignment_conflicts(
-              descriptor_set, unit_liveness, existing, candidate,
-              ignored_value_ids, ignored_value_count)) {
+              live_range_sweep, descriptor_set, unit_liveness, assignments,
+              assignment_count, assignment_index, candidate, ignored_value_ids,
+              ignored_value_count)) {
         if (*inout_assignment_count == assignment_capacity) {
           return iree_make_status(
               IREE_STATUS_RESOURCE_EXHAUSTED,
@@ -321,6 +1207,10 @@ void loom_low_allocation_active_unit_index_insert_assignment(
   if (!loom_low_allocation_location_kind_is_register_like(
           assignment->location_kind)) {
     return;
+  }
+  if (loom_low_allocation_active_unit_index_can_order_candidate(index,
+                                                                assignment)) {
+    loom_low_allocation_active_location_insert(index, assignment);
   }
   const uint32_t atomic_unit_count =
       loom_low_allocation_storage_assignment_atomic_unit_count(descriptor_set,
@@ -361,6 +1251,11 @@ void loom_low_allocation_active_unit_index_insert_assignment(
     }
     index->bucket_heads[bucket_index] = entry_index;
     assignment_entry_head = entry_index;
+    if (index->occupancy != NULL) {
+      loom_low_allocation_active_occupancy_insert(
+          index, entry_index, assignment, unit_offset,
+          assignment->liveness_segments.start, index->occupancy->point);
+    }
   }
   index->entry_starts_by_assignment_index[assignment_index] =
       assignment_entry_head;
@@ -384,6 +1279,10 @@ void loom_low_allocation_active_unit_index_remove_assignment(
           assignment->location_kind)) {
     return;
   }
+  if (loom_low_allocation_active_unit_index_can_order_candidate(index,
+                                                                assignment)) {
+    loom_low_allocation_active_location_remove(index, assignment);
+  }
   const uint32_t entry_start =
       index->entry_starts_by_assignment_index[assignment_index];
   IREE_ASSERT_NE(entry_start, UINT32_MAX);
@@ -392,6 +1291,9 @@ void loom_low_allocation_active_unit_index_remove_assignment(
     IREE_ASSERT_LT(entry_index, index->entry_count);
     loom_low_allocation_active_unit_entry_t* entry =
         &index->entries[entry_index];
+    if (index->occupancy != NULL) {
+      loom_low_allocation_active_occupancy_remove(index, entry_index);
+    }
     if (entry->previous_entry != UINT32_MAX) {
       IREE_ASSERT_LT(entry->previous_entry, index->entry_count);
       index->entries[entry->previous_entry].next_entry = entry->next_entry;

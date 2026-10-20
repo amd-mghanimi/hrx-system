@@ -8,8 +8,10 @@
 
 #include "loom/error/emitter.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
+#include "loom/ops/callable_effects.h"
 #include "loom/ops/function_contract_verify.h"
 #include "loom/ops/low/ops.h"
 #include "loom/ops/low/schedule_scope.h"
@@ -1290,32 +1292,6 @@ static iree_status_t loom_low_verify_function_preamble(
   return status;
 }
 
-static iree_status_t loom_low_verify_kernel_returns(
-    const loom_module_t* module, const loom_op_t* kernel_op,
-    iree_diagnostic_emitter_t emitter) {
-  loom_region_t* body = loom_low_kernel_def_body(kernel_op);
-  if (body == NULL) {
-    return iree_ok_status();
-  }
-  loom_block_t* block = NULL;
-  loom_region_for_each_block(body, block) {
-    loom_op_t* nested_op = NULL;
-    loom_block_for_each_op(block, nested_op) {
-      if (!loom_low_return_isa(nested_op) || nested_op->operand_count == 0) {
-        continue;
-      }
-      loom_diagnostic_param_t params[] = {
-          loom_param_string(loom_low_op_name(module, nested_op)),
-          loom_param_u32(nested_op->operand_count),
-          loom_param_u32(0),
-      };
-      return loom_low_emit(emitter, nested_op, LOOM_ERR_STRUCTURE_001, params,
-                           IREE_ARRAYSIZE(params));
-    }
-  }
-  return iree_ok_status();
-}
-
 static iree_status_t loom_low_emit_callee_related(
     iree_diagnostic_emitter_t emitter, const loom_op_t* call_op,
     const loom_op_t* definition_op, const loom_error_def_t* error,
@@ -1416,6 +1392,17 @@ iree_status_t loom_low_cond_br_verify(const loom_module_t* module,
       loom_low_cond_br_false_dest(op), NULL, 0);
 }
 
+iree_status_t loom_low_op_cond_br_verify(const loom_module_t* module,
+                                         const loom_op_t* op,
+                                         iree_diagnostic_emitter_t emitter) {
+  IREE_RETURN_IF_ERROR(loom_ops_verify_successor_args(
+      module, emitter, op, IREE_SV("low.op.cond_br"), 0,
+      loom_low_op_cond_br_true_dest(op), NULL, 0));
+  return loom_ops_verify_successor_args(
+      module, emitter, op, IREE_SV("low.op.cond_br"), 1,
+      loom_low_op_cond_br_false_dest(op), NULL, 0);
+}
+
 iree_status_t loom_low_scf_if_verify(const loom_module_t* module,
                                      const loom_op_t* op,
                                      iree_diagnostic_emitter_t emitter) {
@@ -1483,7 +1470,6 @@ iree_status_t loom_low_kernel_def_verify(const loom_module_t* module,
                                          iree_diagnostic_emitter_t emitter) {
   IREE_RETURN_IF_ERROR(loom_low_verify_kernel_contract(op, emitter));
   IREE_RETURN_IF_ERROR(loom_low_verify_kernel_exactness_modes(op, emitter));
-  IREE_RETURN_IF_ERROR(loom_low_verify_kernel_returns(module, op, emitter));
   return loom_low_verify_function_preamble(module, op, emitter);
 }
 
@@ -1612,12 +1598,35 @@ iree_status_t loom_low_func_call_verify(const loom_module_t* module,
   }
   return loom_function_call_contract_verify(
       module, op, callee, loom_low_func_call_operands(op),
-      loom_low_func_call_results(op), emitter);
+      loom_low_func_call_results(op), /*argument_match_flags=*/0, emitter);
 }
 
 iree_status_t loom_low_invoke_verify(const loom_module_t* module,
                                      const loom_op_t* op,
                                      iree_diagnostic_emitter_t emitter) {
+  // Memory lowering carries view geometry separately from its storage-root
+  // register. A raw register call has no corresponding layout/offset binding.
+  const loom_value_slice_t operands = loom_low_invoke_operands(op);
+  for (uint16_t i = 0; i < operands.count; ++i) {
+    const loom_type_t type = loom_module_value_type(module, operands.values[i]);
+    if (loom_type_is_view(type)) {
+      return loom_low_emit_type_constraint_error(
+          op, LOOM_DIAGNOSTIC_FIELD_OPERAND, i, IREE_SV("operands"), type,
+          IREE_SV("non-view source value; pass buffers and offsets explicitly"),
+          emitter);
+    }
+  }
+  const loom_value_slice_t results = loom_low_invoke_results(op);
+  for (uint16_t i = 0; i < results.count; ++i) {
+    const loom_type_t type = loom_module_value_type(module, results.values[i]);
+    if (loom_type_is_view(type)) {
+      return loom_low_emit_type_constraint_error(
+          op, LOOM_DIAGNOSTIC_FIELD_RESULT, i, IREE_SV("results"), type,
+          IREE_SV(
+              "non-view source value; return buffers and offsets explicitly"),
+          emitter);
+    }
+  }
   loom_symbol_ref_t callee = loom_low_invoke_callee(op);
   const loom_symbol_t* symbol = loom_low_lookup_defined_symbol(module, callee);
   if (!symbol) {
@@ -1633,7 +1642,9 @@ iree_status_t loom_low_invoke_verify(const loom_module_t* module,
   return iree_ok_status();
 }
 
-loom_trait_flags_t loom_low_op_effective_traits(const loom_op_t* op) {
+loom_trait_flags_t loom_low_op_effective_traits(const loom_module_t* module,
+                                                const loom_op_t* op) {
+  (void)module;
   // Descriptor traits remain intrinsic even when an access has no modifiers.
   // Volatility strengthens this instance without changing the instruction.
   if (iree_any_bit_set(op->instance_flags, LOOM_MEMORY_ACCESS_FLAG_VOLATILE)) {
@@ -1642,16 +1653,14 @@ loom_trait_flags_t loom_low_op_effective_traits(const loom_op_t* op) {
   return op->traits;
 }
 
-loom_trait_flags_t loom_low_func_call_effective_traits(const loom_op_t* op) {
-  if (loom_low_func_call_purity(op) != 0) {
-    return LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_PURE;
-  }
-  return LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_UNKNOWN_EFFECTS;
+loom_trait_flags_t loom_low_func_call_effective_traits(
+    const loom_module_t* module, const loom_op_t* op) {
+  (void)module;
+  return loom_callable_effects_traits(loom_low_func_call_effect_contract(op));
 }
 
-loom_trait_flags_t loom_low_invoke_effective_traits(const loom_op_t* op) {
-  if (loom_low_invoke_purity(op) != 0) {
-    return LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_PURE;
-  }
-  return LOOM_TRAIT_CALLABLE_BOUNDARY | LOOM_TRAIT_UNKNOWN_EFFECTS;
+loom_trait_flags_t loom_low_invoke_effective_traits(const loom_module_t* module,
+                                                    const loom_op_t* op) {
+  (void)module;
+  return loom_callable_effects_traits(loom_low_invoke_effect_contract(op));
 }

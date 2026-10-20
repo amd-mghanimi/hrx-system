@@ -1,0 +1,296 @@
+// RUN: emit source-low output=low
+
+// Integer reductions use the same shift/combine tree for every native combine
+// family. YMM values first combine their two XMM halves.
+x86.target<avx2> @target
+
+func.def target(@target) @integer_reduction_families(%i8_values: vector<32xi8>, %i8_init: i8, %i16_values: vector<8xi16>, %i16_init: i16, %i32_values: vector<8xi32>, %i32_init: i32, %i64_values: vector<2xi64>, %i64_init: i64) -> (i8, i16, i32, i64) {
+  %i8 = vector.reduce<addi> %i8_values, %i8_init : vector<32xi8>, i8
+  %i16 = vector.reduce<muli> %i16_values, %i16_init : vector<8xi16>, i16
+  %i32 = vector.reduce<minsi> %i32_values, %i32_init : vector<8xi32>, i32
+  %i64 = vector.reduce<xori> %i64_values, %i64_init : vector<2xi64>, i64
+  func.return %i8, %i16, %i32, %i64 : i8, i16, i32, i64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<32xi8>, i8, vector<8xi16>, i16, vector<8xi32>, i32, vector<2xi64>, i64) -> (i8, i16, i32, i64)}) @integer_reduction_families(%i8_values: reg<x86.ymm>, %i8_init: reg<x86.gpr32>, %i16_values: reg<x86.xmm>, %i16_init: reg<x86.gpr32>, %i32_values: reg<x86.ymm>, %i32_init: reg<x86.gpr32>, %i64_values: reg<x86.xmm>, %i64_init: reg<x86.gpr64>) -> (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr64>) asm {
+  %28 = vextractf128.xmm %i8_values, 0
+  %29 = vextractf128.xmm %i8_values, 1
+  %30 = vpaddb.xmm %28, %29
+  %31 = vpsrldq.xmm %30, 8
+  %32 = vpaddb.xmm %30, %31
+  %33 = vpsrldq.xmm %32, 4
+  %34 = vpaddb.xmm %32, %33
+  %35 = vpsrldq.xmm %34, 2
+  %36 = vpaddb.xmm %34, %35
+  %37 = vpsrldq.xmm %36, 1
+  %38 = vpaddb.xmm %36, %37
+  %39 = vmovd.xmm.gpr32 %i8_init
+  %40 = vpaddb.xmm %38, %39
+  %i8 = vpextrb.xmm %40, 0
+  %42 = vpsrldq.xmm %i16_values, 8
+  %43 = vpmullw.xmm %i16_values, %42
+  %44 = vpsrldq.xmm %43, 4
+  %45 = vpmullw.xmm %43, %44
+  %46 = vpsrldq.xmm %45, 2
+  %47 = vpmullw.xmm %45, %46
+  %48 = vmovd.xmm.gpr32 %i16_init
+  %49 = vpmullw.xmm %47, %48
+  %i16 = vpextrw.xmm %49, 0
+  %51 = vextractf128.xmm %i32_values, 0
+  %52 = vextractf128.xmm %i32_values, 1
+  %53 = vpminsd.xmm %51, %52
+  %54 = vpsrldq.xmm %53, 8
+  %55 = vpminsd.xmm %53, %54
+  %56 = vpsrldq.xmm %55, 4
+  %57 = vpminsd.xmm %55, %56
+  %58 = vmovd.xmm.gpr32 %i32_init
+  %59 = vpminsd.xmm %57, %58
+  %i32 = vpextrd.xmm %59, 0
+  %61 = vpsrldq.xmm %i64_values, 8
+  %62 = vpxor.xmm %i64_values, %61
+  %63 = vmovq.xmm.gpr64 %i64_init
+  %64 = vpxor.xmm %62, %63
+  %i64 = vpextrq.xmm %64, 0
+  return %i8, %i16, %i32, %i64
+}
+
+// ====
+
+// Ordered reductions retain logical lane order. Reassociated reductions use a
+// packed tree after combining YMM halves. Dot products retain scalar FMA order.
+x86.target<avx2> @target
+
+func.def target(@target) @float_reduction_families(%f32x4: vector<4xf32>, %f32x8: vector<8xf32>, %f32_init: f32, %f64x2: vector<2xf64>, %f64x4: vector<4xf64>, %f64_init: f64) -> (f32, f32, f64, f64) {
+  %f32_ordered = vector.reduce<addf> %f32x4, %f32_init : vector<4xf32>, f32
+  %f32_reassociated = vector.reduce<mulf, reassoc> %f32x8, %f32_init : vector<8xf32>, f32
+  %f64_ordered = vector.reduce<mulf> %f64x2, %f64_init : vector<2xf64>, f64
+  %f64_reassociated = vector.reduce<addf, reassoc> %f64x4, %f64_init : vector<4xf64>, f64
+  func.return %f32_ordered, %f32_reassociated, %f64_ordered, %f64_reassociated : f32, f32, f64, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf32>, vector<8xf32>, f32, vector<2xf64>, vector<4xf64>, f64) -> (f32, f32, f64, f64)}) @float_reduction_families(%f32x4: reg<x86.xmm>, %f32x8: reg<x86.ymm>, %f32_init: reg<x86.xmm>, %f64x2: reg<x86.xmm>, %f64x4: reg<x86.ymm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %24 = vaddss.xmm %f32_init, %f32x4
+  %25 = vpermilps.xmm %f32x4, 1
+  %26 = vaddss.xmm %24, %25
+  %27 = vpermilps.xmm %f32x4, 2
+  %28 = vaddss.xmm %26, %27
+  %29 = vpermilps.xmm %f32x4, 3
+  %f32_ordered = vaddss.xmm %28, %29
+  %31 = vextractf128.xmm %f32x8, 0
+  %32 = vextractf128.xmm %f32x8, 1
+  %33 = vmulps.xmm %31, %32
+  %34 = vpsrldq.xmm %33, 8
+  %35 = vmulps.xmm %33, %34
+  %36 = vpsrldq.xmm %35, 4
+  %37 = vmulps.xmm %35, %36
+  %f32_reassociated = vmulss.xmm %f32_init, %37
+  %39 = vmulsd.xmm %f64_init, %f64x2
+  %40 = vpermilpd.xmm %f64x2, 1
+  %f64_ordered = vmulsd.xmm %39, %40
+  %42 = vextractf128.xmm %f64x4, 0
+  %43 = vextractf128.xmm %f64x4, 1
+  %44 = vaddpd.xmm %42, %43
+  %45 = vpsrldq.xmm %44, 8
+  %46 = vaddpd.xmm %44, %45
+  %f64_reassociated = vaddsd.xmm %f64_init, %46
+  return %f32_ordered, %f32_reassociated, %f64_ordered, %f64_reassociated
+}
+
+// ====
+
+// IEEE extrema reductions scalarize through the shared vector reduction
+// legalization and the scalar extrema family when no packed contract applies.
+x86.target<avx2> @target
+
+func.def target(@target) @float_extrema_reductions(%f32x4: vector<4xf32>, %f32_init: f32, %f64x4: vector<4xf64>, %f64_init: f64) -> (f32, f64) {
+  %f32 = vector.reduce<minnumf> %f32x4, %f32_init : vector<4xf32>, f32
+  %f64 = vector.reduce<maximumf, reassoc> %f64x4, %f64_init : vector<4xf64>, f64
+  func.return %f32, %f64 : f32, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf32>, f32, vector<4xf64>, f64) -> (f32, f64)}) @float_extrema_reductions(%f32x4: reg<x86.xmm>, %f32_init: reg<x86.xmm>, %f64x4: reg<x86.ymm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %30 = vpermilps.xmm %f32x4, 0
+  %31 = avx2.vcmpps.xmm %f32_init, %30, 17
+  %32 = vpblendvb.xmm %30, %f32_init, %31
+  %33 = avx2.vcmpps.xmm %f32_init, %30, 0
+  %34 = vpor.xmm %f32_init, %30
+  %35 = vpblendvb.xmm %32, %34, %33
+  %36 = avx2.vcmpps.xmm %f32_init, %f32_init, 3
+  %37 = vpblendvb.xmm %35, %30, %36
+  %38 = avx2.vcmpps.xmm %30, %30, 3
+  %39 = vpblendvb.xmm %37, %f32_init, %38
+  %40 = vpermilps.xmm %f32x4, 1
+  %41 = avx2.vcmpps.xmm %39, %40, 17
+  %42 = vpblendvb.xmm %40, %39, %41
+  %43 = avx2.vcmpps.xmm %39, %40, 0
+  %44 = vpor.xmm %39, %40
+  %45 = vpblendvb.xmm %42, %44, %43
+  %46 = avx2.vcmpps.xmm %39, %39, 3
+  %47 = vpblendvb.xmm %45, %40, %46
+  %48 = avx2.vcmpps.xmm %40, %40, 3
+  %49 = vpblendvb.xmm %47, %39, %48
+  %50 = vpermilps.xmm %f32x4, 2
+  %51 = avx2.vcmpps.xmm %49, %50, 17
+  %52 = vpblendvb.xmm %50, %49, %51
+  %53 = avx2.vcmpps.xmm %49, %50, 0
+  %54 = vpor.xmm %49, %50
+  %55 = vpblendvb.xmm %52, %54, %53
+  %56 = avx2.vcmpps.xmm %49, %49, 3
+  %57 = vpblendvb.xmm %55, %50, %56
+  %58 = avx2.vcmpps.xmm %50, %50, 3
+  %59 = vpblendvb.xmm %57, %49, %58
+  %60 = vpermilps.xmm %f32x4, 3
+  %61 = avx2.vcmpps.xmm %59, %60, 17
+  %62 = vpblendvb.xmm %60, %59, %61
+  %63 = avx2.vcmpps.xmm %59, %60, 0
+  %64 = vpor.xmm %59, %60
+  %65 = vpblendvb.xmm %62, %64, %63
+  %66 = avx2.vcmpps.xmm %59, %59, 3
+  %67 = vpblendvb.xmm %65, %60, %66
+  %68 = avx2.vcmpps.xmm %60, %60, 3
+  %f32 = vpblendvb.xmm %67, %59, %68
+  %70 = vextractf128.xmm %f64x4, 0
+  %71 = vpermilpd.xmm %70, 0
+  %73 = vpermilpd.xmm %70, 1
+  %74 = avx2.vcmppd.xmm %71, %73, 30
+  %75 = vpblendvb.xmm %73, %71, %74
+  %76 = avx2.vcmppd.xmm %71, %73, 0
+  %77 = vpand.xmm %71, %73
+  %78 = vpblendvb.xmm %75, %77, %76
+  %79 = avx2.vcmppd.xmm %71, %71, 3
+  %80 = vpblendvb.xmm %78, %71, %79
+  %81 = avx2.vcmppd.xmm %73, %73, 3
+  %82 = vpblendvb.xmm %80, %73, %81
+  %83 = vextractf128.xmm %f64x4, 1
+  %84 = vpermilpd.xmm %83, 0
+  %86 = vpermilpd.xmm %83, 1
+  %87 = avx2.vcmppd.xmm %84, %86, 30
+  %88 = vpblendvb.xmm %86, %84, %87
+  %89 = avx2.vcmppd.xmm %84, %86, 0
+  %90 = vpand.xmm %84, %86
+  %91 = vpblendvb.xmm %88, %90, %89
+  %92 = avx2.vcmppd.xmm %84, %84, 3
+  %93 = vpblendvb.xmm %91, %84, %92
+  %94 = avx2.vcmppd.xmm %86, %86, 3
+  %95 = vpblendvb.xmm %93, %86, %94
+  %96 = avx2.vcmppd.xmm %82, %95, 30
+  %97 = vpblendvb.xmm %95, %82, %96
+  %98 = avx2.vcmppd.xmm %82, %95, 0
+  %99 = vpand.xmm %82, %95
+  %100 = vpblendvb.xmm %97, %99, %98
+  %101 = avx2.vcmppd.xmm %82, %82, 3
+  %102 = vpblendvb.xmm %100, %82, %101
+  %103 = avx2.vcmppd.xmm %95, %95, 3
+  %104 = vpblendvb.xmm %102, %95, %103
+  %105 = avx2.vcmppd.xmm %f64_init, %104, 30
+  %106 = vpblendvb.xmm %104, %f64_init, %105
+  %107 = avx2.vcmppd.xmm %f64_init, %104, 0
+  %108 = vpand.xmm %f64_init, %104
+  %109 = vpblendvb.xmm %106, %108, %107
+  %110 = avx2.vcmppd.xmm %f64_init, %f64_init, 3
+  %111 = vpblendvb.xmm %109, %f64_init, %110
+  %112 = avx2.vcmppd.xmm %104, %104, 3
+  %f64 = vpblendvb.xmm %111, %104, %112
+  return %f32, %f64
+}
+
+// ====
+
+// Reassociated extrema with no NaNs or signed-zero distinction use packed
+// native MIN/MAX trees before one scalar init combine.
+x86.target<avx2> @target
+
+func.def target(@target) @fast_float_extrema_reductions(%f32x8: vector<8xf32>, %f32_init: f32, %f64x2: vector<2xf64>, %f64_init: f64) -> (f32, f64) {
+  %f32 = vector.reduce<maxnumf, reassoc|nnan|nsz> %f32x8, %f32_init : vector<8xf32>, f32
+  %f64 = vector.reduce<minimumf, reassoc|nnan|nsz> %f64x2, %f64_init : vector<2xf64>, f64
+  func.return %f32, %f64 : f32, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xf32>, f32, vector<2xf64>, f64) -> (f32, f64)}) @fast_float_extrema_reductions(%f32x8: reg<x86.ymm>, %f32_init: reg<x86.xmm>, %f64x2: reg<x86.xmm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %14 = vextractf128.xmm %f32x8, 0
+  %15 = vextractf128.xmm %f32x8, 1
+  %16 = vmaxps.xmm %14, %15
+  %17 = vpsrldq.xmm %16, 8
+  %18 = vmaxps.xmm %16, %17
+  %19 = vpsrldq.xmm %18, 4
+  %20 = vmaxps.xmm %18, %19
+  %f32 = vmaxss.xmm %f32_init, %20
+  %22 = vpsrldq.xmm %f64x2, 8
+  %23 = vminpd.xmm %f64x2, %22
+  %f64 = vminsd.xmm %f64_init, %23
+  return %f32, %f64
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @float_dot_families(%f32_lhs: vector<4xf32>, %f32_rhs: vector<4xf32>, %f32_init: f32, %f64_lhs: vector<4xf64>, %f64_rhs: vector<4xf64>, %f64_init: f64) -> (f32, f64) {
+  %f32 = vector.dotf %f32_lhs, %f32_rhs, %f32_init : vector<4xf32>, vector<4xf32>, f32
+  %f64 = vector.dotf %f64_lhs, %f64_rhs, %f64_init : vector<4xf64>, vector<4xf64>, f64
+  func.return %f32, %f64 : f32, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf32>, vector<4xf32>, f32, vector<4xf64>, vector<4xf64>, f64) -> (f32, f64)}) @float_dot_families(%f32_lhs: reg<x86.xmm>, %f32_rhs: reg<x86.xmm>, %f32_init: reg<x86.xmm>, %f64_lhs: reg<x86.ymm>, %f64_rhs: reg<x86.ymm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %18 = copy %f32_init : reg<x86.xmm> -> reg<x86.xmm>
+  %19 = vfmadd231ss.xmm %18, %f32_lhs, %f32_rhs
+  %20 = vpermilps.xmm %f32_lhs, 1
+  %21 = vpermilps.xmm %f32_rhs, 1
+  %22 = vfmadd231ss.xmm %19, %20, %21
+  %23 = vpermilps.xmm %f32_lhs, 2
+  %24 = vpermilps.xmm %f32_rhs, 2
+  %25 = vfmadd231ss.xmm %22, %23, %24
+  %26 = vpermilps.xmm %f32_lhs, 3
+  %27 = vpermilps.xmm %f32_rhs, 3
+  %f32 = vfmadd231ss.xmm %25, %26, %27
+  %29 = vextractf128.xmm %f64_lhs, 0
+  %30 = vextractf128.xmm %f64_lhs, 1
+  %31 = vextractf128.xmm %f64_rhs, 0
+  %32 = vextractf128.xmm %f64_rhs, 1
+  %33 = copy %f64_init : reg<x86.xmm> -> reg<x86.xmm>
+  %34 = vfmadd231sd.xmm %33, %29, %31
+  %35 = vpermilpd.xmm %29, 1
+  %36 = vpermilpd.xmm %31, 1
+  %37 = vfmadd231sd.xmm %34, %35, %36
+  %38 = vfmadd231sd.xmm %37, %30, %32
+  %39 = vpermilpd.xmm %30, 1
+  %40 = vpermilpd.xmm %32, 1
+  %f64 = vfmadd231sd.xmm %38, %39, %40
+  return %f32, %f64
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @subnative_float_reductions(%f32_lhs: vector<2xf32>, %f32_rhs: vector<2xf32>, %f32_init: f32, %f64_lhs: vector<1xf64>, %f64_rhs: vector<1xf64>, %f64_init: f64) -> (f32, f32, f32, f64, f64) {
+  %f32_ordered = vector.reduce<addf> %f32_lhs, %f32_init : vector<2xf32>, f32
+  %f32_reassociated = vector.reduce<mulf, reassoc> %f32_lhs, %f32_init : vector<2xf32>, f32
+  %f32_dot = vector.dotf %f32_lhs, %f32_rhs, %f32_init : vector<2xf32>, vector<2xf32>, f32
+  %f64_ordered = vector.reduce<addf> %f64_lhs, %f64_init : vector<1xf64>, f64
+  %f64_dot = vector.dotf %f64_lhs, %f64_rhs, %f64_init : vector<1xf64>, vector<1xf64>, f64
+  func.return %f32_ordered, %f32_reassociated, %f32_dot, %f64_ordered, %f64_dot : f32, f32, f32, f64, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<2xf32>, vector<2xf32>, f32, vector<1xf64>, vector<1xf64>, f64) -> (f32, f32, f32, f64, f64)}) @subnative_float_reductions(%f32_lhs: reg<x86.xmm>, %f32_rhs: reg<x86.xmm>, %f32_init: reg<x86.xmm>, %f64_lhs: reg<x86.xmm>, %f64_rhs: reg<x86.xmm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %27 = vaddss.xmm %f32_init, %f32_lhs
+  %28 = vpermilps.xmm %f32_lhs, 1
+  %f32_ordered = vaddss.xmm %27, %28
+  %30 = vpsrldq.xmm %f32_lhs, 4
+  %31 = vmulps.xmm %f32_lhs, %30
+  %f32_reassociated = vmulss.xmm %f32_init, %31
+  %33 = copy %f32_init : reg<x86.xmm> -> reg<x86.xmm>
+  %34 = vfmadd231ss.xmm %33, %f32_lhs, %f32_rhs
+  %36 = vpermilps.xmm %f32_rhs, 1
+  %f32_dot = vfmadd231ss.xmm %34, %28, %36
+  %f64_ordered = vaddsd.xmm %f64_init, %f64_lhs
+  %39 = copy %f64_init : reg<x86.xmm> -> reg<x86.xmm>
+  %f64_dot = vfmadd231sd.xmm %39, %f64_lhs, %f64_rhs
+  return %f32_ordered, %f32_reassociated, %f32_dot, %f64_ordered, %f64_dot
+}

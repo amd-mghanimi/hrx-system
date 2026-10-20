@@ -37,6 +37,28 @@ func.def target(@test_target) @rejects_unresolved_compile_time_query(%schema: en
 }
 
 // ====
+// RUN: pass source-to-low
+
+test.target<low_core> @test_target
+
+func.def target(@test_target) @rejects_unresolved_scalar_constexpr(%value: i32) -> (i32) {
+  // ERROR@+1: TARGET/070 {op_name="scalar.constexpr"}
+  %required = scalar.constexpr %value : i32
+  func.return %required : i32
+}
+
+// ====
+// RUN: pass source-to-low
+
+test.target<low_core> @test_target
+
+func.def target(@test_target) @rejects_unresolved_index_constexpr(%value: index) -> (index) {
+  // ERROR@+1: TARGET/070 {op_name="index.constexpr"}
+  %required = index.constexpr %value : index
+  func.return %required : index
+}
+
+// ====
 // RUN: pass dce,canonicalize,source-to-low
 
 test.target<low_core> @test_target
@@ -52,17 +74,6 @@ test.target<low_core> @test_target
 
 low.func.def target<test.low.core>(@test_target) abi(object_function) @removes_dead_compile_time_query() asm {
   return
-}
-
-// ====
-// RUN: pass target-legalize{mode=final}
-
-test.target<low_core> @test_target
-
-func.def target(@test_target) @rejects_unsupported_source_op_in_final_mode(%input: view<4xf32>, %origin: index, %mask: vector<4xi1>, %old: vector<4xf32>) -> (vector<4xf32>) {
-  // ERROR@+1: TARGET/001 {op_name="vector.load.mask"}
-  %r = vector.load.mask %input[%origin], %mask, %old : view<4xf32>, vector<4xi1>, vector<4xf32>
-  func.return %r : vector<4xf32>
 }
 
 // ====
@@ -148,8 +159,8 @@ test.target<low_core> @test_target
 
 func.def target(@test_target) @rejects_assume_divisibility_contradicting_exact_facts() -> (index) {
   %exact = index.constant 66 : index
-  // ERROR@+1: TARGET/060 {predicate_name="mul", value_name="exact", known_value="66"}
-  %assumed = index.assume %exact [mul(%exact, 64)] : index
+  // ERROR@+1: TARGET/060 {predicate_name="multiple_of", value_name="exact", known_value="66"}
+  %assumed = index.assume %exact [multiple_of(%exact, 64)] : index
   func.return %assumed : index
 }
 
@@ -192,13 +203,13 @@ kernel.def target(@test_target) @rejects_workgroup_id_assume_excluding_static_co
 
 test.target<low_core> @test_target
 
-kernel.def target(@test_target) @rejects_subgroup_lane_id_assume_excluding_static_workgroup() {
+kernel.def target(@test_target) @rejects_subgroup_lane_id_assume_excluding_execution_width() {
   %c1 = index.constant 1 : index
   %c64 = index.constant 64 : index
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
 } launch() {
   %lane0 = kernel.subgroup.lane.id : index
-  // ERROR@+1: TARGET/058 {value_kind="subgroup.lane.id", axis="lane", required_min="0", required_max="63", assumed_min="0", assumed_max="31"}
+  // ERROR@+1: TARGET/058 {value_kind="subgroup.lane.id", axis="lane", required_min="0", required_max="127", assumed_min="0", assumed_max="31"}
   %lane = index.assume %lane0 [range(%lane0, 0, 31)] : index
   test.use %lane : index
   kernel.return
@@ -227,7 +238,7 @@ kernel.def target(@test_target) @rejects_cast_workitem_id_assume_excluding_stati
 
 test.target<low_core> @test_target
 
-kernel.def target(@test_target) @allows_guarded_workitem_id_assume_excluding_static_workgroup() {
+kernel.def target(@test_target) @allows_structured_guarded_workitem_id_excluding_static_workgroup() {
   %c1 = index.constant 1 : index
   %c32 = index.constant 32 : index
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c32, %c1, %c1) : index
@@ -236,8 +247,7 @@ kernel.def target(@test_target) @allows_guarded_workitem_id_assume_excluding_sta
   %c16 = index.constant 16 : index
   %inside = index.cmp ult, %lane, %c16 : index
   scf.if %inside {
-    %guarded_lane = index.assume %lane [range(%lane, 0, 15)] : index
-    test.use %guarded_lane : index
+    test.use %lane : index
   }
   kernel.return
 }

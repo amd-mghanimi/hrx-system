@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#include "loom/format/block_order.h"
 #include "loom/ir/module.h"
 #include "loom/ops/op_defs.h"
 
@@ -112,11 +113,59 @@ iree_status_t loom_bytecode_resolve_value_number(
   return iree_ok_status();
 }
 
+static iree_status_t loom_bytecode_retain_region_order(
+    loom_bytecode_value_numbering_t* value_numbering,
+    const loom_region_t* region, loom_bytecode_region_order_t** out_order) {
+  *out_order = NULL;
+  if (region->block_count <= 1) {
+    return iree_ok_status();
+  }
+  loom_bytecode_numbering_t* numbering = value_numbering->numbering;
+  loom_bytecode_region_order_t* retained = NULL;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate(numbering->arena, sizeof(*retained),
+                                           (void**)&retained));
+  *retained = (loom_bytecode_region_order_t){0};
+  loom_format_block_order_t order = {0};
+  IREE_RETURN_IF_ERROR(
+      loom_format_block_order_initialize(numbering->module, region, &order));
+  iree_status_t status = iree_ok_status();
+  if (order.indices) {
+    uint16_t* indices = NULL;
+    status =
+        iree_arena_allocate_array(numbering->arena, 2 * region->block_count,
+                                  sizeof(*indices), (void**)&indices);
+    if (iree_status_is_ok(status)) {
+      uint16_t* positions = indices + region->block_count;
+      for (uint16_t i = 0; i < region->block_count; ++i) {
+        indices[i] = order.indices[i];
+        positions[indices[i]] = i;
+      }
+      retained->indices = indices;
+      retained->positions = positions;
+    }
+  }
+  loom_format_block_order_deinitialize(&order);
+  if (iree_status_is_ok(status)) {
+    if (value_numbering->regions.last) {
+      value_numbering->regions.last->next = retained;
+    } else {
+      value_numbering->regions.next = retained;
+    }
+    value_numbering->regions.last = retained;
+    *out_order = retained;
+  }
+  return status;
+}
+
 iree_status_t loom_bytecode_value_numbering_assign_region(
     loom_bytecode_value_numbering_t* value_numbering,
     const loom_region_t* region) {
-  for (uint16_t block_index = 0; block_index < region->block_count;
-       ++block_index) {
+  loom_bytecode_region_order_t* order = NULL;
+  IREE_RETURN_IF_ERROR(
+      loom_bytecode_retain_region_order(value_numbering, region, &order));
+  for (uint16_t position = 0; position < region->block_count; ++position) {
+    const uint16_t block_index =
+        order && order->indices ? order->indices[position] : position;
     const loom_block_t* block = loom_region_const_block(region, block_index);
     // Block arguments define values.
     for (uint16_t arg_index = 0; arg_index < block->arg_count; ++arg_index) {

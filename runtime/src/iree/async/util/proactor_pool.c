@@ -267,6 +267,10 @@ static iree_status_t iree_async_proactor_pool_ensure_entry_locked(
   iree_async_proactor_options_t proactor_options =
       pool->options.proactor_options;
   proactor_options.threading_mode = IREE_ASYNC_PROACTOR_THREADING_CROSS_THREAD;
+  if (entry->node_id != UINT32_MAX) {
+    iree_thread_affinity_set_group_any(entry->node_id,
+                                       &proactor_options.worker_affinity);
+  }
   char name_buffer[32];
   if (iree_string_view_is_empty(proactor_options.debug_name)) {
     snprintf(name_buffer, sizeof(name_buffer), "proactor-%zu", index);
@@ -351,16 +355,24 @@ uint32_t iree_async_proactor_pool_node_id(
   return pool->slots[index].node_id;
 }
 
-// Finds the slot for |node_id|, falling back to slot zero when no exact match
-// is present. Slot topology is immutable after pool creation.
-static iree_host_size_t iree_async_proactor_pool_find_node_index(
-    const iree_async_proactor_pool_t* pool, uint32_t node_id) {
+// Resolves an explicit node exactly. An unspecified request can use any slot.
+// Slot topology is immutable after pool creation.
+static iree_status_t iree_async_proactor_pool_resolve_node_index(
+    const iree_async_proactor_pool_t* pool, uint32_t node_id,
+    iree_host_size_t* out_index) {
+  if (node_id == UINT32_MAX) {
+    *out_index = 0;
+    return iree_ok_status();
+  }
   for (iree_host_size_t i = 0; i < pool->count; ++i) {
     if (pool->slots[i].node_id == node_id) {
-      return i;
+      *out_index = i;
+      return iree_ok_status();
     }
   }
-  return 0;
+  return iree_make_status(IREE_STATUS_NOT_FOUND,
+                          "proactor pool has no entry for NUMA node %u",
+                          node_id);
 }
 
 iree_status_t iree_async_proactor_pool_acquire_for_node(
@@ -368,8 +380,11 @@ iree_status_t iree_async_proactor_pool_acquire_for_node(
     iree_async_proactor_pool_entry_t** out_entry) {
   IREE_ASSERT_ARGUMENT(pool);
   IREE_ASSERT_ARGUMENT(out_entry);
-  return iree_async_proactor_pool_acquire(
-      pool, iree_async_proactor_pool_find_node_index(pool, node_id), out_entry);
+  *out_entry = NULL;
+  iree_host_size_t index = 0;
+  IREE_RETURN_IF_ERROR(
+      iree_async_proactor_pool_resolve_node_index(pool, node_id, &index));
+  return iree_async_proactor_pool_acquire(pool, index, out_entry);
 }
 
 iree_status_t iree_async_proactor_pool_get_for_node(
@@ -377,7 +392,9 @@ iree_status_t iree_async_proactor_pool_get_for_node(
     iree_async_proactor_t** out_proactor) {
   IREE_ASSERT_ARGUMENT(pool);
   IREE_ASSERT_ARGUMENT(out_proactor);
-  return iree_async_proactor_pool_get(
-      pool, iree_async_proactor_pool_find_node_index(pool, node_id),
-      out_proactor);
+  *out_proactor = NULL;
+  iree_host_size_t index = 0;
+  IREE_RETURN_IF_ERROR(
+      iree_async_proactor_pool_resolve_node_index(pool, node_id, &index));
+  return iree_async_proactor_pool_get(pool, index, out_proactor);
 }

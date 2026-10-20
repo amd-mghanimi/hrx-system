@@ -6,6 +6,7 @@
 
 #include "loom/target/reporting/report.h"
 
+#include <limits.h>
 #include <string.h>
 
 #include "loom/target/reporting/config_bindings.h"
@@ -18,6 +19,15 @@ void loom_target_compile_report_initialize(
       .allocator = allocator,
       .status_code = IREE_STATUS_OK,
   };
+}
+
+void loom_target_compile_report_take_storage(
+    loom_target_compile_report_t* report, void* storage,
+    loom_target_compile_report_storage_release_fn_t release) {
+  IREE_ASSERT(report->retained_storage.data == NULL,
+              "compile report already owns target storage");
+  report->retained_storage.data = storage;
+  report->retained_storage.release = release;
 }
 
 void loom_target_compile_report_deinitialize(
@@ -92,6 +102,9 @@ void loom_target_compile_report_deinitialize(
       allocator, &report->target_legalization_rows);
   loom_target_compile_report_row_list_deinitialize(
       allocator, &report->target_capability_rows);
+  if (report->retained_storage.data != NULL) {
+    report->retained_storage.release(report->retained_storage.data);
+  }
   *report = (loom_target_compile_report_t){0};
 }
 
@@ -135,6 +148,7 @@ void loom_target_compile_report_initialize_if_empty(
   if (report->detail_flags != LOOM_TARGET_COMPILE_REPORT_DETAIL_NONE ||
       report->requested_detail_flags !=
           LOOM_TARGET_COMPILE_REPORT_DETAIL_NONE ||
+      report->retained_storage.data != NULL ||
       loom_target_compile_report_has_rows(report)) {
     return;
   }
@@ -793,6 +807,25 @@ static void loom_target_compile_report_merge_entry_summary(
       entry_report->source_low_memory_summary.packet_count != 0;
   report->detail_flags |=
       entry_report->detail_flags | LOOM_TARGET_COMPILE_REPORT_DETAIL_ENTRIES;
+  report->source_low_unkeyed_maximum_emitted_op_count =
+      iree_max(report->source_low_unkeyed_maximum_emitted_op_count,
+               entry_report->source_low_unkeyed_maximum_emitted_op_count);
+  report->target_legalization_maximum_created_op_count =
+      iree_max(report->target_legalization_maximum_created_op_count,
+               entry_report->target_legalization_maximum_created_op_count);
+  report->math_legalization_maximum_created_op_count =
+      iree_max(report->math_legalization_maximum_created_op_count,
+               entry_report->math_legalization_maximum_created_op_count);
+  report->math_legalization_rewritten_op_count +=
+      entry_report->math_legalization_rewritten_op_count;
+  report->math_legalization_native_alternative_op_count +=
+      entry_report->math_legalization_native_alternative_op_count;
+  report->math_legalization_rejected_op_count +=
+      entry_report->math_legalization_rejected_op_count;
+  report->math_legalization_missing_policy_op_count +=
+      entry_report->math_legalization_missing_policy_op_count;
+  report->math_legalization_missing_recipe_op_count +=
+      entry_report->math_legalization_missing_recipe_op_count;
   if (first_entry) {
     report->function_name = entry_report->function_name;
     report->lowered_symbol = entry_report->lowered_symbol;
@@ -860,14 +893,6 @@ static void loom_target_compile_report_merge_entry_summary(
     if (report->workload.flags == LOOM_TARGET_COMPILE_REPORT_WORKLOAD_NONE) {
       report->detail_flags &= ~LOOM_TARGET_COMPILE_REPORT_DETAIL_WORKLOAD;
     }
-    report->math_legalization_rewritten_op_count =
-        entry_report->math_legalization_rewritten_op_count;
-    report->math_legalization_rejected_op_count =
-        entry_report->math_legalization_rejected_op_count;
-    report->math_legalization_missing_policy_op_count =
-        entry_report->math_legalization_missing_policy_op_count;
-    report->math_legalization_missing_recipe_op_count =
-        entry_report->math_legalization_missing_recipe_op_count;
     memcpy(report->move_causes, entry_report->move_causes,
            sizeof(report->move_causes));
     if (entry_has_source_low_data) {
@@ -985,14 +1010,6 @@ static void loom_target_compile_report_merge_entry_summary(
     report->detail_flags &= ~LOOM_TARGET_COMPILE_REPORT_DETAIL_LOW_PLANNING;
     report->low_planning = (loom_low_planning_statistics_t){0};
   }
-  report->math_legalization_rewritten_op_count +=
-      entry_report->math_legalization_rewritten_op_count;
-  report->math_legalization_rejected_op_count +=
-      entry_report->math_legalization_rejected_op_count;
-  report->math_legalization_missing_policy_op_count +=
-      entry_report->math_legalization_missing_policy_op_count;
-  report->math_legalization_missing_recipe_op_count +=
-      entry_report->math_legalization_missing_recipe_op_count;
   report->source_low_selected_op_count +=
       entry_report->source_low_selected_op_count;
   report->source_low_emitted_op_count +=
@@ -1110,10 +1127,9 @@ loom_target_compile_report_entry_from_report(
 
 static bool loom_target_compile_report_source_low_row_has_summary_key(
     const loom_target_compile_report_source_low_row_t* row) {
-  return row->emitted_low_op_count != 0 &&
-         (!iree_string_view_is_empty(row->plan_key) ||
-          !iree_string_view_is_empty(row->descriptor_key) ||
-          !iree_string_view_is_empty(row->descriptor_semantic_tag));
+  return !iree_string_view_is_empty(row->plan_key) ||
+         !iree_string_view_is_empty(row->descriptor_key) ||
+         !iree_string_view_is_empty(row->descriptor_semantic_tag);
 }
 
 static loom_target_compile_report_source_low_selection_summary_t
@@ -1129,6 +1145,7 @@ loom_target_compile_report_source_low_selection_summary_from_row(
       .descriptor_semantic_tag = row->descriptor_semantic_tag,
       .selected_op_count = 1,
       .emitted_low_op_count = row->emitted_low_op_count,
+      .maximum_emitted_low_op_count = row->emitted_low_op_count,
   };
   if (row->execution_count_plus_one ==
       LOOM_TARGET_COMPILE_REPORT_SOURCE_LOW_EXECUTION_COUNT_PLUS_ONE_UNKNOWN) {
@@ -1148,59 +1165,143 @@ loom_target_compile_report_source_low_selection_summary_from_row(
   return summary;
 }
 
-static bool loom_target_compile_report_source_low_selection_summaries_match(
+static int loom_target_compile_report_source_low_selection_summaries_compare(
     const loom_target_compile_report_source_low_selection_summary_t* lhs,
     const loom_target_compile_report_source_low_selection_summary_t* rhs) {
-  return iree_string_view_equal(lhs->function_name, rhs->function_name) &&
-         iree_string_view_equal(lhs->source_op_name, rhs->source_op_name) &&
-         lhs->source_op_kind == rhs->source_op_kind &&
-         lhs->selection_kind == rhs->selection_kind &&
-         iree_string_view_equal(lhs->plan_key, rhs->plan_key) &&
-         iree_string_view_equal(lhs->descriptor_key, rhs->descriptor_key) &&
-         iree_string_view_equal(lhs->descriptor_semantic_tag,
-                                rhs->descriptor_semantic_tag);
+  if (lhs->source_op_kind != rhs->source_op_kind) {
+    return lhs->source_op_kind < rhs->source_op_kind ? -1 : 1;
+  }
+  if (lhs->selection_kind != rhs->selection_kind) {
+    return lhs->selection_kind < rhs->selection_kind ? -1 : 1;
+  }
+  int order = iree_string_view_compare(lhs->function_name, rhs->function_name);
+  if (order == 0) {
+    order = iree_string_view_compare(lhs->source_op_name, rhs->source_op_name);
+  }
+  if (order == 0) {
+    order = iree_string_view_compare(lhs->plan_key, rhs->plan_key);
+  }
+  if (order == 0) {
+    order = iree_string_view_compare(lhs->descriptor_key, rhs->descriptor_key);
+  }
+  if (order == 0) {
+    order = iree_string_view_compare(lhs->descriptor_semantic_tag,
+                                     rhs->descriptor_semantic_tag);
+  }
+  return order;
+}
+
+static uint8_t loom_target_compile_report_selection_height(
+    const loom_target_compile_report_source_low_selection_summary_t* row) {
+  return row ? row->index.height : 0;
+}
+
+static void loom_target_compile_report_selection_update_height(
+    loom_target_compile_report_source_low_selection_summary_t* row) {
+  row->index.height =
+      1 +
+      iree_max(
+          loom_target_compile_report_selection_height(row->index.children[0]),
+          loom_target_compile_report_selection_height(row->index.children[1]));
+}
+
+// Promotes the selected child while keeping row storage and output order fixed.
+static loom_target_compile_report_source_low_selection_summary_t*
+loom_target_compile_report_selection_rotate(
+    loom_target_compile_report_source_low_selection_summary_t* row,
+    uint32_t direction) {
+  loom_target_compile_report_source_low_selection_summary_t* pivot =
+      row->index.children[direction];
+  row->index.children[direction] = pivot->index.children[1 - direction];
+  pivot->index.children[1 - direction] = row;
+  loom_target_compile_report_selection_update_height(row);
+  loom_target_compile_report_selection_update_height(pivot);
+  return pivot;
 }
 
 static loom_target_compile_report_source_low_selection_summary_t*
-loom_target_compile_report_find_source_low_selection_summary(
-    loom_target_compile_report_t* report,
-    const loom_target_compile_report_source_low_selection_summary_t* row) {
-  for (loom_target_compile_report_vec_t* vec =
-           report->source_low_selection_summaries.head;
-       vec != NULL; vec = vec->next) {
-    loom_target_compile_report_source_low_selection_summary_t* summaries =
-        (loom_target_compile_report_source_low_selection_summary_t*)
-            loom_target_compile_report_vec_rows(vec);
-    for (iree_host_size_t i = 0; i < vec->count; ++i) {
-      loom_target_compile_report_source_low_selection_summary_t* summary =
-          &summaries[i];
-      if (loom_target_compile_report_source_low_selection_summaries_match(
-              summary, row)) {
-        return summary;
-      }
+loom_target_compile_report_selection_balance(
+    loom_target_compile_report_source_low_selection_summary_t* row) {
+  loom_target_compile_report_selection_update_height(row);
+  const int balance =
+      (int)loom_target_compile_report_selection_height(row->index.children[0]) -
+      (int)loom_target_compile_report_selection_height(row->index.children[1]);
+  if (balance < -1 || balance > 1) {
+    const uint32_t direction = balance < 0;
+    loom_target_compile_report_source_low_selection_summary_t* child =
+        row->index.children[direction];
+    if (loom_target_compile_report_selection_height(
+            child->index.children[direction]) <
+        loom_target_compile_report_selection_height(
+            child->index.children[1 - direction])) {
+      row->index.children[direction] =
+          loom_target_compile_report_selection_rotate(child, 1 - direction);
     }
+    row = loom_target_compile_report_selection_rotate(row, direction);
   }
-  return NULL;
+  return row;
 }
 
 static iree_status_t
 loom_target_compile_report_record_source_low_selection_summary_row(
     loom_target_compile_report_t* report,
     const loom_target_compile_report_source_low_selection_summary_t* row) {
-  loom_target_compile_report_source_low_selection_summary_t* summary =
-      loom_target_compile_report_find_source_low_selection_summary(report, row);
+  if (iree_allocator_is_null(report->allocator)) {
+    return iree_ok_status();
+  }
+  // An AVL tree has height below twice log2(node_count + 1). Addressable row
+  // storage bounds node_count, so this path covers every representable report.
+  loom_target_compile_report_source_low_selection_summary_t**
+      path[2 * sizeof(iree_host_size_t) * CHAR_BIT];
+  iree_host_size_t depth = 0;
+  loom_target_compile_report_source_low_selection_summary_t** link =
+      &report->source_low_selection_root;
+  while (*link != NULL) {
+    const int order =
+        loom_target_compile_report_source_low_selection_summaries_compare(
+            row, *link);
+    if (order == 0) {
+      break;
+    }
+    path[depth++] = link;
+    link = &(*link)->index.children[order > 0];
+  }
+  loom_target_compile_report_source_low_selection_summary_t* summary = *link;
   if (summary != NULL) {
     summary->selected_op_count += row->selected_op_count;
     summary->emitted_low_op_count += row->emitted_low_op_count;
+    summary->maximum_emitted_low_op_count =
+        iree_max(summary->maximum_emitted_low_op_count,
+                 row->maximum_emitted_low_op_count);
     summary->exact_dynamic_op_count += row->exact_dynamic_op_count;
     summary->unknown_dynamic_op_count += row->unknown_dynamic_op_count;
     summary->dynamic_selected_op_count += row->dynamic_selected_op_count;
     summary->dynamic_emitted_low_op_count += row->dynamic_emitted_low_op_count;
     return iree_ok_status();
   }
-  return loom_target_compile_report_row_list_append(
+  IREE_RETURN_IF_ERROR(loom_target_compile_report_row_list_append(
       &report->source_low_selection_summaries, sizeof(*row), report->allocator,
-      row);
+      row));
+  loom_target_compile_report_vec_t* tail =
+      report->source_low_selection_summaries.tail;
+  summary = (loom_target_compile_report_source_low_selection_summary_t*)
+                loom_target_compile_report_vec_rows(tail) +
+            (tail->count - 1);
+  // Merged source rows may already be indexed by another report.
+  summary->index.children[0] = NULL;
+  summary->index.children[1] = NULL;
+  summary->index.height = 1;
+  *link = summary;
+  while (depth != 0) {
+    --depth;
+    link = path[depth];
+    const uint8_t old_height = (*link)->index.height;
+    *link = loom_target_compile_report_selection_balance(*link);
+    if ((*link)->index.height == old_height) {
+      break;
+    }
+  }
+  return iree_ok_status();
 }
 
 iree_status_t loom_target_compile_report_record_entry_report(
@@ -1486,7 +1587,13 @@ iree_status_t loom_target_compile_report_record_source_low_row(
   report->detail_flags |= LOOM_TARGET_COMPILE_REPORT_DETAIL_SOURCE_LOW_ROWS;
   IREE_RETURN_IF_ERROR(loom_target_compile_report_row_list_append(
       &report->source_low_rows, sizeof(*row), report->allocator, row));
+  if (row->emitted_low_op_count == 0) {
+    return iree_ok_status();
+  }
   if (!loom_target_compile_report_source_low_row_has_summary_key(row)) {
+    report->source_low_unkeyed_maximum_emitted_op_count =
+        iree_max(report->source_low_unkeyed_maximum_emitted_op_count,
+                 row->emitted_low_op_count);
     return iree_ok_status();
   }
   const loom_target_compile_report_source_low_selection_summary_t summary =
@@ -1548,6 +1655,12 @@ iree_status_t loom_target_compile_report_record_math_row(
   report->detail_flags |=
       LOOM_TARGET_COMPILE_REPORT_DETAIL_MATH_LEGALIZATION_ROWS;
   loom_target_compile_report_count_math_action(report, row->action);
+  if (row->native_required_fastmath_flags != 0) {
+    ++report->math_legalization_native_alternative_op_count;
+  }
+  report->math_legalization_maximum_created_op_count =
+      iree_max(report->math_legalization_maximum_created_op_count,
+               row->created_op_count);
   if (!loom_target_compile_report_wants_details(
           report, LOOM_TARGET_COMPILE_REPORT_DETAIL_MATH_LEGALIZATION_ROWS)) {
     return iree_ok_status();
@@ -1559,7 +1672,11 @@ iree_status_t loom_target_compile_report_record_math_row(
 static void loom_target_compile_report_count_legalization_action(
     loom_target_compile_report_t* report,
     loom_target_compile_report_legalization_action_t action,
-    loom_target_compile_report_legalizer_strategy_t legalizer_strategy) {
+    loom_target_compile_report_legalizer_strategy_t legalizer_strategy,
+    bool scalarized) {
+  if (scalarized) {
+    ++report->target_legalization_scalarized_op_count;
+  }
   switch (action) {
     case LOOM_TARGET_COMPILE_REPORT_LEGALIZATION_ACTION_LEGAL:
       ++report->target_legalization_legal_op_count;
@@ -1599,18 +1716,22 @@ static void loom_target_compile_report_count_legalization_action(
 void loom_target_compile_report_record_legalization_summary(
     loom_target_compile_report_t* report,
     loom_target_compile_report_legalization_action_t action,
-    loom_target_compile_report_legalizer_strategy_t legalizer_strategy) {
+    loom_target_compile_report_legalizer_strategy_t legalizer_strategy,
+    bool scalarized, uint64_t created_op_count) {
   report->detail_flags |=
       LOOM_TARGET_COMPILE_REPORT_DETAIL_TARGET_LEGALIZATION_ROWS;
-  loom_target_compile_report_count_legalization_action(report, action,
-                                                       legalizer_strategy);
+  loom_target_compile_report_count_legalization_action(
+      report, action, legalizer_strategy, scalarized);
+  report->target_legalization_maximum_created_op_count = iree_max(
+      report->target_legalization_maximum_created_op_count, created_op_count);
 }
 
 iree_status_t loom_target_compile_report_record_legalization_row(
     loom_target_compile_report_t* report,
     const loom_target_compile_report_legalization_row_t* row) {
   loom_target_compile_report_record_legalization_summary(
-      report, row->action, row->legalizer_strategy);
+      report, row->action, row->legalizer_strategy, row->scalarized,
+      row->created_op_count);
   return loom_target_compile_report_row_list_append(
       &report->target_legalization_rows, sizeof(*row), report->allocator, row);
 }

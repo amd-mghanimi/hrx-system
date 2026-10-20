@@ -6,6 +6,26 @@
 
 #include "loom/tools/loom-check/comparison.h"
 
+typedef enum loom_check_match_kind_e {
+  LOOM_CHECK_MATCH_PRESENT,
+  LOOM_CHECK_MATCH_ABSENT,
+  LOOM_CHECK_MATCH_COUNT,
+} loom_check_match_kind_t;
+
+static bool loom_check_parse_match_count(iree_string_view_t text,
+                                         uint32_t* out_count) {
+  uint32_t count = 0;
+  for (iree_host_size_t i = 0; i < text.size; ++i) {
+    const uint32_t digit = (uint32_t)(text.data[i] - '0');
+    if (digit > 9 || count > (UINT32_MAX - digit) / 10) {
+      return false;
+    }
+    count = count * 10 + digit;
+  }
+  *out_count = count;
+  return count != 0;
+}
+
 static iree_status_t loom_check_match_lines(iree_string_view_t expected,
                                             loom_check_result_t* result) {
   bool has_positive_check = false;
@@ -22,18 +42,34 @@ static iree_status_t loom_check_match_lines(iree_string_view_t expected,
     if (iree_string_view_consume_prefix(&line, IREE_SV("//"))) {
       line = iree_string_view_trim(line);
       if (!iree_string_view_starts_with(line, IREE_SV("CHECK:")) &&
-          !iree_string_view_starts_with(line, IREE_SV("CHECK-NOT:"))) {
+          !iree_string_view_starts_with(line, IREE_SV("CHECK-NOT:")) &&
+          !iree_string_view_starts_with(line, IREE_SV("CHECK-COUNT-"))) {
         continue;
       }
     }
-    bool negative = false;
+    loom_check_match_kind_t kind = LOOM_CHECK_MATCH_PRESENT;
+    uint32_t expected_count = 0;
     if (iree_string_view_consume_prefix(&line, IREE_SV("CHECK:"))) {
       has_positive_check = true;
     } else if (iree_string_view_consume_prefix(&line, IREE_SV("CHECK-NOT:"))) {
-      negative = true;
+      kind = LOOM_CHECK_MATCH_ABSENT;
+    } else if (iree_string_view_consume_prefix(&line,
+                                               IREE_SV("CHECK-COUNT-"))) {
+      kind = LOOM_CHECK_MATCH_COUNT;
+      iree_string_view_t count;
+      if (iree_string_view_split(line, ':', &count, &line) < 0 ||
+          !loom_check_parse_match_count(count, &expected_count)) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "expected positive count in CHECK-COUNT-N: at expected line "
+            "%" PRIhsz,
+            line_number);
+      }
+      has_positive_check = true;
     } else {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "expected CHECK: or CHECK-NOT: at expected line "
+                              "expected CHECK:, CHECK-NOT:, or CHECK-COUNT-N: "
+                              "at expected line "
                               "%" PRIhsz,
                               line_number);
     }
@@ -44,7 +80,7 @@ static iree_status_t loom_check_match_lines(iree_string_view_t expected,
                               line_number);
     }
 
-    bool matched = false;
+    iree_host_size_t matched_count = 0;
     iree_string_view_t output =
         iree_string_builder_view(&result->actual_output);
     while (!iree_string_view_is_empty(output)) {
@@ -54,18 +90,29 @@ static iree_status_t loom_check_match_lines(iree_string_view_t expected,
       if (!iree_string_view_match_pattern(output_line, pattern)) {
         continue;
       }
-      matched = true;
-      if (negative) {
+      ++matched_count;
+      if (kind == LOOM_CHECK_MATCH_ABSENT) {
         IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
             &result->detail,
             "CHECK-NOT at expected line %" PRIhsz " matched: %.*s\n",
             line_number, (int)output_line.size, output_line.data));
       }
-      break;
+      if (kind != LOOM_CHECK_MATCH_COUNT) {
+        break;
+      }
     }
-    if (matched == negative) {
+    if (kind == LOOM_CHECK_MATCH_COUNT && matched_count != expected_count) {
       result->raw_outcome = LOOM_CHECK_FAIL;
-      if (!negative) {
+      IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+          &result->detail,
+          "CHECK-COUNT at expected line %" PRIhsz
+          " expected %u matching lines, found %" PRIhsz ": %.*s\n",
+          line_number, expected_count, matched_count, (int)pattern.size,
+          pattern.data));
+    } else if ((kind == LOOM_CHECK_MATCH_PRESENT && matched_count == 0) ||
+               (kind == LOOM_CHECK_MATCH_ABSENT && matched_count != 0)) {
+      result->raw_outcome = LOOM_CHECK_FAIL;
+      if (kind == LOOM_CHECK_MATCH_PRESENT) {
         IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
             &result->detail,
             "CHECK at expected line %" PRIhsz " did not match: %.*s\n",
@@ -75,7 +122,8 @@ static iree_status_t loom_check_match_lines(iree_string_view_t expected,
   }
   if (!has_positive_check) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "with-checks requires at least one CHECK: pattern");
+                            "with-checks requires at least one CHECK: or "
+                            "CHECK-COUNT-N: pattern");
   }
   return iree_ok_status();
 }

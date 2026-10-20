@@ -25,10 +25,29 @@ void reject_misplaced_binding_attributes(
               "symbol bindings require namespace-scope functions "
               "with a leading attribute");
         }
+        if (name == "import" && scope != BindingAttributeScope::Declaration) {
+          diagnostics.reject(
+              unit, attribute,
+              "import bindings require namespace-scope functions "
+              "with a leading attribute");
+        }
         if (name == "config" && scope != BindingAttributeScope::Declaration) {
           diagnostics.reject(unit, attribute,
                              "config bindings require namespace-scope scalar "
                              "variables with a leading attribute");
+        }
+        if (name == "target" && scope != BindingAttributeScope::Declaration) {
+          diagnostics.reject(
+              unit, attribute,
+              "target bindings require namespace-scope kernels or template "
+              "definitions with a leading attribute");
+        }
+        if ((name == "template_def" || name == "priority") &&
+            scope != BindingAttributeScope::Declaration) {
+          diagnostics.reject(
+              unit, attribute,
+              "template definitions require namespace-scope functions with a "
+              "leading attribute");
         }
         if ((name == "assume_aligned" || name == "noalias") &&
             scope != BindingAttributeScope::Parameter) {
@@ -36,6 +55,34 @@ void reject_misplaced_binding_attributes(
               unit, attribute,
               std::string(name) +
                   " requires a leading pointer parameter attribute");
+        }
+        if (name == "constexpr" &&
+            scope != BindingAttributeScope::LocalDeclaration) {
+          diagnostics.reject(
+              unit, attribute,
+              "constexpr requires a leading automatic const scalar "
+              "declaration attribute");
+        }
+        if (name == "where" && scope != BindingAttributeScope::Declaration &&
+            scope != BindingAttributeScope::Function) {
+          diagnostics.reject(
+              unit, attribute,
+              "where requires a trailing function attribute or a leading "
+              "config declaration attribute");
+        }
+        if (name == "fastmath" && scope != BindingAttributeScope::Declaration &&
+            scope != BindingAttributeScope::Function &&
+            scope != BindingAttributeScope::LocalDeclaration &&
+            scope != BindingAttributeScope::Statement) {
+          if (scope == BindingAttributeScope::CheckStatement) {
+            diagnostics.reject(
+                unit, attribute,
+                "check statements cannot carry fastmath contracts");
+          }
+          diagnostics.reject(
+              unit, attribute,
+              "fastmath requires a function, automatic declaration, or "
+              "leading statement attribute");
         }
       });
 }
@@ -70,13 +117,16 @@ void reject_misplaced_binding_declarator(
                                         bitfield->trailingAttributeList);
   }
   for (auto* chunk : cxx::ListView{declarator->declaratorChunkList}) {
+    auto* function = cxx::ast_cast<cxx::FunctionDeclaratorChunkAST>(chunk);
     cxx::visit(
         [&](auto* part) {
-          reject_misplaced_binding_attributes(unit, diagnostics,
-                                              part->attributeList);
+          reject_misplaced_binding_attributes(
+              unit, diagnostics, part->attributeList,
+              function && function == parameter_owner
+                  ? BindingAttributeScope::Function
+                  : BindingAttributeScope::Local);
         },
         chunk);
-    auto* function = cxx::ast_cast<cxx::FunctionDeclaratorChunkAST>(chunk);
     if (!function || !function->parameterDeclarationClause) {
       continue;
     }
@@ -94,15 +144,13 @@ void reject_misplaced_binding_declarator(
 
 void reject_misplaced_binding_statement(cxx::TranslationUnit& unit,
                                         Diagnostics& diagnostics,
-                                        cxx::StatementAST* statement) {
-  cxx::visit(
-      [&](auto* node) {
-        if constexpr (requires { node->attributeList; }) {
-          reject_misplaced_binding_attributes(unit, diagnostics,
-                                              node->attributeList);
-        }
-      },
-      statement);
+                                        cxx::StatementAST* statement,
+                                        BindingAttributeScope scope) {
+  if (cxx::ast_cast<cxx::DeclarationStatementAST>(statement)) {
+    scope = BindingAttributeScope::LocalDeclaration;
+  }
+  reject_misplaced_binding_attributes(unit, diagnostics,
+                                      statement_attributes(statement), scope);
 }
 
 }  // namespace loom::cxx_import

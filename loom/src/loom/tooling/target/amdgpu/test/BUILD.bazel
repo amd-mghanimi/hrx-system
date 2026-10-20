@@ -5,8 +5,18 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 load("//build_tools/bazel:python.bzl", "iree_py_test")
+load("//build_tools/bazel:test_resources.bzl", "GPU_DEVICE_RESOURCE_GROUP")
 load("//build_tools/testing:build_defs.bzl", "iree_execution_test_suite")
-load("//loom/build_tools/amdgpu:target_config.bzl", "LOOM_AMDGPU_SUPPORTED_TARGETS")
+load(
+    "//loom/build_tools/amdgpu:descriptor_sets.bzl",
+    "loom_amdgpu_descriptor_set_compatible_with",
+    "loom_amdgpu_iree_hal_representation_compatible_with",
+)
+load(
+    "//loom/build_tools/amdgpu:target_config.bzl",
+    "LOOM_AMDGPU_DESCRIPTOR_SET_CAPABILITY_BY_KEY",
+    "LOOM_AMDGPU_SUPPORTED_TARGETS",
+)
 load("//loom/build_tools/bazel:build_defs.bzl", "loom_config_compatible_with")
 load(
     "//loom/build_tools/bazel:defs.bzl",
@@ -18,7 +28,7 @@ load(
     "AMDGPU_ACCESS_PROFILE",
     "AMDGPU_ASAN_PROFILE",
     "AMDGPU_HARDWARE_PROFILE",
-    "AMDGPU_TSAN_BYTE_GRANULE_PROFILE",
+    "AMDGPU_TSAN_CAPACITY_PROFILE",
     "AMDGPU_TSAN_PROFILE",
 )
 
@@ -32,22 +42,43 @@ _AMDGPU_ARTIFACTS_COMPATIBLE_WITH = loom_config_compatible_with([
     "//loom/config/target:amdgpu_artifacts",
 ])
 
+_GFX11_GENERIC_REPRESENTATION = LOOM_AMDGPU_DESCRIPTOR_SET_CAPABILITY_BY_KEY["amdgpu.gfx11.generic.core"]
+
+_GFX11_EXECUTION_COMPATIBLE_WITH = (
+    loom_amdgpu_descriptor_set_compatible_with(_GFX11_GENERIC_REPRESENTATION) +
+    loom_amdgpu_iree_hal_representation_compatible_with(_GFX11_GENERIC_REPRESENTATION)
+)
+
+iree_execution_test_suite(
+    name = "benchmark_profile_policy_test",
+    data = ["benchmark_profile_policy.loom"],
+    manifests = ["benchmark_profile_policy.test.json"],
+    resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    tags = [
+        "iree-run-requirement=runtime.resource.amd_gpu",
+        "runtime-resource=amd-gpu",
+    ],
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/execute:amdgpu_hal",
+        "//loom/config/target/arch:vm",
+    ]),
+    tools = {"iree-benchmark-loom": "//loom/src/loom/tools/iree-benchmark-loom"},
+)
+
 iree_py_test(
     name = "qualification_test",
     srcs = ["qualification_test.py"],
     args = [
         "$(location //loom/src/loom/tools/loom-check:loom-check)",
-        "$(location //loom/src/loom/test/corpus/source_low:memory_global_atomic.loom-test)",
-        "$(location //loom/src/loom/target/arch/amdgpu:test/source_low/source_low_memory_global_atomic_gfx9_4_generic.loom-test)",
+        "$(location qualification_accepted.loom-test)",
         "$(location //loom/src/loom/tools/loom-compile:loom-compile)",
-        "$(location //loom/src/loom/test/corpus/source_low:memory_address_realizations.loom-test)",
+        "$(location memory_address_realizations.loom-test)",
         "$(location qualification_rejected.loom-test)",
     ],
     data = [
+        "memory_address_realizations.loom-test",
+        "qualification_accepted.loom-test",
         "qualification_rejected.loom-test",
-        "//loom/src/loom/target/arch/amdgpu:test/source_low/source_low_memory_global_atomic_gfx9_4_generic.loom-test",
-        "//loom/src/loom/test/corpus/source_low:memory_address_realizations.loom-test",
-        "//loom/src/loom/test/corpus/source_low:memory_global_atomic.loom-test",
         "//loom/src/loom/tools/loom-check",
         "//loom/src/loom/tools/loom-compile",
     ],
@@ -57,9 +88,9 @@ iree_py_test(
 iree_execution_test_suite(
     name = "loom_compile_execution_test",
     data = [
+        "feature_distinct_code_objects.loom",
         "loom_opt_f32_arith.loom",
         "selected_root_amdgpu.loom",
-        "//loom/src/loom/tooling/target/amdgpu/test/corpus:gfx11/schedule_scopes.loom",
     ],
     manifests = ["loom-compile-amdgpu.test.json"],
     tags = ["hostonly"],
@@ -92,9 +123,29 @@ loom_check_compile_tests(
 )
 
 loom_check_compile_tests(
+    name = "memory_address_realizations",
+    src = "memory_address_realizations.loom-test",
+    targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
+)
+
+# Ordered global atomics require RDNA memory-ordering support.
+loom_check_compile_tests(
+    name = "memory_atomic_preservation",
+    src = "memory_atomic_preservation.loom-test",
+    targets = [
+        "//loom/target/amdgpu:gfx11-generic",
+        "//loom/target/amdgpu:gfx1151",
+        "//loom/target/amdgpu:gfx12-generic",
+        "//loom/target/amdgpu:gfx1250",
+        "//loom/target/amdgpu:gfx12-5-generic",
+    ],
+)
+
+loom_check_compile_tests(
     name = "loop_entry_access",
     src = "//loom/src/loom/tooling/target/amdgpu/test/corpus:gfx11_loop_entry_module",
     args = ["--sanitizer=access"],
+    target_compatible_with = loom_amdgpu_descriptor_set_compatible_with("descriptor_set_gfx11_generic_core"),
     targets = ["//loom/target/amdgpu:gfx1151"],
 )
 
@@ -138,78 +189,6 @@ loom_test(
 )
 
 loom_test(
-    name = "wide_offset_hardware_test",
-    srcs = [
-        "//loom/src/loom/test/corpus/conformance:address_scaling.loom",
-        "//loom/src/loom/test/corpus/conformance:address_selection.loom",
-        "//loom/src/loom/test/corpus/conformance:offset_integer_casts.loom",
-    ],
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
-)
-
-loom_test(
-    name = "atomic_i64_test",
-    srcs = [
-        "//loom/src/loom/test/corpus/conformance:atomic_i64.loom",
-        "//loom/src/loom/test/corpus/source_low:memory_atomic_i64.loom",
-    ],
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "atomic_observations_test",
-    srcs = [
-        "atomic_observations.loom",
-        "//loom/src/loom/test/corpus/source_low:memory_atomic_float64.loom",
-        "//loom/src/loom/test/corpus/source_low:memory_atomic_observations.loom",
-        "//loom/src/loom/test/corpus/source_low:memory_float64.loom",
-    ],
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "address_carrier_test",
-    srcs = [
-        "//loom/src/loom/test/corpus/conformance:address_carrier_casts.loom",
-        "//loom/src/loom/test/corpus/conformance:address_carrier_loops.loom",
-        "//loom/src/loom/test/corpus/conformance:address_widening.loom",
-    ],
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "address_uniform_add_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:address_uniform_add.loom"],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "subview_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:memory_subview.loom"],
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
     name = "packed_integer_widening_test",
     srcs = ["packed_integer_widening.loom"],
     execution_profiles = [
@@ -219,18 +198,9 @@ loom_test(
 )
 
 loom_test(
-    name = "packed_vector_select_test",
-    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-    module = "//loom/src/loom/test/corpus/conformance:packed_vector_select_module",
-)
-
-loom_test(
-    name = "private_memory_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:private_memory.loom"],
+    name = "packed_f16_widening_test",
+    srcs = ["packed_f16_widening.loom"],
+    benchmark_smoke = False,
     compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
     execution_profiles = [
         AMDGPU_HARDWARE_PROFILE,
@@ -248,8 +218,8 @@ loom_test(
 )
 
 loom_test(
-    name = "packed_memory_tails_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:packed_memory_tails.loom"],
+    name = "packed_nibble_unpack_test",
+    srcs = ["packed_nibble_unpack.loom"],
     compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
     execution_profiles = [
         AMDGPU_HARDWARE_PROFILE,
@@ -258,18 +228,14 @@ loom_test(
 )
 
 loom_test(
-    name = "wide_subtract_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:integer_wide_subtract.loom"],
+    name = "buffer_descriptor_extents_test",
+    srcs = ["buffer_descriptor_extents.loom"],
+    benchmark_smoke = False,
+    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
     execution_profiles = [
         AMDGPU_HARDWARE_PROFILE,
         AMDGPU_ACCESS_PROFILE,
     ],
-)
-
-loom_test(
-    name = "wide_shift_hardware_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:integer_wide_shifts.loom"],
-    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
 )
 
 loom_test(
@@ -300,78 +266,29 @@ loom_test(
 )
 
 loom_test(
-    name = "narrow_integer_hardware_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:integer_narrow_consumers.loom"],
-    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
-)
-
-loom_test(
-    name = "unsigned_remainder_hardware_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:integer_unsigned_remainder.loom"],
-    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
-)
-
-loom_test(
-    name = "loop_count_access_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:loop_count.loom"],
-    execution_profiles = [AMDGPU_ACCESS_PROFILE],
-)
-
-loom_test(
-    name = "collective_loop_access_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:collective_loop_state.loom"],
-    execution_profiles = [AMDGPU_ACCESS_PROFILE],
-)
-
-loom_test(
-    name = "sequential_loops_hardware_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:sequential_loop_slices.loom"],
-    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
-)
-
-loom_test(
-    name = "conditional_guards_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:conditional_guards.loom"],
+    name = "repeated_wmma_test",
+    srcs = ["amdgpu_repeated_wmma.loom"],
+    compile_targets = [
+        "//loom/target/amdgpu:gfx1100",
+        "//loom/target/amdgpu:gfx1151",
+    ],
     execution_profiles = [
         AMDGPU_HARDWARE_PROFILE,
         AMDGPU_ACCESS_PROFILE,
     ],
-)
-
-loom_test(
-    name = "conditional_effects_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:conditional_effects.loom"],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "conditional_results_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:conditional_results.loom"],
-    execution_profiles = [
-        AMDGPU_HARDWARE_PROFILE,
-        AMDGPU_ACCESS_PROFILE,
-    ],
-)
-
-loom_test(
-    name = "uniform_predicate_control_access_test",
-    srcs = ["//loom/src/loom/test/corpus/conformance:uniform_predicate_control.loom"],
-    execution_profiles = [AMDGPU_ACCESS_PROFILE],
+    target_compatible_with = loom_amdgpu_descriptor_set_compatible_with("descriptor_set_gfx11_generic_core"),
 )
 
 loom_test(
     name = "asan_test",
-    srcs = ["//loom/src/loom/test/corpus/sanitizer:amdgpu_asan_actual.loom"],
+    srcs = ["//loom/src/loom/test/corpus/sanitizer:access_reporting.loom"],
     configs = {"asan_launch_bound.tile_capacity": "1"},
     execution_profiles = [AMDGPU_ASAN_PROFILE],
 )
 
 loom_test(
     name = "ubsan_test",
-    srcs = ["//loom/src/loom/test/corpus/sanitizer:amdgpu_ubsan_actual.loom"],
+    srcs = ["//loom/src/loom/test/corpus/sanitizer:assertion_reporting.loom"],
     # Authored assertions must provision feedback without insertion options.
     execution_profiles = [AMDGPU_HARDWARE_PROFILE],
 )
@@ -393,55 +310,116 @@ loom_test(
         "//loom/src/loom/test/corpus/checked_benchmarks:routed_row_combine_f32.loom",
         "//loom/src/loom/test/corpus/checked_benchmarks:sparse_token_attention_f32.loom",
     ],
+    benchmark_smoke = False,
     execution_profiles = [AMDGPU_ACCESS_PROFILE],
 )
 
 loom_test(
-    name = "pipeline_predicates_test",
+    name = "checked_benchmark_workload_test",
+    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
+    module = "//loom/src/loom/test/corpus/checked_benchmarks:checked_benchmark_workload_module",
+    tags = ["manual"],
+)
+
+loom_test(
+    name = "authoring_benchmark_workload_test",
+    configs = {
+        "mlp_down_projection_residual_bf16.row_capacity": "3584",
+    },
+    execution_profiles = [AMDGPU_HARDWARE_PROFILE],
+    module = "//loom/src/loom/test/corpus/authoring:authoring_benchmark_workload_module",
+    tags = ["manual"],
+)
+
+loom_test(
+    name = "split_kv_stage2_access_test",
+    srcs = ["//loom/src/loom/test/corpus/checked_benchmarks:split_kv_online_softmax_combine_f32.loom"],
+    execution_profiles = [AMDGPU_ACCESS_PROFILE],
+)
+
+loom_test(
+    name = "split_kv_stage2_test",
     srcs = [
-        "amdgpu_pipeline_predicates.loom",
-        "//loom/binding/c/benchmark/kernels:synthetic/segmented_guarded_read_ahead.loom",
+        "//loom/src/loom/test/corpus/checked_benchmarks:split_kv_online_softmax_combine_f32.loom",
+        "//loom/src/loom/test/corpus/checked_benchmarks:split_kv_online_softmax_combine_f32_benchmark.loom",
     ],
     compile_targets = [
         "//loom/target/amdgpu:gfx942",
         "//loom/target/amdgpu:gfx1151",
+        "//loom/target/amdgpu:gfx1250",
     ],
-    configs = {
-        "benchmark.loop_count": "8",
-        "test.factor": "1",
-    },
-    execution_profiles = [AMDGPU_ACCESS_PROFILE],
-    variants = {
-        "depth_three": {"configs": {
-            "benchmark.pipeline_depth": "3",
-            "test.depth": "3",
-        }},
-        "serial": {"configs": {
-            "benchmark.pipeline_depth": "1",
-            "test.depth": "1",
-        }},
-        "unrolled": {"configs": {
-            "benchmark.pipeline_depth": "4",
-            "test.depth": "4",
-            "test.factor": "2",
-        }},
-    },
+)
+
+loom_test(
+    name = "predicate_control_test",
+    srcs = ["amdgpu_predicate_control.loom"],
+    compile_targets = [
+        "//loom/target/amdgpu:gfx942",
+        "//loom/target/amdgpu:gfx1151",
+        "//loom/target/amdgpu:gfx1250",
+    ],
+    execution_profiles = [
+        AMDGPU_HARDWARE_PROFILE,
+        AMDGPU_ACCESS_PROFILE,
+    ],
 )
 
 loom_test(
     name = "tsan_test",
-    srcs = ["//loom/src/loom/test/corpus/sanitizer:amdgpu_tsan_actual.loom"],
-    execution_profiles = [
-        AMDGPU_TSAN_BYTE_GRANULE_PROFILE,
-        AMDGPU_TSAN_PROFILE,
-    ],
+    srcs = ["//loom/src/loom/test/corpus/sanitizer:race_workgroup.loom"],
+    execution_profiles = [AMDGPU_TSAN_PROFILE],
+)
+
+loom_test(
+    name = "tsan_collective_publication_test",
+    srcs = ["//loom/src/loom/test/corpus/kernel:workgroup/publication.loom"],
+    execution_profiles = [AMDGPU_TSAN_PROFILE],
+)
+
+loom_test(
+    name = "tsan_fragment_test",
+    srcs = ["//loom/src/loom/tooling/target/amdgpu/test/corpus:gfx11/fragment_repack_bf16.loom"],
+    execution_profiles = [AMDGPU_TSAN_PROFILE],
+    target_compatible_with = _GFX11_EXECUTION_COMPATIBLE_WITH,
+)
+
+loom_test(
+    name = "tsan_subgroup_test",
+    srcs = ["//loom/src/loom/test/corpus/sanitizer:race_subgroup.loom"],
+    compile_targets = ["//loom/target/amdgpu:" + target for target in LOOM_AMDGPU_SUPPORTED_TARGETS],
+    execution_profiles = [AMDGPU_TSAN_PROFILE],
+)
+
+loom_test(
+    name = "tsan_capacity_test",
+    srcs = ["//loom/src/loom/test/corpus/sanitizer:race_capacity.loom"],
+    execution_profiles = [AMDGPU_TSAN_CAPACITY_PROFILE],
 )
 
 iree_execution_test_suite(
     name = "check_requirements_test",
-    data = ["check_requirements.loom"],
+    data = [
+        "check_requirements.loom",
+        "check_requirements_invalid.loom",
+    ],
     manifests = ["check-requirements.test.json"],
     tags = ["hostonly"],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/execute:amdgpu_hal"]),
+    tools = {
+        "iree-benchmark-loom": "//loom/src/loom/tools/iree-benchmark-loom",
+        "iree-test-loom": "//loom/src/loom/tools/iree-test-loom",
+    },
+)
+
+iree_execution_test_suite(
+    name = "check_target_requirements_test",
+    data = ["check_target_requirements.loom"],
+    manifests = ["check-target-requirements.test.json"],
+    resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    tags = [
+        "iree-run-requirement=runtime.resource.amd_gpu",
+        "runtime-resource=amd-gpu",
+    ],
     target_compatible_with = loom_config_compatible_with(["//loom/config/execute:amdgpu_hal"]),
     tools = {
         "iree-benchmark-loom": "//loom/src/loom/tools/iree-benchmark-loom",

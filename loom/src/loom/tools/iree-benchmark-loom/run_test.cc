@@ -13,7 +13,6 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 #include "iree/testing/temp_file.h"
-#include "loom/target/low_descriptor_registry_core_test.h"
 
 namespace loom {
 namespace {
@@ -31,13 +30,6 @@ static iree_status_t collect_event(void* user_data,
                             "benchmark event collector is full");
   }
   collector->events[collector->event_count++] = *event;
-  return iree_ok_status();
-}
-
-static iree_status_t InitializeLowDescriptorRegistry(
-    void* user_data, loom_target_low_descriptor_registry_t* out_registry) {
-  (void)user_data;
-  loom_target_core_test_low_descriptor_registry_initialize(out_registry);
   return iree_ok_status();
 }
 
@@ -94,22 +86,21 @@ check.benchmark<@sampled_choice> @sampled_choice_value7 {value = 7}
   benchmark_options.warmup_iterations = 0;
 
   event_collector_t collector = {};
-  iree_benchmark_loom_event_sink_t event_sink = {};
-  event_sink.emit = collect_event;
-  event_sink.user_data = &collector;
-  iree_benchmark_loom_configuration_t configuration = {};
-  configuration.tool_name = "iree-benchmark-loom-test";
-  configuration.initialize_low_descriptor_registry =
-      (loom_run_initialize_low_descriptor_registry_callback_t){
-          /*.fn=*/InitializeLowDescriptorRegistry,
-      };
-  iree_benchmark_loom_file_run_options_t run_options = {};
-  run_options.configuration = &configuration;
-  run_options.benchmark_options = &benchmark_options;
-  run_options.input_path = input_path.path_view();
-  run_options.command_line_json = IREE_SV("[\"iree-benchmark-loom-test\"]");
-  run_options.event_sink = &event_sink;
-  run_options.host_allocator = iree_allocator_system();
+  iree_benchmark_loom_event_sink_t event_sink = {
+      .emit = collect_event,
+      .user_data = &collector,
+  };
+  iree_benchmark_loom_configuration_t configuration = {
+      .tool_name = "iree-benchmark-loom-test",
+  };
+  iree_benchmark_loom_file_run_options_t run_options = {
+      .configuration = &configuration,
+      .benchmark_options = &benchmark_options,
+      .input_path = input_path.path_view(),
+      .command_line_json = IREE_SV("[\"iree-benchmark-loom-test\"]"),
+      .event_sink = &event_sink,
+      .host_allocator = iree_allocator_system(),
+  };
 
   iree_benchmark_loom_run_result_t run_result = {};
   IREE_ASSERT_OK(iree_benchmark_loom_run_file(&run_options, &run_result));
@@ -158,18 +149,16 @@ check.benchmark<@sampled_choice> @sampled_choice_value7 {value = 7}
   benchmark_options.iterations = 1;
   benchmark_options.warmup_iterations = 0;
 
-  iree_benchmark_loom_configuration_t configuration = {};
-  configuration.tool_name = "iree-benchmark-loom-test";
-  configuration.initialize_low_descriptor_registry =
-      (loom_run_initialize_low_descriptor_registry_callback_t){
-          /*.fn=*/InitializeLowDescriptorRegistry,
-      };
-  iree_benchmark_loom_file_run_options_t run_options = {};
-  run_options.configuration = &configuration;
-  run_options.benchmark_options = &benchmark_options;
-  run_options.input_path = input_path.path_view();
-  run_options.command_line_json = IREE_SV("[\"iree-benchmark-loom-test\"]");
-  run_options.host_allocator = iree_allocator_system();
+  iree_benchmark_loom_configuration_t configuration = {
+      .tool_name = "iree-benchmark-loom-test",
+  };
+  iree_benchmark_loom_file_run_options_t run_options = {
+      .configuration = &configuration,
+      .benchmark_options = &benchmark_options,
+      .input_path = input_path.path_view(),
+      .command_line_json = IREE_SV("[\"iree-benchmark-loom-test\"]"),
+      .host_allocator = iree_allocator_system(),
+  };
 
   iree_benchmark_loom_run_result_t run_result = {};
   IREE_ASSERT_OK(iree_benchmark_loom_run_file(&run_options, &run_result));

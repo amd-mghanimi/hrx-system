@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// AMDGPU vector-memory, atomics, and prefetch lowering helpers.
+// Logical AMDGPU memory access decomposition and canonical address facts.
 
 #ifndef LOOM_TARGET_ARCH_AMDGPU_LOWER_MEMORY_H_
 #define LOOM_TARGET_ARCH_AMDGPU_LOWER_MEMORY_H_
@@ -31,14 +31,40 @@ typedef struct loom_amdgpu_source_alloca_layout_t
 typedef struct loom_amdgpu_source_value_analysis_t
     loom_amdgpu_source_value_analysis_t;
 
+typedef struct loom_amdgpu_memory_dynamic_term_materialization_t {
+  // Term requires materializing scaled address arithmetic.
+  bool needs_scaled_materialization;
+  // Term and stride inputs can be materialized through a scalar offset operand.
+  bool can_materialize_soffset;
+  // Term and stride inputs can be materialized through a vector address
+  // operand.
+  bool can_materialize_vaddr;
+} loom_amdgpu_memory_dynamic_term_materialization_t;
+
+typedef struct loom_amdgpu_memory_dynamic_term_materialization_plan_t {
+  // The dynamic view-base term can be materialized through a scalar offset.
+  bool dynamic_view_base_can_materialize_soffset;
+  // Per-term materialization facts in source dynamic-term order.
+  loom_amdgpu_memory_dynamic_term_materialization_t
+      terms[LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY];
+} loom_amdgpu_memory_dynamic_term_materialization_plan_t;
+
 // Bounded caller-owned workspace for selecting one direct memory plan. The
 // workspace lives only for one selection call and is never retained.
 typedef struct loom_amdgpu_memory_access_selection_t {
+  // Canonical source access shared by all selected physical packet views.
+  loom_low_source_memory_access_plan_t source;
   // Packet candidates populated in increasing source-register order.
   loom_amdgpu_memory_packet_plan_t packets[LOOM_AMDGPU_MAX_MEMORY_PACKET_COUNT];
   // Number of populated packet candidates.
   uint32_t packet_count;
 } loom_amdgpu_memory_access_selection_t;
+
+typedef uint8_t loom_amdgpu_memory_access_selection_flags_t;
+enum loom_amdgpu_memory_access_selection_flag_bits_e {
+  // Native packets retain their destination for inactive SIMD lanes.
+  LOOM_AMDGPU_MEMORY_ACCESS_SELECTION_FLAG_PRESERVE_INACTIVE = 1u << 0,
+};
 
 typedef uint32_t loom_amdgpu_memory_access_rejection_flags_t;
 
@@ -82,7 +108,7 @@ typedef uint32_t loom_amdgpu_memory_access_rejection_flags_t;
   ((uint32_t)1u << 20)
 #define LOOM_AMDGPU_MEMORY_ACCESS_REJECTION_LOW16_DESCRIPTOR_MISSING \
   ((uint32_t)1u << 21)
-#define LOOM_AMDGPU_MEMORY_ACCESS_REJECTION_SIGNED_I16_REPAIR_DESCRIPTOR_MISSING \
+#define LOOM_AMDGPU_MEMORY_ACCESS_REJECTION_SIGNED_NARROW_REPAIR_DESCRIPTOR_MISSING \
   ((uint32_t)1u << 22)
 #define LOOM_AMDGPU_MEMORY_ACCESS_REJECTION_PRIVATE_ROOT ((uint32_t)1u << 23)
 
@@ -113,16 +139,26 @@ typedef struct loom_amdgpu_memory_access_diagnostic_t {
   uint32_t dynamic_term_index;
 } loom_amdgpu_memory_access_diagnostic_t;
 
-typedef struct loom_amdgpu_descriptor_offset_immediate_info_t {
-  // Low immediate kind required by all offset immediate fields.
-  loom_low_immediate_kind_t kind;
-  // Minimum encoded value accepted by signed offset immediate fields.
-  int64_t signed_min;
-  // Maximum encoded value accepted by every offset immediate field.
-  uint64_t unsigned_max;
-  // Byte count represented by one encoded offset unit.
-  uint32_t unit_byte_count;
-} loom_amdgpu_descriptor_offset_immediate_info_t;
+// Returns the source integer width that an unsigned LDS load must sign-extend
+// to satisfy its narrow signed payload contract, or zero when no repair is
+// required. Packed byte vectors use the unsigned payload format and therefore
+// never repair individual packet fragments.
+static inline uint32_t
+loom_amdgpu_memory_access_signed_narrow_lds_repair_bit_count(
+    const loom_amdgpu_memory_access_t* access) {
+  if (access->source->memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP ||
+      access->source->operation_kind != LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD) {
+    return 0;
+  }
+  switch (access->payload_format) {
+    case LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_SIGNED_8BIT_INTEGER:
+      return 8;
+    case LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_SIGNED_16BIT_INTEGER:
+      return 16;
+    default:
+      return 0;
+  }
+}
 
 typedef uint32_t loom_amdgpu_memory_cache_policy_attr_flags_t;
 
@@ -153,13 +189,6 @@ typedef enum loom_amdgpu_memory_cache_policy_resolution_e {
   LOOM_AMDGPU_MEMORY_CACHE_POLICY_RESOLUTION_REJECTED = 3,
 } loom_amdgpu_memory_cache_policy_resolution_t;
 
-// Reads common offset-immediate limits from a descriptor.
-bool loom_amdgpu_descriptor_offset_immediate_info(
-    const loom_low_descriptor_set_t* descriptor_set,
-    uint32_t descriptor_ordinal, uint16_t expected_offset_immediate_count,
-    loom_low_immediate_kind_t expected_kind,
-    loom_amdgpu_descriptor_offset_immediate_info_t* out_info);
-
 // Returns true when the source memory byte offset selected for a 32-bit AMDGPU
 // packet operand is fully proven non-negative and u32 after adding the static
 // byte contribution named by the selected address form.
@@ -167,9 +196,17 @@ bool loom_amdgpu_source_memory_offset_fits_u32(
     const loom_low_source_memory_access_plan_t* source,
     int64_t static_byte_offset);
 
-// Selects a complete AMDGPU memory packet sequence from source IR and facts
-// into caller-owned bounded workspace. Operand paths use the same retained
-// source placement as value mapping.
+// Returns canonical term bits whose indices and strides have scalar register
+// placement. This is a capability query, independent of packet cost policy.
+uint32_t loom_amdgpu_source_memory_scalar_term_mask(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    const loom_view_region_table_t* view_regions,
+    loom_amdgpu_source_value_analysis_t* analysis,
+    const loom_low_source_memory_access_plan_t* source);
+
+// Selects a complete AMDGPU memory packet sequence from a canonical source
+// access and facts into caller-owned bounded workspace. The selection owns the
+// source copy receiving target visibility and physical allocation offsets.
 bool loom_amdgpu_memory_access_plan_select(
     const loom_module_t* module, const loom_value_fact_table_t* fact_table,
     const loom_low_descriptor_set_t* descriptor_set,
@@ -179,32 +216,9 @@ bool loom_amdgpu_memory_access_plan_select(
     loom_amdgpu_instruction_constraint_bits_t instruction_constraints,
     const loom_amdgpu_source_alloca_layout_t* alloca_layout,
     uint8_t read_visibility_scope, const loom_op_t* source_op,
-    loom_low_source_memory_access_plan_t* out_source,
+    const loom_low_source_memory_access_plan_t* source,
+    loom_amdgpu_memory_access_selection_flags_t selection_flags,
     loom_amdgpu_memory_access_selection_t* out_selection,
-    loom_low_source_memory_access_diagnostic_t* out_source_diagnostic,
-    loom_amdgpu_memory_access_diagnostic_t* out_diagnostic);
-
-// Selects a flat global address plan for instrumentation that needs the actual
-// application pointer rather than a memory packet for the source access.
-bool loom_amdgpu_memory_access_select_flat_global_address(
-    const loom_module_t* module,
-    const loom_low_source_memory_access_plan_t* source,
-    loom_amdgpu_memory_access_t* out_access,
-    loom_amdgpu_memory_access_diagnostic_t* out_diagnostic);
-
-// Selects an explicit VGPR byte-offset expression for source access
-// instrumentation.
-//
-// The selected access has all static byte offset, including target-assigned
-// workgroup/private alloca layout, and all dynamic byte terms routed through
-// VADDR. It does not select a memory packet descriptor. Callers can pass the
-// result to loom_amdgpu_emit_memory_vaddr with no base value to materialize the
-// exact u32 memory-space-relative byte offset.
-bool loom_amdgpu_memory_access_select_u32_vaddr_byte_offset(
-    const loom_module_t* module,
-    const loom_amdgpu_source_alloca_layout_t* alloca_layout,
-    const loom_low_source_memory_access_plan_t* source,
-    loom_amdgpu_memory_access_t* out_access,
     loom_amdgpu_memory_access_diagnostic_t* out_diagnostic);
 
 // Folds target-assigned workgroup/private alloca layout into a source memory
@@ -212,6 +226,19 @@ bool loom_amdgpu_memory_access_select_u32_vaddr_byte_offset(
 // AMDGPU memory packets.
 bool loom_amdgpu_memory_access_include_alloca_root_byte_offset(
     const loom_amdgpu_source_alloca_layout_t* alloca_layout,
+    loom_low_source_memory_access_plan_t* source,
+    loom_amdgpu_memory_access_diagnostic_t* diagnostic);
+
+// Returns whether a canonical dynamic term can be realized in vector address
+// registers. The result includes every retained runtime stride factor.
+bool loom_amdgpu_memory_dynamic_term_can_materialize_vaddr(
+    const loom_module_t* module,
+    const loom_low_source_memory_dynamic_term_t* term);
+
+// Selects scalar/vector operand paths from the retained materialization facts.
+bool loom_amdgpu_memory_access_select_dynamic_term_kinds_from_plan(
+    const loom_amdgpu_memory_dynamic_term_materialization_plan_t*
+        materialization_plan,
     loom_amdgpu_memory_access_t* access,
     loom_amdgpu_memory_access_diagnostic_t* diagnostic);
 
@@ -229,20 +256,6 @@ bool loom_amdgpu_memory_access_select_dynamic_term_kinds(
 bool loom_amdgpu_memory_access_select_vaddr_dynamic_terms(
     const loom_module_t* module, loom_amdgpu_memory_access_t* access,
     loom_amdgpu_memory_access_diagnostic_t* diagnostic);
-
-// Routes all dynamic source terms through the VGPR byte-address operand.
-void loom_amdgpu_memory_access_route_dynamic_terms_through_vaddr(
-    loom_amdgpu_memory_access_t* access);
-
-// Emits the target buffer descriptor consumed by MUBUF-style packets from a low
-// HAL binding pointer. When the low resource has no explicit extent,
-// |source_access| may provide source view facts used to derive the descriptor
-// range word.
-iree_status_t loom_amdgpu_emit_hal_buffer_descriptor(
-    loom_low_lower_context_t* context, const loom_op_t* source_op,
-    loom_value_id_t low_binding,
-    const loom_low_source_memory_access_plan_t* source_access,
-    loom_value_id_t* out_low_descriptor);
 
 // Builds descriptor offset and cache-policy attrs for a memory packet.
 iree_status_t loom_amdgpu_make_memory_attrs(
@@ -298,15 +311,6 @@ iree_string_view_t loom_amdgpu_memory_address_form_name(
 iree_string_view_t loom_amdgpu_memory_access_dynamic_term_kind_name(
     const loom_amdgpu_memory_access_t* access);
 
-// Returns the stable report/diagnostic reason key explaining why an LDS access
-// did or did not select the DS addtid address form.
-iree_string_view_t loom_amdgpu_memory_ds_addtid_reason_key(
-    const loom_low_descriptor_set_t* descriptor_set,
-    const loom_module_t* module, loom_func_like_t source_function,
-    const loom_target_bundle_t* bundle,
-    const loom_amdgpu_memory_access_t* access,
-    loom_low_source_memory_operation_kind_t kind);
-
 // Returns the stable diagnostic name for a cache scope.
 iree_string_view_t loom_amdgpu_cache_scope_name(uint8_t scope);
 
@@ -325,19 +329,12 @@ loom_amdgpu_memory_cache_policy_resolve(
 // the memory access.
 iree_string_view_t loom_amdgpu_memory_cache_policy_rejection_key(
     const loom_low_descriptor_set_t* descriptor_set,
-    const loom_amdgpu_memory_access_t* access,
     const loom_vector_memory_cache_policy_t* policy);
 
 // Returns the stable diagnostic constraint key for target-specific
 // memory-access rejection bits.
 iree_string_view_t loom_amdgpu_memory_access_rejection_key(
     loom_amdgpu_memory_access_rejection_flags_t rejection_bits);
-
-// Records the first source dynamic term relevant to a flat-address rejection.
-void loom_amdgpu_memory_access_record_flat_dynamic_address_rejection(
-    const loom_module_t* module,
-    const loom_low_source_memory_access_plan_t* source,
-    loom_amdgpu_memory_access_diagnostic_t* diagnostic);
 
 // Emits a dedicated AMDGPU memory-access rejection diagnostic when one exists
 // for the recorded rejection bits.
@@ -368,12 +365,6 @@ iree_status_t loom_amdgpu_record_memory_cache_policy_rejection_diagnostic(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_amdgpu_memory_access_t* access);
 
-// Populates optional source storage-schema fields on a memory report row.
-void loom_amdgpu_memory_report_row_populate_storage_schema(
-    loom_low_lower_context_t* context,
-    const loom_low_source_memory_access_plan_t* source,
-    loom_low_lower_memory_report_row_t* row);
-
 // Selects and retains an exact-sized AMDGPU source memory-load packet plan.
 iree_status_t loom_amdgpu_select_memory_load_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
@@ -383,6 +374,11 @@ iree_status_t loom_amdgpu_select_memory_load_plan(
 iree_status_t loom_amdgpu_select_memory_store_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_low_lower_plan_t* out_plan);
+
+// Completes descriptor bounds once all operand producers have selected their
+// actual carriers. Packet splits share one retained extent recipe.
+iree_status_t loom_amdgpu_finalize_memory_plan(
+    loom_low_lower_context_t* context, loom_amdgpu_memory_access_plan_t* plan);
 
 // Lowers a source memory-load op to an AMDGPU memory packet.
 iree_status_t loom_amdgpu_lower_memory_load(
@@ -411,6 +407,12 @@ void loom_amdgpu_mark_source_memory_plan_dynamic_storage_demands(
     loom_low_lower_context_t* context,
     const loom_low_source_memory_access_plan_t* source);
 
+// Marks source-value storage required by a retained dynamic address-term
+// slice.
+void loom_amdgpu_mark_source_memory_dynamic_terms_storage_demands(
+    loom_low_lower_context_t* context,
+    const loom_low_source_memory_dynamic_term_t* terms, uint8_t term_count);
+
 // Marks the physical source values needed by a selected AMDGPU memory plan.
 void loom_amdgpu_mark_memory_access_plan_storage_demands(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
@@ -426,6 +428,12 @@ bool loom_amdgpu_atomic_has_native_candidate(
     loom_amdgpu_atomic_operation_kind_t operation_kind, uint8_t atomic_kind,
     uint8_t scope, loom_memory_access_flags_t access_flags,
     loom_type_t value_type);
+
+// Returns whether the analyzed access is an aligned adjacent half pair.
+// Legalization and final selection share this shape contract; descriptor and
+// numerical availability are checked separately by native candidate lookup.
+bool loom_amdgpu_atomic_packed_half_source_shape(
+    const loom_low_source_memory_access_plan_t* source, loom_type_t value_type);
 
 // Selects an AMDGPU atomic packet plan.
 iree_status_t loom_amdgpu_select_atomic_plan(

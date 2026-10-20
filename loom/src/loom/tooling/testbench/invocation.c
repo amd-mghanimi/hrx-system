@@ -39,6 +39,52 @@ static bool loom_testbench_invocation_providers_equal(
          lhs->user_data == rhs->user_data;
 }
 
+iree_status_t loom_testbench_prepare_invocation(
+    const loom_testbench_invocation_options_t* options,
+    const loom_testbench_invocation_plan_t* invocation,
+    loom_testbench_prepared_invocation_t* out_prepared) {
+  loom_testbench_invocation_provider_t provider = {0};
+  switch (invocation->kind) {
+    case LOOM_TESTBENCH_INVOCATION_FUNCTION_CALL:
+      provider = options->function_call;
+      if (!provider.invoke) {
+        return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                                "no function call provider is configured");
+      }
+      break;
+    case LOOM_TESTBENCH_INVOCATION_KERNEL_LAUNCH:
+      provider = options->kernel_launch;
+      if (!provider.invoke) {
+        return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                                "no kernel launch provider is configured");
+      }
+      break;
+    case LOOM_TESTBENCH_INVOCATION_ORACLE:
+      if (!loom_testbench_find_oracle_provider(options, invocation->provider,
+                                               &provider)) {
+        return iree_make_status(
+            IREE_STATUS_UNAVAILABLE, "oracle provider `%.*s` is not configured",
+            (int)invocation->provider.size, invocation->provider.data);
+      }
+      if (!provider.invoke) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "oracle provider `%.*s` has no callback",
+                                (int)invocation->provider.size,
+                                invocation->provider.data);
+      }
+      break;
+    default:
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "invalid invocation plan kind %u",
+                              (unsigned)invocation->kind);
+  }
+  *out_prepared = (loom_testbench_prepared_invocation_t){
+      .plan = invocation,
+      .provider = provider,
+  };
+  return iree_ok_status();
+}
+
 iree_status_t loom_testbench_prepare_case_invocations(
     const loom_testbench_invocation_options_t* options,
     const loom_testbench_case_plan_t* case_plan, iree_arena_allocator_t* arena,
@@ -68,45 +114,8 @@ iree_status_t loom_testbench_prepare_case_invocations(
        invocation_index < case_plan->invocation_count; ++invocation_index) {
     const loom_testbench_invocation_plan_t* invocation =
         &case_plan->invocations[invocation_index];
-    loom_testbench_invocation_provider_t provider = {0};
-    switch (invocation->kind) {
-      case LOOM_TESTBENCH_INVOCATION_FUNCTION_CALL:
-        provider = options->function_call;
-        if (!provider.invoke) {
-          return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                                  "no function call provider is configured");
-        }
-        break;
-      case LOOM_TESTBENCH_INVOCATION_KERNEL_LAUNCH:
-        provider = options->kernel_launch;
-        if (!provider.invoke) {
-          return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                                  "no kernel launch provider is configured");
-        }
-        break;
-      case LOOM_TESTBENCH_INVOCATION_ORACLE:
-        if (!loom_testbench_find_oracle_provider(options, invocation->provider,
-                                                 &provider)) {
-          return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                                  "oracle provider `%.*s` is not configured",
-                                  (int)invocation->provider.size,
-                                  invocation->provider.data);
-        }
-        if (!provider.invoke) {
-          return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                  "oracle provider `%.*s` has no callback",
-                                  (int)invocation->provider.size,
-                                  invocation->provider.data);
-        }
-        break;
-      default:
-        return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                                "invalid invocation plan kind %u",
-                                (unsigned)invocation->kind);
-    }
-
-    prepared_invocations[invocation_index].plan = invocation;
-    prepared_invocations[invocation_index].provider = provider;
+    IREE_RETURN_IF_ERROR(loom_testbench_prepare_invocation(
+        options, invocation, &prepared_invocations[invocation_index]));
     max_workload_count =
         iree_max(max_workload_count, invocation->workload_count);
     max_input_count = iree_max(max_input_count, invocation->input_count);
@@ -227,6 +236,11 @@ void loom_testbench_invocation_executor_deinitialize(
   memset(executor, 0, sizeof(*executor));
 }
 
+void loom_testbench_invocation_executor_reset_issues(
+    loom_testbench_invocation_executor_t* executor) {
+  executor->issue_count = 0;
+}
+
 static iree_status_t loom_testbench_invocation_executor_query_issue(
     loom_testbench_invocation_executor_t* executor,
     const loom_testbench_prepared_invocation_t* prepared) {
@@ -279,7 +293,7 @@ static iree_status_t loom_testbench_store_invocation_results(
   return iree_ok_status();
 }
 
-static iree_status_t loom_testbench_run_single_invocation(
+iree_status_t loom_testbench_run_prepared_invocation(
     loom_testbench_invocation_executor_t* executor,
     const loom_testbench_prepared_invocation_t* prepared,
     loom_testbench_value_table_t* table) {
@@ -332,7 +346,7 @@ static iree_status_t loom_testbench_query_invocation_span_issues(
 iree_status_t loom_testbench_run_case_invocations(
     loom_testbench_invocation_executor_t* executor,
     iree_host_size_t sample_ordinal, loom_testbench_value_table_t* table) {
-  executor->issue_count = 0;
+  loom_testbench_invocation_executor_reset_issues(executor);
   iree_status_t status = iree_ok_status();
   for (iree_host_size_t span_index = 0;
        iree_status_is_ok(status) && executor->issue_count == 0 &&
@@ -350,7 +364,8 @@ iree_status_t loom_testbench_run_case_invocations(
         status = loom_testbench_query_invocation_span_issues(executor, span);
       }
     } else {
-      status = loom_testbench_run_single_invocation(executor, prepared, table);
+      status =
+          loom_testbench_run_prepared_invocation(executor, prepared, table);
     }
   }
   return status;

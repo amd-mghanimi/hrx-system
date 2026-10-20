@@ -15,9 +15,12 @@ loom_check_test_suite(
   SRCS
     "canonicalize.loom-test"
     "canonicalize_condition_loop.loom-test"
+    "canonicalize_counted_while.loom-test"
     "canonicalize_select.loom-test"
+    "canonicalize_select_extensions.loom-test"
     "canonicalize_speculation.loom-test"
     "combine_extrema.loom-test"
+    "condition_induction.loom-test"
     "convergence_facts.loom-test"
     "dependent_types.loom-test"
     "facts.loom-test"
@@ -26,30 +29,9 @@ loom_check_test_suite(
     "loop_distribution_facts.loom-test"
     "rotation_facts.loom-test"
     "roundtrip.loom-test"
+    "selection_bounds.loom-test"
     "selection_facts.loom-test"
     "verify.loom-test"
 )
-
-loom_test_module(
-  NAME
-    extrema_values_test_module
-  SRCS
-    "extrema_values.loom"
-)
-
-if(LOOM_TARGET_ARCH_VM)
-loom_execution_test(
-  NAME
-    extrema_values_test_execute_vm_reference_test
-  MODULE
-    "::extrema_values_test_module"
-  LABELS
-    "iree-build-requirement=loom.target.arch.vm"
-    "loom-execution-profile=vm_reference"
-    "loom-target-family=vm"
-    "loom-target-class=cpu"
-    "loom-executor=reference"
-)
-endif()
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

@@ -26,6 +26,15 @@ static bool loom_vm_source_type_supported(void* user_data,
                                         loom_type_element_type(type)));
 }
 
+static bool loom_vm_source_vector_carrier_supported(
+    void* user_data, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type) {
+  (void)fact_table;
+  (void)value_id;
+  return loom_vm_source_type_supported(user_data, module, type);
+}
+
 static iree_status_t loom_vm_map_type(void* user_data,
                                       loom_low_lower_context_t* context,
                                       const loom_op_t* source_op,
@@ -67,6 +76,12 @@ static iree_status_t loom_vm_select_op(void* user_data,
   const loom_op_t* definition =
       module->symbols.entries[symbol.symbol_id].defining_op;
   if (loom_global_rodata_def_isa(definition)) {
+    loom_type_t result_type;
+    IREE_RETURN_IF_ERROR(loom_low_lower_make_typed_register_type(
+        context, VM_CORE_REG_CLASS_ID_REF, 1, loom_type_buffer(),
+        &result_type));
+    IREE_RETURN_IF_ERROR(loom_low_lower_plan_value_type(
+        context, loom_global_load_result(source_op).values[0], result_type));
     *out_plan = loom_low_lower_plan_make(
         VM_CORE_DESCRIPTOR_REF_BUFFER_RODATA_LOAD, NULL);
   }
@@ -85,9 +100,8 @@ static iree_status_t loom_vm_emit_op(void* user_data,
       .name_id = name,
       .value = loom_attr_symbol(loom_global_load_global(source_op)),
   };
-  loom_type_t result_type;
-  IREE_RETURN_IF_ERROR(loom_low_lower_make_typed_register_type(
-      context, VM_CORE_REG_CLASS_ID_REF, 1, loom_type_buffer(), &result_type));
+  const loom_type_t result_type = loom_low_lower_value_binding_type(
+      context, loom_global_load_result(source_op).values[0]);
   const loom_low_lower_resolved_descriptor_t descriptor = {
       .descriptor =
           &loom_low_lower_context_descriptor_set(context)->descriptors[plan.id],
@@ -107,6 +121,8 @@ static const loom_low_lower_policy_t kPolicy = {
     .import_decl_kind = LOOM_LOW_FUNC_DECL_IMPORT_KIND_NATIVE,
     .error_catalog = &loom_error_catalog_core,
     .source_type_supported = {.fn = loom_vm_source_type_supported},
+    .source_vector_carrier_supported =
+        {.fn = loom_vm_source_vector_carrier_supported},
     .map_type = {.fn = loom_vm_map_type},
     .contract = LOOM_VM_CORE_CONTRACT,
     .select_op = {.fn = loom_vm_select_op},

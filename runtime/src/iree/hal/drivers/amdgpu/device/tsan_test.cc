@@ -14,10 +14,11 @@
 namespace iree::hal::amdgpu {
 namespace {
 
-static iree_hal_amdgpu_device_kernel_args_t MakeQueueInitializeKernelArgs() {
-  iree_hal_amdgpu_device_kernel_args_t kernel_args = {};
-  kernel_args.kernel_object = 0x12345678ull;
-  kernel_args.setup = 1;
+static iree_hal_amdgpu_device_kernel_args_t MakeShadowInitializeKernelArgs() {
+  iree_hal_amdgpu_device_kernel_args_t kernel_args = {
+      .kernel_object = 0x12345678ull,
+      .setup = 1,
+  };
   kernel_args.workgroup_size[0] = 32;
   kernel_args.workgroup_size[1] = 1;
   kernel_args.workgroup_size[2] = 1;
@@ -25,55 +26,66 @@ static iree_hal_amdgpu_device_kernel_args_t MakeQueueInitializeKernelArgs() {
   return kernel_args;
 }
 
-static iree_hal_amdgpu_tsan_queue_initialize_args_t MakeQueueInitializeArgs(
+static iree_hal_amdgpu_tsan_shadow_initialize_args_t MakeShadowInitializeArgs(
     uint64_t shadow_size) {
-  iree_hal_amdgpu_tsan_queue_initialize_args_t initialize_args = {};
-  initialize_args.queue_state =
-      reinterpret_cast<iree_hal_amdgpu_tsan_queue_state_t*>(0x1000);
-  initialize_args.shadow_base = reinterpret_cast<void*>(0x2000);
-  initialize_args.shadow_size = shadow_size;
+  iree_hal_amdgpu_tsan_shadow_initialize_args_t initialize_args = {
+      .shadow_base = reinterpret_cast<void*>(0x2000),
+      .shadow_size = shadow_size,
+  };
   return initialize_args;
 }
 
-TEST(TsanTest, QueueInitializeUsesMinimumClearGrid) {
+TEST(TsanTest, ShadowInitializeUsesMinimumClearGrid) {
   const iree_hal_amdgpu_device_kernel_args_t kernel_args =
-      MakeQueueInitializeKernelArgs();
-  const iree_hal_amdgpu_tsan_queue_initialize_args_t initialize_args =
-      MakeQueueInitializeArgs(/*shadow_size=*/65);
+      MakeShadowInitializeKernelArgs();
+  const iree_hal_amdgpu_tsan_shadow_initialize_args_t initialize_args =
+      MakeShadowInitializeArgs(/*shadow_size=*/65);
   iree_hsa_kernel_dispatch_packet_t packet = {};
+  uint16_t setup = 0xBEEFu;
+  packet.header = 0xFFFFu;
+  packet.setup = 0xA5A5u;
   alignas(16)
-      std::array<uint8_t, sizeof(iree_hal_amdgpu_tsan_queue_initialize_args_t)>
+      std::array<uint8_t, sizeof(iree_hal_amdgpu_tsan_shadow_initialize_args_t)>
           kernargs = {};
 
-  iree_hal_amdgpu_device_tsan_emplace_queue_initialize(
+  iree_hal_amdgpu_device_tsan_emplace_shadow_initialize(
       &kernel_args, &initialize_args, /*max_workgroup_count=*/384, &packet,
-      kernargs.data());
+      kernargs.data(), &setup);
 
   const auto* args =
-      reinterpret_cast<const iree_hal_amdgpu_tsan_queue_initialize_args_t*>(
+      reinterpret_cast<const iree_hal_amdgpu_tsan_shadow_initialize_args_t*>(
           kernargs.data());
+  EXPECT_EQ(packet.header, 0xFFFFu);
+  EXPECT_EQ(packet.setup, 0xA5A5u);
+  EXPECT_EQ(setup, 1u);
   EXPECT_EQ(packet.grid_size[0], 96u);
   EXPECT_EQ(args->clear_workgroup_size, 32u);
   EXPECT_EQ(args->clear_byte_stride, 96u);
 }
 
-TEST(TsanTest, QueueInitializeCapsLargeClearToResidentWork) {
+TEST(TsanTest, ShadowInitializeCapsLargeClearToResidentWork) {
   const iree_hal_amdgpu_device_kernel_args_t kernel_args =
-      MakeQueueInitializeKernelArgs();
-  const iree_hal_amdgpu_tsan_queue_initialize_args_t initialize_args =
-      MakeQueueInitializeArgs(/*shadow_size=*/0x20008000ull);
+      MakeShadowInitializeKernelArgs();
+  const iree_hal_amdgpu_tsan_shadow_initialize_args_t initialize_args =
+      MakeShadowInitializeArgs(/*shadow_size=*/0x20008000ull);
   iree_hsa_kernel_dispatch_packet_t packet = {};
+  uint16_t setup = 0xBEEFu;
+  packet.header = 0xFFFFu;
+  packet.setup = 0xA5A5u;
   alignas(16)
-      std::array<uint8_t, sizeof(iree_hal_amdgpu_tsan_queue_initialize_args_t)>
+      std::array<uint8_t, sizeof(iree_hal_amdgpu_tsan_shadow_initialize_args_t)>
           kernargs = {};
 
-  iree_hal_amdgpu_device_tsan_emplace_queue_initialize(
+  iree_hal_amdgpu_device_tsan_emplace_shadow_initialize(
       &kernel_args, &initialize_args, /*max_workgroup_count=*/384, &packet,
-      kernargs.data());
+      kernargs.data(), &setup);
 
   const auto* args =
-      reinterpret_cast<const iree_hal_amdgpu_tsan_queue_initialize_args_t*>(
+      reinterpret_cast<const iree_hal_amdgpu_tsan_shadow_initialize_args_t*>(
           kernargs.data());
+  EXPECT_EQ(packet.header, 0xFFFFu);
+  EXPECT_EQ(packet.setup, 0xA5A5u);
+  EXPECT_EQ(setup, 1u);
   EXPECT_EQ(packet.grid_size[0], 12288u);
   EXPECT_EQ(args->clear_workgroup_size, 32u);
   EXPECT_EQ(args->clear_byte_stride, 12288u);

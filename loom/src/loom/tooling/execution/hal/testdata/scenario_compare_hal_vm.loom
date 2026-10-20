@@ -1,0 +1,163 @@
+kernel.def @scenario_alias_update() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%first: buffer, %second: buffer, %delta: i64) {
+  %origin = index.constant 0 : offset
+  %delta_i32 = scalar.trunci %delta : i64 to i32
+  %first_aligned = buffer.assume.alignment %first {minimum_alignment = 4} : buffer
+  %second_aligned = buffer.assume.alignment %second {minimum_alignment = 4} : buffer
+  %first_view = buffer.view %first_aligned[%origin] : buffer -> view<4xi32>
+  %second_view = buffer.view %second_aligned[%origin] : buffer -> view<4xi32>
+  %value = view.load %second_view[0] : view<4xi32> -> i32
+  %updated = scalar.addi %value, %delta_i32 : i32
+  view.store %updated, %first_view[1] : i32, view<4xi32>
+  %aliased = view.load %second_view[0] : view<4xi32> -> i32
+  view.store %aliased, %second_view[1] : i32, view<4xi32>
+  kernel.return
+}
+
+func.def @scenario_alias_update_oracle(%first: buffer, %second: buffer, %delta: i64) {
+  %origin = index.constant 0 : offset
+  %delta_i32 = scalar.trunci %delta : i64 to i32
+  %first_aligned = buffer.assume.alignment %first {minimum_alignment = 4} : buffer
+  %second_aligned = buffer.assume.alignment %second {minimum_alignment = 4} : buffer
+  %first_view = buffer.view %first_aligned[%origin] : buffer -> view<4xi32>
+  %second_view = buffer.view %second_aligned[%origin] : buffer -> view<4xi32>
+  %value = view.load %second_view[0] : view<4xi32> -> i32
+  %updated = scalar.addi %value, %delta_i32 : i32
+  view.store %updated, %first_view[1] : i32, view<4xi32>
+  %aliased = view.load %second_view[0] : view<4xi32> -> i32
+  view.store %aliased, %second_view[1] : i32, view<4xi32>
+  func.return
+}
+
+check.scenario public @scenario_compare_hal_vm {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(11) : tensor<8xi32>
+    %first = check.tensor.view %storage offset(4) : tensor<8xi32> -> tensor<4xi32>
+    %second = check.tensor.view %storage offset(8) : tensor<8xi32> -> tensor<4xi32>
+    %delta = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    check.compare<@scenario_alias_update, @scenario_alias_update_oracle>(%first, %second, %delta) : (tensor<4xi32>, tensor<4xi32>, i64) -> () {
+      check.expect.equal actual(%storage) expected(%storage) : tensor<8xi32>
+      check.expect.equal actual(%first) expected(%first) : tensor<4xi32>
+      check.expect.equal actual(%second) expected(%second) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// A separately named scenario normally has an independent entropy namespace.
+// Controlled comparison gives both candidates the baseline namespace, then
+// verifies every scalar, buffer, view, and alias before timing.
+check.scenario public @scenario_benchmark_baseline {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(11) : tensor<8xi32>
+    %first = check.tensor.view %storage offset(4) : tensor<8xi32> -> tensor<4xi32>
+    %second = check.tensor.view %storage offset(8) : tensor<8xi32> -> tensor<4xi32>
+    %delta = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    check.invoke<@scenario_alias_update>(%first, %second, %delta) : (tensor<4xi32>, tensor<4xi32>, i64) -> ()
+  }
+  check.return
+}
+
+check.benchmark<@scenario_benchmark_baseline> @scenario_benchmark_baseline_throughput
+
+check.scenario public @scenario_benchmark_candidate {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(11) : tensor<8xi32>
+    %first = check.tensor.view %storage offset(4) : tensor<8xi32> -> tensor<4xi32>
+    %second = check.tensor.view %storage offset(8) : tensor<8xi32> -> tensor<4xi32>
+    %delta = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    check.invoke<@scenario_alias_update>(%first, %second, %delta) : (tensor<4xi32>, tensor<4xi32>, i64) -> ()
+  }
+  check.return
+}
+
+check.benchmark<@scenario_benchmark_candidate> @scenario_benchmark_candidate_throughput
+
+// Comparison must reject candidates whose concrete materialized values differ,
+// even when their invocation layouts and entropy-derived scalars match.
+check.scenario public @scenario_benchmark_mismatch {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(12) : tensor<8xi32>
+    %first = check.tensor.view %storage offset(4) : tensor<8xi32> -> tensor<4xi32>
+    %second = check.tensor.view %storage offset(8) : tensor<8xi32> -> tensor<4xi32>
+    %delta = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    check.invoke<@scenario_alias_update>(%first, %second, %delta) : (tensor<4xi32>, tensor<4xi32>, i64) -> ()
+  }
+  check.return
+}
+
+check.benchmark<@scenario_benchmark_mismatch> @scenario_benchmark_mismatch_throughput
+
+// Scalar results and mutable aliased inputs must reach the same comparison.
+// Returning raw floating payloads exercises transport without numeric rounding.
+func.def @scenario_function_results(%first: buffer, %second: buffer, %trial: index, %bits: i64) -> (i1, i8, i16, i32, i64, index, offset, f8E4M3, f8E5M2, f16, bf16, f32, f64) {
+  func.call @scenario_alias_update_oracle(%first, %second, %bits) : (buffer, buffer, i64)
+  %origin = index.constant 0 : offset
+  %second_view = buffer.view %second[%origin] : buffer -> view<4xi32>
+  %updated = view.load %second_view[0] : view<4xi32> -> i32
+  %boolean = scalar.trunci %bits : i64 to i1
+  %byte = scalar.trunci %bits : i64 to i8
+  %half = scalar.trunci %bits : i64 to i16
+  %word = scalar.trunci %bits : i64 to i32
+  %bounded_trial = index.assume %trial [range(%trial, 0, 7)] : index
+  %offset = index.cast %bounded_trial : index to offset
+  %e4m3 = scalar.bitcast %byte : i8 to f8E4M3
+  %e5m2 = scalar.bitcast %byte : i8 to f8E5M2
+  %half_float = scalar.bitcast %half : i16 to f16
+  %brain_float = scalar.bitcast %half : i16 to bf16
+  %single = scalar.bitcast %word : i32 to f32
+  %double = scalar.bitcast %bits : i64 to f64
+  func.return %boolean, %byte, %half, %updated, %bits, %trial, %offset, %e4m3, %e5m2, %half_float, %brain_float, %single, %double : i1, i8, i16, i32, i64, index, offset, f8E4M3, f8E5M2, f16, bf16, f32, f64
+}
+
+check.scenario public @scenario_scalar_results {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(11) : tensor<8xi32>
+    %first = check.tensor.view %storage offset(4) : tensor<8xi32> -> tensor<4xi32>
+    %second = check.tensor.view %storage offset(8) : tensor<8xi32> -> tensor<4xi32>
+    %bits = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    check.compare<@scenario_function_results>(%first, %second, %trial, %bits) : (tensor<4xi32>, tensor<4xi32>, index, i64) -> [actual(%actual_boolean: i1, %actual_byte: i8, %actual_half: i16, %actual_updated: i32, %actual_bits: i64, %actual_index: index, %actual_offset: offset, %actual_e4m3: f8E4M3, %actual_e5m2: f8E5M2, %actual_half_float: f16, %actual_brain_float: bf16, %actual_single: f32, %actual_double: f64), expected(%expected_boolean: i1, %expected_byte: i8, %expected_half: i16, %expected_updated: i32, %expected_bits: i64, %expected_index: index, %expected_offset: offset, %expected_e4m3: f8E4M3, %expected_e5m2: f8E5M2, %expected_half_float: f16, %expected_brain_float: bf16, %expected_single: f32, %expected_double: f64)] {
+      check.expect.equal actual(%storage) expected(%storage) : tensor<8xi32>
+      check.expect.equal actual(%actual_boolean) expected(%expected_boolean) : i1
+      check.expect.equal actual(%actual_byte) expected(%expected_byte) : i8
+      check.expect.equal actual(%actual_half) expected(%expected_half) : i16
+      check.expect.equal actual(%actual_updated) expected(%expected_updated) : i32
+      check.expect.equal actual(%actual_bits) expected(%expected_bits) : i64
+      check.expect.equal actual(%actual_index) expected(%expected_index) : index
+      check.expect.equal actual(%actual_offset) expected(%expected_offset) : offset
+      check.expect.bitwise actual(%actual_e4m3) expected(%expected_e4m3) : f8E4M3
+      check.expect.bitwise actual(%actual_e5m2) expected(%expected_e5m2) : f8E5M2
+      check.expect.bitwise actual(%actual_half_float) expected(%expected_half_float) : f16
+      check.expect.bitwise actual(%actual_brain_float) expected(%expected_brain_float) : bf16
+      check.expect.bitwise actual(%actual_single) expected(%expected_single) : f32
+      check.expect.bitwise actual(%actual_double) expected(%expected_double) : f64
+    }
+  }
+  check.return
+}
+
+check.benchmark<@scenario_scalar_results> @scenario_scalar_results_throughput
+
+// An argument-free subject still needs a result binding. Payload comparisons
+// distinguish negative zero and NaN from values equal under numeric comparison.
+func.def @scenario_constant_results() -> (f32, f64) {
+  %sign_bit = scalar.constant -2147483648 : i32
+  %nan_bits = scalar.constant 9221120237041090851 : i64
+  %negative_zero = scalar.bitcast %sign_bit : i32 to f32
+  %nan = scalar.bitcast %nan_bits : i64 to f64
+  func.return %negative_zero, %nan : f32, f64
+}
+
+check.scenario public @scenario_argument_free_results {
+  check.trial[2](%trial: index, %entropy: check.entropy) {
+    check.compare<@scenario_constant_results>() : () -> [actual(%actual_zero: f32, %actual_nan: f64), expected(%expected_zero: f32, %expected_nan: f64)] {
+      check.expect.bitwise actual(%actual_zero) expected(%expected_zero) : f32
+      check.expect.bitwise actual(%actual_nan) expected(%expected_nan) : f64
+    }
+  }
+  check.return
+}
+
+check.benchmark<@scenario_argument_free_results> @scenario_argument_free_results_throughput

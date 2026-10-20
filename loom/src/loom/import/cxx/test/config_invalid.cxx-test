@@ -169,3 +169,64 @@ struct Value {
 // ====
 // ERROR@+1: LOWERING/059 "with a leading attribute"
 using Word = unsigned [[loom::config("word")]];
+
+// ====
+#include <loomcxx/predicate.h>
+// ERROR@+1: LOWERING/059 "leading where contracts require a config declaration"
+[[loom::where(loom::predicate::eq(4u))]] extern const unsigned value;
+
+// ====
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "one where contract per declaration is allowed"
+[[loom::config("tuning.value"), loom::where(loom::predicate::gt(0u)),
+  loom::where(loom::predicate::lt(16u))]]
+extern const unsigned value;
+
+// ====
+#include <loomcxx/predicate.h>
+// ERROR@+1: LOWERING/059 "where requires one predicate expression"
+[[loom::config("tuning.value"), loom::where]]
+extern const unsigned value;
+
+// ====
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "multiple_of does not accept this config source type"
+[[loom::config("tuning.scale"),
+  loom::where(loom::predicate::multiple_of(2.0f))]]
+extern const float scale;
+
+// ====
+// Literal types are explicit parts of a C++ config contract.
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "config predicate arguments must match the declared source type"
+[[loom::config("tuning.value"),
+  loom::where(loom::predicate::range(1, 16))]]
+extern const unsigned value;
+
+// ====
+#include <loomcxx/index.h>
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "index config predicate arguments must be integral or enum constants"
+[[loom::config("tuning.value"),
+  loom::where(loom::predicate::range(1.0, 16.0))]]
+extern const loom::type::index value;
+
+// ====
+#include <loomcxx/predicate.h>
+extern const unsigned other;
+// ERROR@+2: LOWERING/059 "config predicates may reference only the implicit config value and pure constants"
+[[loom::config("tuning.value"),
+  loom::where(loom::predicate::eq(other))]]
+extern const unsigned value;
+
+// ====
+// Exact definitions must satisfy constraints contributed by every alias.
+#include <loomcxx/predicate.h>
+[[loom::config("model.tile"),
+  loom::where(loom::predicate::range(16u, 256u))]]
+extern const unsigned tile;
+[[loom::config("model.tile"),
+  loom::where(loom::predicate::multiple_of(16u))]]
+extern const unsigned tile_alias;
+// ERROR@+1: LOWERING/059 "symbol '@model.tile' value 18 violates constraint 'multiple_of'"
+[[loom::config("model.tile")]] const unsigned tile = 18u;

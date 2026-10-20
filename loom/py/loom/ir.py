@@ -68,6 +68,7 @@ __all__ = [
     "StorageSpace",
     "StorageType",
     "PoolType",
+    "GroupType",
     "FunctionType",
     "NoneType",
     "RegisterType",
@@ -104,6 +105,7 @@ __all__ = [
     "CanonicalAttrDict",
     "ATTR_AGGREGATE_MAX_NESTING_DEPTH",
     "EnumArrayAttr",
+    "StringArrayAttr",
     "SignedEnumSetAttr",
     "ParameterizedAttr",
     "ParameterizedAttrArray",
@@ -215,7 +217,8 @@ class TypeKind(IntEnum):
     REGISTER = 12
     STORAGE = 13
     PARAMETERIZED = 14
-    PLACEHOLDER = 15
+    GROUP = 15
+    PLACEHOLDER = 16
 
 
 # ============================================================================
@@ -673,33 +676,50 @@ ENCODING_TRANSFORM_TYPE = EncodingType(EncodingRole.TRANSFORM)
 
 @dataclass(frozen=True, slots=True)
 class PoolType:
-    """A block-managed device memory pool: pool<[%block_size]>.
+    """An opaque allocation resource: pool.
 
-    One parameter: the block size in bytes, which may be static or
-    dynamic. The pool carries no capacity, no element type, no
-    encoding — it's untyped bytes. Element type and encoding are
-    imposed by pool ops at access time.
-
-    A dynamic block_size carries the index-typed SSA value that supplies its
-    size, just like a dynamic dimension in a shaped type.
+    The value selects backing storage. Device identity, memory-space
+    capabilities, capacity and allocation strategy are not type parameters.
     """
-
-    block_size: Dim
 
     @property
     def type_kind(self) -> TypeKind:
         return TypeKind.POOL
 
+    def __repr__(self) -> str:
+        return "pool"
+
+
+@dataclass(frozen=True, slots=True)
+class GroupType:
+    """A shaped communication domain: group<8>, group<2x4>, or group<[%n]>.
+
+    The shape identifies participants and their rank coordinates. It does not
+    contain participant values, channels, or physical resources. Placement and
+    topology facts relate a group value to concrete execution resources.
+    """
+
+    dims: tuple[Dim, ...]
+
+    def __post_init__(self) -> None:
+        if not self.dims:
+            raise ValueError("group types must have rank >= 1")
+
     @property
-    def has_dynamic_block_size(self) -> bool:
-        return isinstance(self.block_size, DynamicDim)
+    def type_kind(self) -> TypeKind:
+        return TypeKind.GROUP
+
+    @property
+    def rank(self) -> int:
+        return len(self.dims)
+
+    @property
+    def is_all_static(self) -> bool:
+        return all(isinstance(dimension, StaticDim) for dimension in self.dims)
 
     def __repr__(self) -> str:
-        match self.block_size:
-            case StaticDim(size=size):
-                return f"pool<{size}>"
-            case DynamicDim():
-                return "pool<?>"
+        dimensions = "x".join(repr(dimension) for dimension in self.dims)
+        return f"group<{dimensions}>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,6 +751,7 @@ type Type = (
     | ParameterizedType
     | EncodingType
     | PoolType
+    | GroupType
     | PlaceholderType
     | NoneType
 )
@@ -857,9 +878,9 @@ class EncodingInstance:
         Aliases are display-only and do not participate in equality/hash.
     params: Canonical static attributes as sorted key-value pairs. Values use
         the same Python attribute domain as op attrs: ints, floats, bools,
-        strings, EncodingInstance, CanonicalAttrDict, and i64 arrays. Dynamic
-        encoding parameters are named SSA operands on encoding.define, not
-        nested values in this static attribute payload.
+        strings, StringArrayAttr, EncodingInstance, CanonicalAttrDict, and i64
+        arrays. Dynamic encoding parameters are named SSA operands on
+        encoding.define, not nested values in this static attribute payload.
     """
 
     name: str
@@ -910,7 +931,10 @@ def _canonicalize_encoding_param_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return CanonicalAttrDict(value.items())
     if isinstance(value, list | tuple):
-        return tuple(_canonicalize_encoding_param_value(item) for item in value)
+        values = tuple(_canonicalize_encoding_param_value(item) for item in value)
+        if values and all(type(item) is str for item in values):
+            return StringArrayAttr(values)
+        return values
     return value
 
 
@@ -918,7 +942,8 @@ def _canonicalize_encoding_param_value(value: Any) -> Any:
 # Predicates
 # ============================================================================
 
-# Valid predicate kinds. Maps kind name to expected argument count.
+# Valid predicate kinds in bytecode ordinal order. Dictionary insertion order
+# is part of the C/Python wire contract; values are exact argument counts.
 PREDICATE_KINDS: dict[str, int] = {
     "eq": 2,
     "ne": 2,
@@ -926,14 +951,16 @@ PREDICATE_KINDS: dict[str, int] = {
     "le": 2,
     "gt": 2,
     "ge": 2,
-    "mul": 2,  # mul(a, n) — a is a multiple of positive n.
-    "min": 2,  # min(a, n) — a >= n.
-    "max": 2,  # max(a, n) — a <= n.
-    "pow2": 1,  # pow2(a) — a is a power of 2.
+    "multiple_of": 2,  # multiple_of(a, n) — a is a multiple of positive n.
+    "power_of_two": 1,  # power_of_two(a) — a is a power of 2.
     "range": 3,  # range(a, lo, hi) — lo <= a <= hi.
     "not_nan": 1,  # not_nan(a) — a is not NaN.
     "not_inf": 1,  # not_inf(a) — a is not positive or negative infinity.
     "finite": 1,  # finite(a) — a is not NaN or infinity.
+    "ult": 2,  # Sign-extended 64-bit carrier of a is unsigned less than b.
+    "ule": 2,  # Sign-extended 64-bit carrier of a is unsigned <= b.
+    "ugt": 2,  # Sign-extended 64-bit carrier of a is unsigned greater than b.
+    "uge": 2,  # Sign-extended 64-bit carrier of a is unsigned >= b.
 }
 
 
@@ -963,12 +990,12 @@ class PredicateArg:
 
 @dataclass(frozen=True, slots=True)
 class Predicate:
-    """A predicate constraint on dynamic dimension values.
+    """A predicate constraint on scalar values.
 
-    Used in function where clauses and assume ops to express
-    constraints like "M is a multiple of 16" or "K is between 32 and 512".
+    Used in function where clauses and assume ops to express constraints such
+    as "M is a multiple of 16" or "lhs is unsigned less than rhs".
 
-    kind: Predicate kind name ("eq", "lt", "mul", "pow2", "range", etc.).
+    kind: Predicate kind name ("eq", "lt", "multiple_of", "range", etc.).
     args: Tuple of predicate arguments.
     """
 
@@ -1023,6 +1050,24 @@ def _resolve_predicate_arg(
             raise ValueError(f"unknown predicate arg tag: {arg.tag!r}")
 
 
+def _evaluate_unsigned_relation(kind: str, lhs: int | float, rhs: int | float) -> bool:
+    if type(lhs) is not int or type(rhs) is not int:
+        return False
+    unsigned_lhs = lhs % (1 << 64)
+    unsigned_rhs = rhs % (1 << 64)
+    match kind:
+        case "ult":
+            return unsigned_lhs < unsigned_rhs
+        case "ule":
+            return unsigned_lhs <= unsigned_rhs
+        case "ugt":
+            return unsigned_lhs > unsigned_rhs
+        case "uge":
+            return unsigned_lhs >= unsigned_rhs
+        case _:
+            raise ValueError(f"unknown unsigned relation kind: {kind!r}")
+
+
 def evaluate_predicate(predicate: Predicate, values: dict[int, int | float]) -> bool:
     """Evaluate a predicate against concrete dimension values.
 
@@ -1048,13 +1093,11 @@ def evaluate_predicate(predicate: Predicate, values: dict[int, int | float]) -> 
             return args[0] > args[1]
         case "ge":
             return args[0] >= args[1]
-        case "mul":
-            return args[1] != 0 and args[0] % args[1] == 0
-        case "min":
-            return args[0] >= args[1]
-        case "max":
-            return args[0] <= args[1]
-        case "pow2":
+        case "ult" | "ule" | "ugt" | "uge":
+            return _evaluate_unsigned_relation(predicate.kind, args[0], args[1])
+        case "multiple_of":
+            return args[1] > 0 and args[0] % args[1] == 0
+        case "power_of_two":
             value = args[0]
             return isinstance(value, int) and value > 0 and (value & (value - 1)) == 0
         case "range":
@@ -1332,6 +1375,29 @@ def _canonicalize_parameterized_signed_enum_set(
     return SignedEnumSetAttr(positive_values, negative_values)
 
 
+def _canonicalize_parameterized_i64_array(
+    family_name: str, parameter_name: str, value: Any
+) -> tuple[int, ...]:
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Iterable):
+        raise TypeError(
+            f"{family_name}: parameter '{parameter_name}' must be an iterable "
+            f"of signed 64-bit integers, got {value!r}"
+        )
+    values = tuple(value)
+    for index, element in enumerate(values):
+        if type(element) is not int or not -(2**63) <= element < 2**63:
+            raise TypeError(
+                f"{family_name}: parameter '{parameter_name}' element {index} "
+                f"must be a signed 64-bit integer, got {element!r}"
+            )
+    if len(values) > 0xFFFF:
+        raise ValueError(
+            f"{family_name}: parameter '{parameter_name}' has {len(values)} "
+            "elements, exceeding UINT16_MAX"
+        )
+    return values
+
+
 def _canonicalize_parameterized_value(
     family_name: str, parameter: Any, value: Any
 ) -> Any:
@@ -1349,6 +1415,7 @@ def _canonicalize_parameterized_value(
         ATTR_TYPE_PARAMETERIZED_ARRAY,
         ATTR_TYPE_SIGNED_ENUM_SET,
         ATTR_TYPE_STRING,
+        ATTR_TYPE_STRING_ARRAY,
         ATTR_TYPE_SYMBOL,
         ATTR_TYPE_SYMBOL_ARRAY,
         ATTR_TYPE_TYPE,
@@ -1373,6 +1440,10 @@ def _canonicalize_parameterized_value(
             if type(value) is not str:
                 raise type_error("a string")
             return value
+        case kind if kind == ATTR_TYPE_STRING_ARRAY:
+            return _canonicalize_parameterized_string_array(
+                family_name, parameter.name, value
+            )
         case kind if kind == ATTR_TYPE_BOOL:
             if type(value) is not bool:
                 raise type_error("a Boolean")
@@ -1405,6 +1476,7 @@ def _canonicalize_parameterized_value(
                     ParameterizedType,
                     EncodingType,
                     PoolType,
+                    GroupType,
                     PlaceholderType,
                     NoneType,
                 ),
@@ -1412,24 +1484,9 @@ def _canonicalize_parameterized_value(
                 raise type_error("a Loom type")
             return value
         case kind if kind == ATTR_TYPE_I64_ARRAY:
-            if isinstance(value, str | bytes | bytearray) or not isinstance(
-                value, Iterable
-            ):
-                raise type_error("an iterable of signed 64-bit integers")
-            values = tuple(value)
-            for index, element in enumerate(values):
-                if type(element) is not int or not -(2**63) <= element < 2**63:
-                    raise TypeError(
-                        f"{family_name}: parameter '{parameter.name}' element "
-                        f"{index} must be a signed 64-bit integer, got "
-                        f"{element!r}"
-                    )
-            if len(values) > 0xFFFF:
-                raise ValueError(
-                    f"{family_name}: parameter '{parameter.name}' has "
-                    f"{len(values)} elements, exceeding UINT16_MAX"
-                )
-            return values
+            return _canonicalize_parameterized_i64_array(
+                family_name, parameter.name, value
+            )
         case kind if kind == ATTR_TYPE_BYTES:
             if not isinstance(value, bytes | bytearray | memoryview):
                 raise type_error("a byte payload")
@@ -1473,6 +1530,44 @@ def _canonicalize_parameterized_value(
                 f"{family_name}: parameter '{parameter.name}' has unsupported "
                 f"kind '{parameter.attr_type}'"
             )
+
+
+def _canonicalize_parameterized_string_array(
+    family_name: str, parameter_name: str, value: Any
+) -> StringArrayAttr:
+    values = value.values if isinstance(value, StringArrayAttr) else value
+    if isinstance(values, str | bytes | bytearray) or not isinstance(values, Iterable):
+        raise TypeError(
+            f"{family_name}: parameter '{parameter_name}' must be an iterable "
+            f"of strings, got {value!r}"
+        )
+    return StringArrayAttr(values)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class StringArrayAttr:
+    """Ordered string attribute payloads."""
+
+    values: tuple[str, ...]
+
+    def __init__(self, values: Iterable[str] = ()) -> None:
+        frozen_values = tuple(values)
+        if len(frozen_values) > 0xFFFF:
+            raise ValueError(
+                f"string array length {len(frozen_values)} exceeds UINT16_MAX"
+            )
+        for index, value in enumerate(frozen_values):
+            if type(value) is not str:
+                raise TypeError(
+                    f"string array element {index} must be a string, got {value!r}"
+                )
+        object.__setattr__(self, "values", frozen_values)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.values)
+
+    def __len__(self) -> int:
+        return len(self.values)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1685,9 +1780,15 @@ def _canonicalize_attr_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return canonicalize_attr_dict(value)
     if isinstance(value, list):
-        return [_canonicalize_attr_value(item) for item in value]
+        canonical_values = [_canonicalize_attr_value(item) for item in value]
+        if canonical_values and all(type(item) is str for item in canonical_values):
+            return StringArrayAttr(canonical_values)
+        return canonical_values
     if isinstance(value, tuple):
-        return tuple(_canonicalize_attr_value(item) for item in value)
+        canonical_values = tuple(_canonicalize_attr_value(item) for item in value)
+        if canonical_values and all(type(item) is str for item in canonical_values):
+            return StringArrayAttr(canonical_values)
+        return canonical_values
     return value
 
 
@@ -2125,8 +2226,12 @@ class TypeTable:
 
 
 class LocationTable:
-    """Interned location table. Entry 0 is always None (unknown).
-    O(1) dedup via hash map on frozen LocationData."""
+    """Stable location table with O(1) structural deduplication.
+
+    Entry 0 is always None (unknown). New authored locations use add() to
+    reuse structurally equal entries. Deserializers use append() to preserve
+    the identity of every indexed row from the wire format.
+    """
 
     __slots__ = ("_locations", "_index")
 
@@ -2141,6 +2246,15 @@ class LocationTable:
         loc_id = len(self._locations)
         self._locations.append(loc)
         self._index[loc] = loc_id
+        return loc_id
+
+    def append(self, loc: LocationData) -> int:
+        """Append a distinct location row, preserving its assigned ID."""
+        if loc is None:
+            raise ValueError("unknown location is fixed at ID 0")
+        loc_id = len(self._locations)
+        self._locations.append(loc)
+        self._index.setdefault(loc, loc_id)
         return loc_id
 
     def get(self, location_id: int) -> LocationData:

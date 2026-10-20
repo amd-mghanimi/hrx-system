@@ -51,6 +51,7 @@ from loom.ir import (
     FileLocation,
     FunctionType,
     FusedLocation,
+    GroupType,
     Module,
     OpaqueLocation,
     Operation,
@@ -1431,39 +1432,42 @@ class TestEncodingTypePrinting:
 
 
 class TestPoolTypePrinting:
-    def test_static_pool(self) -> None:
-        assert print_type(PoolType(StaticDim(65536))) == "pool<65536>"
+    def test_pool(self) -> None:
+        assert print_type(PoolType()) == "pool"
 
-    def test_static_pool_small(self) -> None:
-        assert print_type(PoolType(StaticDim(4096))) == "pool<4096>"
+    def test_pool_in_operation(self) -> None:
+        module = Module(name="test")
+        pool_type = PoolType()
+        pool_id = module.add_value(Value(name="pool", type=pool_type))
+        result_id = module.add_value(Value(name="result", type=pool_type))
+        op = Operation(name="test.attrs", operands=[pool_id], results=[result_id])
+        assert (
+            _printer().print_operation(op, module)
+            == "%result = test.attrs %pool : pool"
+        )
 
-    def test_dynamic_pool_no_context(self) -> None:
-        """Without context, dynamic block_size prints as ?."""
-        assert print_type(PoolType(DynamicDim())) == "pool<?>"
 
-    def test_dynamic_pool_with_context(self) -> None:
-        """With context, dynamic block_size prints as [%name]."""
+# ============================================================================
+# Group type printing
+# ============================================================================
+
+
+class TestGroupTypePrinting:
+    def test_static_group(self) -> None:
+        group_type = GroupType((StaticDim(2), StaticDim(4)))
+        assert print_type(group_type) == "group<2x4>"
+
+    def test_dynamic_group_no_context(self) -> None:
+        assert print_type(GroupType((DynamicDim(),))) == "group<?>"
+
+    def test_dynamic_group_with_context(self) -> None:
         from loom.format.text.printer import TypePrintContext
 
         module = Module(name="test")
-        module.add_value(Value(name="BS", type=INDEX))
+        module.add_value(Value(name="workers", type=INDEX))
         context = TypePrintContext(module)
-        assert print_type(PoolType(DynamicDim(0)), context) == "pool<[%BS]>"
-
-    def test_pool_in_operation(self) -> None:
-        """Pool type prints correctly as an op operand type."""
-        module = Module(name="test")
-        bs_id = module.add_value(Value(name="BS", type=INDEX))
-        pool_type = PoolType(DynamicDim(bs_id))
-        pool_id = module.add_value(Value(name="pool", type=pool_type))
-        result_id = module.add_value(Value(name="result", type=pool_type))
-        op = Operation(
-            name="test.attrs",
-            operands=[pool_id],
-            results=[result_id],
-        )
-        text = _printer().print_operation(op, module)
-        assert text == "%result = test.attrs %pool : pool<[%BS]>"
+        group_type = GroupType((DynamicDim(0), StaticDim(4)))
+        assert print_type(group_type, context) == "group<[%workers]x4>"
 
 
 # ============================================================================

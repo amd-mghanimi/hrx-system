@@ -1,0 +1,14 @@
+kernel.def @entry(%groups: index) {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%groups, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%data: buffer) {
+  kernel.return
+}
+
+command.program.def public @root() launch(%data: buffer) {
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  kernel.launch @entry[%c1](%data) : [index](buffer)
+  kernel.launch @entry[%c2](%data) : [index](buffer)
+  command.return
+}

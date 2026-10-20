@@ -262,3 +262,48 @@ def test_validates_rows_in_later_pipeline_exports() -> None:
         match=r"pipeline_plans\[1\]\.workers\.rows\[0\]\.worker_index: expected 0",
     ):
         suggest_compile_report(parse_compile_report(report))
+
+
+def test_configuration_reports_memory_only_tiles_without_inventing_channels() -> None:
+    report = _compile_report()
+    report["entries"] = {"count": 0, "rows": []}
+    plan = report["pipeline_plans"][0]
+    plan["realization"] = "resident-configuration"
+    del plan["channels"]
+    worker = plan["workers"]["rows"][0]
+    worker["code_byte_count"] = 512
+    # The same occupied bank may be visible through several loaded workers.
+    # Physical memory rows own pressure suggestions when they are available.
+    plan["memories"] = {
+        "count": 2,
+        "rows": [
+            {
+                "memory_index": 0,
+                "placement": {"rank": 2, "x": 0, "y": 3},
+                "high_water_byte_count": 32768,
+                "capacity_byte_count": 65536,
+                "maximum_bank_storage_byte_count": 14336,
+                "bank_storage_capacity_byte_count": 16384,
+            },
+            {
+                "memory_index": 1,
+                "placement": {"rank": 2, "x": 1, "y": 1},
+                "high_water_byte_count": 458752,
+                "capacity_byte_count": 524288,
+                "maximum_bank_storage_byte_count": 65536,
+                "bank_storage_capacity_byte_count": 65536,
+            },
+        ],
+    }
+
+    result = suggest_compile_report(parse_compile_report(report))
+
+    suggestions = result.suggestions
+    assert [(item.suggestion_id, item.entry_name) for item in suggestions] == [
+        ("aie2p.bank_pressure", "q5_gate_up:tile[0,3]"),
+        ("aie2p.bank_pressure", "q5_gate_up:tile[1,1]"),
+        ("aie2p.local_memory_pressure", "q5_gate_up:tile[1,1]"),
+    ]
+    assert suggestions[-1].evidence[0].path == (
+        "pipeline_plans[0].memories.rows[1].high_water_byte_count"
+    )

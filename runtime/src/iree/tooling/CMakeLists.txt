@@ -34,8 +34,43 @@ iree_cc_test(
     iree::base::internal
     iree::base::internal::span
     iree::hal
+    iree::hal::memory::heap_pool
+    iree::hal::testing::mapped_transfer_buffer
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+iree_cc_library(
+  NAME
+    device_flags
+  HDRS
+    "device_flags.h"
+  SRCS
+    "device_flags.c"
+  DEPS
+    iree::base
+    iree::base::tooling::flags
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
+    device_profiling
+  HDRS
+    "device_profiling.h"
+  SRCS
+    "device_profiling.c"
+  DEPS
+    iree::base
+    iree::base::internal
+    iree::base::threading
+    iree::base::threading::thread
+    iree::base::tooling::flags
+    iree::hal
+    iree::hal::utils::profile_file
+    iree::hal::utils::statistics_sink
+    iree::io::file_handle
+  PUBLIC
 )
 
 iree_cc_library(
@@ -46,18 +81,68 @@ iree_cc_library(
   SRCS
     "device_util.c"
   DEPS
+    ::device_flags
     iree::base
-    iree::base::internal
     iree::base::threading
-    iree::base::threading::thread
     iree::base::tooling::flags
     iree::hal
     iree::hal::drivers
     iree::hal::utils::mpi_channel_provider
-    iree::hal::utils::profile_file
-    iree::hal::utils::statistics_sink
-    iree::io::file_handle
   PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    device_util_default_device_test
+  SRCS
+    "device_util_test.cc"
+  DEPS
+    ::device_util
+    iree::async::util::proactor_pool
+    iree::base::threading
+    iree::hal
+    iree::hal::drivers::task::registration
+    iree::testing::gtest
+    iree::testing::gtest_main
+  ARGS
+    "--gtest_filter=DeviceUtilTest.CreatesDefaultDevice"
+)
+
+iree_cc_test(
+  NAME
+    device_util_flag_device_test
+  SRCS
+    "device_util_test.cc"
+  DEPS
+    ::device_util
+    iree::async::util::proactor_pool
+    iree::base::threading
+    iree::hal
+    iree::hal::drivers::task::registration
+    iree::testing::gtest
+    iree::testing::gtest_main
+  ARGS
+    "--device=task"
+    "--gtest_filter=DeviceUtilTest.CreatesFlagDevice"
+)
+
+iree_cc_test(
+  NAME
+    device_util_repeated_device_test
+  SRCS
+    "device_util_test.cc"
+  DEPS
+    ::device_util
+    iree::async::util::proactor_pool
+    iree::base::threading
+    iree::hal
+    iree::hal::drivers::task::registration
+    iree::testing::gtest
+    iree::testing::gtest_main
+  ARGS
+    "--device=task"
+    "--device=task"
+    "--gtest_filter=DeviceUtilTest.RejectsRepeatedDeviceFlags"
 )
 
 iree_cc_library(
@@ -84,6 +169,7 @@ iree_cc_test(
     ::value_io
     iree::base
     iree::hal
+    iree::hal::memory::heap_pool
     iree::io::file_handle
     iree::testing::gtest
     iree::testing::gtest_main
@@ -112,10 +198,8 @@ iree_cc_test(
   SRCS
     "numpy_io_test.cc"
   DEPS
-    ::device_util
     ::numpy_io
-    iree::async::util::proactor_pool
-    iree::base::threading
+    iree::hal::memory::heap_pool
     iree::io::stream
     iree::testing::gtest
     iree::testing::gtest_main
@@ -152,11 +236,78 @@ iree_cc_test(
     ::parameter_util
     iree::base
     iree::base::internal::path
+    iree::base::tooling::flags
     iree::io::file_handle
     iree::io::parameter_index
     iree::testing::gtest
     iree::testing::gtest_main
     iree::testing::temp_file
+  LABELS
+    "requires-filesystem"
+)
+
+iree_cc_test(
+  NAME
+    parameter_util_direct_test
+  SRCS
+    "parameter_util_test.cc"
+  DEPS
+    ::parameter_util
+    iree::base
+    iree::base::internal::path
+    iree::base::tooling::flags
+    iree::io::file_handle
+    iree::io::parameter_index
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::testing::temp_file
+  ARGS
+    "--parameter_mode=direct"
+    "--expected_parameter_mode=direct"
+  LABELS
+    "requires-filesystem"
+)
+
+iree_cc_test(
+  NAME
+    parameter_util_preload_test
+  SRCS
+    "parameter_util_test.cc"
+  DEPS
+    ::parameter_util
+    iree::base
+    iree::base::internal::path
+    iree::base::tooling::flags
+    iree::io::file_handle
+    iree::io::parameter_index
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::testing::temp_file
+  ARGS
+    "--parameter_mode=preload"
+    "--expected_parameter_mode=preload"
+  LABELS
+    "requires-filesystem"
+)
+
+iree_cc_test(
+  NAME
+    parameter_util_invalid_test
+  SRCS
+    "parameter_util_test.cc"
+  DEPS
+    ::parameter_util
+    iree::base
+    iree::base::internal::path
+    iree::base::tooling::flags
+    iree::io::file_handle
+    iree::io::parameter_index
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::testing::temp_file
+  ARGS
+    "--parameter_mode=invalid"
+    "--expected_parameter_mode=invalid"
   LABELS
     "requires-filesystem"
 )

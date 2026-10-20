@@ -28,7 +28,7 @@ enum {
 };
 
 // LOOM_OP_POOL_LOAD: Read a page from the pool as a typed tile.
-// %tile = pool.load %pool, %pid, %pb : pool<[%BS]>, i32, offset -> tile<[16, 128]xf16>
+// %tile = pool.load %pool, %pid, %pb : pool, i32, offset -> tile<[16, 128]xf16>
 LOOM_DEFINE_ISA(loom_pool_load_isa, LOOM_OP_POOL_LOAD)
 LOOM_DEFINE_OPERAND(loom_pool_load_pool, 0)
 LOOM_DEFINE_OPERAND(loom_pool_load_page_id, 1)
@@ -44,7 +44,7 @@ iree_status_t loom_pool_load_build(
     loom_op_t** out_op);
 
 // LOOM_OP_POOL_STORE: Write tile data into the pool at a page offset.
-// pool.store %pool, %pid, %pb, %off, %data : pool<[%BS]>, i32, offset, offset, tile<[16, 128]xf16>
+// pool.store %pool, %pid, %pb, %off, %data : pool, i32, offset, offset, tile<[16, 128]xf16>
 LOOM_DEFINE_ISA(loom_pool_store_isa, LOOM_OP_POOL_STORE)
 LOOM_DEFINE_OPERAND(loom_pool_store_pool, 0)
 LOOM_DEFINE_OPERAND(loom_pool_store_page_id, 1)
@@ -62,7 +62,7 @@ iree_status_t loom_pool_store_build(
     loom_op_t** out_op);
 
 // LOOM_OP_POOL_PIN: Atomically increment the pin count for a block.
-// pool.pin %pool, %bid : pool<[%BS]>, i32
+// pool.pin %pool, %bid : pool, i32
 LOOM_DEFINE_ISA(loom_pool_pin_isa, LOOM_OP_POOL_PIN)
 LOOM_DEFINE_OPERAND(loom_pool_pin_pool, 0)
 LOOM_DEFINE_OPERAND(loom_pool_pin_block_id, 1)
@@ -74,7 +74,7 @@ iree_status_t loom_pool_pin_build(
     loom_op_t** out_op);
 
 // LOOM_OP_POOL_UNPIN: Atomically decrement the pin count for a block.
-// pool.unpin %pool, %bid : pool<[%BS]>, i32
+// pool.unpin %pool, %bid : pool, i32
 LOOM_DEFINE_ISA(loom_pool_unpin_isa, LOOM_OP_POOL_UNPIN)
 LOOM_DEFINE_OPERAND(loom_pool_unpin_pool, 0)
 LOOM_DEFINE_OPERAND(loom_pool_unpin_block_id, 1)
@@ -86,7 +86,7 @@ iree_status_t loom_pool_unpin_build(
     loom_op_t** out_op);
 
 // LOOM_OP_POOL_BUFFER: Extract the raw device buffer handle from a pool.
-// %buf = pool.buffer %pool : pool<[%BS]> -> hal.buffer
+// %buf = pool.buffer %pool : pool -> hal.buffer
 LOOM_DEFINE_ISA(loom_pool_buffer_isa, LOOM_OP_POOL_BUFFER)
 LOOM_DEFINE_OPERAND(loom_pool_buffer_pool, 0)
 LOOM_DEFINE_RESULT(loom_pool_buffer_buffer, 0)

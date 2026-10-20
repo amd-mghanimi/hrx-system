@@ -43,10 +43,10 @@ low.func.def target<test.low.core> @call_definition(%extent: reg<test.i32 : inde
 // ====
 
 // Register value types preserve nested TYPE and predicate attribute bindings.
-low.func.decl target<test.low.core> @metadata(%width: reg<test.i32 : index>, %value: reg<test.ptr : test.array<vector<[%width]xf32>, metadata = {constraints = predicates[pow2(%width)], shape = vector<[%width]xf32>}>>)
+low.func.decl target<test.low.core> @metadata(%width: reg<test.i32 : index>, %value: reg<test.ptr : test.array<vector<[%width]xf32>, metadata = {constraints = predicates[power_of_two(%width)], shape = vector<[%width]xf32>}>>)
 
-low.func.def target<test.low.core> @call_metadata(%extent: reg<test.i32 : index>, %input: reg<test.ptr : test.array<vector<[%extent]xf32>, metadata = {constraints = predicates[pow2(%extent)], shape = vector<[%extent]xf32>}>>) asm {
-  low.func.call @metadata(%extent, %input) : (reg<test.i32 : index>, reg<test.ptr : test.array<vector<[%extent]xf32>, metadata = {constraints = predicates[pow2(%extent)], shape = vector<[%extent]xf32>}>>)
+low.func.def target<test.low.core> @call_metadata(%extent: reg<test.i32 : index>, %input: reg<test.ptr : test.array<vector<[%extent]xf32>, metadata = {constraints = predicates[power_of_two(%extent)], shape = vector<[%extent]xf32>}>>) asm {
+  low.func.call @metadata(%extent, %input) : (reg<test.i32 : index>, reg<test.ptr : test.array<vector<[%extent]xf32>, metadata = {constraints = predicates[power_of_two(%extent)], shape = vector<[%extent]xf32>}>>)
   return
 }
 
@@ -102,11 +102,11 @@ low.func.def target<test.low.core> @wrong_carrier(%width: reg<test.i32 : index>,
 
 // ====
 
-low.func.decl target<test.low.core> @metadata(%width: reg<test.i32 : index>, %value: reg<test.ptr : test.array<i32, metadata = {constraints = predicates[pow2(%width)]}>>)
+low.func.decl target<test.low.core> @metadata(%width: reg<test.i32 : index>, %value: reg<test.ptr : test.array<i32, metadata = {constraints = predicates[power_of_two(%width)]}>>)
 
-low.func.def target<test.low.core> @wrong_predicate_peer(%width: reg<test.i32 : index>, %other_width: reg<test.i32 : index>, %input: reg<test.ptr : test.array<i32, metadata = {constraints = predicates[pow2(%other_width)]}>>) asm {
+low.func.def target<test.low.core> @wrong_predicate_peer(%width: reg<test.i32 : index>, %other_width: reg<test.i32 : index>, %input: reg<test.ptr : test.array<i32, metadata = {constraints = predicates[power_of_two(%other_width)]}>>) asm {
   // ERROR@+1: TYPE/001 {field_a="operand 1", field_b="contract argument 1"}
-  low.func.call @metadata(%width, %input) : (reg<test.i32 : index>, reg<test.ptr : test.array<i32, metadata = {constraints = predicates[pow2(%other_width)]}>>) -> ()
+  low.func.call @metadata(%width, %input) : (reg<test.i32 : index>, reg<test.ptr : test.array<i32, metadata = {constraints = predicates[power_of_two(%other_width)]}>>) -> ()
   return
 }
 

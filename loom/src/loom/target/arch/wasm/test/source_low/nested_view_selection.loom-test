@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/nested_view_selection.loom-test
 // RUN: emit source-low target=wasm:simd128 output=low control-flow=structured-low
 
 // A derived selection retains both the selected buffer and its byte base.
@@ -17,35 +16,31 @@ func.def @derived_selection(%first: buffer, %second: buffer, %third: buffer, %po
   %refined = view.refine %pair : view<4xi32> -> view<4xi32>
   %part = view.subview %refined[%position] : view<4xi32> -> view<1xi32>
   %selected = scf.select %select_pair, %part, %third_view : view<1xi32>
-  // ERROR@+1: WASM/005 {op_name="view.load"}
   %value = view.load %selected[0] : view<1xi32> -> i32
   func.return %value : i32
 }
 
-// ====
-
-// Nested selections compose with structured side effects and explicit CFG.
-// ERROR@+1: TARGET/089 {function_name="selection_with_side_effects", op_name="func.def"}
-func.def @selection_with_side_effects(%first: buffer, %second: buffer, %third: buffer, %select_first: i1, %select_pair: i1, %enter: i1, %side: i1, %initial: i32) -> (i32) {
-  %base = index.constant 0 : offset
-  %first_aligned = buffer.assume.alignment %first {minimum_alignment = 4} : buffer
-  %second_aligned = buffer.assume.alignment %second {minimum_alignment = 4} : buffer
-  %third_aligned = buffer.assume.alignment %third {minimum_alignment = 4} : buffer
-  %first_view = buffer.view %first_aligned[%base] : buffer -> view<1xi32>
-  %second_view = buffer.view %second_aligned[%base] : buffer -> view<1xi32>
-  %third_view = buffer.view %third_aligned[%base] : buffer -> view<1xi32>
-  cfg.cond_br %enter, ^producer, ^exit
-^producer:
-  view.store %initial, %third_view[0] : i32, view<1xi32>
-  scf.if %side {
-    view.store %initial, %first_view[0] : i32, view<1xi32>
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @derived_selection(%first_aligned: reg<wasm.i32>, %second_aligned: reg<wasm.i32>, %third_aligned: reg<wasm.i32>, %position: reg<wasm.i32>, %select_first: reg<wasm.i32>, %select_pair: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
+  %base0 = i32.const 4
+  %base1 = i32.const 8
+  %base2 = i32.const 12
+  %pair_root, %pair_offset = low.scf.if %select_first -> (reg<wasm.i32>, reg<wasm.i32>) {
+    low.scf.yield %first_aligned, %base0 : reg<wasm.i32>, reg<wasm.i32>
+  } else {
+    low.scf.yield %second_aligned, %base1 : reg<wasm.i32>, reg<wasm.i32>
   }
-  %pair = scf.select %select_first, %first_view, %second_view : view<1xi32>
-  cfg.br ^consumer
-^consumer:
-  %selected = scf.select %select_pair, %pair, %third_view : view<1xi32>
-  %result = view.load %selected[0] : view<1xi32> -> i32
-  func.return %result : i32
-^exit:
-  func.return %initial : i32
+  %45 = i64.extend_i32_s %position
+  %46 = i64.const 4
+  %47 = i64.mul %45, %46
+  %48 = i32.wrap_i64 %47
+  %49 = i32.add %pair_offset, %48
+  %selected_root, %selected_offset = low.scf.if %select_pair -> (reg<wasm.i32>, reg<wasm.i32>) {
+    low.scf.yield %pair_root, %49 : reg<wasm.i32>, reg<wasm.i32>
+  } else {
+    low.scf.yield %third_aligned, %base2 : reg<wasm.i32>, reg<wasm.i32>
+  }
+  %52 = i32.add %selected_root, %selected_offset
+  %value = i32.load %52
+  return %value
 }

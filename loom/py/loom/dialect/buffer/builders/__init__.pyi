@@ -15,6 +15,7 @@ class BufferBuilder(DialectBuilder):
         self,
         *,
         memory_space: str,
+        pool: ValueRef | None = ...,
         base_alignment: int,
         byte_length: ValueRef,
         results: list[Type | TiedResultSpec],

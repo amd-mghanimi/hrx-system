@@ -8,18 +8,22 @@
 //
 // Public target callbacks use the opaque context accessors declared in
 // lower.h. This header owns the stack-local context representation and the
-// function-lifetime state shared by the lowering orchestrator, planning,
-// callable-boundary, reporting, and rule-interpreter components.
+// phase-local analysis and the retained frame shared by source planning,
+// callable boundaries, reporting, and rule interpretation.
 
 #ifndef LOOM_CODEGEN_LOW_LOWER_CONTEXT_H_
 #define LOOM_CODEGEN_LOW_LOWER_CONTEXT_H_
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "loom/analysis/cfg_value_identity.h"
+#include "loom/analysis/storage_interference.h"
 #include "loom/analysis/symbolic_expr.h"
 #include "loom/analysis/view_regions.h"
 #include "loom/codegen/low/builder.h"
+#include "loom/codegen/low/lower/control_plan.h"
 #include "loom/codegen/low/lower/execution.h"
+#include "loom/codegen/low/lower/function_boundary.h"
 #include "loom/codegen/low/lower/lower.h"
 #include "loom/codegen/low/lower/report.h"
 #include "loom/codegen/low/lower/rules.h"
@@ -35,16 +39,16 @@ extern "C" {
 // Sentinel indicating that a source value was intentionally erased.
 #define LOOM_LOW_LOWER_VALUE_ID_ELIDED ((loom_value_id_t)(UINT32_MAX - 1))
 
-typedef struct loom_low_lower_rule_descriptor_map_t
-    loom_low_lower_rule_descriptor_map_t;
-
-typedef struct loom_low_lower_successor_interpositions_t {
-  // Effective low destinations indexed by source terminator successor ordinal.
-  // NULL entries use the destination implied by the source successor block.
-  loom_block_t** low_dests;
-  // Number of entries in low_dests.
-  uint8_t low_dest_count;
-} loom_low_lower_successor_interpositions_t;
+typedef struct loom_low_lower_rule_descriptor_cache_t
+    loom_low_lower_rule_descriptor_cache_t;
+typedef struct loom_low_lower_source_query_coverage_t
+    loom_low_lower_source_query_coverage_t;
+typedef struct loom_low_lower_source_graph_placement_t
+    loom_low_lower_source_graph_placement_t;
+typedef struct loom_low_lower_participation_state_t
+    loom_low_lower_participation_state_t;
+typedef struct loom_control_participant_table_t
+    loom_control_participant_table_t;
 
 typedef struct loom_low_lower_target_state_record_t {
   // Target-owned static key identifying this function-local state object.
@@ -64,52 +68,40 @@ typedef enum loom_low_lower_function_analysis_phase_e {
 typedef struct loom_low_lower_function_analysis_t {
   // Furthest analysis phase completed for the active fact table.
   loom_low_lower_function_analysis_phase_t phase;
+  // Exact CFG representatives retained from source footprint verification.
+  loom_cfg_value_identity_table_t value_identities;
   // Function-local stable symbolic expressions shared by rules and views.
   loom_symbolic_expr_context_t expression_context;
   // View-region table borrowing expression_context.
   loom_view_region_table_t view_regions;
   // Source body multiplicities retained independently of optional reports.
   loom_low_lower_execution_counts_t execution_counts;
+  // Source control participation shared by target planning and reports.
+  loom_low_lower_participation_state_t* participation;
+  // Compact block guarantees projected during common condition verification.
+  loom_control_participant_table_t* participant_zeros;
+  // Shared source allocation provenance, accesses, and instance lifetimes.
+  loom_storage_interference_t* storage_interference;
 } loom_low_lower_function_analysis_t;
 
 typedef struct loom_low_lowering_frame_t {
-  // Active source-function value domain for dense per-value lowering state.
+  // Stable source IDs and ordinals; borrows module scratch only while this
+  // plan is being built or executed.
   loom_local_value_domain_t value_domain;
-  // Borrowed source value facts computed before planning.
-  loom_value_fact_table_t* fact_table;
-  // Reusable traversal state for condition-fact queries.
-  loom_condition_query_t condition_query;
-  // Stable function analyses advanced monotonically on demand.
-  loom_low_lower_function_analysis_t function_analysis;
   // Declared terminator kind for direct exits from the source callable body,
   // or unknown while querying a bodyless callable.
   loom_op_kind_t source_callable_exit_kind;
   // Retained source lowering decisions and value materialization demands.
   loom_low_lower_source_plan_t source_plan;
-  // Source local value ordinal to emitted low value ID map.
-  loom_value_id_t* value_map;
-  // Source block ordinal to emitted low block pointer map.
-  loom_block_t** block_map;
-  // Source block ordinal to per-successor low destination interpositions.
-  loom_low_lower_successor_interpositions_t* successor_interpositions;
-  // Source block ordinal to target branch plan selected after low blocks exist.
-  loom_low_lower_plan_t* branch_plans;
-  // Source function argument ABI mappings.
-  loom_low_lower_abi_argument_t* argument_map;
-  // Number of entries in argument_map.
-  uint16_t argument_map_count;
-  // Callable result carriers joined during source planning, in source result
-  // order. None until a return is observed or the boundary is finalized.
-  // Function-arena storage is retained through definition and return emission.
-  loom_type_t* result_types;
-  // Optional source selection and memory report analysis state.
-  loom_low_lower_report_state_t report;
-  // Descriptor set used to build rule_descriptor_maps.
-  const loom_low_descriptor_set_t* rule_descriptor_map_set;
-  // Per-policy-rule-set descriptor-ref to descriptor-row maps.
-  loom_low_lower_rule_descriptor_map_t* rule_descriptor_maps;
-  // Number of entries in rule_descriptor_maps.
-  uint16_t rule_descriptor_map_count;
+  // Source ordinal to selected type, replaced in place by the emitted value.
+  loom_low_lower_value_binding_t* value_bindings;
+  // Planned block topology and branch expansions, before Low construction.
+  loom_low_lower_control_plan_t* control_plan;
+  // Callable signature, argument imports, and ABI layout retained for emission.
+  loom_low_lower_function_boundary_t boundary;
+  // Shared descriptor bindings for the active immutable target tables. Without
+  // module state, this is the head of the function-owned cache list.
+  loom_low_lower_rule_descriptor_cache_t* rule_descriptor_cache;
   // Function-local target state records keyed by target-owned static storage.
   loom_low_lower_target_state_record_t* target_state_records;
   // Number of populated target_state_records entries.
@@ -136,21 +128,42 @@ struct loom_low_lower_context_t {
   const loom_low_descriptor_set_t* descriptor_set;
   // Result object receiving counters and emitted low function metadata.
   loom_low_lower_result_t* result;
-  // Arena retaining function plans, maps, analyses, and target state.
-  iree_arena_allocator_t function_arena;
+  // Stable owner of retained function plans and target payloads.
+  iree_arena_allocator_t* function_arena;
+  // Function-local analysis storage retired before any plan executes.
+  iree_arena_allocator_t analysis_arena;
+  // Borrowed source value facts computed before planning.
+  loom_value_fact_table_t* fact_table;
+  // Demand scope over immutable source, retired before plan execution.
+  loom_storage_access_scope_t* storage_access;
+  // Reusable traversal state for condition-fact queries.
+  loom_condition_query_t condition_query;
+  // Stable function analyses advanced monotonically on demand.
+  loom_low_lower_function_analysis_t function_analysis;
+  // Source-graph coverage for the primary fact table, owned by analysis_arena.
+  loom_low_lower_source_query_coverage_t* source_query_coverage;
+  // Lazy source-graph emission placement state owned by analysis_arena.
+  loom_low_lower_source_graph_placement_t* source_graph_placement;
   // Arena reset after each source-op planning callback.
   iree_arena_allocator_t planning_arena;
   // True only while a source-op planning callback may request scratch storage.
   bool planning_arena_active;
-  // Arena reset after each bounded low-IR emission scope.
+  // Active function emission storage, with transient callback scratch after
+  // its block bindings. Released when this function finishes emitting.
   iree_arena_allocator_t emission_arena;
+  // Function-owned emission storage preceding the active callback scratch.
+  iree_arena_checkpoint_t emission_checkpoint;
   // True only while a low-IR builder callback may request emission storage.
   bool emission_arena_active;
   // Module-scope state shared by source-to-low calls in the current module
   // pass, or NULL when the caller is lowering a standalone function.
   loom_low_lower_module_state_t* module_state;
-  // Function-local state for this source-to-low lowering run.
-  loom_low_lowering_frame_t lowering;
+  // Plan-owned frame; its address remains stable between planning and emission.
+  loom_low_lowering_frame_t* lowering;
+  // Active phase reporting scratch; completed report rows belong to result.
+  loom_low_lower_report_state_t report;
+  // Emission-owned block bindings in planned order; absent during planning.
+  loom_block_t** block_map;
   // Builder used while emitting the low function.
   loom_builder_t builder;
   // Emitted target-low function operation, or NULL before emission starts.
@@ -170,7 +183,7 @@ iree_status_t loom_low_lower_query_value(loom_low_lower_context_t* context,
                                          loom_type_t* out_low_type);
 
 // Returns true when the lowering context has reached its diagnostic limit.
-bool loom_low_lower_context_should_stop(
+bool loom_low_lower_context_diagnostic_limit_reached(
     const loom_low_lower_context_t* context);
 
 // Emits a TARGET-domain diagnostic with the standard target-low source

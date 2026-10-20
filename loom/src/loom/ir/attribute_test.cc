@@ -16,17 +16,51 @@ namespace {
 
 TEST(AttributeTest, Size) { static_assert(sizeof(loom_attribute_t) == 16); }
 
+TEST(AttributeTest, PredicateMetadataCoversEveryKind) {
+  static constexpr const char* kNames[] = {
+      "eq",          "ne",           "lt",    "le",      "gt",      "ge",
+      "multiple_of", "power_of_two", "range", "not_nan", "not_inf", "finite",
+      "ult",         "ule",          "ugt",   "uge",
+  };
+  static_assert(IREE_ARRAYSIZE(kNames) == LOOM_PREDICATE_COUNT_);
+
+  for (loom_predicate_kind_t kind = 0; kind < LOOM_PREDICATE_COUNT_; ++kind) {
+    EXPECT_STREQ(loom_predicate_kind_name(kind), kNames[kind]);
+    loom_predicate_kind_t parsed_kind = LOOM_PREDICATE_COUNT_;
+    EXPECT_TRUE(loom_predicate_kind_parse(iree_make_cstring_view(kNames[kind]),
+                                          &parsed_kind));
+    EXPECT_EQ(parsed_kind, kind);
+    EXPECT_NE(loom_predicate_kind_argument_count(kind), UINT8_MAX);
+  }
+
+  loom_predicate_kind_t parsed_kind = LOOM_PREDICATE_COUNT_;
+  EXPECT_FALSE(loom_predicate_kind_parse(IREE_SV("unknown"), &parsed_kind));
+  EXPECT_EQ(loom_predicate_kind_name(LOOM_PREDICATE_COUNT_), nullptr);
+  EXPECT_EQ(loom_predicate_kind_argument_count(LOOM_PREDICATE_COUNT_),
+            UINT8_MAX);
+}
+
 TEST(AttributeTest, PredicateValueTypeContracts) {
   static constexpr loom_predicate_kind_t kIntegerPredicateKinds[] = {
-      LOOM_PREDICATE_EQ,   LOOM_PREDICATE_NE,    LOOM_PREDICATE_LT,
-      LOOM_PREDICATE_LE,   LOOM_PREDICATE_GT,    LOOM_PREDICATE_GE,
-      LOOM_PREDICATE_MUL,  LOOM_PREDICATE_MIN,   LOOM_PREDICATE_MAX,
-      LOOM_PREDICATE_POW2, LOOM_PREDICATE_RANGE,
+      LOOM_PREDICATE_LT,          LOOM_PREDICATE_LE,
+      LOOM_PREDICATE_GT,          LOOM_PREDICATE_GE,
+      LOOM_PREDICATE_MULTIPLE_OF, LOOM_PREDICATE_POWER_OF_TWO,
+      LOOM_PREDICATE_RANGE,
+  };
+  static constexpr loom_predicate_kind_t kEqualityPredicateKinds[] = {
+      LOOM_PREDICATE_EQ,
+      LOOM_PREDICATE_NE,
   };
   static constexpr loom_predicate_kind_t kFloatPredicateKinds[] = {
       LOOM_PREDICATE_NOT_NAN,
       LOOM_PREDICATE_NOT_INF,
       LOOM_PREDICATE_FINITE,
+  };
+  static constexpr loom_predicate_kind_t kUnsignedPredicateKinds[] = {
+      LOOM_PREDICATE_ULT,
+      LOOM_PREDICATE_ULE,
+      LOOM_PREDICATE_UGT,
+      LOOM_PREDICATE_UGE,
   };
   const loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
   const loom_type_t index = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
@@ -41,9 +75,23 @@ TEST(AttributeTest, PredicateValueTypeContracts) {
     EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, f32));
     EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, buffer));
   }
+  for (loom_predicate_kind_t kind : kEqualityPredicateKinds) {
+    EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, i32));
+    EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, index));
+    EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, offset));
+    EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, f32));
+    EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, buffer));
+  }
   for (loom_predicate_kind_t kind : kFloatPredicateKinds) {
     EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, i32));
     EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, f32));
+    EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, buffer));
+  }
+  for (loom_predicate_kind_t kind : kUnsignedPredicateKinds) {
+    EXPECT_TRUE(loom_predicate_kind_accepts_value_type(kind, i32));
+    EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, index));
+    EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, offset));
+    EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, f32));
     EXPECT_FALSE(loom_predicate_kind_accepts_value_type(kind, buffer));
   }
   EXPECT_FALSE(
@@ -53,14 +101,14 @@ TEST(AttributeTest, PredicateValueTypeContracts) {
 
 TEST(AttributeTest, PredicateValueTypeContractsUseTypedRegisterSemantics) {
   const loom_register_type_data_t integer_data = {
-      /*.carrier_payload0=*/0,
-      /*.carrier_payload1=*/0,
-      /*.value_type=*/loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+      .carrier_payload0 = 0,
+      .carrier_payload1 = 0,
+      .value_type = loom_type_scalar(LOOM_SCALAR_TYPE_I32),
   };
   const loom_register_type_data_t float_data = {
-      /*.carrier_payload0=*/0,
-      /*.carrier_payload1=*/0,
-      /*.value_type=*/loom_type_scalar(LOOM_SCALAR_TYPE_F32),
+      .carrier_payload0 = 0,
+      .carrier_payload1 = 0,
+      .value_type = loom_type_scalar(LOOM_SCALAR_TYPE_F32),
   };
   const loom_type_t integer_register =
       loom_type_register_payload_with_value_type(&integer_data);
@@ -70,13 +118,19 @@ TEST(AttributeTest, PredicateValueTypeContractsUseTypedRegisterSemantics) {
 
   EXPECT_TRUE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_EQ,
                                                      integer_register));
+  EXPECT_TRUE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_ULE,
+                                                     integer_register));
   EXPECT_FALSE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_FINITE,
                                                       integer_register));
-  EXPECT_FALSE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_EQ,
+  EXPECT_TRUE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_EQ,
+                                                     float_register));
+  EXPECT_FALSE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_ULE,
                                                       float_register));
   EXPECT_TRUE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_FINITE,
                                                      float_register));
   EXPECT_FALSE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_EQ,
+                                                      untyped_register));
+  EXPECT_FALSE(loom_predicate_kind_accepts_value_type(LOOM_PREDICATE_ULE,
                                                       untyped_register));
 }
 
@@ -237,14 +291,37 @@ TEST(AttributeEqual, I64ArraySamePointer) {
   EXPECT_TRUE(loom_attribute_equal(&a, &b));
 }
 
+TEST(AttributeEqual, StringArrayPreservesOrderAndDuplicates) {
+  const loom_string_id_t values_a[] = {4, 9, 4};
+  const loom_string_id_t values_b[] = {4, 9, 4};
+  const loom_string_id_t reordered[] = {4, 4, 9};
+  loom_attribute_t a = loom_attr_string_array(values_a, 3);
+  loom_attribute_t b = loom_attr_string_array(values_b, 3);
+  loom_attribute_t c = loom_attr_string_array(reordered, 3);
+
+  EXPECT_TRUE(loom_attribute_equal(&a, &b));
+  EXPECT_EQ(loom_attribute_hash(&a), loom_attribute_hash(&b));
+  EXPECT_FALSE(loom_attribute_equal(&a, &c));
+}
+
+TEST(AttributeEqual, EmptyStringArrayIsPresentAndStructural) {
+  loom_attribute_t first = loom_attr_string_array(nullptr, 0);
+  loom_attribute_t second = loom_attr_string_array(nullptr, 0);
+  loom_attribute_t absent = loom_attr_absent();
+
+  EXPECT_TRUE(loom_attribute_equal(&first, &second));
+  EXPECT_EQ(loom_attribute_hash(&first), loom_attribute_hash(&second));
+  EXPECT_FALSE(loom_attribute_equal(&first, &absent));
+}
+
 TEST(AttributeEqual, PredicateListSameContent) {
   loom_predicate_t preds_a[2];
   memset(preds_a, 0, sizeof(preds_a));
-  preds_a[0].kind = LOOM_PREDICATE_MUL;
+  preds_a[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   preds_a[0].arg_count = 2;
   preds_a[0].args[0] = 100;
   preds_a[0].args[1] = 16;
-  preds_a[1].kind = LOOM_PREDICATE_MIN;
+  preds_a[1].kind = LOOM_PREDICATE_GE;
   preds_a[1].arg_count = 2;
   preds_a[1].args[0] = 100;
   preds_a[1].args[1] = 1;
@@ -261,7 +338,7 @@ TEST(AttributeEqual, PredicateListSameContent) {
 TEST(AttributeEqual, PredicateListDifferentContent) {
   loom_predicate_t preds_a[1];
   memset(preds_a, 0, sizeof(preds_a));
-  preds_a[0].kind = LOOM_PREDICATE_MUL;
+  preds_a[0].kind = LOOM_PREDICATE_MULTIPLE_OF;
   preds_a[0].arg_count = 2;
   preds_a[0].args[0] = 100;
   preds_a[0].args[1] = 16;

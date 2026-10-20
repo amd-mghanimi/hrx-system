@@ -1,5 +1,122 @@
 // RUN: pass cfg-simplify
 
+// Independent strands share a captured condition. Constant folding and
+// dependent Boolean replacement preserve the unchanged sibling's analysis,
+// including when the replacements introduce new values into the local domain.
+pipeline.def @sibling_regions() run(%choose: i1, %value: i32) {
+  %yes = scalar.constant true : i1
+  pipeline.strand workers([0], [1], [1]) {
+    cfg.cond_br %yes, ^selected, ^unused
+  ^selected:
+    test.use %value : i32
+  ^unused:
+    test.use %choose : i1
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    cfg.cond_br %choose, ^selected, ^other
+  ^selected:
+    test.use %value : i32
+    cfg.br ^exit
+  ^other:
+    test.use %choose : i1
+    cfg.br ^exit
+  ^exit:
+  }
+  pipeline.strand workers([2], [1], [1]) {
+    cfg.cond_br %choose, ^selected, ^exit
+  ^selected:
+    %known = scalar.andi %choose, %choose : i1
+    test.use %known : i1
+    %propagated = scalar.andi %known, %choose : i1
+    test.use %propagated : i1
+    cfg.br ^exit
+  ^exit:
+  }
+}
+
+// ----
+pipeline.def @sibling_regions() run(%choose: i1, %value: i32) {
+  pipeline.strand workers([0], [1], [1]) {
+    test.use %value : i32
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    cfg.cond_br %choose, ^selected, ^other
+  ^selected:
+    test.use %value : i32
+    cfg.br ^exit
+  ^other:
+    test.use %choose : i1
+    cfg.br ^exit
+  ^exit:
+  }
+  pipeline.strand workers([2], [1], [1]) {
+    cfg.cond_br %choose, ^selected, ^exit
+  ^selected:
+    %known = scalar.constant true : i1
+    test.use %known : i1
+    %propagated = scalar.constant true : i1
+    test.use %propagated : i1
+    cfg.br ^exit
+  ^exit:
+  }
+}
+
+// ====
+
+// Removing a parent block retires its entire nested region tree. Surviving
+// descendants consume the next snapshot after their captured argument is
+// replaced, while another sibling still has independent CFG edits.
+pipeline.def @changed_parent_regions() run(%choose: i1, %value: i32) {
+  %yes = scalar.constant true : i1
+  pipeline.strand workers([0], [1], [1]) {
+    cfg.cond_br %yes, ^selected, ^unused
+  ^selected:
+    cfg.br ^join(%value: i32)
+  ^unused:
+    pipeline.strand workers([1], [1], [1]) {
+      cfg.br ^nested
+    ^nested:
+      test.use %choose : i1
+    }
+    cfg.br ^join(%value: i32)
+  ^join(%captured: i32):
+    pipeline.strand workers([2], [1], [1]) {
+      cfg.br ^nested
+    ^nested:
+      test.use %captured : i32
+    }
+    pipeline.strand workers([3], [1], [1]) {
+      cfg.cond_br %yes, ^nested, ^unused
+    ^nested:
+      test.use %captured : i32
+    ^unused:
+      test.use %choose : i1
+    }
+  }
+  pipeline.strand workers([4], [1], [1]) {
+    cfg.br ^forward
+  ^forward:
+    test.use %value : i32
+  }
+}
+
+// ----
+pipeline.def @changed_parent_regions() run(%choose: i1, %value: i32) {
+  pipeline.strand workers([0], [1], [1]) {
+    pipeline.strand workers([2], [1], [1]) {
+      test.use %value : i32
+    }
+    pipeline.strand workers([3], [1], [1]) {
+      test.use %value : i32
+    }
+  }
+  pipeline.strand workers([4], [1], [1]) {
+    test.use %value : i32
+  }
+}
+
+// ====
+
 func.def @changed_predecessor(%choose: i1, %left_value: i32, %right_value: i32) -> (i32) {
   %true = scalar.constant true : i1
   cfg.cond_br %true, ^select, ^dead
@@ -28,19 +145,14 @@ func.def @changed_predecessor(%choose: i1, %left_value: i32, %right_value: i32) 
 
 // ----
 func.def @changed_predecessor(%choose: i1, %left_value: i32, %right_value: i32) -> (i32) {
-  %true = scalar.constant true : i1
   cfg.cond_br %choose, ^left, ^right
 ^left:
   test.use %left_value : i32
-  %left = index.constant 2 : index
   cfg.br ^join
 ^right:
   test.use %right_value : i32
-  %right = index.constant 2 : index
   cfg.br ^join
 ^join:
-  %expected = index.constant 2 : index
-  %matches = scalar.constant true : i1
   func.return %left_value : i32
 }
 
@@ -72,18 +184,11 @@ func.def @arithmetic_feedback(%again: i1, %good: i32, %bad: i32) -> (i32) {
 
 // ----
 func.def @arithmetic_feedback(%again: i1, %good: i32, %bad: i32) -> (i32) {
-  %true = scalar.constant true : i1
-  %c0 = index.constant 0 : index
-  %c2 = index.constant 2 : index
   %c9 = index.constant 9 : index
-  cfg.br ^header(%c2: index)
-^header(%carried: index):
-  cfg.cond_br %again, ^body, ^exit
-^body:
-  %next = index.add %carried, %c0 : index
-  cfg.br ^header(%next: index)
+  cfg.br ^header
+^header:
+  cfg.cond_br %again, ^header, ^exit
 ^exit:
-  %matches = scalar.constant true : i1
   func.return %good : i32
 }
 
@@ -182,7 +287,6 @@ func.def @forwarding_cycle_after_edge_removal(%again: i1, %good: i32, %bad: i32)
 
 // ----
 func.def @forwarding_cycle_after_edge_removal(%again: i1, %good: i32, %bad: i32) -> (i32) {
-  %true = scalar.constant true : i1
   %c2 = index.constant 2 : index
   %c9 = index.constant 9 : index
   cfg.br ^header
@@ -192,7 +296,6 @@ func.def @forwarding_cycle_after_edge_removal(%again: i1, %good: i32, %bad: i32)
   test.use %c2 : index
   cfg.br ^header
 ^exit:
-  %matches = scalar.constant true : i1
   func.return %good : i32
 }
 
@@ -219,6 +322,7 @@ func.def @attribute_only_join(%offset: index, %choose: i1, %left_value: i32, %ri
 ^join(%joined: index):
   %expected = index.constant 2 : index
   %bounded = index.assume %offset [lt(%offset, %joined)] : index
+  test.use %bounded : index
   %matches = index.cmp slt, %bounded, %expected : index
   cfg.cond_br %matches, ^matched, ^mismatch
 ^matched:
@@ -229,20 +333,17 @@ func.def @attribute_only_join(%offset: index, %choose: i1, %left_value: i32, %ri
 
 // ----
 func.def @attribute_only_join(%offset: index, %choose: i1, %left_value: i32, %right_value: i32) -> (i32) {
-  %true = scalar.constant true : i1
+  %13 = index.constant 2 : index
   cfg.cond_br %choose, ^left, ^right
 ^left:
   test.use %left_value : i32
-  %left = index.constant 2 : index
-  cfg.br ^join(%left: index)
+  cfg.br ^join
 ^right:
   test.use %right_value : i32
-  %right = index.constant 2 : index
-  cfg.br ^join(%right: index)
-^join(%joined: index):
-  %expected = index.constant 2 : index
-  %bounded = index.assume %offset [lt(%offset, %joined)] : index
-  %matches = scalar.constant true : i1
+  cfg.br ^join
+^join:
+  %bounded = index.assume %offset [lt(%offset, %13)] : index
+  test.use %bounded : index
   func.return %left_value : i32
 }
 
@@ -281,23 +382,11 @@ func.def @nested_branch_feedback(%choose: i1, %again: i1, %good: i32, %bad: i32)
 
 // ----
 func.def @nested_branch_feedback(%choose: i1, %again: i1, %good: i32, %bad: i32) -> (i32) {
-  %true = scalar.constant true : i1
-  %c0 = index.constant 0 : index
-  %c2 = index.constant 2 : index
   %c9 = index.constant 9 : index
-  cfg.br ^header(%c2: index)
-^header(%carried: index):
-  cfg.cond_br %again, ^body, ^exit
-^body:
-  %next = scf.if %choose -> (index) {
-    %left = index.add %carried, %c0 : index
-    scf.yield %left : index
-  } else {
-    scf.yield %carried : index
-  }
-  cfg.br ^header(%next: index)
+  cfg.br ^header
+^header:
+  cfg.cond_br %again, ^header, ^exit
 ^exit:
-  %matches = scalar.constant true : i1
   func.return %good : i32
 }
 
@@ -333,21 +422,94 @@ func.def @nested_loop_feedback(%limit: index, %again: i1, %good: i32, %bad: i32)
 
 // ----
 func.def @nested_loop_feedback(%limit: index, %again: i1, %good: i32, %bad: i32) -> (i32) {
-  %true = scalar.constant true : i1
+  %c9 = index.constant 9 : index
+  cfg.br ^header
+^header:
+  cfg.cond_br %again, ^header, ^exit
+^exit:
+  func.return %good : i32
+}
+
+// ====
+
+// RUN: pass cfg-simplify
+
+// Fusion retires the argument retained by the bound's identity before the next
+// induction refresh. The assumption's operand and retained representative must
+// both follow the replacement, even while numeric inference is pending.
+func.def @fused_loop_bound(%bound: index) {
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
-  %c2 = index.constant 2 : index
-  %c9 = index.constant 9 : index
-  cfg.br ^header(%c2: index)
-^header(%carried: index):
-  cfg.cond_br %again, ^body, ^exit
+  cfg.br ^bound_bridge(%bound: index)
+^bound_bridge(%forwarded: index):
+  %extent = index.assume %forwarded [range(%forwarded, 1, 256)] : index
+  cfg.br ^header(%c0: index)
+^header(%position: index):
+  %active = index.cmp ult, %position, %extent : index
+  cfg.cond_br %active, ^body, ^exit
 ^body:
-  %next = scf.for %iv = [%c0 to %limit step %c1](%inner = %carried : index) -> (index) {
-    %forwarded = index.add %inner, %c0 : index
-    scf.yield %forwarded : index
-  }
+  test.use %position : index
+  %next = index.add %position, %c1 : index
   cfg.br ^header(%next: index)
 ^exit:
-  %matches = scalar.constant true : i1
-  func.return %good : i32
+  func.return
+}
+
+// ----
+func.def @fused_loop_bound(%bound: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %extent = index.assume %bound [range(%bound, 1, 256)] : index
+  cfg.br ^header(%c0: index)
+^header(%position: index):
+  %active = index.cmp ult, %position, %extent : index
+  cfg.cond_br %active, ^body, ^exit
+^body:
+  test.use %position : index
+  %next = index.add %position, %c1 : index
+  cfg.br ^header(%next: index)
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass cfg-simplify
+
+// Removing an invariant carried argument has the same lifetime contract as
+// block fusion. A transitive alias keeps its predicate while the canonical
+// identity moves outside the loop.
+func.def @redundant_loop_bound(%bound: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  cfg.br ^header(%c0: index, %bound: index)
+^header(%position: index, %carried_bound: index):
+  %positive = index.assume %carried_bound [range(%carried_bound, 1, 256)] : index
+  %extent = index.assume %positive [multiple_of(%positive, 2)] : index
+  %active = index.cmp ult, %position, %extent : index
+  cfg.cond_br %active, ^body, ^exit
+^body:
+  test.use %position : index
+  %next = index.add %position, %c1 : index
+  cfg.br ^header(%next: index, %carried_bound: index)
+^exit:
+  func.return
+}
+
+// ----
+func.def @redundant_loop_bound(%bound: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  cfg.br ^header(%c0: index)
+^header(%position: index):
+  %positive = index.assume %bound [range(%bound, 1, 256)] : index
+  %extent = index.assume %positive [multiple_of(%positive, 2)] : index
+  %active = index.cmp ult, %position, %extent : index
+  cfg.cond_br %active, ^body, ^exit
+^body:
+  test.use %position : index
+  %next = index.add %position, %c1 : index
+  cfg.br ^header(%next: index)
+^exit:
+  func.return
 }

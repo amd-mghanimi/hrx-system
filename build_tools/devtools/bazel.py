@@ -1541,7 +1541,15 @@ class BazelTryStep:
                 return 2
             deps = list(self.command.explicit_deps)
             if self.command.infer_deps:
-                deps.extend(self.infer_deps(source_texts))
+                try:
+                    deps.extend(self.infer_deps(source_texts))
+                except subprocess.CalledProcessError as exc:
+                    print(
+                        "dev.py: Bazel dependency query failed:\n"
+                        + (exc.stderr or exc.output or str(exc)).rstrip(),
+                        file=sys.stderr,
+                    )
+                    return process_exit_code(exc.returncode)
             write_try_build_file(
                 scratch_dir / "BUILD.bazel",
                 source_names=source_names,
@@ -1736,24 +1744,22 @@ def header_path_for_include(header: str) -> Path | None:
 def infer_dep_for_header_path(
     bazel: str, header_path: Path, *, env: dict[str, str] | None
 ) -> str | None:
-    package_dir = header_path.parent
-    if not header_path.is_file():
-        return fallback_dep_for_header_dir(package_dir)
-    package_dir = nearest_package_dir(package_dir)
+    # Generated headers have declared owners before their output files exist.
+    package_dir = nearest_package_dir(header_path.parent)
     if package_dir is None:
         return None
     package_label = "//" + package_dir.relative_to(REPO_ROOT).as_posix()
-    header_label_path = re.escape(header_path.relative_to(package_dir).as_posix())
+    header_label = f"{package_label}:{header_path.relative_to(package_dir).as_posix()}"
     labels = query_rules_with_header(
         bazel,
-        header_label_path=header_label_path,
+        header_label=header_label,
         target_pattern=f"{package_label}:*",
         env=env,
     )
     if not labels:
         labels = query_rules_with_header(
             bazel,
-            header_label_path=header_label_path,
+            header_label=header_label,
             target_pattern=f"{package_label}/...",
             env=env,
         )
@@ -1765,18 +1771,26 @@ def infer_dep_for_header_path(
 def query_rules_with_header(
     bazel: str,
     *,
-    header_label_path: str,
+    header_label: str,
     target_pattern: str,
     env: dict[str, str] | None,
 ) -> list[str]:
-    query_expression = (
-        f'kind(".* rule", attr("hdrs", "{header_label_path}", {target_pattern}))'
-    )
-    completed = run_captured([bazel, "query", query_expression], cwd=REPO_ROOT, env=env)
-    if completed.returncode == 0:
-        return sorted(
+    # Prefer public header owners, then private headers among library sources.
+    # Label-list attributes print as [//package:file, //package:other_file].
+    header_pattern = rf"(\[|, ){re.escape(header_label)}(,|\])"
+    for attribute in ("hdrs", "srcs"):
+        query_expression = (
+            f'kind(".* rule", attr("{attribute}", "{header_pattern}", '
+            f"{target_pattern}))"
+        )
+        command = [bazel, "query", query_expression]
+        completed = run_captured(command, cwd=REPO_ROOT, env=env)
+        completed.check_returncode()
+        labels = sorted(
             line.strip() for line in completed.stdout.splitlines() if line.strip()
         )
+        if labels:
+            return labels
     return []
 
 

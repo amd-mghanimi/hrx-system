@@ -121,16 +121,16 @@ class LinkCatalogFixture {
     std::string source_text =
         BuildCatalogSource(root_count_, values_per_root_, &root_names_);
     const loomc_source_options_t source_options = {
-        /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-        /*.structure_size=*/sizeof(source_options),
-        /*.next=*/nullptr,
-        /*.format=*/LOOMC_SOURCE_FORMAT_TEXT,
-        /*.identifier=*/loomc_make_cstring_view("link_catalog.loom"),
-        /*.contents=*/
-        loomc_make_byte_span(source_text.data(), source_text.size()),
-        /*.storage=*/LOOMC_SOURCE_STORAGE_COPY,
-        /*.release=*/nullptr,
-        /*.release_user_data=*/nullptr,
+        .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+        .structure_size = sizeof(source_options),
+        .next = nullptr,
+        .format = LOOMC_SOURCE_FORMAT_TEXT,
+        .identifier = loomc_make_cstring_view("link_catalog.loom"),
+        .contents =
+            loomc_make_byte_span(source_text.data(), source_text.size()),
+        .storage = LOOMC_SOURCE_STORAGE_COPY,
+        .release = nullptr,
+        .release_user_data = nullptr,
     };
     loomc_source_t* source = nullptr;
     IREE_RETURN_IF_ERROR(to_iree_status(
@@ -158,12 +158,12 @@ class LinkCatalogFixture {
           RequireSucceededResult(result_ptr.get(), "catalog parsing"));
 
       const loomc_module_serialize_options_t serialize_options = {
-          /*.type=*/LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
-          /*.structure_size=*/sizeof(serialize_options),
-          /*.next=*/nullptr,
-          /*.format=*/LOOMC_SOURCE_FORMAT_BYTECODE,
-          /*.identifier=*/loomc_make_cstring_view("link_catalog.loombc"),
-          /*.text_presentation=*/LOOMC_MODULE_TEXT_PRESENTATION_DEFAULT,
+          .type = LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
+          .structure_size = sizeof(serialize_options),
+          .next = nullptr,
+          .format = LOOMC_SOURCE_FORMAT_BYTECODE,
+          .identifier = loomc_make_cstring_view("link_catalog.loombc"),
+          .text_presentation = LOOMC_MODULE_TEXT_PRESENTATION_DEFAULT,
       };
       loomc_source_t* bytecode_source = nullptr;
       IREE_RETURN_IF_ERROR(to_iree_status(loomc_module_serialize_to_source(
@@ -183,20 +183,38 @@ class LinkCatalogFixture {
     return iree_ok_status();
   }
 
+  iree_status_t MaterializeInput() {
+    WorkspacePtr workspace;
+    IREE_RETURN_IF_ERROR(CreateWorkspace(&workspace));
+    loomc_module_t* module = nullptr;
+    loomc_result_t* result = nullptr;
+    iree_status_t status = to_iree_status(loomc_module_deserialize_from_source(
+        context_.get(), workspace.get(), source_.get(), nullptr,
+        loom_allocator(), &module, &result));
+    module_.reset(module);
+    ResultPtr result_owner(result);
+    IREE_RETURN_IF_ERROR(status);
+    return RequireSucceededResult(result, "catalog parsing");
+  }
+
   iree_status_t BuildIndex(LinkIndexPtr* out_index) const {
     out_index->reset();
     loomc_link_index_builder_t* builder = nullptr;
-    IREE_RETURN_IF_ERROR(to_iree_status(loomc_link_index_builder_create(
+    IREE_RETURN_IF_ERROR(to_iree_status(loomc_link_index_builder_allocate(
         context_.get(), /*options=*/nullptr, loom_allocator(), &builder)));
     LinkIndexBuilderPtr builder_ptr(builder);
 
     const loomc_link_index_source_options_t source_options = {
-        /*.provider_name=*/loomc_make_cstring_view("catalog"),
-        /*.role=*/LOOMC_LINK_PROVIDER_ROLE_INPUT,
+        .provider_name = loomc_make_cstring_view("catalog"),
+        .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
     };
-    IREE_RETURN_IF_ERROR(to_iree_status(loomc_link_index_builder_add_source(
-        builder_ptr.get(), source_.get(), &source_options,
-        /*out_slot=*/nullptr)));
+    if (module_) {
+      IREE_RETURN_IF_ERROR(to_iree_status(loomc_link_index_builder_add_module(
+          builder, module_.get(), &source_options, /*out_slot=*/nullptr)));
+    } else {
+      IREE_RETURN_IF_ERROR(to_iree_status(loomc_link_index_builder_add_source(
+          builder, source_.get(), &source_options, /*out_slot=*/nullptr)));
+    }
 
     loomc_link_index_t* index = nullptr;
     loomc_result_t* result = nullptr;
@@ -238,16 +256,16 @@ class LinkCatalogFixture {
     const loomc_string_view_t root_symbol =
         loomc_make_string_view(root.data(), root.size());
     const loomc_link_options_t options = {
-        /*.type=*/LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
-        /*.structure_size=*/sizeof(options),
-        /*.next=*/nullptr,
-        /*.link_index=*/index,
-        /*.module_name=*/loomc_make_cstring_view("selected_kernel"),
-        /*.mode=*/LOOMC_LINK_MODE_LINK,
-        /*.root_symbols=*/&root_symbol,
-        /*.root_symbol_count=*/1,
-        /*.flags=*/0,
-        /*.config=*/{},
+        .type = LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
+        .structure_size = sizeof(options),
+        .next = nullptr,
+        .link_index = index,
+        .module_name = loomc_make_cstring_view("selected_kernel"),
+        .mode = LOOMC_LINK_MODE_LINK,
+        .root_symbols = &root_symbol,
+        .root_symbol_count = 1,
+        .flags = 0,
+        .config = {},
     };
     loomc_module_t* module = nullptr;
     loomc_result_t* result = nullptr;
@@ -328,6 +346,8 @@ class LinkCatalogFixture {
   size_t source_size_ = 0;
   ContextPtr context_;
   SourcePtr source_;
+  // Materialized catalog when measuring native snapshot admission.
+  ModulePtr module_;
   LinkerPtr linker_;
   std::vector<std::string> root_names_;
 };
@@ -434,6 +454,32 @@ static void BM_LinkIndexBuild(benchmark::State& state) {
 
 static void BM_LinkIndexBuildBytecode(benchmark::State& state) {
   BM_LinkIndexBuildForFormat(state, LOOMC_SOURCE_FORMAT_BYTECODE);
+}
+
+static void BM_LinkIndexBuildModule(benchmark::State& state) {
+  LinkCatalogFixture fixture((uint32_t)state.range(0), (uint32_t)state.range(1),
+                             LOOMC_SOURCE_FORMAT_TEXT);
+  if (SkipOnError(state, fixture.Initialize()) ||
+      SkipOnError(state, fixture.MaterializeInput())) {
+    return;
+  }
+  int64_t index_count = 0;
+  for (auto _ : state) {
+    LinkIndexPtr index;
+    if (SkipOnError(state, fixture.BuildIndex(&index))) {
+      break;
+    }
+    benchmark::DoNotOptimize(index.get());
+    ++index_count;
+    state.PauseTiming();
+    index.reset();
+    state.ResumeTiming();
+  }
+  SetCatalogCounters(state, fixture);
+  state.SetItemsProcessed(index_count * (fixture.root_count() + 1));
+  state.SetBytesProcessed(index_count * (int64_t)fixture.source_size());
+  state.counters["indexes/s"] =
+      benchmark::Counter(index_count, benchmark::Counter::kIsRate);
 }
 
 static void BM_LinkBatchForFormat(benchmark::State& state,
@@ -570,6 +616,10 @@ static void BM_LinkIndexBuild_Smoke(benchmark::State& state) {
   BM_LinkIndexBuild(state);
 }
 
+static void BM_LinkIndexBuildModule_Smoke(benchmark::State& state) {
+  BM_LinkIndexBuildModule(state);
+}
+
 static void BM_LinkIndexBuildBytecode_Smoke(benchmark::State& state) {
   BM_LinkIndexBuildBytecode(state);
 }
@@ -581,6 +631,9 @@ static void BM_LinkBatchBytecode_Smoke(benchmark::State& state) {
 }
 
 BENCHMARK(BM_LinkIndexBuild)
+    ->Apply(CatalogScales)
+    ->ArgNames({"catalog_roots", "values_per_root"});
+BENCHMARK(BM_LinkIndexBuildModule)
     ->Apply(CatalogScales)
     ->ArgNames({"catalog_roots", "values_per_root"});
 BENCHMARK(BM_LinkIndexBuildBytecode)
@@ -604,6 +657,9 @@ BENCHMARK(BM_IndexOnceAndLinkBatchBytecode)
     ->ArgNames({"catalog_roots", "values_per_root", "links_per_batch"});
 
 BENCHMARK(BM_LinkIndexBuild_Smoke)
+    ->Args({16, 16})
+    ->ArgNames({"catalog_roots", "values_per_root"});
+BENCHMARK(BM_LinkIndexBuildModule_Smoke)
     ->Args({16, 16})
     ->ArgNames({"catalog_roots", "values_per_root"});
 BENCHMARK(BM_LinkIndexBuildBytecode_Smoke)

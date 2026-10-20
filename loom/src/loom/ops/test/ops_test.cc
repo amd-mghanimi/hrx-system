@@ -361,7 +361,7 @@ TEST_F(BuilderTest, MemoryFenceHasOrderingWithoutMemoryAccess) {
 }
 
 TEST_F(BuilderTest, DirectWriteEffectSummaryUpdatesOnErase) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -379,11 +379,14 @@ TEST_F(BuilderTest, DirectWriteEffectSummaryUpdatesOnErase) {
   EXPECT_EQ(module_->body->read_effect_count, 0u);
   EXPECT_EQ(module_->body->write_effect_count, 1u);
   EXPECT_EQ(module_->body->memory_access_count, 1u);
+  EXPECT_EQ(loom_region_written_memory_spaces(module_->body),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
 
   IREE_ASSERT_OK(loom_op_erase(module_, write_op));
   EXPECT_EQ(module_->body->read_effect_count, 0u);
   EXPECT_EQ(module_->body->write_effect_count, 0u);
   EXPECT_EQ(module_->body->memory_access_count, 0u);
+  EXPECT_EQ(loom_region_written_memory_spaces(module_->body), 0);
 }
 
 TEST_F(BuilderTest, UnknownOpEffectsAreConservative) {
@@ -402,7 +405,7 @@ TEST_F(BuilderTest, UnknownOpEffectsAreConservative) {
 }
 
 TEST_F(BuilderTest, NestedWriteEffectSummaryPropagatesToAncestors) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -432,6 +435,10 @@ TEST_F(BuilderTest, NestedWriteEffectSummaryPropagatesToAncestors) {
   EXPECT_EQ(module_->body->write_effect_count, 1u);
   EXPECT_EQ(map_body->memory_access_count, 1u);
   EXPECT_EQ(module_->body->memory_access_count, 1u);
+  EXPECT_EQ(loom_region_written_memory_spaces(map_body),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
+  EXPECT_EQ(loom_region_written_memory_spaces(module_->body),
+            1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN);
 
   IREE_ASSERT_OK(loom_module_compute_uses(module_));
   EXPECT_EQ(map_body->memory_access_count, 1u);
@@ -443,6 +450,8 @@ TEST_F(BuilderTest, NestedWriteEffectSummaryPropagatesToAncestors) {
   EXPECT_EQ(map_body->memory_access_count, 0u);
   EXPECT_EQ(module_->body->memory_access_count, 0u);
   EXPECT_EQ(write_op->flags & LOOM_OP_FLAG_SUMMARIES_COUNTED, 0u);
+  EXPECT_EQ(loom_region_written_memory_spaces(map_body), 0);
+  EXPECT_EQ(loom_region_written_memory_spaces(module_->body), 0);
 }
 
 TEST_F(BuilderTest, VariadicOperands) {
@@ -566,8 +575,8 @@ TEST_F(BuilderTest, OperandDictBuilderCanonicalizesNames) {
       loom_builder_intern_string(&builder_, IREE_SV("beta"), &beta_name));
 
   loom_named_value_t params[] = {
-      {/*.name_id=*/beta_name, /*.reserved=*/0, /*.value_id=*/beta},
-      {/*.name_id=*/alpha_name, /*.reserved=*/0, /*.value_id=*/alpha},
+      {.name_id = beta_name, .reserved = 0, .value_id = beta},
+      {.name_id = alpha_name, .reserved = 0, .value_id = alpha},
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_operand_dict_build(
@@ -635,12 +644,12 @@ TEST_F(BuilderTest, ReplaceAllUsesWithUpdatesPredicateAttrs) {
 
   loom_value_id_t values[] = {old_id, bound_id};
   loom_predicate_t predicates[] = {{
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/
-      {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_NONE},
-      /*.reserved=*/{},
-      /*.args=*/{(int64_t)old_id, (int64_t)bound_id, 0},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE,
+                   LOOM_PRED_ARG_NONE},
+      .reserved = {},
+      .args = {(int64_t)old_id, (int64_t)bound_id, 0},
   }};
   loom_type_t result_types[] = {index, index};
 
@@ -701,8 +710,11 @@ TEST_F(BuilderTest, ReplaceAllUsesWithUpdatesTypeAttrs) {
   IREE_ASSERT_OK(
       loom_module_intern_string(module_, IREE_SV("shape"), &type_attr_name));
   loom_named_attr_t entries[] = {
-      {/*.name_id=*/type_attr_name, /*.reserved=*/{},
-       /*.value=*/loom_attr_type(vector_type_id)},
+      {
+          .name_id = type_attr_name,
+          .reserved = {},
+          .value = loom_attr_type(vector_type_id),
+      },
   };
   loom_op_t* attrs_op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1086,7 +1098,7 @@ TEST_F(BuilderTest, FuncBuilder) {
 TEST_F(BuilderTest, FuncBuilderConsumesReservedSignatureBeforeResults) {
   const auto index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_value_id_t signature[4];
-  IREE_ASSERT_OK(loom_builder_reserve_results(&builder_, 4, signature));
+  IREE_ASSERT_OK(loom_builder_reserve_values(&builder_, 4, signature));
   const loom_type_t argument_types[] = {
       index_type,
       loom_type_shaped_1d(LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32,
@@ -1113,6 +1125,29 @@ TEST_F(BuilderTest, FuncBuilderConsumesReservedSignatureBeforeResults) {
   EXPECT_EQ(loom_type_dim_value_id_at(
                 loom_module_value_type(module_, loom_op_results(op)[1]), 0),
             loom_op_results(op)[0]);
+}
+
+TEST_F(BuilderTest, ExplicitBlockArgsConsumeReservedSignature) {
+  const auto index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  loom_value_id_t signature[2];
+  IREE_ASSERT_OK(loom_builder_reserve_values(&builder_, 2, signature));
+  const loom_type_t actual_types[] = {index_type};
+  const loom_type_t expected_types[] = {
+      loom_type_shaped_1d(LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32,
+                          loom_dim_pack_dynamic(signature[0]), 0)};
+  loom_op_t* op = nullptr;
+  IREE_ASSERT_OK(loom_test_block_arg_groups_build(
+      &builder_, actual_types, IREE_ARRAYSIZE(actual_types), expected_types,
+      IREE_ARRAYSIZE(expected_types), LOOM_LOCATION_UNKNOWN, &op));
+
+  const auto* entry =
+      loom_region_const_entry_block(loom_test_block_arg_groups_body(op));
+  ASSERT_EQ(entry->arg_count, IREE_ARRAYSIZE(signature));
+  EXPECT_EQ(entry->arg_ids[0], signature[0]);
+  EXPECT_EQ(entry->arg_ids[1], signature[1]);
+  EXPECT_EQ(
+      loom_type_dim_value_id_at(loom_block_arg_type(module_, entry, 1), 0),
+      signature[0]);
 }
 
 TEST_F(BuilderTest, SplitFuncBuilderProjectsSignatureArgs) {
@@ -1213,8 +1248,8 @@ TEST_F(BuilderTest, AttrsBuilderCanonicalizesDict) {
       loom_module_intern_string(module_, IREE_SV("alpha"), &alpha_id));
 
   loom_named_attr_t entries[2] = {
-      {/*.name_id=*/zeta_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(2)},
-      {/*.name_id=*/alpha_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(1)},
+      {.name_id = zeta_id, .reserved = {}, .value = loom_attr_i64(2)},
+      {.name_id = alpha_id, .reserved = {}, .value = loom_attr_i64(1)},
   };
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -1242,8 +1277,8 @@ TEST_F(BuilderTest, AttrsBuilderRejectsDuplicateDictKeys) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("axis"), &axis_id));
 
   loom_named_attr_t entries[2] = {
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(1)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(1)},
   };
   loom_op_t* op = NULL;
   IREE_EXPECT_STATUS_IS(
@@ -1296,7 +1331,7 @@ TEST_F(BuilderTest, OpErase) {
 TEST_F(BuilderTest, EraseDeclarationDropsOwnedArgumentTypeUses) {
   const loom_type_t argument_types[] = {
       loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
-      loom_type_pool(loom_dim_pack_static(4)),
+      loom_type_group_1d(loom_dim_pack_static(4)),
   };
   loom_op_t* declarations[2] = {};
   const iree_string_view_t names[] = {IREE_SV("erased"), IREE_SV("retained")};
@@ -1314,7 +1349,7 @@ TEST_F(BuilderTest, EraseDeclarationDropsOwnedArgumentTypeUses) {
         LOOM_LOCATION_UNKNOWN, &declarations[i]));
     const loom_value_slice_t arguments = loom_test_decl_args(declarations[i]);
     const loom_type_t storage_type =
-        loom_type_pool(loom_dim_pack_dynamic(arguments.values[0]));
+        loom_type_group_1d(loom_dim_pack_dynamic(arguments.values[0]));
     IREE_ASSERT_OK(
         loom_module_set_value_type(module_, arguments.values[1], storage_type));
     IREE_ASSERT_OK(loom_module_set_value_type(
@@ -1473,7 +1508,7 @@ TEST_F(BuilderTest, OpRemoveResultsCompactsDefinitionsAndTiedResults) {
   loom_value_id_t operands[] = {operand};
   loom_type_t result_types[] = {f32, f32, f32};
   loom_tied_result_t tied[] = {
-      {/*.result_index=*/2, /*.operand_index=*/0, /*.has_type_change=*/false}};
+      {.result_index = 2, .operand_index = 0, .has_type_change = false}};
   loom_symbol_ref_t callee = {0, 1};
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_invoke_build(
@@ -2381,7 +2416,7 @@ TEST_F(BuilderTest, InvokeBuilderWithDynamicTied) {
   loom_value_id_t operands[] = {DefineValue(f32), DefineValue(index_type)};
   loom_type_t result_types[] = {f32, index_type};
   loom_tied_result_t tied[] = {
-      {/*.result_index=*/0, /*.operand_index=*/0, /*.has_type_change=*/false}};
+      {.result_index = 0, .operand_index = 0, .has_type_change = false}};
   loom_symbol_ref_t callee = {0, 1};
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_test_invoke_build(&builder_, callee, operands, 2,

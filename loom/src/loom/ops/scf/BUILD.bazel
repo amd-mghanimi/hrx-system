@@ -4,12 +4,21 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_test", "loom_generated_cc_library")
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test", "loom_generated_cc_library")
 
 package(
     default_visibility = ["//visibility:public"],
     features = ["layering_check"],
     licenses = ["notice"],  # Apache 2.0
+)
+
+# Shared analyses consume declarations without linking dialect inference back
+# into its own semantic dependencies.
+loom_cc_library(
+    name = "op_defs",
+    hdrs = ["ops.h"],
+    textual_hdrs = ["ops.inc"],
+    deps = ["//loom/src/loom/ops:op_defs"],
 )
 
 loom_cc_test(
@@ -52,6 +61,19 @@ loom_cc_test(
 )
 
 loom_cc_test(
+    name = "traits_test",
+    srcs = ["traits_test.cc"],
+    deps = [
+        ":scf",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
     name = "verify_test",
     srcs = ["verify_test.cc"],
     deps = [
@@ -72,12 +94,15 @@ loom_generated_cc_library(
         "canonicalize_loop.c",
         "facts.c",
         "forwarding_equivalence.c",
+        "selectify_facts.c",
+        "traits.c",
         "verify.c",
     ],
     hdrs = [
         "canonicalize.h",
         "forwarding_equivalence.h",
         "ops.h",
+        "selectify_facts.h",
     ],
     args = ["--dialect=scf"],
     extra_output_flags = ["--ops-include"],
@@ -94,11 +119,17 @@ loom_generated_cc_library(
     textual_hdrs = ["ops.inc"],
     deps = [
         "//loom/src/loom/analysis:availability",
+        "//loom/src/loom/analysis:condition_facts",
+        "//loom/src/loom/analysis:motion_policy",
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/index:cast",
+        "//loom/src/loom/ops/index:comparison",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/rewrite:remap",
         "//loom/src/loom/rewrite:rewriter",

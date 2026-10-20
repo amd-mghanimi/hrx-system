@@ -9,6 +9,10 @@
 bool loom_x86_register_class_for_vector_bit_width(
     uint32_t vector_bit_width, loom_x86_register_class_t* out_register_class) {
   switch (vector_bit_width) {
+    case 8:
+    case 16:
+    case 32:
+    case 64:
     case 128:
       *out_register_class = LOOM_X86_REGISTER_CLASS_XMM;
       return true;
@@ -27,25 +31,22 @@ bool loom_x86_register_class_for_vector_bit_width(
 loom_x86_register_class_t loom_x86_logical_register_class(
     uint16_t descriptor_reg_class_id) {
   static const uint16_t logical_classes[] = {
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_GPR32] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_GPR32] =
           LOOM_X86_REGISTER_CLASS_GPR32,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_GPR64] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_GPR64] =
           LOOM_X86_REGISTER_CLASS_GPR64,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_RAX] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_RAX] =
           LOOM_X86_REGISTER_CLASS_GPR64,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_RDX] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_RDX] =
           LOOM_X86_REGISTER_CLASS_GPR64,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_ECX] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_ECX] =
           LOOM_X86_REGISTER_CLASS_GPR32,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_RCX] =
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_RCX] =
           LOOM_X86_REGISTER_CLASS_GPR64,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_XMM] =
-          LOOM_X86_REGISTER_CLASS_XMM,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_YMM] =
-          LOOM_X86_REGISTER_CLASS_YMM,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_ZMM] =
-          LOOM_X86_REGISTER_CLASS_ZMM,
-      [X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_K] = LOOM_X86_REGISTER_CLASS_K,
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_XMM] = LOOM_X86_REGISTER_CLASS_XMM,
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_YMM] = LOOM_X86_REGISTER_CLASS_YMM,
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_ZMM] = LOOM_X86_REGISTER_CLASS_ZMM,
+      [X86_AVX512_FEATURES_CORE_REG_CLASS_ID_K] = LOOM_X86_REGISTER_CLASS_K,
   };
   return (loom_x86_register_class_t)logical_classes[descriptor_reg_class_id];
 }

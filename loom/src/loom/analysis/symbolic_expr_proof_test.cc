@@ -13,6 +13,7 @@
 #include "iree/testing/status_matchers.h"
 #include "loom/analysis/condition_facts.h"
 #include "loom/analysis/symbolic_expr_test_fixture.h"
+#include "loom/analysis/symbolic_integer_cast.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
@@ -81,28 +82,60 @@ static bool AppendConditionFacts(
   return complete;
 }
 
+static loom_condition_integer_relation_t ValueRelation(
+    loom_symbolic_integer_relation_t relation, loom_value_id_t left,
+    loom_value_id_t right) {
+  loom_condition_integer_relation_t result = {.relation = relation};
+  result.left.kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE;
+  result.left.value_id = left;
+  result.right.kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE;
+  result.right.value_id = right;
+  return result;
+}
+
+static loom_condition_fact_set_t SingleRelationFacts(
+    loom_condition_integer_relation_t* relation) {
+  loom_condition_fact_set_t facts = {
+      .integer_relations = relation,
+      .integer_relation_count = 1,
+      .integer_relation_capacity = 1,
+  };
+  return facts;
+}
+
+static loom_predicate_t ValuePredicate(loom_predicate_kind_t kind,
+                                       loom_value_id_t left,
+                                       loom_value_id_t right) {
+  loom_predicate_t predicate = {.kind = kind, .arg_count = 2};
+  predicate.arg_tags[0] = LOOM_PRED_ARG_VALUE;
+  predicate.arg_tags[1] = LOOM_PRED_ARG_VALUE;
+  predicate.args[0] = left;
+  predicate.args[1] = right;
+  return predicate;
+}
+
 static iree_status_t ProveSemanticallyEquivalentUpperBound(
     loom_symbolic_expr_context_t* context, loom_value_id_t relation_value,
     loom_value_id_t query_value, loom_symbolic_proof_result_t* out_result) {
   loom_condition_integer_relation_t relation = {
-      /*.relation=*/LOOM_SYMBOLIC_INTEGER_RELATION_LE,
-      /*.left=*/
-      {
-          /*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_CONSTANT,
-          /*.value_id=*/LOOM_VALUE_ID_INVALID,
-          /*.constant=*/0,
-      },
-      /*.right=*/
-      {
-          /*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-          /*.value_id=*/relation_value,
-          /*.constant=*/0,
-      },
+      .relation = LOOM_SYMBOLIC_INTEGER_RELATION_LE,
+      .left =
+          {
+              .kind = LOOM_CONDITION_INTEGER_OPERAND_CONSTANT,
+              .value_id = LOOM_VALUE_ID_INVALID,
+              .constant = 0,
+          },
+      .right =
+          {
+              .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+              .value_id = relation_value,
+              .constant = 0,
+          },
   };
   loom_condition_fact_set_t condition_facts = {
-      /*.integer_relations=*/&relation,
-      /*.integer_relation_count=*/1,
-      /*.integer_relation_capacity=*/1,
+      .integer_relations = &relation,
+      .integer_relation_count = 1,
+      .integer_relation_capacity = 1,
   };
   ScopedConditionFacts condition_scope(context, &condition_facts);
 
@@ -115,6 +148,24 @@ static iree_status_t ProveSemanticallyEquivalentUpperBound(
   }
 
   return status;
+}
+
+static iree_status_t ProveSemanticallyEquivalentRelativeUpperBound(
+    loom_symbolic_expr_context_t* context, loom_value_id_t lower_value,
+    loom_value_id_t relation_upper_value, loom_value_id_t query_upper_value,
+    loom_symbolic_proof_result_t* out_result) {
+  loom_condition_integer_relation_t relation = ValueRelation(
+      LOOM_SYMBOLIC_INTEGER_RELATION_LE, lower_value, relation_upper_value);
+  loom_condition_fact_set_t condition_facts = SingleRelationFacts(&relation);
+  ScopedConditionFacts condition_scope(context, &condition_facts);
+
+  loom_symbolic_expr_t lower = {};
+  IREE_RETURN_IF_ERROR(
+      loom_symbolic_expr_from_value(context, lower_value, &lower));
+  loom_symbolic_expr_t upper = {};
+  IREE_RETURN_IF_ERROR(
+      loom_symbolic_expr_from_value(context, query_upper_value, &upper));
+  return loom_symbolic_expr_prove_le(context, &lower, &upper, out_result);
 }
 
 TEST_F(SymbolicExprTest, AddSubNormalizeAndCancelTerms) {
@@ -209,6 +260,193 @@ TEST_F(SymbolicExprTest, SemanticMatchRetainsProducerDepthLimit) {
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
 }
 
+TEST_F(SymbolicExprTest, UnsignedExtensionsMatchOffsetEntryAcrossFixedWidths) {
+  for (const loom_scalar_type_t source_type : {
+           LOOM_SCALAR_TYPE_I1,
+           LOOM_SCALAR_TYPE_I8,
+           LOOM_SCALAR_TYPE_I16,
+           LOOM_SCALAR_TYPE_I32,
+       }) {
+    SCOPED_TRACE(static_cast<int>(source_type));
+    loom_value_id_t source = LOOM_VALUE_ID_INVALID;
+    IREE_ASSERT_OK(loom_builder_define_value(
+        &builder_, loom_type_scalar(source_type), &source));
+    int64_t lower_bound = 0;
+    int64_t upper_bound = 0;
+    ASSERT_TRUE(loom_value_facts_scalar_type_domain(source_type, &lower_bound,
+                                                    &upper_bound));
+    DefineFacts(source, loom_value_facts_make(lower_bound, upper_bound, 1));
+
+    loom_op_t* extension = nullptr;
+    IREE_ASSERT_OK(loom_scalar_extui_build(
+        &builder_, source, loom_type_scalar(source_type),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I64), LOOM_LOCATION_UNKNOWN,
+        &extension));
+    ComputeFacts(extension);
+    loom_op_t* offset = nullptr;
+    IREE_ASSERT_OK(
+        loom_index_cast_build(&builder_, source, loom_type_scalar(source_type),
+                              loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET),
+                              LOOM_LOCATION_UNKNOWN, &offset));
+    ComputeFacts(offset);
+
+    const loom_value_id_t lower = DefineI64Value();
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+    IREE_ASSERT_OK(ProveSemanticallyEquivalentRelativeUpperBound(
+        &expression_context_, lower, loom_scalar_extui_result(extension),
+        loom_index_cast_result(offset), &proof));
+    EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+  }
+}
+
+TEST_F(SymbolicExprTest,
+       SignedExtensionsMatchIndexEntryExceptPredicateInterpretation) {
+  for (const loom_scalar_type_t source_type : {
+           LOOM_SCALAR_TYPE_I1,
+           LOOM_SCALAR_TYPE_I8,
+           LOOM_SCALAR_TYPE_I16,
+           LOOM_SCALAR_TYPE_I32,
+       }) {
+    SCOPED_TRACE(static_cast<int>(source_type));
+    loom_value_id_t source = LOOM_VALUE_ID_INVALID;
+    IREE_ASSERT_OK(loom_builder_define_value(
+        &builder_, loom_type_scalar(source_type), &source));
+    int64_t lower_bound = 0;
+    int64_t upper_bound = 0;
+    ASSERT_TRUE(loom_value_facts_scalar_type_domain(source_type, &lower_bound,
+                                                    &upper_bound));
+    DefineFacts(source, loom_value_facts_make(lower_bound, upper_bound, 1));
+
+    loom_op_t* extension = nullptr;
+    IREE_ASSERT_OK(loom_scalar_extsi_build(
+        &builder_, source, loom_type_scalar(source_type),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I64), LOOM_LOCATION_UNKNOWN,
+        &extension));
+    ComputeFacts(extension);
+    loom_op_t* index = nullptr;
+    IREE_ASSERT_OK(
+        loom_index_cast_build(&builder_, source, loom_type_scalar(source_type),
+                              loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
+                              LOOM_LOCATION_UNKNOWN, &index));
+    ComputeFacts(index);
+
+    const loom_value_id_t lower = DefineI64Value();
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+    IREE_ASSERT_OK(ProveSemanticallyEquivalentRelativeUpperBound(
+        &expression_context_, lower, loom_index_cast_result(index),
+        loom_scalar_extsi_result(extension), &proof));
+    EXPECT_EQ(proof, source_type == LOOM_SCALAR_TYPE_I1
+                         ? LOOM_SYMBOLIC_PROOF_UNKNOWN
+                         : LOOM_SYMBOLIC_PROOF_TRUE);
+  }
+}
+
+TEST_F(SymbolicExprTest,
+       SignedAndUnsignedExtensionsRemainDistinctAcrossNegativeDomains) {
+  for (const loom_scalar_type_t source_type : {
+           LOOM_SCALAR_TYPE_I8,
+           LOOM_SCALAR_TYPE_I16,
+           LOOM_SCALAR_TYPE_I32,
+       }) {
+    SCOPED_TRACE(static_cast<int>(source_type));
+    loom_value_id_t source = LOOM_VALUE_ID_INVALID;
+    IREE_ASSERT_OK(loom_builder_define_value(
+        &builder_, loom_type_scalar(source_type), &source));
+    int64_t lower_bound = 0;
+    int64_t upper_bound = 0;
+    ASSERT_TRUE(loom_value_facts_scalar_type_domain(source_type, &lower_bound,
+                                                    &upper_bound));
+    DefineFacts(source, loom_value_facts_make(lower_bound, upper_bound, 1));
+
+    loom_op_t* signed_extension = nullptr;
+    IREE_ASSERT_OK(loom_scalar_extsi_build(
+        &builder_, source, loom_type_scalar(source_type),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I64), LOOM_LOCATION_UNKNOWN,
+        &signed_extension));
+    ComputeFacts(signed_extension);
+    loom_op_t* unsigned_extension = nullptr;
+    IREE_ASSERT_OK(loom_scalar_extui_build(
+        &builder_, source, loom_type_scalar(source_type),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I64), LOOM_LOCATION_UNKNOWN,
+        &unsigned_extension));
+    ComputeFacts(unsigned_extension);
+
+    const loom_value_id_t lower = DefineI64Value();
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_TRUE;
+    IREE_ASSERT_OK(ProveSemanticallyEquivalentRelativeUpperBound(
+        &expression_context_, lower, loom_scalar_extsi_result(signed_extension),
+        loom_scalar_extui_result(unsigned_extension), &proof));
+    EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
+  }
+}
+
+TEST_F(SymbolicExprTest, UnsignedCastFunctionsMatchEquivalentPayloads) {
+  loom_value_id_t source = LOOM_VALUE_ID_INVALID;
+  const loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
+  IREE_ASSERT_OK(loom_builder_define_value(&builder_, i32, &source));
+  DefineFacts(source, loom_value_facts_make(INT32_MIN, INT32_MAX, 1));
+  loom_op_t* zero = nullptr;
+  IREE_ASSERT_OK(loom_scalar_constant_build(&builder_, loom_attr_i64(0), i32,
+                                            LOOM_LOCATION_UNKNOWN, &zero));
+  ComputeFacts(zero);
+  loom_op_t* alias = nullptr;
+  IREE_ASSERT_OK(loom_scalar_addi_build(&builder_, 0, source,
+                                        loom_scalar_constant_result(zero), i32,
+                                        LOOM_LOCATION_UNKNOWN, &alias));
+  ComputeFacts(alias);
+
+  loom_op_t* source_extension = nullptr;
+  IREE_ASSERT_OK(loom_scalar_extui_build(
+      &builder_, source, i32, loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+      LOOM_LOCATION_UNKNOWN, &source_extension));
+  ComputeFacts(source_extension);
+  loom_op_t* alias_extension = nullptr;
+  IREE_ASSERT_OK(
+      loom_scalar_extui_build(&builder_, loom_scalar_addi_result(alias), i32,
+                              loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+                              LOOM_LOCATION_UNKNOWN, &alias_extension));
+  ComputeFacts(alias_extension);
+
+  const loom_value_id_t lower = DefineI64Value();
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+  IREE_ASSERT_OK(ProveSemanticallyEquivalentRelativeUpperBound(
+      &expression_context_, lower, loom_scalar_extui_result(source_extension),
+      loom_scalar_extui_result(alias_extension), &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+}
+
+TEST_F(SymbolicExprTest, UnsignedCastFunctionsKeepPayloadWidthsDistinct) {
+  loom_value_id_t source = LOOM_VALUE_ID_INVALID;
+  const loom_type_t i16 = loom_type_scalar(LOOM_SCALAR_TYPE_I16);
+  IREE_ASSERT_OK(loom_builder_define_value(&builder_, i16, &source));
+  DefineFacts(source, loom_value_facts_make(INT16_MIN, INT16_MAX, 1));
+
+  loom_op_t* wide_extension = nullptr;
+  IREE_ASSERT_OK(loom_scalar_extui_build(
+      &builder_, source, i16, loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+      LOOM_LOCATION_UNKNOWN, &wide_extension));
+  ComputeFacts(wide_extension);
+  loom_op_t* narrow = nullptr;
+  IREE_ASSERT_OK(loom_scalar_trunci_build(&builder_, source, i16,
+                                          loom_type_scalar(LOOM_SCALAR_TYPE_I8),
+                                          LOOM_LOCATION_UNKNOWN, &narrow));
+  ComputeFacts(narrow);
+  loom_op_t* narrow_extension = nullptr;
+  IREE_ASSERT_OK(
+      loom_scalar_extui_build(&builder_, loom_scalar_trunci_result(narrow),
+                              loom_type_scalar(LOOM_SCALAR_TYPE_I8),
+                              loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+                              LOOM_LOCATION_UNKNOWN, &narrow_extension));
+  ComputeFacts(narrow_extension);
+
+  const loom_value_id_t lower = DefineI64Value();
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_TRUE;
+  IREE_ASSERT_OK(ProveSemanticallyEquivalentRelativeUpperBound(
+      &expression_context_, lower, loom_scalar_extui_result(wide_extension),
+      loom_scalar_extui_result(narrow_extension), &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
+}
+
 TEST_F(SymbolicExprTest, SimplifiesDifferenceToExistingValue) {
   loom_value_id_t row = DefineIndexValue();
   loom_value_id_t column = DefineIndexValue();
@@ -258,11 +496,11 @@ TEST_F(SymbolicExprTest, DifferencePreservesAssumedValue) {
   loom_value_id_t value = DefineIndexValue();
   loom_value_id_t other = DefineIndexValue();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{value, other},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {value, other},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
@@ -327,40 +565,82 @@ TEST_F(SymbolicExprTest, AssumedValueRelationPredicatesProveRelations) {
   loom_value_id_t induction = DefineIndexValue();
   loom_value_id_t upper_bound = DefineIndexValue();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{induction, upper_bound},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {induction, upper_bound},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
   IREE_ASSERT_OK(loom_index_assume_build(&builder_, &induction, 1, &predicate,
                                          1, &index_type, 1,
                                          LOOM_LOCATION_UNKNOWN, &assume_op));
+  ComputeFacts(assume_op);
   loom_value_id_t assumed_induction =
       loom_index_assume_results(assume_op).values[0];
+  loom_op_t* alias_op = nullptr;
+  IREE_ASSERT_OK(loom_index_assume_build(
+      &builder_, &assumed_induction, 1, /*predicates=*/nullptr,
+      /*predicate_count=*/0, &index_type, 1, LOOM_LOCATION_UNKNOWN, &alias_op));
+  ComputeFacts(alias_op);
+  loom_value_id_t aliased_induction =
+      loom_index_assume_results(alias_op).values[0];
 
   loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
   IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
       &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT,
-      assumed_induction, upper_bound, &proof));
+      aliased_induction, upper_bound, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
 
   IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
       &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_GE,
-      assumed_induction, upper_bound, &proof));
+      aliased_induction, upper_bound, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_FALSE);
 
   IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
       &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
-      assumed_induction, upper_bound, &proof));
+      aliased_induction, upper_bound, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_FALSE);
 
   IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
       &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_NE,
-      assumed_induction, upper_bound, &proof));
+      aliased_induction, upper_bound, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+}
+
+TEST_F(SymbolicExprTest, RetainedLiteralExclusionProvesRelations) {
+  const loom_value_id_t value = DefineIndexValue();
+  const loom_predicate_t predicate = {
+      .kind = LOOM_PREDICATE_NE,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST},
+      .reserved = {},
+      .args = {value, 42},
+  };
+  const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  loom_op_t* assume_op = nullptr;
+  IREE_ASSERT_OK(loom_index_assume_build(&builder_, &value, 1, &predicate, 1,
+                                         &index_type, 1, LOOM_LOCATION_UNKNOWN,
+                                         &assume_op));
+  ComputeFacts(assume_op);
+  const loom_value_id_t assumed_value =
+      loom_index_assume_results(assume_op).values[0];
+
+  loom_op_t* literal_op = BuildIndexConstant(42);
+  ComputeFacts(literal_op);
+  const loom_value_id_t literal = loom_index_constant_result(literal_op);
+
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+      &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_NE, assumed_value,
+      literal, &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+      &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_EQ, assumed_value,
+      literal, &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_FALSE);
 }
 
 TEST_F(SymbolicExprTest, CheckedIdentityPredicateProvesDynamicExtent) {
@@ -370,11 +650,11 @@ TEST_F(SymbolicExprTest, CheckedIdentityPredicateProvesDynamicExtent) {
   const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   const loom_type_t result_types[] = {index_type, index_type};
   const loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{row, row_count},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {row, row_count},
   };
   loom_op_t* assertion_op = nullptr;
   IREE_ASSERT_OK(loom_sanitizer_assert_value_build(
@@ -403,11 +683,11 @@ TEST_F(SymbolicExprTest, CheckedIdentityNonStrictPredicateDoesNotProveExtent) {
   const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   const loom_type_t result_types[] = {index_type, index_type};
   const loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LE,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{row, row_count},
+      .kind = LOOM_PREDICATE_LE,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {row, row_count},
   };
   loom_op_t* assertion_op = nullptr;
   IREE_ASSERT_OK(loom_sanitizer_assert_value_build(
@@ -433,11 +713,11 @@ TEST_F(SymbolicExprTest, ScaledStrictRelationProvesLessEqualWithUnitExtent) {
   loom_value_id_t induction = DefineIndexValue();
   loom_value_id_t upper_bound = DefineIndexValue();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{induction, upper_bound},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {induction, upper_bound},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
@@ -516,21 +796,26 @@ TEST_F(SymbolicExprTest, AffineConditionProofsRespectRelationOrientation) {
       for (int orientation = 0; orientation < 2; ++orientation) {
         SCOPED_TRACE(orientation);
         loom_condition_integer_relation_t relation = {
-            /*.relation=*/test_case.relation,
-            /*.left=*/
-            {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-             /*.value_id=*/orientation == 0 ? loom_index_add_result(shifted_op)
-                                            : right},
-            /*.right=*/
-            {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-             /*.value_id=*/orientation == 0
-                 ? right
-                 : loom_index_add_result(shifted_op)},
+            .relation = test_case.relation,
+            .left =
+                {
+                    .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+                    .value_id = orientation == 0
+                                    ? loom_index_add_result(shifted_op)
+                                    : right,
+                },
+            .right =
+                {
+                    .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+                    .value_id = orientation == 0
+                                    ? right
+                                    : loom_index_add_result(shifted_op),
+                },
         };
         loom_condition_fact_set_t condition_facts = {
-            /*.integer_relations=*/&relation,
-            /*.integer_relation_count=*/1,
-            /*.integer_relation_capacity=*/1,
+            .integer_relations = &relation,
+            .integer_relation_count = 1,
+            .integer_relation_capacity = 1,
         };
         ScopedConditionFacts condition_scope(&expression_context_,
                                              &condition_facts);
@@ -588,17 +873,18 @@ TEST_F(SymbolicExprTest, EqualityMatchesOppositeSemanticProducerTerms) {
   const loom_value_id_t query_left = BuildScalarAndI(right_source, mask);
   const loom_value_id_t query_right = BuildScalarAndI(left_source, mask);
   loom_condition_integer_relation_t relation = {
-      /*.relation=*/LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
-      /*.left=*/
-      {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE, /*.value_id=*/left},
-      /*.right=*/
-      {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-       /*.value_id=*/right},
+      .relation = LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
+      .left = {.kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE, .value_id = left},
+      .right =
+          {
+              .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+              .value_id = right,
+          },
   };
   loom_condition_fact_set_t condition_facts = {
-      /*.integer_relations=*/&relation,
-      /*.integer_relation_count=*/1,
-      /*.integer_relation_capacity=*/1,
+      .integer_relations = &relation,
+      .integer_relation_count = 1,
+      .integer_relation_capacity = 1,
   };
   ScopedConditionFacts condition_scope(&expression_context_, &condition_facts);
   const int64_t scales[] = {-4, 4};
@@ -641,18 +927,22 @@ TEST_F(SymbolicExprTest, EqualityMultiplierOverflowDoesNotProveOrder) {
   for (int orientation = 0; orientation < 2; ++orientation) {
     SCOPED_TRACE(orientation);
     loom_condition_integer_relation_t relation = {
-        /*.relation=*/LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
-        /*.left=*/
-        {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-         /*.value_id=*/orientation == 0 ? left : right},
-        /*.right=*/
-        {/*.kind=*/LOOM_CONDITION_INTEGER_OPERAND_VALUE,
-         /*.value_id=*/orientation == 0 ? right : left},
+        .relation = LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
+        .left =
+            {
+                .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+                .value_id = orientation == 0 ? left : right,
+            },
+        .right =
+            {
+                .kind = LOOM_CONDITION_INTEGER_OPERAND_VALUE,
+                .value_id = orientation == 0 ? right : left,
+            },
     };
     loom_condition_fact_set_t condition_facts = {
-        /*.integer_relations=*/&relation,
-        /*.integer_relation_count=*/1,
-        /*.integer_relation_capacity=*/1,
+        .integer_relations = &relation,
+        .integer_relation_count = 1,
+        .integer_relation_capacity = 1,
     };
     ScopedConditionFacts condition_scope(&expression_context_,
                                          &condition_facts);
@@ -692,11 +982,11 @@ TEST_F(SymbolicExprTest, ShiftedStrictRelationProvesWideExtent) {
       LOOM_LOCATION_UNKNOWN, &last_valid_start_op));
   loom_value_id_t last_valid_start = loom_index_sub_result(last_valid_start_op);
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{origin, last_valid_start},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {origin, last_valid_start},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
@@ -732,17 +1022,18 @@ TEST_F(SymbolicExprTest, AssumedRightValueRelationPredicatesAreSwapped) {
   loom_value_id_t induction = DefineIndexValue();
   loom_value_id_t upper_bound = DefineIndexValue();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_GT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{upper_bound, induction},
+      .kind = LOOM_PREDICATE_GT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {upper_bound, induction},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
   IREE_ASSERT_OK(loom_index_assume_build(&builder_, &upper_bound, 1, &predicate,
                                          1, &index_type, 1,
                                          LOOM_LOCATION_UNKNOWN, &assume_op));
+  ComputeFacts(assume_op);
   loom_value_id_t assumed_upper_bound =
       loom_index_assume_results(assume_op).values[0];
 
@@ -757,11 +1048,11 @@ TEST_F(SymbolicExprTest, ScalarAssumePredicatesProveRelations) {
   loom_value_id_t element = DefineI64Value();
   loom_value_id_t bound = DefineI64Value();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_LE,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{element, bound},
+      .kind = LOOM_PREDICATE_LE,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {element, bound},
   };
   loom_type_t i64_type = loom_type_scalar(LOOM_SCALAR_TYPE_I64);
   loom_op_t* assume_op = nullptr;
@@ -791,11 +1082,11 @@ TEST_F(SymbolicExprTest, ProvesFlattenedAddressFromDynamicAxisBounds) {
 
   loom_value_id_t row_values[] = {row_source, row_count_source};
   loom_predicate_t row_predicate = {
-      /*.kind=*/LOOM_PREDICATE_LT,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{row_source, row_count_source, 0},
+      .kind = LOOM_PREDICATE_LT,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {row_source, row_count_source, 0},
   };
   loom_type_t row_result_types[] = {index_type, index_type};
   loom_op_t* row_assume_op = nullptr;
@@ -803,6 +1094,7 @@ TEST_F(SymbolicExprTest, ProvesFlattenedAddressFromDynamicAxisBounds) {
       &builder_, row_values, IREE_ARRAYSIZE(row_values), &row_predicate, 1,
       row_result_types, IREE_ARRAYSIZE(row_result_types), LOOM_LOCATION_UNKNOWN,
       &row_assume_op));
+  ComputeFacts(row_assume_op);
   loom_value_slice_t row_results = loom_index_assume_results(row_assume_op);
   loom_value_id_t row = row_results.values[0];
   loom_value_id_t row_count = row_results.values[1];
@@ -906,15 +1198,53 @@ TEST_F(SymbolicExprTest, ProvesLessEqualFromTermFacts) {
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
 }
 
+TEST_F(SymbolicExprTest, ProvesBoundsFromIdentityRangeEndpointFacts) {
+  const loom_value_id_t lower = DefineIndexValue();
+  const loom_value_id_t value = DefineIndexValue();
+  const loom_value_id_t upper = DefineIndexValue();
+  DefineFacts(lower, loom_value_facts_make(-128, -32, 1));
+  DefineFacts(upper, loom_value_facts_make(32, 4096, 1));
+  const loom_predicate_t predicate = {
+      .kind = LOOM_PREDICATE_RANGE,
+      .arg_count = 3,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE,
+                   LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {value, lower, upper},
+  };
+  const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  loom_op_t* assume_op = nullptr;
+  IREE_ASSERT_OK(loom_index_assume_build(&builder_, &value, 1, &predicate, 1,
+                                         &index_type, 1, LOOM_LOCATION_UNKNOWN,
+                                         &assume_op));
+  const loom_value_id_t assumed_value =
+      loom_index_assume_results(assume_op).values[0];
+
+  loom_symbolic_expr_t expression = {};
+  IREE_ASSERT_OK(loom_symbolic_expr_from_value(&expression_context_,
+                                               assumed_value, &expression));
+  loom_symbolic_expr_t lower_limit = {};
+  loom_symbolic_expr_constant(-128, &lower_limit);
+  loom_symbolic_expr_t upper_limit = {};
+  loom_symbolic_expr_constant(4096, &upper_limit);
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_le(&expression_context_, &lower_limit,
+                                             &expression, &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_le(&expression_context_, &expression,
+                                             &upper_limit, &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+}
+
 TEST_F(SymbolicExprTest, ProvesLessEqualFromExpressionFactsAfterExpansion) {
   loom_value_id_t value_id = DefineIndexValue();
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_RANGE,
-      /*.arg_count=*/3,
-      /*.arg_tags=*/
-      {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST, LOOM_PRED_ARG_CONST},
-      /*.reserved=*/{},
-      /*.args=*/{value_id, 0, 10},
+      .kind = LOOM_PREDICATE_RANGE,
+      .arg_count = 3,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
+                   LOOM_PRED_ARG_CONST},
+      .reserved = {},
+      .args = {value_id, 0, 10},
   };
   loom_op_t* assume_op = nullptr;
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
@@ -982,11 +1312,11 @@ TEST_F(SymbolicExprTest, ProvesAssumedIndexRemainderIsBelowDynamicDivisor) {
   loom_value_id_t remainder = loom_index_rem_result(remainder_op);
 
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_GE,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST},
-      /*.reserved=*/{},
-      /*.args=*/{remainder, 0},
+      .kind = LOOM_PREDICATE_GE,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST},
+      .reserved = {},
+      .args = {remainder, 0},
   };
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
   loom_op_t* assume_op = nullptr;
@@ -1041,6 +1371,297 @@ TEST_F(SymbolicExprTest, ProvesScalarUnsignedRemainderIsBelowDivisor) {
       &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_EQ, remainder,
       divisor, &proof));
   EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_FALSE);
+}
+
+TEST_F(SymbolicExprTest, ProvesQuotientBoundFromActiveProductRelation) {
+  const loom_value_id_t dividend = DefineIndexValue();
+  const loom_value_id_t divisor = DefineIndexValue();
+  const loom_value_id_t bound = DefineIndexValue();
+  DefineFacts(dividend, loom_value_facts_make(0, 65535, 1));
+  // These ranges deliberately allow multiplication to wrap. A true relation
+  // to the materialized residue remains sufficient in the accepted direction.
+  DefineFacts(divisor, loom_value_facts_make(1, INT64_MAX, 1));
+  DefineFacts(bound, loom_value_facts_make(0, INT64_MAX, 1));
+
+  loom_op_t* quotient_op = nullptr;
+  IREE_ASSERT_OK(loom_index_div_build(&builder_, dividend, divisor,
+                                      LOOM_LOCATION_UNKNOWN, &quotient_op));
+  const loom_value_id_t quotient = loom_index_div_result(quotient_op);
+  ComputeFacts(quotient_op);
+
+  for (int orientation = 0; orientation < 2; ++orientation) {
+    for (int factor_order = 0; factor_order < 2; ++factor_order) {
+      SCOPED_TRACE(orientation);
+      SCOPED_TRACE(factor_order);
+      loom_op_t* product_op = nullptr;
+      IREE_ASSERT_OK(loom_index_mul_build(&builder_,
+                                          factor_order == 0 ? divisor : bound,
+                                          factor_order == 0 ? bound : divisor,
+                                          LOOM_LOCATION_UNKNOWN, &product_op));
+      const loom_value_id_t product = loom_index_mul_result(product_op);
+      ComputeFacts(product_op);
+      loom_condition_integer_relation_t active_relation =
+          ValueRelation(orientation == 0 ? LOOM_SYMBOLIC_INTEGER_RELATION_LT
+                                         : LOOM_SYMBOLIC_INTEGER_RELATION_GT,
+                        orientation == 0 ? dividend : product,
+                        orientation == 0 ? product : dividend);
+      loom_condition_fact_set_t condition_facts =
+          SingleRelationFacts(&active_relation);
+      ScopedConditionFacts condition_scope(&expression_context_,
+                                           &condition_facts);
+
+      loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+      IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+          &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT, quotient,
+          bound, &proof));
+      EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+      IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+          &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_GE, quotient,
+          bound, &proof));
+      EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_FALSE);
+      IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+          &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_GT, bound,
+          quotient, &proof));
+      EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+    }
+  }
+}
+
+TEST_F(SymbolicExprTest, ProvesShiftedQuotientBoundFromActiveShiftedExtent) {
+  const loom_value_id_t dividend = DefineIndexValue();
+  const loom_value_id_t bound = DefineIndexValue();
+  const loom_value_id_t shift_two =
+      loom_index_constant_result(BuildIndexConstant(2));
+  const loom_value_id_t shift_three =
+      loom_index_constant_result(BuildIndexConstant(3));
+  const loom_value_id_t shift_sixty_four =
+      loom_index_constant_result(BuildIndexConstant(64));
+  const loom_value_id_t dynamic_shift = DefineIndexValue();
+  DefineFacts(dividend, loom_value_facts_make(0, 65535, 1));
+  DefineFacts(bound, loom_value_facts_make(0, INT64_MAX, 1));
+  DefineFacts(shift_two, loom_value_facts_exact_i64(2));
+  DefineFacts(shift_three, loom_value_facts_exact_i64(3));
+  DefineFacts(shift_sixty_four, loom_value_facts_exact_i64(64));
+  DefineFacts(dynamic_shift, loom_value_facts_make(1, 3, 1));
+
+  const struct {
+    loom_value_id_t quotient_shift;
+    loom_value_id_t extent_shift;
+    loom_symbolic_proof_result_t expected;
+  } cases[] = {
+      {shift_two, shift_two, LOOM_SYMBOLIC_PROOF_TRUE},
+      {shift_two, shift_three, LOOM_SYMBOLIC_PROOF_UNKNOWN},
+      {shift_sixty_four, shift_sixty_four, LOOM_SYMBOLIC_PROOF_UNKNOWN},
+      {dynamic_shift, dynamic_shift, LOOM_SYMBOLIC_PROOF_UNKNOWN},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.quotient_shift);
+    SCOPED_TRACE(test_case.extent_shift);
+    loom_op_t* quotient_op = nullptr;
+    IREE_ASSERT_OK(loom_index_shrui_build(&builder_, dividend,
+                                          test_case.quotient_shift,
+                                          LOOM_LOCATION_UNKNOWN, &quotient_op));
+    const loom_value_id_t quotient = loom_index_shrui_result(quotient_op);
+    ComputeFacts(quotient_op);
+    loom_op_t* extent_op = nullptr;
+    IREE_ASSERT_OK(loom_index_shli_build(&builder_, bound,
+                                         test_case.extent_shift,
+                                         LOOM_LOCATION_UNKNOWN, &extent_op));
+    const loom_value_id_t extent = loom_index_shli_result(extent_op);
+    ComputeFacts(extent_op);
+
+    loom_condition_integer_relation_t active_relation =
+        ValueRelation(LOOM_SYMBOLIC_INTEGER_RELATION_LT, dividend, extent);
+    loom_condition_fact_set_t condition_facts =
+        SingleRelationFacts(&active_relation);
+    ScopedConditionFacts condition_scope(&expression_context_,
+                                         &condition_facts);
+
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+    IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+        &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT, quotient,
+        bound, &proof));
+    EXPECT_EQ(proof, test_case.expected);
+  }
+}
+
+TEST_F(SymbolicExprTest, ProvesScalarQuotientBoundFromActiveProductRelation) {
+  const loom_value_id_t dividend = DefineI64Value();
+  const loom_value_id_t divisor = DefineI64Value();
+  const loom_value_id_t bound = DefineI64Value();
+  DefineFacts(dividend, loom_value_facts_make(0, 65535, 1));
+  DefineFacts(divisor, loom_value_facts_make(1, 256, 1));
+  DefineFacts(bound, loom_value_facts_make(0, 1024, 1));
+
+  const loom_type_t i64_type = loom_type_scalar(LOOM_SCALAR_TYPE_I64);
+  loom_op_t* product_op = nullptr;
+  IREE_ASSERT_OK(loom_scalar_muli_build(&builder_, /*instance_flags=*/0,
+                                        divisor, bound, i64_type,
+                                        LOOM_LOCATION_UNKNOWN, &product_op));
+  const loom_value_id_t product = loom_scalar_muli_result(product_op);
+  ComputeFacts(product_op);
+  loom_op_t* quotient_op = nullptr;
+  IREE_ASSERT_OK(loom_scalar_divui_build(&builder_, dividend, divisor, i64_type,
+                                         LOOM_LOCATION_UNKNOWN, &quotient_op));
+  const loom_value_id_t quotient = loom_scalar_divui_result(quotient_op);
+  ComputeFacts(quotient_op);
+
+  loom_condition_integer_relation_t active_relation =
+      ValueRelation(LOOM_SYMBOLIC_INTEGER_RELATION_LT, dividend, product);
+  loom_condition_fact_set_t condition_facts =
+      SingleRelationFacts(&active_relation);
+  ScopedConditionFacts condition_scope(&expression_context_, &condition_facts);
+
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+      &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT, quotient, bound,
+      &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+}
+
+TEST_F(SymbolicExprTest, ProvesQuotientBoundFromDividendIdentityPredicate) {
+  const loom_value_id_t source_dividend = DefineIndexValue();
+  const loom_value_id_t divisor = DefineIndexValue();
+  const loom_value_id_t bound = DefineIndexValue();
+  DefineFacts(source_dividend, loom_value_facts_make(0, 65535, 1));
+  DefineFacts(divisor, loom_value_facts_make(1, 256, 1));
+  DefineFacts(bound, loom_value_facts_make(0, 1024, 1));
+
+  loom_op_t* product_op = nullptr;
+  IREE_ASSERT_OK(loom_index_mul_build(&builder_, divisor, bound,
+                                      LOOM_LOCATION_UNKNOWN, &product_op));
+  const loom_value_id_t product = loom_index_mul_result(product_op);
+  ComputeFacts(product_op);
+
+  loom_predicate_t product_bound_predicate =
+      ValuePredicate(LOOM_PREDICATE_LT, source_dividend, product);
+  const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  loom_op_t* assume_op = nullptr;
+  IREE_ASSERT_OK(loom_index_assume_build(
+      &builder_, &source_dividend, 1, &product_bound_predicate, 1, &index_type,
+      1, LOOM_LOCATION_UNKNOWN, &assume_op));
+  const loom_value_id_t dividend =
+      loom_index_assume_results(assume_op).values[0];
+  ComputeFacts(assume_op);
+
+  loom_op_t* quotient_op = nullptr;
+  IREE_ASSERT_OK(loom_index_div_build(&builder_, dividend, divisor,
+                                      LOOM_LOCATION_UNKNOWN, &quotient_op));
+  const loom_value_id_t quotient = loom_index_div_result(quotient_op);
+  ComputeFacts(quotient_op);
+
+  loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+  IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+      &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT, quotient, bound,
+      &proof));
+  EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_TRUE);
+}
+
+TEST_F(SymbolicExprTest, QuotientProductRelationRejectsInsufficientProofs) {
+  const loom_value_id_t dividend = DefineIndexValue();
+  const loom_value_id_t divisor = DefineIndexValue();
+  const loom_value_id_t bound = DefineIndexValue();
+  const loom_value_id_t other_bound = DefineIndexValue();
+  DefineFacts(dividend, loom_value_facts_make(0, 65535, 1));
+  DefineFacts(divisor, loom_value_facts_make(1, 256, 1));
+  DefineFacts(bound, loom_value_facts_make(0, 1024, 1));
+  DefineFacts(other_bound, loom_value_facts_make(0, 1024, 1));
+
+  loom_op_t* product_op = nullptr;
+  IREE_ASSERT_OK(loom_index_mul_build(&builder_, divisor, bound,
+                                      LOOM_LOCATION_UNKNOWN, &product_op));
+  const loom_value_id_t product = loom_index_mul_result(product_op);
+  ComputeFacts(product_op);
+  loom_op_t* other_product_op = nullptr;
+  IREE_ASSERT_OK(loom_index_mul_build(&builder_, divisor, other_bound,
+                                      LOOM_LOCATION_UNKNOWN,
+                                      &other_product_op));
+  const loom_value_id_t other_product = loom_index_mul_result(other_product_op);
+  ComputeFacts(other_product_op);
+  loom_op_t* quotient_op = nullptr;
+  IREE_ASSERT_OK(loom_index_div_build(&builder_, dividend, divisor,
+                                      LOOM_LOCATION_UNKNOWN, &quotient_op));
+  const loom_value_id_t quotient = loom_index_div_result(quotient_op);
+  ComputeFacts(quotient_op);
+
+  const struct {
+    loom_symbolic_integer_relation_t active_relation;
+    loom_value_id_t active_product;
+    loom_symbolic_integer_relation_t queried_relation;
+  } cases[] = {
+      // Equality with the product still permits quotient == bound.
+      {LOOM_SYMBOLIC_INTEGER_RELATION_LE, product,
+       LOOM_SYMBOLIC_INTEGER_RELATION_LT},
+      // A wrapped product can make this edge weaker than the mathematical
+      // product comparison, so it cannot establish the converse quotient.
+      {LOOM_SYMBOLIC_INTEGER_RELATION_GE, product,
+       LOOM_SYMBOLIC_INTEGER_RELATION_GE},
+      // A strict relation to a different product says nothing about bound.
+      {LOOM_SYMBOLIC_INTEGER_RELATION_LT, other_product,
+       LOOM_SYMBOLIC_INTEGER_RELATION_LT},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.active_relation);
+    loom_condition_integer_relation_t active_relation = ValueRelation(
+        test_case.active_relation, dividend, test_case.active_product);
+    loom_condition_fact_set_t condition_facts =
+        SingleRelationFacts(&active_relation);
+    ScopedConditionFacts condition_scope(&expression_context_,
+                                         &condition_facts);
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+    IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+        &expression_context_, test_case.queried_relation, quotient, bound,
+        &proof));
+    EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
+  }
+}
+
+TEST_F(SymbolicExprTest,
+       QuotientProductRelationRequiresUnsignedInputsAndPositiveDivisor) {
+  const loom_value_id_t dividend = DefineIndexValue();
+  const loom_value_id_t divisor = DefineIndexValue();
+  const loom_value_id_t bound = DefineIndexValue();
+
+  loom_op_t* product_op = nullptr;
+  IREE_ASSERT_OK(loom_index_mul_build(&builder_, divisor, bound,
+                                      LOOM_LOCATION_UNKNOWN, &product_op));
+  const loom_value_id_t product = loom_index_mul_result(product_op);
+  loom_op_t* quotient_op = nullptr;
+  IREE_ASSERT_OK(loom_index_div_build(&builder_, dividend, divisor,
+                                      LOOM_LOCATION_UNKNOWN, &quotient_op));
+  const loom_value_id_t quotient = loom_index_div_result(quotient_op);
+
+  loom_condition_integer_relation_t active_relation =
+      ValueRelation(LOOM_SYMBOLIC_INTEGER_RELATION_LT, dividend, product);
+  loom_condition_fact_set_t condition_facts =
+      SingleRelationFacts(&active_relation);
+  ScopedConditionFacts condition_scope(&expression_context_, &condition_facts);
+
+  const struct {
+    loom_value_facts_t dividend_facts;
+    loom_value_facts_t divisor_facts;
+    loom_value_facts_t bound_facts;
+  } cases[] = {
+      {loom_value_facts_make(-1, 65535, 1), loom_value_facts_make(1, 256, 1),
+       loom_value_facts_make(0, 1024, 1)},
+      {loom_value_facts_make(0, 65535, 1), loom_value_facts_make(0, 256, 1),
+       loom_value_facts_make(0, 1024, 1)},
+      {loom_value_facts_make(0, 65535, 1), loom_value_facts_make(1, 256, 1),
+       loom_value_facts_make(-1, 1024, 1)},
+  };
+  for (const auto& test_case : cases) {
+    DefineFacts(dividend, test_case.dividend_facts);
+    DefineFacts(divisor, test_case.divisor_facts);
+    DefineFacts(bound, test_case.bound_facts);
+    ComputeFacts(product_op);
+    ComputeFacts(quotient_op);
+
+    loom_symbolic_proof_result_t proof = LOOM_SYMBOLIC_PROOF_UNKNOWN;
+    IREE_ASSERT_OK(loom_symbolic_expr_prove_value_relation(
+        &expression_context_, LOOM_SYMBOLIC_INTEGER_RELATION_LT, quotient,
+        bound, &proof));
+    EXPECT_EQ(proof, LOOM_SYMBOLIC_PROOF_UNKNOWN);
+  }
 }
 
 TEST_F(SymbolicExprTest, ConditionRefinementMemoReusesPersistentStorage) {
@@ -1119,11 +1740,11 @@ TEST_F(SymbolicExprTest, SelectConditionProvesDynamicLoopLowerBound) {
   loom_value_id_t lower_bound = loom_scf_select_result(lower_bound_op);
 
   loom_predicate_t lower_bound_predicate = {
-      /*.kind=*/LOOM_PREDICATE_GE,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-      /*.reserved=*/{},
-      /*.args=*/{raw_induction, lower_bound},
+      .kind = LOOM_PREDICATE_GE,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      .reserved = {},
+      .args = {raw_induction, lower_bound},
   };
   loom_op_t* assume_op = nullptr;
   IREE_ASSERT_OK(loom_index_assume_build(&builder_, &raw_induction, 1,
@@ -1313,29 +1934,29 @@ TEST_F(SymbolicExprTest, SelectConditionProvesDynamicLoopDivBounds) {
   // the case proof below.
   loom_predicate_t tap_predicates[11] = {
       {
-          /*.kind=*/LOOM_PREDICATE_GE,
-          /*.arg_count=*/2,
-          /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-          /*.reserved=*/{},
-          /*.args=*/{raw_tap, loom_scf_select_result(lower_bound_op)},
+          .kind = LOOM_PREDICATE_GE,
+          .arg_count = 2,
+          .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+          .reserved = {},
+          .args = {raw_tap, loom_scf_select_result(lower_bound_op)},
       },
       {
-          /*.kind=*/LOOM_PREDICATE_LT,
-          /*.arg_count=*/2,
-          /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-          /*.reserved=*/{},
-          /*.args=*/{raw_tap, loom_scf_select_result(upper_bound_op)},
+          .kind = LOOM_PREDICATE_LT,
+          .arg_count = 2,
+          .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+          .reserved = {},
+          .args = {raw_tap, loom_scf_select_result(upper_bound_op)},
       },
   };
   for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(irrelevant_selects); ++i) {
     const loom_value_id_t selected =
         loom_scf_select_result(irrelevant_selects[i]);
-    tap_predicates[i + 2] = (loom_predicate_t){
-        /*.kind=*/LOOM_PREDICATE_EQ,
-        /*.arg_count=*/2,
-        /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
-        /*.reserved=*/{},
-        /*.args=*/{selected, selected},
+    tap_predicates[i + 2] = loom_predicate_t{
+        .kind = LOOM_PREDICATE_EQ,
+        .arg_count = 2,
+        .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+        .reserved = {},
+        .args = {selected, selected},
     };
   }
   loom_op_t* assume_op = nullptr;

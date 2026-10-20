@@ -46,6 +46,13 @@ typedef struct loom_amdgpu_kernel_assert_plan_t {
   loom_sanitizer_site_id_t site_id;
 } loom_amdgpu_kernel_assert_plan_t;
 
+typedef struct loom_amdgpu_sanitizer_site_range_t {
+  // Module-table ID assigned to the first site in this source function.
+  loom_sanitizer_site_id_t base;
+  // Number of densely assigned sites in this source function.
+  uint32_t count;
+} loom_amdgpu_sanitizer_site_range_t;
+
 // Resolves the shared AMDGPU feedback configuration symbol used by sanitizer
 // report producers.
 iree_status_t loom_amdgpu_sanitizer_feedback_config_symbol(
@@ -59,6 +66,12 @@ iree_status_t loom_amdgpu_sanitizer_tsan_config_symbol(
 iree_status_t loom_amdgpu_sanitizer_site_id_for_op(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_sanitizer_site_id_t* out_site_id);
+
+// Returns the dense module-table range assigned to the source function's
+// immutable final site collection.
+iree_status_t loom_amdgpu_sanitizer_site_range(
+    loom_low_lower_context_t* context,
+    loom_amdgpu_sanitizer_site_range_t* out_range);
 
 // Selects AMDGPU failure semantics for kernel.assert.
 iree_status_t loom_amdgpu_select_kernel_assert_plan(
@@ -95,11 +108,6 @@ iree_status_t loom_amdgpu_low_legality_verify_sanitizer_assert_access(
 iree_status_t loom_amdgpu_lower_sanitizer_assert_access(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_sanitizer_access_plan_t* plan);
-
-// Commits sanitizer site rows discovered while lowering one function into the
-// module-scope AMDGPU sanitizer state.
-iree_status_t loom_amdgpu_finalize_sanitizer_function(
-    loom_low_lower_context_t* context);
 
 // Emits module-level sanitizer metadata required by lowered AMDGPU kernels.
 iree_status_t loom_amdgpu_finalize_sanitizer_module(

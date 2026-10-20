@@ -119,7 +119,7 @@ class ControlPeer {
     options.service_batch_size = service_batch_size;
     options.resolution_timeout_ms = INT_MAX;
     options.minimum_rnr_timer = 1;
-    IREE_CHECK_OK(iree_net_rdma_connection_control_create(
+    IREE_CHECK_OK(iree_net_rdma_connection_control_allocate(
         context, proactor, options,
         iree_make_const_byte_span(hello.data(), hello.size()),
         {+[](void* user_data, iree_const_byte_span_t private_data) {
@@ -207,7 +207,7 @@ class ControlPeer {
       Stop();
       PollUntil(proactor_, [&] { return has(kStopped); });
     }
-    iree_net_rdma_connection_control_destroy(control_);
+    iree_net_rdma_connection_control_free(control_);
     DestroyData();
     iree_async_region_release(data_region_);
     for (auto& message : messages_) {
@@ -269,11 +269,12 @@ class ControlPeer {
       iree_net_rdma_direct_endpoint_join_deactivation(data_endpoint_);
     }
     iree_net_rdma_connection_control_deactivate(
-        control_, {+[](void* user_data) {
+        control_, {+[](void* user_data, iree_status_t status) {
+                     IREE_CHECK_OK(status);
                      auto* self = static_cast<ControlPeer*>(user_data);
                      self->flags_ |= kStopped;
                      if (self->has(kDestroyOnStop)) {
-                       iree_net_rdma_connection_control_destroy(self->control_);
+                       iree_net_rdma_connection_control_free(self->control_);
                        self->control_ = nullptr;
                        self->DestroyData();
                      }
@@ -290,7 +291,7 @@ class ControlPeer {
       iree_net_carrier_release(message_carrier_);
       message_carrier_ = nullptr;
     } else {
-      iree_net_rdma_direct_endpoint_destroy(data_endpoint_);
+      iree_net_rdma_direct_endpoint_free(data_endpoint_);
     }
     data_endpoint_ = nullptr;
   }
@@ -326,7 +327,7 @@ class ControlPeer {
     options.post_batch_size = post_batch_size;
     options.max_request_length = 17;
     options.minimum_rnr_timer = 1;
-    IREE_ASSERT_OK(iree_net_rdma_direct_endpoint_create(
+    IREE_ASSERT_OK(iree_net_rdma_direct_endpoint_allocate(
         context_, proactor_, control_, 0, 0x123400 + identity_, options,
         {+[](void* user_data, uint64_t posted_count) {
            auto* self = static_cast<ControlPeer*>(user_data);
@@ -702,7 +703,7 @@ class ConnectionControlTest
       IREE_ASSERT_OK(iree_async_proactor_create_posix(
           options, iree_allocator_system(), &proactor_));
     }
-    IREE_ASSERT_OK(iree_net_rdma_connection_events_create(
+    IREE_ASSERT_OK(iree_net_rdma_connection_events_allocate(
         context_, proactor_, std::get<1>(GetParam()),
         {+[](void* user_data, const rdma_cm_event* event) {
            auto* self = static_cast<ConnectionControlTest*>(user_data);
@@ -737,10 +738,13 @@ class ConnectionControlTest
     if (listener_events_) {
       bool stopped = false;
       iree_net_rdma_connection_events_deactivate(
-          listener_events_,
-          {+[](void* value) { *static_cast<bool*>(value) = true; }, &stopped});
+          listener_events_, {+[](void* value, iree_status_t status) {
+                               IREE_CHECK_OK(status);
+                               *static_cast<bool*>(value) = true;
+                             },
+                             &stopped});
       PollUntil(proactor_, [&] { return stopped; });
-      iree_net_rdma_connection_events_destroy(listener_events_);
+      iree_net_rdma_connection_events_free(listener_events_);
       listener_events_ = nullptr;
     }
   }

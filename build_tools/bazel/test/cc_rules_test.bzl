@@ -24,6 +24,38 @@ load(
 
 _TEST_DYNAMIC_LIBRARY_ENVIRONMENT = "IREE_TEST_DYNAMIC_LIBRARY_PATH"
 
+def _execution_platform_runner(ctx, binary_info, processed_environment, runner_name):
+    return [
+        DefaultInfo(
+            executable = binary_info.executable,
+            files = binary_info.files,
+            runfiles = binary_info.runfiles,
+        ),
+        RunEnvironmentInfo(
+            environment = processed_environment | {"IREE_TEST_RUNNER": runner_name},
+            inherited_environment = ctx.attr.env_inherit,
+        ),
+    ]
+
+def _execution_platform_runner_impl(ctx):
+    return [platform_common.ToolchainInfo(cc_test_info = struct(
+        # Callback and immutable arguments consumed by the rules_cc test rule.
+        get_runner = struct(
+            # Identifies the selected platform through the runtime environment.
+            args = {"runner_name": ctx.label.name},
+            # Preserves the compiled executable and its declared runfiles.
+            func = _execution_platform_runner,
+        ),
+        # This runner adds no linker flags to the test binary.
+        linkopts = [],
+        # Preserve the shared test macro's static-link policy.
+        linkstatic = True,
+    ))]
+
+# The optional C++ runner makes the selected execution platform observable
+# through the production cc_test rule's normal RunEnvironmentInfo provider.
+execution_platform_runner = rule(implementation = _execution_platform_runner_impl)
+
 def _all_compilation_paths(compilation_context):
     return [
         str(path)
@@ -346,6 +378,75 @@ def _test_cc_test_links_statically_by_default_impl(env, target):
     if not attrs.linkstatic:
         env.fail("expected C/C++ tests to link statically by default")
 
+def _test_cc_test_skips_incompatible_execution_platform(name, **kwargs):
+    util.helper_target(
+        iree_cc_test,
+        name = name + "_subject",
+        srcs = [name + "_subject.cc"],
+    )
+    analysis_test(
+        name = name,
+        config_settings = {
+            "//command_line_option:extra_execution_platforms": [
+                str(Label(":test_incompatible_execution_platform")),
+                str(Label(":test_execution_platform")),
+            ],
+            "//command_line_option:extra_toolchains": [
+                str(Label(":incompatible_test_runner_toolchain")),
+                str(Label(":compatible_test_runner_toolchain")),
+            ],
+            "//command_line_option:platforms": [Label(":test_execution_platform")],
+            "@bazel_tools//tools/test:incompatible_use_default_test_toolchain": True,
+        },
+        impl = _test_cc_test_skips_incompatible_execution_platform_impl,
+        target = name + "_subject",
+        **kwargs
+    )
+
+def _test_cc_test_skips_incompatible_execution_platform_impl(env, target):
+    _expect_cc_executable_providers(env, target)
+    env.expect.that_str(
+        target[RunEnvironmentInfo].environment["IREE_TEST_RUNNER"],
+    ).equals("compatible_test_runner")
+
+def _test_cc_test_accepts_matching_execution_platform(name, **kwargs):
+    util.helper_target(
+        iree_cc_test,
+        name = name + "_subject",
+        srcs = [name + "_subject.cc"],
+    )
+    analysis_test(
+        name = name,
+        config_settings = {
+            "//command_line_option:extra_execution_platforms": [str(Label(":test_execution_platform"))],
+            "//command_line_option:platforms": [Label(":test_execution_platform")],
+            "@bazel_tools//tools/test:incompatible_use_default_test_toolchain": True,
+        },
+        impl = _test_cc_test_preserves_execution_platform_providers_impl,
+        target = name + "_subject",
+        **kwargs
+    )
+
+def _test_cc_test_cross_builds_without_executor(name, **kwargs):
+    util.helper_target(
+        iree_cc_test,
+        name = name + "_subject",
+        srcs = [name + "_subject.cc"],
+    )
+    analysis_test(
+        name = name,
+        config_settings = {
+            "//command_line_option:platforms": [Label(":test_execution_platform")],
+            "@bazel_tools//tools/test:incompatible_use_default_test_toolchain": False,
+        },
+        impl = _test_cc_test_preserves_execution_platform_providers_impl,
+        target = name + "_subject",
+        **kwargs
+    )
+
+def _test_cc_test_preserves_execution_platform_providers_impl(env, target):
+    _expect_cc_executable_providers(env, target)
+
 def _test_cc_test_preserves_rules_cc_providers(name, **kwargs):
     util.helper_target(
         iree_cc_test,
@@ -429,10 +530,14 @@ def _expect_cc_execution_dynamic_library_bindings(env, target):
         "build_tools/bazel/test/dynamic_library_root.so",
     ):
         env.fail("unexpected dynamic-library root path %r" % library_path)
-    runfiles = target[DefaultInfo].default_runfiles.files.to_list()
-    _expect_file_basename(env, runfiles, "dynamic_library_root.so")
-    _expect_file_basename(env, runfiles, "dynamic_library_dependency.so")
-    _expect_file_basename(env, runfiles, "generate_rule_fixture.data")
+    for runfiles in [
+        target[DefaultInfo].default_runfiles,
+        target[DefaultInfo].data_runfiles,
+    ]:
+        files = runfiles.files.to_list()
+        _expect_file_basename(env, files, "dynamic_library_root.so")
+        _expect_file_basename(env, files, "dynamic_library_dependency.so")
+        _expect_file_basename(env, files, "generate_rule_fixture.data")
 
 def _expect_runfiles_arguments(env, target):
     runfiles_arguments = target[IreeRunfilesArgumentsInfo]
@@ -533,6 +638,9 @@ def cc_rules_test_suite(name):
             _test_cc_test_preserves_system_include_inputs,
             _test_cc_test_applies_resource_group_tags,
             _test_cc_test_links_statically_by_default,
+            _test_cc_test_skips_incompatible_execution_platform,
+            _test_cc_test_accepts_matching_execution_platform,
+            _test_cc_test_cross_builds_without_executor,
             _test_cc_test_preserves_rules_cc_providers,
             _test_cc_test_injects_dynamic_library_bindings,
             _test_cc_test_rejects_conflicting_dynamic_library_env,

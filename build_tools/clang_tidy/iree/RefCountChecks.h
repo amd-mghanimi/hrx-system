@@ -15,6 +15,11 @@ namespace clang::tidy::iree {
 // helpers observe completion without consuming the caller's reference.
 bool IsRefCountReleaseFunctionName(StringRef FunctionName);
 
+// Matches a void, single-handle release. Complete record types must expose an
+// offset-zero refcount anchor (possibly through a base). Opaque and erased
+// handles retain the naming contract when their representation is unavailable.
+bool IsRefCountReleaseFunction(const FunctionDecl* Function);
+
 class RefCountLifecycleCheck final : public ClangTidyCheck {
  public:
   RefCountLifecycleCheck(StringRef Name, ClangTidyContext* Context);

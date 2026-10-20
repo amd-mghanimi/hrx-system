@@ -29,7 +29,7 @@ using loomc::testing::HandlePtr;
 using ContextPtr = HandlePtr<loomc_context_t, loomc_context_release>;
 using SourcePtr = HandlePtr<loomc_source_t, loomc_source_release>;
 using BuilderPtr =
-    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_release>;
+    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_free>;
 using LinkIndexPtr = HandlePtr<loomc_link_index_t, loomc_link_index_release>;
 using ResultPtr = HandlePtr<loomc_result_t, loomc_result_release>;
 
@@ -48,13 +48,13 @@ ContextPtr CreateContext() {
 SourcePtr CreateSource(loomc_source_format_t format, const char* identifier,
                        const void* contents, size_t contents_length) {
   loomc_source_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.format=*/format,
-      /*.identifier=*/loomc_make_cstring_view(identifier),
-      /*.contents=*/loomc_make_byte_span(contents, contents_length),
-      /*.storage=*/LOOMC_SOURCE_STORAGE_COPY,
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .format = format,
+      .identifier = loomc_make_cstring_view(identifier),
+      .contents = loomc_make_byte_span(contents, contents_length),
+      .storage = LOOMC_SOURCE_STORAGE_COPY,
   };
   loomc_source_t* source = nullptr;
   loomc_status_t status =
@@ -70,7 +70,7 @@ SourcePtr CreateTextSource(const char* identifier, const char* source_text) {
 
 BuilderPtr CreateBuilder(loomc_context_t* context) {
   loomc_link_index_builder_t* builder = nullptr;
-  loomc_status_t status = loomc_link_index_builder_create(
+  loomc_status_t status = loomc_link_index_builder_allocate(
       context, nullptr, loomc_allocator_system(), &builder);
   LOOMC_EXPECT_OK(status);
   return BuilderPtr(builder);
@@ -92,26 +92,44 @@ void FinishSucceeded(loomc_link_index_builder_t* builder,
 TEST(LinkIndexTest, RejectsInvalidBlockSizes) {
   ContextPtr context = CreateContext();
   loomc_link_index_builder_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_LINK_INDEX_BUILDER_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.block_size=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_LINK_INDEX_BUILDER_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .block_size = 1,
   };
   loomc_link_index_builder_t* builder =
       reinterpret_cast<loomc_link_index_builder_t*>(0x1);
   LOOMC_EXPECT_STATUS_IS(
       LOOMC_STATUS_INVALID_ARGUMENT,
-      loomc_link_index_builder_create(context.get(), &options,
-                                      loomc_allocator_system(), &builder));
+      loomc_link_index_builder_allocate(context.get(), &options,
+                                        loomc_allocator_system(), &builder));
   EXPECT_EQ(builder, nullptr);
 
   options.block_size = std::numeric_limits<loomc_host_size_t>::max();
   builder = reinterpret_cast<loomc_link_index_builder_t*>(0x1);
   LOOMC_EXPECT_STATUS_IS(
       LOOMC_STATUS_OUT_OF_RANGE,
-      loomc_link_index_builder_create(context.get(), &options,
-                                      loomc_allocator_system(), &builder));
+      loomc_link_index_builder_allocate(context.get(), &options,
+                                        loomc_allocator_system(), &builder));
   EXPECT_EQ(builder, nullptr);
+}
+
+TEST(LinkIndexTest, RejectsUnknownProviderRole) {
+  ContextPtr context = CreateContext();
+  BuilderPtr builder = CreateBuilder(context.get());
+  SourcePtr source = CreateTextSource("input.loom", R"(
+func.def public @entry() {
+  func.return
+}
+)");
+  const loomc_link_index_source_options_t options = {
+      .provider_name = loomc_string_view_empty(),
+      .role = static_cast<loomc_link_provider_role_t>(-1),
+  };
+  LOOMC_EXPECT_STATUS_IS(
+      LOOMC_STATUS_INVALID_ARGUMENT,
+      loomc_link_index_builder_add_source(builder.get(), source.get(), &options,
+                                          /*out_slot=*/nullptr));
 }
 
 std::vector<uint8_t> WriteBytecodeModule(const char* source_text) {
@@ -124,9 +142,9 @@ std::vector<uint8_t> WriteBytecodeModule(const char* source_text) {
   IREE_CHECK_OK(loom_context_finalize(&context));
 
   loom_text_parse_options_t parse_options = {
-      /*.diagnostic_sink=*/{},
-      /*.max_errors=*/20,
-      /*.low_asm_environment=*/{},
+      .diagnostic_sink = {},
+      .max_errors = 20,
+      .low_asm_environment = {},
   };
   loom_module_t* module = nullptr;
   IREE_CHECK_OK(loom_text_parse(iree_make_cstring_view(source_text),
@@ -174,8 +192,8 @@ func.def @helper(%x: i32) -> (i32) {
 }
 )");
   loomc_link_index_source_options_t options = {
-      /*.provider_name=*/loomc_make_cstring_view("app"),
-      /*.role=*/LOOMC_LINK_PROVIDER_ROLE_INPUT,
+      .provider_name = loomc_make_cstring_view("app"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(
       builder.get(), source.get(), &options, nullptr));
@@ -216,8 +234,8 @@ check.case public @kernel_case {
 }
 )");
   loomc_link_index_source_options_t options = {
-      /*.provider_name=*/loomc_make_cstring_view("checks"),
-      /*.role=*/LOOMC_LINK_PROVIDER_ROLE_INPUT,
+      .provider_name = loomc_make_cstring_view("checks"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(
       builder.get(), source.get(), &options, nullptr));
@@ -268,14 +286,14 @@ func.def public @entry(%x: i32) -> (i32) {
 )");
 
   loomc_link_index_source_options_t library_options = {
-      /*.provider_name=*/loomc_make_cstring_view("library"),
-      /*.role=*/LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
+      .provider_name = loomc_make_cstring_view("library"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(
       builder.get(), library.get(), &library_options, nullptr));
   loomc_link_index_source_options_t input_options = {
-      /*.provider_name=*/loomc_make_cstring_view("input"),
-      /*.role=*/LOOMC_LINK_PROVIDER_ROLE_INPUT,
+      .provider_name = loomc_make_cstring_view("input"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(
       builder.get(), input.get(), &input_options, nullptr));
@@ -316,13 +334,13 @@ func.def public @second(%x: i32) -> (i32) {
 
   loomc_link_index_source_slot_t first_slot = {};
   loomc_link_index_source_options_t first_options = {
-      /*.provider_name=*/loomc_make_cstring_view("first"),
+      .provider_name = loomc_make_cstring_view("first"),
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_reserve_source_slot(
       builder.get(), &first_options, &first_slot));
   loomc_link_index_source_slot_t second_slot = {};
   loomc_link_index_source_options_t second_options = {
-      /*.provider_name=*/loomc_make_cstring_view("second"),
+      .provider_name = loomc_make_cstring_view("second"),
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_reserve_source_slot(
       builder.get(), &second_options, &second_slot));
@@ -353,8 +371,8 @@ func.def public @from_bytecode(%x: i32) -> (i32) {
   SourcePtr source = CreateSource(LOOMC_SOURCE_FORMAT_BYTECODE, "module.loombc",
                                   bytecode.data(), bytecode.size());
   loomc_link_index_source_options_t options = {
-      /*.provider_name=*/loomc_make_cstring_view("bytecode"),
-      /*.role=*/LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
+      .provider_name = loomc_make_cstring_view("bytecode"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
   };
   LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(
       builder.get(), source.get(), &options, nullptr));

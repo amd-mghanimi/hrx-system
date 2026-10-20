@@ -5,13 +5,12 @@ artifact for selected roots. It is the offline form of the same parse, link,
 configure, specialize, lower, and emit operations available through the `loomc`
 API.
 
-Selected roots infer exactly one product: `kernel`, `command`, or `module`.
-With explicit `--root` values, `--product` is an optional assertion on that
-result and never reinterprets the roots. With no roots, an explicit product
-selects its canonical root set. `--target=family:selector` supplies a target
-when the roots do not already name one. `--format` requests an exact output
-encoding; when it is omitted, the tool requires one canonical compatible
-format. Reports, manifests, and IR traces are optional evidence products, not
+Selected roots must have exactly one entry category: `kernel` or `module`.
+With no roots, the module must expose at most one category of default entry;
+mixed inputs require explicit roots. `--target=family:selector` supplies a
+target when the roots do not already name one. `--format` requests an exact
+output encoding; when it is omitted, the tool requires one canonical compatible
+format. Reports, manifests, and IR traces are optional evidence artifacts, not
 boilerplate required by every compile.
 
 ## Compile a loadable kernel
@@ -74,10 +73,12 @@ build rather than fragmenting into target-specific copies.
 
 ## Select roots from a catalog
 
-When `--root` is omitted, public or retained command programs take precedence;
-otherwise the tool selects every kernel entry, or the whole module when neither
-kind exists. Select one or more entries from a catalog by repeating the flag.
-Every selected root must infer the same product:
+When `--root` is omitted, the module must contain at most one category of
+default entry. A kernel-only module selects every kernel entry, a module-only
+input compiles the whole module, and a command-program input is rejected because
+it needs the LoomC transaction described below. Mixed inputs require explicit
+roots. Select one or more entries from a catalog by repeating the flag. Every
+selected root must have the same entry category:
 
 ```shell
 loom-compile catalog.loombc \
@@ -90,8 +91,7 @@ loom-compile catalog.loombc \
 Root selection is reachability, not name filtering after compilation. Unused
 functions, providers, configurations, checks, and kernels are absent from the
 materialized compile module. In a mixed command-and-kernel catalog, name the
-kernel roots explicitly or pass `--product=kernel` without roots to select all
-kernel entries. A product never changes the meaning of explicit roots.
+kernel roots explicitly. Root selection never changes the meaning of an entry.
 
 Use [`loom-link`](link-and-package.md#link-transitive-dependencies-incrementally)
 first when several independently shipped modules must be composed. Use
@@ -125,50 +125,56 @@ pipeline. Specialization can therefore select providers and remove unreachable
 paths before later compilation work. Nested JSON keys flatten with `.`
 separators; explicit bindings not referenced by the module are ignored.
 
-## Emit portable command programs
+## Build command programs through LoomC
 
-The command product prepares selected command-program roots and emits one
-portable artifact per root. Command roots select the canonical `loom-command`
-format, which may also be stated explicitly:
+A command program and the kernels selected while planning it form one compiler
+transaction. `loom-compile` does not emit command programs because separate
+command and kernel invocations cannot preserve the exact requirement bindings
+between those outputs.
 
-```shell
-loom-compile model.loombc \
-  --root=@elementwise_transform \
-  --format=loom-command \
-  --output=commands.json \
-  --emit-command-artifacts=commands/ \
-  --emit-kernel-requests=kernel-requests/
+Use the public LoomC command-product API instead. It publishes each live kernel
+request while constructing the parent command product, and every request
+carries the parent requirement ordinal and child root ordinal needed to bind
+the completed executable. [Parallelize kernel JIT
+compilation](../integration/product-frontier.md) follows that transaction end to
+end.
+
+## Emit native callable functions
+
+An installation with x86 enabled can compile ordinary functions using the
+scalar profile's SysV ABI. Save this as `mix.loom`:
+
+```loom
+func.def public @mix(%input: i64, %delta: i64) -> (i64) {
+  %sum = scalar.addi %input, %delta : i64
+  %result = scalar.xori %sum, %input : i64
+  func.return %result : i64
+}
 ```
 
-`commands.json` maps each command symbol to a `.loomcmd` file and records the
-logical kernel entries that artifact requires. The files under `commands/`
-contain target-neutral resource bindings, schedule waves, dispatches, and
-executable slots. They do not embed a device executable. Source-backed entries
-also name ordinary `.loombc` modules under `kernel-requests/`. Launch sites are
-partitioned only by decisions that change their generated kernels, so repeated
-sites and separate command roots share a request when their semantic class is
-the same. External bodyless entries remain plain binding requirements.
-
-Compile each manifest-listed source request independently for its target. For
-example, the first request can be compiled with:
+The default native output is a relocatable object for linking with a host
+program. The explicit shared format produces a self-contained loadable image:
 
 ```shell
-loom-compile kernel-requests/kernel-0.loombc \
-  --target=amdgpu:gfx11-generic \
-  --output=kernel-0.hsaco
+loom-compile mix.loom --target=x86:scalar --output=mix.o
+loom-compile mix.loom --target=x86:scalar \
+  --format=x86-elf-shared --output=mix.so
 ```
 
-Each request is already closed around one semantic kernel class while retaining
-the ordinary target-selection surface. The embedding compiles or cache-resolves
-those requests concurrently, then binds each resulting executable entry to the
-manifest ordinal that named it. The manifest is the parent commit point: request
-files emitted by a failed command compilation are not a usable artifact set.
+`x86-elf` emits ELF64 `ET_REL`; `x86-elf-shared` emits ELF64 `ET_DYN` directly,
+without invoking an assembler or linker. The scalar function contract supports
+`i32`, `i64`, and pointer arguments and results, including stack arguments,
+retained calls, and recursion. SysV is the default regardless of the compiler's
+host platform; a caller on another ABI needs a matching call bridge.
 
-The public
-[`loom_command_binary`](build-with-bazel.md#command-binaries-package-schedules-with-their-kernels)
-rule retains the static packaging workflow. It compiles the linked kernel module
-as one executable and exposes it with the manifest and portable artifacts as one
-Bazel product target.
+The shared image exports public definitions, binds internal calls locally,
+and keeps private helpers out of the dynamic export table. A referenced
+undefined function fails shared-image emission; relocatable objects can retain
+that reference for the host linker. Code and data use separate load permissions.
+
+The output artifact owns its bytes independently of compiler storage. It
+supplies ordinary function exports; task HAL dispatch additionally requires
+kernel entry adaptation and executable-library metadata.
 
 ## Emit a WebAssembly module
 
@@ -242,24 +248,6 @@ that use case and its evidence boundary.
 pass list selects those passes directly. Both forms replace the default
 pipeline with the requested transformation sequence.
 
-## Emit a target-native sidecar
-
-A loadable kernel format may have both a loader-ready representation and a
-target-native artifact. Request both when an integration needs the primary
-loader product and tooling needs the native object:
-
-```shell
-loom-compile kernel.loom \
-  --format=amdgpu-hsaco \
-  --target=amdgpu:gfx11-generic \
-  --output=kernel.executable \
-  --emit-target-artifact=kernel.hsaco
-```
-
-The two byte sequences may be identical. AMDGPU currently uses HSACO for both;
-the separate output contract still matters for formats whose loader container
-and native artifact differ.
-
 ## Emit an artifact manifest
 
 An artifact manifest describes the loader product without asking a consumer to
@@ -297,10 +285,11 @@ jq '.functions[] | {name, target, workgroup_size}' kernel.manifest.json
 
 ## Keep compiler evidence separate
 
-The primary artifact is what a runtime loads. The target-native sidecar is what
-target tooling consumes. The manifest describes the emitted interface. A
-compile report records compiler and emitted-code evidence. An IR trace records
-the program at selected pipeline boundaries.
+`--output` receives the selected target encoding. Runtime loaders consume that
+byte sequence, and target tooling can inspect it directly. The manifest
+describes the emitted interface. A compile report records compiler and
+emitted-code evidence. An IR trace records the program at selected pipeline
+boundaries.
 
 Generate each product only for the consumer that needs it. Routine application
 builds can stop at the artifact; tuning runs continue with

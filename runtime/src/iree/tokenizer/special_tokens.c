@@ -281,7 +281,8 @@ iree_status_t iree_tokenizer_special_tokens_builder_build(
     }
   }
 
-  // Calculate slab layout: [ids][flags][bstring_offsets][bstring_data].
+  // Keep typed arrays before byte arrays so every token count preserves
+  // natural alignment without padding the slab.
   iree_host_size_t slab_size = 0;
   iree_host_size_t ids_offset = 0;
   iree_host_size_t flags_offset = 0;
@@ -293,10 +294,10 @@ iree_status_t iree_tokenizer_special_tokens_builder_build(
           /*base_size=*/0, &slab_size,
           IREE_STRUCT_FIELD(builder->entry_count, iree_tokenizer_token_id_t,
                             &ids_offset),
+          IREE_STRUCT_FIELD(builder->entry_count, uint32_t, &offsets_offset),
           IREE_STRUCT_FIELD(builder->entry_count,
                             iree_tokenizer_special_token_flags_t,
                             &flags_offset),
-          IREE_STRUCT_FIELD(builder->entry_count, uint32_t, &offsets_offset),
           IREE_STRUCT_FIELD(bstring_data_size, uint8_t, &data_offset)));
 
   // Allocate slab.
@@ -509,6 +510,14 @@ iree_tokenizer_special_tokens_match(
 
       // Skip tokens shorter than what we've already matched.
       if (token_length <= state->match_position) {
+        continue;
+      }
+
+      // The stored candidate retains every byte already accepted. Other
+      // candidates in the bucket may have diverged before this position;
+      // matching only the new suffix would resurrect those rejected tokens.
+      if (memcmp(token_content, stored_bstring + 1, state->match_position) !=
+          0) {
         continue;
       }
 

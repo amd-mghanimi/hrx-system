@@ -48,7 +48,7 @@ typedef struct iree_hal_amdgpu_hsaco_metadata_arg_t {
   iree_string_view_t name;
   // Byte offset in the kernel's kernarg segment.
   uint32_t offset;
-  // Byte length of the kernarg storage for this argument.
+  // Byte length of the argument payload within the kernarg segment.
   uint32_t size;
   // Storage alignment in bytes when explicitly available; otherwise 0.
   uint32_t alignment;
@@ -111,6 +111,16 @@ typedef struct iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t {
   iree_string_view_t symbol_name;
 } iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t;
 
+// Exact logical range of one runtime-visible code-object data symbol.
+typedef struct iree_hal_amdgpu_hsaco_metadata_data_object_t {
+  // Symbol name borrowed from the dynamic string table.
+  iree_string_view_t name;
+  // Unrelocated ELF virtual address of the first object byte.
+  uint64_t virtual_address;
+  // Logical object byte length excluding its trailing redzone.
+  uint64_t byte_length;
+} iree_hal_amdgpu_hsaco_metadata_data_object_t;
+
 // Decoded AMDGPU code object metadata.
 //
 // All string views and |message_pack_data| borrow from |elf_data|. Callers must
@@ -120,7 +130,8 @@ typedef struct iree_hal_amdgpu_hsaco_metadata_t {
   iree_allocator_t host_allocator;
   // Borrowed ELF bytes used as the source of all string views.
   iree_const_byte_span_t elf_data;
-  // Borrowed AMDGPU MessagePack note descriptor payload.
+  // Borrowed descriptor payload of the first AMDGPU MessagePack metadata note.
+  // Kernel and argument records include all metadata notes in the ELF.
   iree_const_byte_span_t message_pack_data;
   // Borrowed target ISA string from `amdhsa.target`, if present.
   iree_string_view_t target;
@@ -137,6 +148,11 @@ typedef struct iree_hal_amdgpu_hsaco_metadata_t {
   // ELF-only kernel symbols. These are not reflected metadata and must only be
   // used by custom-direct native kernarg launch paths.
   iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t* elf_kernel_symbols;
+  // Number of exact logical data-object rows in |data_objects|.
+  // Zero indicates that the code object did not advertise a data layout.
+  iree_host_size_t data_object_count;
+  // Exact data objects sorted by unrelocated virtual address.
+  iree_hal_amdgpu_hsaco_metadata_data_object_t* data_objects;
   // Total number of decoded argument records.
   iree_host_size_t arg_count;
   // Contiguous argument storage referenced by |kernels|.
@@ -145,7 +161,7 @@ typedef struct iree_hal_amdgpu_hsaco_metadata_t {
 
 // Initializes |out_metadata| from a raw AMDGPU ELF code object.
 //
-// This locates the `AMDGPU`/`NT_AMDGPU_METADATA` note and decodes only the
+// This locates all `AMDGPU`/`NT_AMDGPU_METADATA` notes and decodes only the
 // fields needed for kernel argument reflection. The parser accepts a normal
 // LLVM-produced 64-bit little-endian AMDGPU ELF. It intentionally does not
 // implement HIP fat binary, clang offload bundle, or compressed code object

@@ -11,6 +11,40 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    callable_effect_inference
+  HDRS
+    "callable_effect_inference.h"
+  SRCS
+    "callable_effect_inference.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::callable_effects
+    loom::ops::op_defs
+    loom::util::call_graph
+    loom::util::walk
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    callable_effect_inference_test
+  SRCS
+    "callable_effect_inference_test.cc"
+  DEPS
+    ::callable_effect_inference
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::buffer
+    loom::ops::func
+    loom::ops::index
+)
+
+loom_cc_library(
+  NAME
     condition_relation_set
   HDRS
     "condition_relation_set.h"
@@ -33,6 +67,7 @@ loom_cc_library(
     "condition_relation_matrix.c"
   DEPS
     ::condition_relation_set
+    ::integer_relation
     iree::base
     iree::base::internal::arena
     loom::util::adaptive_sort
@@ -72,10 +107,12 @@ loom_cc_library(
   SRCS
     "control_uniformity.c"
   DEPS
+    ::condition_facts
     iree::base
     iree::base::internal::arena
     loom::ir
     loom::ir::facts
+    loom::ops::cfg
     loom::ops::op_defs
     loom::util::cfg_control
     loom::util::cfg_dominance
@@ -83,6 +120,128 @@ loom_cc_library(
     loom::util::fact_control
     loom::util::fact_table
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    storage_access
+  HDRS
+    "storage_access.h"
+  SRCS
+    "storage_access.c"
+  DEPS
+    ::movement
+    ::value_relation
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::global
+    loom::ops::kernel
+    loom::ops::op_defs
+    loom::util::walk
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    storage_interference
+  HDRS
+    "storage_interference.h"
+  SRCS
+    "storage_interference.c"
+  DEPS
+    ::control_uniformity
+    ::liveness
+    ::liveness_events
+    ::storage_access
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::buffer
+    loom::ops::kernel
+    loom::ops::op_defs
+    loom::util::cfg_postdominance
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    storage_geometry
+  HDRS
+    "storage_geometry.h"
+  SRCS
+    "storage_geometry.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::encoding
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    storage_geometry_test
+  SRCS
+    "storage_geometry_test.cc"
+  DEPS
+    ::storage_geometry
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::encoding
+    loom::util::fact_table
+)
+
+loom_cc_library(
+  NAME
+    storage_layout
+  HDRS
+    "storage_layout.h"
+  SRCS
+    "storage_layout.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    storage_layout_test
+  SRCS
+    "storage_layout_test.cc"
+  DEPS
+    ::storage_layout
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
+    source_storage_packing
+  HDRS
+    "source_storage_packing.h"
+  SRCS
+    "source_storage_packing.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    source_storage_packing_test
+  SRCS
+    "source_storage_packing_test.cc"
+  DEPS
+    ::source_storage_packing
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_library(
@@ -166,7 +325,9 @@ loom_cc_test(
     loom::ir
     loom::ops::cfg
     loom::ops::func
+    loom::ops::index
     loom::ops::scalar
+    loom::ops::scf
     loom::ops::test
     loom::testing::module_ptr
 )
@@ -196,6 +357,7 @@ loom_cc_library(
   DEPS
     iree::base
     loom::ir
+    loom::ir::facts
   PUBLIC
 )
 
@@ -236,13 +398,17 @@ loom_cc_library(
   DEPS
     ::integer_relation
     iree::base
+    iree::base::internal
     iree::base::internal::arena
     loom::ir
     loom::ir::facts
-    loom::ops::index
-    loom::ops::scalar
+    loom::ops::index::comparison
+    loom::ops::index::op_defs
+    loom::ops::scalar::comparison
+    loom::ops::scalar::op_defs
+    loom::ops::scf::op_defs
     loom::util::adaptive_sort
-    loom::util::fact_table
+    loom::util::fact_table_api
   PUBLIC
 )
 
@@ -259,8 +425,42 @@ loom_cc_test(
     loom::ir
     loom::ops::index
     loom::ops::scalar
+    loom::ops::scf
     loom::target::facts
     loom::util::fact_table
+)
+
+loom_cc_test(
+  NAME
+    condition_affine_preimage_test
+  SRCS
+    "condition_affine_preimage_test.cc"
+  DEPS
+    ::condition_facts
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::index
+    loom::ops::scalar
+    loom::target::facts
+    loom::util::fact_table
+)
+
+loom_cc_library(
+  NAME
+    condition_edge_projection
+  HDRS
+    "condition_edge_projection.h"
+  SRCS
+    "condition_edge_projection.c"
+  DEPS
+    ::condition_facts
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::util::adaptive_sort
+  PUBLIC
 )
 
 loom_cc_library(
@@ -272,6 +472,7 @@ loom_cc_library(
     "condition_fact_scope.c"
   DEPS
     ::cfg_condition_facts
+    ::condition_edge_projection
     ::condition_facts
     iree::base
     loom::util::fact_table
@@ -311,6 +512,7 @@ loom_cc_test(
     loom::ir
     loom::ops::cfg
     loom::ops::scalar
+    loom::ops::scf
     loom::ops::test
     loom::pass::value_facts
 )
@@ -332,11 +534,15 @@ loom_cc_benchmark(
   SRCS
     "condition_facts_benchmark.cc"
   DEPS
+    ::condition_edge_projection
     ::condition_facts
     iree::base::internal::arena
     iree::testing::benchmark_main
     loom::ir
+    loom::ops::func
     loom::ops::scalar
+    loom::ops::scf
+    loom::pass::value_facts
     loom::util::fact_table
   TESTONLY
 )
@@ -345,21 +551,27 @@ loom_cc_library(
   NAME
     cfg_condition_facts
   HDRS
+    "cfg_condition_derivation.h"
     "cfg_condition_facts.h"
     "cfg_condition_operand_domain.h"
+    "cfg_condition_relation_anchors.h"
     "cfg_condition_relation_table.h"
   SRCS
+    "cfg_condition_derivation.c"
     "cfg_condition_facts.c"
     "cfg_condition_operand_domain.c"
+    "cfg_condition_relation_anchors.c"
     "cfg_condition_relation_table.c"
   DEPS
     ::cfg_value_identity
     ::condition_facts
     ::condition_relation_matrix
+    ::condition_relation_set
     iree::base
     iree::base::internal::arena
     loom::ir
     loom::ops::cfg
+    loom::ops::low
     loom::util::adaptive_sort
     loom::util::cfg_graph
     loom::util::dominance
@@ -526,8 +738,10 @@ loom_cc_library(
   NAME
     ownership_lifetime
   HDRS
+    "ownership_callable.h"
     "ownership_lifetime.h"
   SRCS
+    "ownership_callable.c"
     "ownership_lifetime.c"
   DEPS
     ::liveness
@@ -538,6 +752,7 @@ loom_cc_library(
     iree::base::internal::arena
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::cfg
     loom::ops::op_defs
@@ -566,11 +781,11 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
-    kernel_async_legality
+    kernel_synchronization_legality
   HDRS
-    "kernel_async_legality.h"
+    "kernel_synchronization_legality.h"
   SRCS
-    "kernel_async_legality.c"
+    "kernel_synchronization_legality.c"
   DEPS
     ::control_uniformity
     ::movement
@@ -578,11 +793,52 @@ loom_cc_library(
     iree::base::internal::arena
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::kernel
     loom::ops::op_defs
     loom::util::fact_table
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    kernel_barrier_lifetime
+  HDRS
+    "kernel_barrier_lifetime.h"
+  SRCS
+    "kernel_barrier_lifetime.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::error::emitter
+    loom::error::error_defs
+    loom::error::parameter
+    loom::ir
+    loom::ops::kernel
+    loom::ops::op_defs
+    loom::util::cfg_graph
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    kernel_barrier_lifetime_test
+  SRCS
+    "kernel_barrier_lifetime_test.cc"
+  DEPS
+    ::kernel_barrier_lifetime
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::format::text::parser
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::type_registry
+    loom::testing::context
+    loom::testing::module_ptr
+    loom::util::fact_table
 )
 
 loom_cc_library(
@@ -593,17 +849,13 @@ loom_cc_library(
   SRCS
     "kernel_launch_config.c"
   DEPS
-    ::symbol_facts
+    ::symbol_value_constraints
     iree::base
     iree::base::internal::arena
-    loom::error::emitter
     loom::ir
     loom::ir::facts
-    loom::ops::func_symbol_facts
-    loom::ops::kernel
+    loom::ops::func
     loom::pass::value_facts
-    loom::target::facts
-    loom::target::function_contract
     loom::target::types
   PUBLIC
 )
@@ -621,74 +873,158 @@ loom_cc_test(
     iree::testing::gtest_main
     loom::format::text::parser
     loom::ir
-    loom::target::facts
-    loom::target::types
     loom::testing::context
     loom::testing::module_ptr
 )
 
 loom_cc_library(
   NAME
-    pipeline_plan
+    channel_completion
   HDRS
-    "pipeline_plan.h"
+    "channel_completion.h"
   SRCS
-    "pipeline_plan.c"
+    "channel_completion.c"
   DEPS
-    ::type_refinement
+    ::channel_plan
     iree::base
-    iree::base::internal
+    iree::base::internal::arena
+    loom::ops::channel
+    loom::util::cfg_graph
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    channel_plan
+  HDRS
+    "channel_plan.h"
+  SRCS
+    "channel_plan.c"
+  DEPS
+    ::value_relation
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::channel
+    loom::ops::func
+    loom::ops::type_registry
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    channel_completion_test
+  SRCS
+    "channel_completion_test.cc"
+  DEPS
+    ::channel_completion
+    ::channel_plan
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::cfg
+    loom::ops::channel
+    loom::ops::func
+    loom::ops::type_registry
+    loom::util::cfg_graph
+    loom::verify
+)
+
+loom_cc_test(
+  NAME
+    channel_plan_test
+  SRCS
+    "channel_plan_test.cc"
+  DEPS
+    ::channel_plan
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::channel
+    loom::ops::func
+    loom::ops::index
+    loom::ops::type_registry
+)
+
+loom_cc_library(
+  NAME
+    pipeline_resources
+  HDRS
+    "pipeline_resources.h"
+  SRCS
+    "pipeline_resources.c"
+  DEPS
+    ::channel_plan
+    ::source_storage_packing
+    iree::base
     iree::base::internal::arena
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
-    loom::ir::facts
     loom::ops::buffer
-    loom::ops::combining
-    loom::ops::encoding
-    loom::ops::group
-    loom::ops::op_defs
+    loom::ops::channel
+    loom::ops::func
     loom::ops::pipeline
-    loom::ops::type_registry
     loom::util::fact_table
   PUBLIC
 )
 
 loom_cc_test(
   NAME
-    pipeline_plan_test
+    pipeline_resources_test
   SRCS
-    "pipeline_plan_test.cc"
+    "pipeline_resources_test.cc"
   DEPS
-    ::pipeline_firing
-    ::pipeline_plan
-    iree::base
+    ::pipeline_resources
+    ::pipeline_workers
+    ::source_storage_packing
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::error::diagnostic
     loom::error::error_defs
-    loom::format::text::parser
     loom::ir
-    loom::ops::encoding
+    loom::ops::buffer
+    loom::ops::channel
+    loom::ops::func
+    loom::ops::index
     loom::ops::pipeline
-    loom::testing::context
-    loom::testing::module_ptr
+    loom::ops::type_registry
     loom::util::fact_table
+    loom::verify
 )
 
 loom_cc_library(
   NAME
-    pipeline_firing
+    pipeline_workers
   HDRS
-    "pipeline_firing.h"
+    "pipeline_workers.h"
   SRCS
-    "pipeline_firing.c"
+    "pipeline_workers.c"
   DEPS
-    ::pipeline_plan
+    ::channel_completion
+    ::channel_plan
+    ::kernel_synchronization_legality
+    ::movement
+    ::pipeline_resources
     iree::base
     iree::base::internal::arena
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
+    loom::ir
+    loom::ops::cfg
+    loom::ops::channel
+    loom::ops::func
+    loom::ops::kernel
+    loom::ops::pipeline
+    loom::ops::type_registry
+    loom::util::adaptive_sort
+    loom::util::cfg_graph
+    loom::util::fact_table
   PUBLIC
 )
 
@@ -708,12 +1044,14 @@ loom_cc_library(
     ::cfg_value_identity
     ::condition_fact_scope
     ::condition_facts
+    ::control_participants
     ::symbolic_expr
     iree::base
     iree::base::internal
     iree::base::internal::arena
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::cfg
     loom::ops::config
@@ -725,6 +1063,42 @@ loom_cc_library(
     loom::util::dominance
     loom::util::fact_table
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    control_participants
+  HDRS
+    "control_participants.h"
+  SRCS
+    "control_participants.c"
+  DEPS
+    ::cfg_condition_facts
+    ::condition_facts
+    ::symbolic_expr
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::util::adaptive_sort
+    loom::util::cfg_graph
+    loom::util::fact_table
+    loom::util::segmented_storage
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    control_participants_test
+  SRCS
+    "control_participants_test.cc"
+  DEPS
+    ::control_participants
+    ::symbolic_expr
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::util::fact_table
 )
 
 loom_cc_library(
@@ -992,6 +1366,23 @@ loom_cc_library(
 
 loom_cc_test(
   NAME
+    liveness_selection_test
+  SRCS
+    "liveness_selection_test.cc"
+  DEPS
+    ::liveness
+    ::liveness_dataflow
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::low
+    loom::target::registers
+    loom::util::cfg_graph
+)
+
+loom_cc_test(
+  NAME
     liveness_test
   SRCS
     "liveness_test.cc"
@@ -1023,8 +1414,19 @@ loom_cc_library(
   SRCS
     "integer_relation.c"
   DEPS
-
+    loom::ir
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    integer_relation_test
+  SRCS
+    "integer_relation_test.cc"
+  DEPS
+    ::integer_relation
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_library(
@@ -1046,11 +1448,30 @@ loom_cc_test(
     loop_domain_test
   SRCS
     "loop_domain_test.cc"
+    "loop_domain_test_util.cc"
+    "loop_domain_test_util.h"
   DEPS
     ::loop_domain
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ir::facts
+)
+
+loom_cc_test(
+  NAME
+    loop_domain_stress_test
+  SRCS
+    "loop_domain_stress.cc"
+    "loop_domain_test_util.cc"
+    "loop_domain_test_util.h"
+  DEPS
+    ::loop_domain
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir::facts
+  LABELS
+    "manual"
+    "stress"
 )
 
 loom_cc_library(
@@ -1061,6 +1482,7 @@ loom_cc_library(
   SRCS
     "movement.c"
   DEPS
+    ::storage_geometry
     ::view_regions
     iree::base
     iree::base::internal
@@ -1097,19 +1519,68 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
+    read_motion
+  HDRS
+    "read_motion.h"
+  SRCS
+    "read_motion.c"
+  DEPS
+    loom::ir
+    loom::ops::op_defs
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    execution_condition
+  HDRS
+    "execution_condition.h"
+  SRCS
+    "execution_condition.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::op_defs
+    loom::target::facts
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    motion_policy
+  HDRS
+    "motion_policy.h"
+  SRCS
+    "motion_policy.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::op_defs
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     motion
   HDRS
     "motion.h"
+    "motion_memory.h"
   SRCS
     "motion.c"
+    "motion_memory.c"
   DEPS
     ::availability
+    ::execution_condition
     ::loop_domain
+    ::motion_policy
     ::movement
+    ::read_motion
     iree::base
     iree::base::internal::arena
     loom::ir
     loom::ops::op_defs
+    loom::util::adaptive_sort
   PUBLIC
 )
 
@@ -1274,11 +1745,21 @@ loom_cc_library(
   NAME
     symbolic_expr
   HDRS
+    "symbolic_congruence.h"
     "symbolic_expr.h"
     "symbolic_expr_proof.h"
+    "symbolic_integer_cast.h"
+    "symbolic_product.h"
+    "symbolic_projection.h"
   SRCS
+    "symbolic_congruence.c"
     "symbolic_expr.c"
     "symbolic_expr_proof.c"
+    "symbolic_integer_cast.c"
+    "symbolic_product.c"
+    "symbolic_projection.c"
+    "symbolic_quotient.c"
+    "symbolic_quotient.h"
     "symbolic_value.c"
     "symbolic_value.h"
   DEPS
@@ -1298,6 +1779,29 @@ loom_cc_library(
     loom::util::adaptive_sort
     loom::util::fact_table
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    symbolic_congruence_test
+  SRCS
+    "symbolic_congruence_test.cc"
+  DEPS
+    ::symbolic_expr
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    symbolic_projection_test
+  SRCS
+    "symbolic_projection_test.cc"
+  DEPS
+    ::symbolic_expr
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_library(
@@ -1367,6 +1871,8 @@ loom_cc_library(
     loom::ir
     loom::ir::facts
     loom::ops::buffer
+    loom::ops::callable_effects
+    loom::ops::channel
     loom::ops::encoding
     loom::ops::kernel
     loom::ops::op_defs
@@ -1387,7 +1893,9 @@ loom_cc_test(
     iree::testing::gtest_main
     loom::ir
     loom::ops::buffer
+    loom::ops::channel
     loom::ops::encoding
+    loom::ops::global
     loom::ops::index
     loom::ops::kernel
     loom::ops::scf
@@ -1415,6 +1923,7 @@ loom_cc_test(
     loom::ops::sanitizer
     loom::ops::scalar
     loom::ops::scf
+    loom::target::facts
 )
 
 loom_cc_test(
@@ -1437,6 +1946,22 @@ loom_cc_test(
     loom::ops::scalar
     loom::ops::scf
     loom::util::fact_table
+)
+
+loom_cc_test(
+  NAME
+    symbolic_product_test
+  SRCS
+    "symbolic_product_test.cc"
+  DEPS
+    ::symbolic_expr
+    ::symbolic_expr_test_fixture
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::index
+    loom::ops::scalar
+    loom::target::facts
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

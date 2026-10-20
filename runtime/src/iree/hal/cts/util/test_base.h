@@ -7,7 +7,7 @@
 // Base class for HAL conformance tests.
 //
 // Provides the test fixture and helper utilities shared by all HAL CTS tests.
-// Test logic lives in separate .cc files (core/allocator_test.cc, etc.)
+// Test logic lives in separate .cc files (buffer/pool_test.cc, etc.)
 // which use CTS_REGISTER_TEST_SUITE() for self-registration.
 //
 // Key design:
@@ -55,6 +55,8 @@ struct HalTraits;
 CTS_HAL_TRAITS(iree_hal_buffer_t, iree_hal_buffer_release);
 CTS_HAL_TRAITS(iree_hal_buffer_view_t, iree_hal_buffer_view_release);
 CTS_HAL_TRAITS(iree_hal_command_buffer_t, iree_hal_command_buffer_release);
+CTS_HAL_TRAITS(iree_hal_device_t, iree_hal_device_release);
+CTS_HAL_TRAITS(iree_hal_device_group_t, iree_hal_device_group_release);
 CTS_HAL_TRAITS(iree_hal_semaphore_t, iree_hal_semaphore_release);
 CTS_HAL_TRAITS(iree_hal_executable_t, iree_hal_executable_release);
 CTS_HAL_TRAITS(iree_hal_file_t, iree_hal_file_release);
@@ -340,6 +342,9 @@ inline std::vector<uint8_t> MakeFilledBytes(iree_device_size_t buffer_size,
 // in TearDown(). The global test environment owns their final teardown.
 template <typename BaseType = ::testing::TestWithParam<BackendInfo>>
 class CtsTestBase : public BaseType {
+ public:
+  ~CtsTestBase() override { iree_hal_pool_release(device_pool_); }
+
  protected:
   void SetUp() override {
     const BackendInfo& backend = this->GetParam();
@@ -563,15 +568,58 @@ class CtsTestBase : public BaseType {
   // Buffer helpers
   //===--------------------------------------------------------------------===//
 
+  // Creates a caller-owned pool with |usage| on every provisioned family.
+  // Tests that need asymmetric family policy construct their scope directly.
+  iree_status_t CreateDevicePool(iree_hal_buffer_usage_t usage,
+                                 iree_hal_pool_t** out_pool) {
+    *out_pool = nullptr;
+    const iree_hal_device_queue_spec_t* queue_spec =
+        iree_hal_device_spec_queues(iree_hal_device_spec(device_));
+    std::vector<iree_hal_pool_family_access_t> families;
+    families.reserve(queue_spec->family_count);
+    for (iree_host_size_t i = 0; i < queue_spec->family_count; ++i) {
+      if (queue_spec->families[i].provisioned_queue_count == 0) {
+        continue;
+      }
+      families.push_back(iree_hal_pool_family_access_t{
+          .family = iree_hal_device_queue_family(device_, i),
+          .usage = usage,
+      });
+    }
+    const iree_hal_pool_scope_t scope = {
+        .family_count = families.size(),
+        .families = families.data(),
+    };
+    iree_hal_slab_pool_options_t options;
+    iree_hal_slab_pool_options_initialize(&options);
+    options.trace_name = IREE_SV("cts.device");
+    return iree_hal_slab_pool_create(device_group_, scope, &options,
+                                     iree_allocator_system(), out_pool);
+  }
+
+  // Returns a fixture-owned pool spanning every provisioned queue family.
+  // The pool remains live through fixture destruction so buffers stored in
+  // derived fixture members are released before their borrowed pool.
+  iree_status_t GetDevicePool(iree_hal_pool_t** out_pool) {
+    *out_pool = nullptr;
+    if (!device_pool_) {
+      IREE_RETURN_IF_ERROR(CreateDevicePool(
+          IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_DISPATCH,
+          &device_pool_));
+    }
+    *out_pool = device_pool_;
+    return iree_ok_status();
+  }
+
   iree_status_t CreateUninitializedDeviceBuffer(
       iree_device_size_t buffer_size, iree_hal_buffer_t** out_buffer) {
     *out_buffer = nullptr;
-    iree_hal_buffer_params_t params = {0};
-    params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
-    params.usage =
-        IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-    return iree_hal_allocator_allocate_buffer(device_allocator_, params,
-                                              buffer_size, out_buffer);
+    iree_hal_pool_t* pool = nullptr;
+    IREE_RETURN_IF_ERROR(GetDevicePool(&pool));
+    return iree_hal_pool_allocate_buffer(pool,
+                                         iree_hal_make_pool_reservation_request(
+                                             buffer_size, /*min_alignment=*/1),
+                                         iree_infinite_timeout(), out_buffer);
   }
 
   iree_status_t CreateZeroedDeviceBuffer(iree_device_size_t buffer_size,
@@ -589,10 +637,10 @@ class CtsTestBase : public BaseType {
       uint8_t pattern = 0;
       SemaphoreList empty_wait;
       SemaphoreList fill_signal(device_, {0}, {1});
-      status =
-          iree_hal_queue_fill(transfer_queue_, empty_wait, fill_signal, buffer,
-                              /*target_offset=*/0, buffer_size, &pattern,
-                              sizeof(pattern), IREE_HAL_FILL_FLAG_NONE);
+      status = iree_hal_queue_fill(
+          transfer_queue_, empty_wait, fill_signal, buffer,
+          /*target_offset=*/0, buffer_size, &pattern, sizeof(pattern),
+          /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
       if (iree_status_is_ok(status)) {
         status = iree_hal_semaphore_list_wait(
             fill_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
@@ -624,7 +672,7 @@ class CtsTestBase : public BaseType {
       status = iree_hal_queue_update(
           transfer_queue_, empty_wait, upload_signal, source_data,
           /*source_offset=*/0, buffer, /*target_offset=*/0, buffer_size,
-          IREE_HAL_UPDATE_FLAG_NONE);
+          /*barriers=*/NULL, IREE_HAL_UPDATE_FLAG_NONE);
       if (iree_status_is_ok(status)) {
         status = iree_hal_semaphore_list_wait(
             upload_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
@@ -654,10 +702,10 @@ class CtsTestBase : public BaseType {
     if (iree_status_is_ok(status)) {
       SemaphoreList empty_wait;
       SemaphoreList fill_signal(device_, {0}, {1});
-      status =
-          iree_hal_queue_fill(transfer_queue_, empty_wait, fill_signal, buffer,
-                              /*target_offset=*/0, buffer_size, &pattern,
-                              sizeof(pattern), IREE_HAL_FILL_FLAG_NONE);
+      status = iree_hal_queue_fill(
+          transfer_queue_, empty_wait, fill_signal, buffer,
+          /*target_offset=*/0, buffer_size, &pattern, sizeof(pattern),
+          /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
       if (iree_status_is_ok(status)) {
         status = iree_hal_semaphore_list_wait(
             fill_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
@@ -702,9 +750,9 @@ class CtsTestBase : public BaseType {
     }
     SemaphoreList empty_wait;
     SemaphoreList upload_signal(device_, {0}, {1});
-    iree_status_t status =
-        iree_hal_queue_upload(transfer_queue_, empty_wait, upload_signal,
-                              source, target_buffer, target_offset, length);
+    iree_status_t status = iree_hal_queue_upload(
+        transfer_queue_, empty_wait, upload_signal, source, target_buffer,
+        target_offset, length, /*barriers=*/NULL);
     if (iree_status_is_ok(status)) {
       status = iree_hal_semaphore_list_wait(
           upload_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
@@ -723,9 +771,9 @@ class CtsTestBase : public BaseType {
     }
     SemaphoreList empty_wait;
     SemaphoreList download_signal(device_, {0}, {1});
-    iree_status_t status =
-        iree_hal_queue_download(transfer_queue_, empty_wait, download_signal,
-                                source_buffer, source_offset, target, length);
+    iree_status_t status = iree_hal_queue_download(
+        transfer_queue_, empty_wait, download_signal, source_buffer,
+        source_offset, target, length, /*barriers=*/NULL);
     if (iree_status_is_ok(status)) {
       status = iree_hal_semaphore_list_wait(
           download_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
@@ -882,6 +930,8 @@ class CtsTestBase : public BaseType {
   iree_hal_device_t* device_ = nullptr;
   // Retained allocator exposed by |device_|.
   iree_hal_allocator_t* device_allocator_ = nullptr;
+  // Owned execution pool borrowed by buffers created through fixture helpers.
+  iree_hal_pool_t* device_pool_ = nullptr;
   // Provisioned transfer-capable queue borrowed from |device_|.
   iree_hal_queue_t* transfer_queue_ = nullptr;
 

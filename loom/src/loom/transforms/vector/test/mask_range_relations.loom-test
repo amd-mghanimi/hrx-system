@@ -1,0 +1,419 @@
+// RUN: pass combine,scf-to-cfg,vector-memory-footprint
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @complete_packets(%input: buffer, %extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_packet = index.constant 12 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %width : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  %fallback = vector.constant 0 : vector<4xi32>
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_packet : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<4xi1>
+    %value = vector.load.mask %view[%origin], %mask, %fallback : view<[%extent]xi32>, vector<4xi1>, vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @complete_packets(%input: buffer, %extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_packet = index.constant 12 : index
+  %base = index.constant 0 : offset
+  %17 = index.constant 4 : index
+  %count = index.shrui %extent, %17 : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  cfg.br ^_bb1(%c0: index)
+^_bb1(%19: index):
+  %21 = index.cmp slt, %19, %count : index
+  cfg.cond_br %21, ^_bb2, ^_bb3
+^_bb2:
+  %block = index.assume %19 [range(%19, 0, 62), lt(%19, %count)] : index
+  %origin = index.madd %block, %width, %last_packet : index
+  %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+  test.use %value : vector<4xi32>
+  %22 = index.add %block, %c1 : index
+  cfg.br ^_bb1(%22: index)
+^_bb3:
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @tail_packet(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %past_packet = index.constant 13 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %past_packet : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @tail_packet(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %past_packet = index.constant 13 : index
+  %10 = index.constant 4 : index
+  %count = index.shrui %extent, %10 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %past_packet : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @reverse_packet(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %descending = index.constant -1 : index
+  %width = index.constant 16 : index
+  %last_lane = index.constant 15 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_lane : index
+    %mask = vector.mask.range [%origin to %extent step %descending] : index -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @reverse_packet(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %12 = index.constant 4 : index
+  %count = index.shrui %extent, %12 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %mask = vector.constant true : vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @stationary_packet(%extent_input: index, %lanes: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.mul %block, %width : index
+    %mask = vector.mask.range [%origin to %extent step %c0] : index -> vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @stationary_packet(%extent_input: index, %lanes: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %11 = index.constant 4 : index
+  %count = index.shrui %extent, %11 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %mask = vector.constant true : vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+func.def @unknown_index_carrier(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_lane = index.constant 15 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_lane : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<1xi1>
+    test.use %mask : vector<1xi1>
+  }
+  func.return
+}
+
+// ----
+func.def @unknown_index_carrier(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_lane = index.constant 15 : index
+  %10 = index.constant 4 : index
+  %count = index.shrui %extent, %10 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_lane : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<1xi1>
+    test.use %mask : vector<1xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+func.def @fixed_width_coordinates(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 127)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_packet = index.constant 12 : index
+  %count = index.div %extent, %width : index
+  %bound_i8 = index.cast %extent : index to i8
+  %bound_i16 = index.cast %extent : index to i16
+  %bound_i32 = index.cast %extent : index to i32
+  %bound_i64 = index.cast %extent : index to i64
+  %step_i8 = scalar.constant 1 : i8
+  %step_i16 = scalar.constant 1 : i16
+  %step_i32 = scalar.constant 1 : i32
+  %step_i64 = scalar.constant 1 : i64
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_packet : index
+    %origin_i8 = index.cast %origin : index to i8
+    %origin_i16 = index.cast %origin : index to i16
+    %origin_i32 = index.cast %origin : index to i32
+    %origin_i64 = index.cast %origin : index to i64
+    %mask_i8 = vector.mask.range [%origin_i8 to %bound_i8 step %step_i8] : i8 -> vector<4xi1>
+    %mask_i16 = vector.mask.range [%origin_i16 to %bound_i16 step %step_i16] : i16 -> vector<4xi1>
+    %mask_i32 = vector.mask.range [%origin_i32 to %bound_i32 step %step_i32] : i32 -> vector<4xi1>
+    %mask_i64 = vector.mask.range [%origin_i64 to %bound_i64 step %step_i64] : i64 -> vector<4xi1>
+    test.use %mask_i8, %mask_i16, %mask_i32, %mask_i64 : vector<4xi1>, vector<4xi1>, vector<4xi1>, vector<4xi1>
+  }
+  func.return
+}
+
+// ----
+func.def @fixed_width_coordinates(%extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 127)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %29 = index.constant 4 : index
+  %count = index.shrui %extent, %29 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %mask_i8 = vector.constant true : vector<4xi1>
+    %mask_i16 = vector.constant true : vector<4xi1>
+    %mask_i32 = vector.constant true : vector<4xi1>
+    %mask_i64 = vector.constant true : vector<4xi1>
+    test.use %mask_i8, %mask_i16, %mask_i32, %mask_i64 : vector<4xi1>, vector<4xi1>, vector<4xi1>, vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+func.def @positive_wrap(%upper_input: index) {
+  %upper = index.assume %upper_input [range(%upper_input, 121, 127)] : index
+  %lower = index.constant 120 : index
+  %c1 = index.constant 1 : index
+  %step = scalar.constant 4 : i8
+  %bound = index.cast %upper : index to i8
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %origin = index.cast %coordinate : index to i8
+    %mask = vector.mask.range [%origin to %bound step %step] : i8 -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+func.def @negative_wrap(%upper_input: index) {
+  %upper = index.assume %upper_input [range(%upper_input, -127, -120)] : index
+  %lower = index.constant -128 : index
+  %c1 = index.constant 1 : index
+  %step = scalar.constant -1 : i8
+  %bound = index.cast %upper : index to i8
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %origin = index.cast %coordinate : index to i8
+    %mask = vector.mask.range [%origin to %bound step %step] : i8 -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @unknown_lanes(%extent_input: index, %lanes: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.mul %block, %width : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @unknown_lanes(%extent_input: index, %lanes: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %12 = index.constant 4 : index
+  %count = index.shrui %extent, %12 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %10 = index.constant 4 : index
+    %origin = index.shli %block, %10 : index
+    %mask = vector.mask.range [%origin to %extent step %c1] : index -> vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @counted_offset(%lower_input: offset, %upper_input: offset) {
+  %lower = index.assume %lower_input [range(%lower_input, 0, 100)] : offset
+  %upper = index.assume %upper_input [range(%upper_input, 0, 100)] : offset
+  %c1 = index.constant 1 : offset
+  %descending = scalar.constant -1 : i64
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %origin = index.cast %coordinate : offset to i64
+    %bound = index.cast %upper : offset to i64
+    %mask = vector.mask.range [%origin to %bound step %descending] : i64 -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @counted_offset(%lower_input: offset, %upper_input: offset) {
+  %lower = index.assume %lower_input [range(%lower_input, 0, 100)] : offset
+  %upper = index.assume %upper_input [range(%upper_input, 0, 100)] : offset
+  %c1 = index.constant 1 : offset
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %mask = vector.constant true : vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @below_counted_lower(%lower_input: index) {
+  %lower = index.assume %lower_input [range(%lower_input, 0, 100)] : index
+  %upper = index.constant 128 : index
+  %c1 = index.constant 1 : index
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %mask = vector.mask.range [%coordinate to %lower step %c1] : index -> vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@carrier) @below_counted_lower(%lower_input: index) {
+  %lower = index.assume %lower_input [range(%lower_input, 0, 100)] : index
+  %upper = index.constant 128 : index
+  %c1 = index.constant 1 : index
+  scf.for %coordinate = [%lower to %upper step %c1] {
+    %mask = vector.constant false : vector<4xi1>
+    test.use %mask : vector<4xi1>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass combine
+
+test.target<low_core> @carrier {index_bitwidth = 64, offset_bitwidth = 64}
+
+func.def target(@carrier) @bounded_lanes_and_stride(%extent_input: index, %lanes_input: index, %stride_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %lanes = index.assume %lanes_input [range(%lanes_input, 1, 4)] : index
+  %stride = index.assume %stride_input [range(%stride_input, -2, 2)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 16 : index
+  %last_packet = index.constant 9 : index
+  %count = index.div %extent, %width : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %width, %last_packet : index
+    %mask = vector.mask.range [%origin to %extent step %stride] : index -> vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier {index_bitwidth = 64, offset_bitwidth = 64}
+
+func.def target(@carrier) @bounded_lanes_and_stride(%extent_input: index, %lanes_input: index, %stride_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %lanes = index.assume %lanes_input [range(%lanes_input, 1, 4)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %15 = index.constant 4 : index
+  %count = index.shrui %extent, %15 : index
+  scf.for %block = [%c0 to %count step %c1] {
+    %mask = vector.constant true : vector<[%lanes]xi1>
+    test.use %mask : vector<[%lanes]xi1>
+  }
+  func.return
+}

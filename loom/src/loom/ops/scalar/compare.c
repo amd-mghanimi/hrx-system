@@ -152,23 +152,68 @@ static bool loom_scalar_signed_cmpi_facts_result(
 static bool loom_scalar_unsigned_cmpi_facts_result(
     uint8_t predicate, const loom_value_facts_t* lhs_facts,
     const loom_value_facts_t* rhs_facts, bool* out_result) {
-  if (!loom_value_facts_is_non_negative(*lhs_facts) ||
-      !loom_value_facts_is_non_negative(*rhs_facts)) {
+  if (predicate < LOOM_SCALAR_CMPI_PREDICATE_ULT ||
+      predicate > LOOM_SCALAR_CMPI_PREDICATE_UGE ||
+      loom_value_facts_is_float(*lhs_facts) ||
+      loom_value_facts_is_float(*rhs_facts)) {
     return false;
+  }
+  // Casting sign-extended values to uint64_t preserves unsigned order for
+  // operands of the same width. A signed interval crossing zero wraps in that
+  // order, so its unsigned extrema are zero and the all-ones value.
+  uint64_t lhs_lo = (uint64_t)lhs_facts->range_lo;
+  uint64_t lhs_hi = (uint64_t)lhs_facts->range_hi;
+  if (lhs_lo > lhs_hi) {
+    lhs_lo = 0;
+    lhs_hi = UINT64_MAX;
+  }
+  uint64_t rhs_lo = (uint64_t)rhs_facts->range_lo;
+  uint64_t rhs_hi = (uint64_t)rhs_facts->range_hi;
+  if (rhs_lo > rhs_hi) {
+    rhs_lo = 0;
+    rhs_hi = UINT64_MAX;
   }
   switch ((loom_scalar_cmpi_predicate_t)predicate) {
     case LOOM_SCALAR_CMPI_PREDICATE_ULT:
-      return loom_scalar_signed_cmpi_facts_result(
-          LOOM_SCALAR_CMPI_PREDICATE_SLT, lhs_facts, rhs_facts, out_result);
+      if (lhs_hi < rhs_lo) {
+        *out_result = true;
+        return true;
+      }
+      if (lhs_lo >= rhs_hi) {
+        *out_result = false;
+        return true;
+      }
+      return false;
     case LOOM_SCALAR_CMPI_PREDICATE_ULE:
-      return loom_scalar_signed_cmpi_facts_result(
-          LOOM_SCALAR_CMPI_PREDICATE_SLE, lhs_facts, rhs_facts, out_result);
+      if (lhs_hi <= rhs_lo) {
+        *out_result = true;
+        return true;
+      }
+      if (lhs_lo > rhs_hi) {
+        *out_result = false;
+        return true;
+      }
+      return false;
     case LOOM_SCALAR_CMPI_PREDICATE_UGT:
-      return loom_scalar_signed_cmpi_facts_result(
-          LOOM_SCALAR_CMPI_PREDICATE_SGT, lhs_facts, rhs_facts, out_result);
+      if (lhs_lo > rhs_hi) {
+        *out_result = true;
+        return true;
+      }
+      if (lhs_hi <= rhs_lo) {
+        *out_result = false;
+        return true;
+      }
+      return false;
     case LOOM_SCALAR_CMPI_PREDICATE_UGE:
-      return loom_scalar_signed_cmpi_facts_result(
-          LOOM_SCALAR_CMPI_PREDICATE_SGE, lhs_facts, rhs_facts, out_result);
+      if (lhs_lo >= rhs_hi) {
+        *out_result = true;
+        return true;
+      }
+      if (lhs_hi < rhs_lo) {
+        *out_result = false;
+        return true;
+      }
+      return false;
     default:
       return false;
   }

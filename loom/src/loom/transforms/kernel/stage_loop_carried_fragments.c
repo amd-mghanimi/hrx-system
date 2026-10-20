@@ -669,7 +669,7 @@ static iree_status_t loom_stage_loop_carried_fragments_reserve_result_scheme(
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
       context->scratch_arena, kept_count, sizeof(*reserved_results),
       (void**)&reserved_results));
-  IREE_RETURN_IF_ERROR(loom_builder_reserve_results(
+  IREE_RETURN_IF_ERROR(loom_builder_reserve_values(
       &context->rewriter->builder, kept_count, reserved_results));
 
   loom_ir_remap_t remap = {0};
@@ -779,7 +779,8 @@ static iree_status_t loom_stage_loop_carried_fragments_rewrite(
 
   loom_op_t* buffer_op = NULL;
   IREE_RETURN_IF_ERROR(loom_buffer_alloca_build(
-      &context->rewriter->builder, LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
+      &context->rewriter->builder, /*build_flags=*/0,
+      LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP, LOOM_VALUE_ID_INVALID,
       /*base_alignment=*/16, byte_count_value, loom_type_buffer(), op->location,
       &buffer_op));
   loom_value_id_t buffer_value = loom_buffer_alloca_result(buffer_op);
@@ -1089,7 +1090,7 @@ static iree_status_t loom_stage_loop_carried_fragments_collect_candidates(
           .fn = loom_stage_loop_carried_fragments_collect_candidate,
           .user_data = &collect,
       },
-      pass->arena, &walk_result);
+      &walk_result);
 }
 
 iree_status_t loom_stage_loop_carried_fragments_run(loom_pass_t* pass,

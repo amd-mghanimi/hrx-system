@@ -10,8 +10,9 @@ without depending on a HAL driver.
 There are two layers. `runtime/src/iree/net/rdma/` owns native resources;
 `runtime/src/iree/net/carrier/rdma/` supplies host connection management,
 bounded posting and caller-owned proactor progress. Native ownership does not
-require the host adapter. Host progress creates no private worker or persistent
-idle polling loop.
+require the host adapter. Host progress creates no private worker. By default it
+waits for native readiness when idle; applications dedicating a polling core can
+explicitly select continuous, bounded CQ polling instead.
 
 ## Native Ownership
 
@@ -108,6 +109,39 @@ authentication or encryption. Application admission and network isolation
 establish that boundary. An exported subrange is a software access contract,
 not a hardware-isolated capability for just that subrange: the native remote
 key authorizes its containing registration.
+
+## Completion Policy
+
+Factory connection options select local completion behavior before connecting
+or listening. The default, `IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS`, waits
+on native CQ notifications when idle and continues bounded batches while work
+remains. Dedicated poll owners can instead select:
+
+```c
+iree_net_rdma_factory_options_t options =
+    iree_net_rdma_factory_options_default();
+options.connection.completion_mode =
+    IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL;
+```
+
+Pass these options to `iree_net_rdma_factory_create`. Busy mode polls each
+connection's shared control/data CQ once per proactor turn, capped by
+`connection.control.service_batch_size`. It creates no completion notification
+channel and performs no notification arm/rearm calls. The caller still drives
+the same proactor, including connection management, device failures and other
+native I/O. There is no transport-owned thread, adaptive spin timer or separate
+completion path.
+
+One busy connection keeps the entire poll owner runnable even when every CQ is
+empty. Readiness and busy connections may share that owner, but the core cost
+is shared too. This trades idle CPU and power for reduced notification latency;
+it is not a universal throughput improvement. Each busy poll owner needs a
+separately assigned core for predictable latency. A process-wide affinity mask
+covering several cores does not ensure that its poll threads run on different
+cores; sharing one can add scheduler timeslices to peer progress. Thread placement
+remains the application's responsibility. The peer may choose a different mode.
+Completion ordering, source return, consumer witnesses and shutdown joins are
+identical in both modes.
 
 ## Addresses And Lifetime
 

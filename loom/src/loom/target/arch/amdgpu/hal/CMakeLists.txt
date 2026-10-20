@@ -22,8 +22,9 @@ loom_cc_library(
     iree::base::internal::arena
     loom::codegen::low::allocation
     loom::codegen::low::function
-    loom::codegen::low::target_binding
+    loom::codegen::low::representation_binding
     loom::error::emitter
+    loom::error::parameter
     loom::ir
     loom::ops::low
     loom::target::arch::amdgpu::error_defs

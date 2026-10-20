@@ -13,12 +13,21 @@ loom_check_test_suite(
   NAME
     test
   SRCS
+    "hazards.loom-test"
     "memory_access_flags.loom-test"
     "memory_frontier.loom-test"
     "packing_completion.loom-test"
+    "pressure_cfg.loom-test"
+    "pressure_headroom.loom-test"
+    "ready_nomination.loom-test"
+    "register_debt.loom-test"
+    "required_pressure.loom-test"
     "schedule.loom-test"
     "schedule_locked.loom-test"
     "schedule_scopes.loom-test"
+    "setup_order.loom-test"
+    "spill_traffic.loom-test"
+    "state_updates.loom-test"
     "storage_lifetime.loom-test"
 )
 

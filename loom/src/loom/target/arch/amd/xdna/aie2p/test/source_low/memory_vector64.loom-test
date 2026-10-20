@@ -42,7 +42,7 @@ CHECK-NOT: *vinsert*
 // Dynamic addressing preserves the full-width native form.
 func.def @copy_i64x8_dynamic(%input: buffer, %output: buffer, %position: offset) {
   %source, %destination = buffer.assume.alignment %input, %output {minimum_alignment = 64} : buffer, buffer
-  %offset = index.assume %position [range(%position, 0, 4096), mul(%position, 64)] : offset
+  %offset = index.assume %position [range(%position, 0, 4096), multiple_of(%position, 64)] : offset
   %source_view = buffer.view %source[%offset] : buffer -> view<8xi64>
   %destination_view = buffer.view %destination[%offset] : buffer -> view<8xi64>
   %value = vector.load %source_view[0] : view<8xi64> -> vector<8xi64>

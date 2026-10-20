@@ -5,8 +5,11 @@ cmake_minimum_required(VERSION 3.20)
 project(libhrx VERSION ${HRX_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# libhrx targets use headers and do not require C++ module dependency scanning.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -41,6 +44,16 @@ function(hrx_cc_test)
   set(IREE_BUILD_TESTS "${_libhrx_saved_iree_build_tests}")
 endfunction()
 
+if(BUILD_SHARED_LIBS)
+  # Reject public installation before any child directory installs artifacts.
+  # Component DSOs are an in-tree build shape, not the public HRX package.
+  install(CODE [[
+    message(FATAL_ERROR
+      "The public HRX package requires BUILD_SHARED_LIBS=OFF. "
+      "Shared runtime components are supported for in-tree development only.")
+  ]] COMPONENT "${HRX_PUBLIC_DIST_COMPONENT}")
+endif()
+
 add_subdirectory(src/libhrx)
 add_subdirectory(src/binding/common)
 if(LIBHRX_BUILD_HIP_BINDING)
@@ -64,6 +77,21 @@ endif()
 set(_hrx_cmake_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/hrx")
 set(_hrx_build_package_dir "${LIBHRX_BINARY_DIR}/cmake/hrx")
 
+configure_package_config_file(
+  cmake/hrx-config.cmake.in
+  "${_hrx_build_package_dir}/hrx-config.cmake"
+  INSTALL_DESTINATION "${_hrx_cmake_package_dir}")
+write_basic_package_version_file(
+  "${_hrx_build_package_dir}/hrx-config-version.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY SameMajorVersion)
+
+# The config records the build mode even when no package is exported. This
+# rejects stale exports after reconfiguring a static build to share components.
+if(BUILD_SHARED_LIBS)
+  return()
+endif()
+
 install(TARGETS libhrx_src_libhrx_hrx EXPORT hrx-targets
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     COMPONENT "${HRX_PUBLIC_DIST_COMPONENT}"
@@ -83,14 +111,6 @@ install(EXPORT hrx-targets
   DESTINATION "${_hrx_cmake_package_dir}"
   COMPONENT "${HRX_PUBLIC_DIST_COMPONENT}")
 
-configure_package_config_file(
-  cmake/hrx-config.cmake.in
-  "${_hrx_build_package_dir}/hrx-config.cmake"
-  INSTALL_DESTINATION "${_hrx_cmake_package_dir}")
-write_basic_package_version_file(
-  "${_hrx_build_package_dir}/hrx-config-version.cmake"
-  VERSION "${PROJECT_VERSION}"
-  COMPATIBILITY SameMajorVersion)
 export(EXPORT hrx-targets
   NAMESPACE hrx::
   FILE "${_hrx_build_package_dir}/hrx-targets.cmake")

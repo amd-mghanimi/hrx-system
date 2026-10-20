@@ -1,0 +1,478 @@
+// Header state carries only the counter. Each condition evaluation computes a
+// wider body/result tuple containing the counter and a payload. The body uses
+// that payload and returns only the next counter to the header; the final false
+// payload remains observable after the loop.
+kernel.def @condition_counter_store() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_condition_counter_store(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_condition_counter_store(%output: buffer) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %header_base = index.constant 16 : offset
+  %exit_base = index.constant 36 : offset
+  %bias = scalar.constant 17 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %body_view = buffer.view %aligned_output[%base] : buffer -> view<4xi32>
+  %header_view = buffer.view %aligned_output[%header_base] : buffer -> view<5xi32>
+  %exit_view = buffer.view %aligned_output[%exit_base] : buffer -> view<1xi32>
+  %terminal, %terminal_payload = scf.while(%before = %begin : index) -> (index, i32) {
+    %header_counter = index.cast %before : index to i32
+    %header_value = scalar.addi %header_counter, %bias : i32
+    view.store %header_value, %header_view[%before] : i32, view<5xi32>
+    %more = index.cmp slt, %before, %end : index
+    scf.condition %more, %before, %header_value : i1, index, i32
+  } do(%position: index, %body_payload: i32) {
+    view.store %body_payload, %body_view[%position] : i32, view<4xi32>
+    %next = index.add %position, %step : index
+    scf.yield %next : index
+  }
+  %terminal_counter = index.cast %terminal : index to i32
+  %exit_value = scalar.addi %terminal_counter, %terminal_payload : i32
+  view.store %exit_value, %exit_view[0] : i32, view<1xi32>
+  func.return
+}
+
+// An empty body still executes its initial condition-region effects and
+// publishes the initial counter as the loop result.
+kernel.def @condition_counter_empty() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_condition_counter_empty(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_condition_counter_empty(%output: buffer) {
+  %begin = index.constant 4 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %header_base = index.constant 16 : offset
+  %exit_base = index.constant 36 : offset
+  %bias = scalar.constant 17 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %body_view = buffer.view %aligned_output[%base] : buffer -> view<4xi32>
+  %header_view = buffer.view %aligned_output[%header_base] : buffer -> view<5xi32>
+  %exit_view = buffer.view %aligned_output[%exit_base] : buffer -> view<1xi32>
+  %terminal = scf.while(%before = %begin : index) -> (index) {
+    %header_counter = index.cast %before : index to i32
+    %header_value = scalar.addi %header_counter, %bias : i32
+    view.store %header_value, %header_view[%before] : i32, view<5xi32>
+    %more = index.cmp slt, %before, %end : index
+    scf.condition %more, %before : i1, index
+  } do(%position: index) {
+    %body_value = index.cast %position : index to i32
+    view.store %body_value, %body_view[%position] : i32, view<4xi32>
+    %next = index.add %position, %step : index
+    scf.yield %next : index
+  }
+  %exit_value = index.cast %terminal : index to i32
+  view.store %exit_value, %exit_view[0] : i32, view<1xi32>
+  func.return
+}
+
+// The row and column loops prove a flattened footprint through a runtime
+// conditional. The guard controls effects without changing the counter proof.
+kernel.def @condition_counter_nested() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %enabled: i1) {
+  func.call @compute_condition_counter_nested(%output, %enabled) : (buffer, i1)
+  kernel.return
+}
+
+func.def device inline @compute_condition_counter_nested(%output: buffer, %enabled: i1) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %rows = index.constant 3 : index
+  %columns = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %view = buffer.view %aligned[%base] : buffer -> view<12xi32>
+  %row_end = scf.while(%row_before = %begin : index) -> (index) {
+    %more_rows = index.cmp slt, %row_before, %rows : index
+    scf.condition %more_rows, %row_before : i1, index
+  } do(%row: index) {
+    %row_base = index.mul %row, %columns : index
+    %column_end = scf.while(%column_before = %begin : index) -> (index) {
+      %more_columns = index.cmp ult, %column_before, %columns : index
+      scf.condition %more_columns, %column_before : i1, index
+    } do(%column: index) {
+      scf.if %enabled {
+        %position = index.add %row_base, %column : index
+        %value = index.cast %position : index to i32
+        view.store %value, %view[%position] : i32, view<12xi32>
+      } else {
+      }
+      %next_column = index.add %column, %step : index
+      scf.yield %next_column : index
+    }
+    %next_row = index.add %row, %step : index
+    scf.yield %next_row : index
+  }
+  func.return
+}
+
+// Keep a native-width offset recurrence coherent across the condition and body
+// CFG edges while the runtime iteration bound stays narrow.
+kernel.def @condition_wide_recurrence() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %initial: offset, %iteration_count_input: index) {
+  func.call @compute_condition_wide_recurrence(%output, %initial, %iteration_count_input) : (buffer, offset, index)
+  kernel.return
+}
+
+func.def device inline @compute_condition_wide_recurrence(%output: buffer, %initial: offset, %iteration_count_input: index) {
+  %iteration_count = index.assume %iteration_count_input [range(%iteration_count_input, 0, 3)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %stride = index.constant 1 : offset
+  %base = index.constant 0 : offset
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 8} : buffer
+  %result_view = buffer.view %aligned_output[%base] : buffer -> view<1xi64>
+  %final_count, %final_value = scf.while(%before_count = %iteration_count : index, %before_value = %initial : offset) -> (index, offset) {
+    %more = index.cmp sgt, %before_count, %c0 : index
+    scf.condition %more, %before_count, %before_value : i1, index, offset
+  } do(%count: index, %value: offset) {
+    %next_count = index.sub %count, %c1 : index
+    %next_value = index.sub %value, %stride : offset
+    scf.yield %next_count, %next_value : index, offset
+  }
+  %wide_value = index.cast %final_value : offset to i64
+  view.store %wide_value, %result_view[0] : i64, view<1xi64>
+  func.return
+}
+
+// Crop a strided view in every condition evaluation, including the final
+// false condition. Check body loads and the distinct final forwarded view.
+kernel.def @condition_view() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%input: buffer, %output: buffer, %count: index) {
+  func.call @compute_condition_view(%input, %output, %count) : (buffer, buffer, index)
+  kernel.return
+}
+
+func.def device inline @compute_condition_view(%input: buffer, %output: buffer, %count: index) {
+  %iterations = index.assume %count [range(%count, 0, 3)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %initial_rows = index.constant 8 : index
+  %base = index.constant 4 : offset
+  %input_aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
+  %output_aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %initial_layout = encoding.layout.strided [8, 1] : encoding<layout>
+  %initial_view = buffer.view %input_aligned[%base] : buffer -> view<[%initial_rows]x4xi32, %initial_layout>
+  %destination = buffer.view %output_aligned[%base] : buffer -> view<2xi32>
+  %c0_i32 = scalar.constant 0 : i32
+  %remaining, %rows, %view, %sum = scf.while(%before_remaining = %iterations : index, %before_rows = %initial_rows : index, %before_view = %initial_view : view<[%before_rows]x4xi32, %initial_layout>, %before_sum = %c0_i32 : i32) -> (index, index, view<[%rows]x4xi32, %initial_layout>, i32) {
+    %more = index.cmp sgt, %before_remaining, %c0 : index
+    %forward_rows = index.sub %before_rows, %c1 : index
+    %forward_view = view.subview %before_view[1, 0] : view<[%before_rows]x4xi32, %initial_layout> -> view<[%forward_rows]x4xi32, %initial_layout>
+    scf.condition %more, %before_remaining, %forward_rows, %forward_view, %before_sum : i1, index, index, view<[%forward_rows]x4xi32, %initial_layout>, i32
+  } do(%body_remaining: index, %body_rows: index, %body_view: view<[%body_rows]x4xi32, %initial_layout>, %total: i32) {
+    %has_row = index.cmp sgt, %body_rows, %c0 : index
+    %value = scf.if %has_row -> (i32) {
+      %loaded = view.load %body_view[0, 1] : view<[%body_rows]x4xi32, %initial_layout> -> i32
+      scf.yield %loaded : i32
+    } else {
+      scf.yield %c0_i32 : i32
+    }
+    %next_sum = scalar.addi %total, %value : i32
+    %next_remaining = index.sub %body_remaining, %c1 : index
+    scf.yield %next_remaining, %body_rows, %body_view, %next_sum : index, index, view<[%body_rows]x4xi32, %initial_layout>, i32
+  }
+  %has_final = index.cmp sgt, %rows, %c0 : index
+  %final = scf.if %has_final -> (i32) {
+    %loaded = view.load %view[0, 1] : view<[%rows]x4xi32, %initial_layout> -> i32
+    scf.yield %loaded : i32
+  } else {
+    scf.yield %c0_i32 : i32
+  }
+  view.store %sum, %destination[0] : i32, view<2xi32>
+  view.store %final, %destination[1] : i32, view<2xi32>
+  func.return
+}
+
+// Each lane starts at its lane index and stops at the first nonpositive input
+// or at the runtime bound. The 37-element input is exact: lanes 37-63 prove
+// that the short-circuited bounds exit skips the guarded load.
+kernel.def @condition_guarded_load() {
+  %unit = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  func.call @compute_condition_guarded_load(%input, %output, %lane) : (buffer, buffer, index)
+  kernel.return
+}
+
+func.def device inline @compute_condition_guarded_load(%input: buffer, %output: buffer, %lane: index) {
+  %length = index.constant 37 : index
+  %input_base = index.constant 0 : offset
+  %input_view = buffer.view %input[%input_base] : buffer -> view<37xi32>
+  %terminal = scf.while(%before = %lane : index) -> (index) {
+    %inside = index.cmp ult, %before, %length : index
+    %continue = scf.if %inside -> (i1) {
+      %value = view.load %input_view[%before] : view<37xi32> -> i32
+      %c0 = scalar.constant 0 : i32
+      %positive = scalar.cmpi sgt, %value, %c0 : i32
+      scf.yield %positive : i1
+    } else {
+      scf.yield %inside : i1
+    }
+    scf.condition %continue, %before : i1, index
+  } do(%current: index) {
+    %c1 = index.constant 1 : index
+    %next = index.add %current, %c1 : index
+    scf.yield %next : index
+  }
+  %output_base = index.constant 4 : offset
+  %output_view = buffer.view %output[%output_base] : buffer -> view<64xi32>
+  %terminal_i32 = index.cast %terminal : index to i32
+  view.store %terminal_i32, %output_view[%lane] : i32, view<64xi32>
+  func.return
+}
+
+// Predicate results retain each retired lane's final value whether the
+// predicate is carried through the header or produced only by the final
+// condition evaluation.
+kernel.def @condition_lane_predicates() {
+  %unit = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%output: buffer) {
+  %lane = kernel.workitem.id<x> : index
+  func.call @compute_condition_lane_predicates(%output, %lane) : (buffer, index)
+  kernel.return
+}
+
+func.def device inline @compute_condition_lane_predicates(%output: buffer, %lane: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %end = index.add %lane, %c1 : index
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<4x64xi32>
+
+  %condition_i, %condition_result = scf.while(%i = %c0 : index) -> (index, i1) {
+    %continue = index.cmp ult, %i, %end : index
+    %at_end = index.cmp eq, %i, %end : index
+    scf.condition %continue, %i, %at_end : i1, index, i1
+  } do(%body_i: index, %body_result: i1) {
+    %next = index.add %body_i, %c1 : index
+    scf.yield %next : index
+  }
+
+  %initial_flag = scalar.constant false : i1
+  %recurrence_i, %recurrence_result = scf.while(%i = %c0 : index, %flag = %initial_flag : i1) -> (index, i1) {
+    %continue = index.cmp ult, %i, %end : index
+    scf.condition %continue, %i, %flag : i1, index, i1
+  } do(%body_i: index, %body_flag: i1) {
+    %next = index.add %body_i, %c1 : index
+    %at_end = index.cmp eq, %next, %end : index
+    scf.yield %next, %at_end : index, i1
+  }
+
+  %initial_flags = vector.from_elements %initial_flag, %recurrence_result : vector<2xi1>
+  %vector_i, %vector_result = scf.while(%i = %c0 : index, %flags = %initial_flags : vector<2xi1>) -> (index, vector<2xi1>) {
+    %continue = index.cmp ult, %i, %end : index
+    scf.condition %continue, %i, %flags : i1, index, vector<2xi1>
+  } do(%body_i: index, %body_flags: vector<2xi1>) {
+    %next = index.add %body_i, %c1 : index
+    %at_end = index.cmp eq, %next, %end : index
+    %before_end = index.cmp ult, %next, %end : index
+    %next_flags = vector.from_elements %at_end, %before_end : vector<2xi1>
+    scf.yield %next, %next_flags : index, vector<2xi1>
+  }
+
+  %condition_word = scalar.extui %condition_result : i1 to i32
+  %recurrence_word = scalar.extui %recurrence_result : i1 to i32
+  %vector_true = vector.extract %vector_result[0] : vector<2xi1> -> i1
+  %vector_false = vector.extract %vector_result[1] : vector<2xi1> -> i1
+  %vector_true_word = scalar.extui %vector_true : i1 to i32
+  %vector_false_word = scalar.extui %vector_false : i1 to i32
+  view.store %condition_word, %output_view[0, %lane] : i32, view<4x64xi32>
+  view.store %recurrence_word, %output_view[1, %lane] : i32, view<4x64xi32>
+  view.store %vector_true_word, %output_view[2, %lane] : i32, view<4x64xi32>
+  view.store %vector_false_word, %output_view[3, %lane] : i32, view<4x64xi32>
+  func.return
+}
+
+func.def @condition_counter_store_oracle(%output: buffer) {
+  func.call @compute_condition_counter_store(%output) : (buffer)
+  func.return
+}
+
+func.def @condition_counter_empty_oracle(%output: buffer) {
+  func.call @compute_condition_counter_empty(%output) : (buffer)
+  func.return
+}
+
+func.def @condition_counter_nested_oracle(%output: buffer, %enabled: i1) {
+  func.call @compute_condition_counter_nested(%output, %enabled) : (buffer, i1)
+  func.return
+}
+
+func.def @condition_wide_recurrence_oracle(%output: buffer, %initial: offset, %iteration_count: index) {
+  func.call @compute_condition_wide_recurrence(%output, %initial, %iteration_count) : (buffer, offset, index)
+  func.return
+}
+
+func.def @condition_view_oracle(%input: buffer, %output: buffer, %count: index) {
+  func.call @compute_condition_view(%input, %output, %count) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @condition_guarded_load_oracle(%input: buffer, %output: buffer) {
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %step] {
+    func.call @compute_condition_guarded_load(%input, %output, %lane) : (buffer, buffer, index)
+  }
+  func.return
+}
+
+// Model the vector-carried target predicates as separate scalar flags so the
+// VM oracle does not depend on the target's vector representation.
+func.def @condition_lane_predicates_oracle(%output: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 64 : index
+  %false = scalar.constant false : i1
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<4x64xi32>
+  scf.for %lane = [%c0 to %width step %c1] {
+    %end = index.add %lane, %c1 : index
+    %condition_i, %condition_result = scf.while(%i = %c0 : index) -> (index, i1) {
+      %continue = index.cmp ult, %i, %end : index
+      %at_end = index.cmp eq, %i, %end : index
+      scf.condition %continue, %i, %at_end : i1, index, i1
+    } do(%body_i: index, %body_result: i1) {
+      %next = index.add %body_i, %c1 : index
+      scf.yield %next : index
+    }
+    %recurrence_i, %recurrence_result = scf.while(%i = %c0 : index, %flag = %false : i1) -> (index, i1) {
+      %continue = index.cmp ult, %i, %end : index
+      scf.condition %continue, %i, %flag : i1, index, i1
+    } do(%body_i: index, %body_flag: i1) {
+      %next = index.add %body_i, %c1 : index
+      %at_end = index.cmp eq, %next, %end : index
+      scf.yield %next, %at_end : index, i1
+    }
+    %vector_i, %vector_true, %vector_false = scf.while(%i = %c0 : index, %true_flag = %false : i1, %false_flag = %false : i1) -> (index, i1, i1) {
+      %continue = index.cmp ult, %i, %end : index
+      scf.condition %continue, %i, %true_flag, %false_flag : i1, index, i1, i1
+    } do(%body_i: index, %body_true: i1, %body_false: i1) {
+      %next = index.add %body_i, %c1 : index
+      %at_end = index.cmp eq, %next, %end : index
+      %before_end = index.cmp ult, %next, %end : index
+      scf.yield %next, %at_end, %before_end : index, i1, i1
+    }
+    %condition_word = scalar.extui %condition_result : i1 to i32
+    %recurrence_word = scalar.extui %recurrence_result : i1 to i32
+    %vector_true_word = scalar.extui %vector_true : i1 to i32
+    %vector_false_word = scalar.extui %vector_false : i1 to i32
+    view.store %condition_word, %output_view[0, %lane] : i32, view<4x64xi32>
+    view.store %recurrence_word, %output_view[1, %lane] : i32, view<4x64xi32>
+    view.store %vector_true_word, %output_view[2, %lane] : i32, view<4x64xi32>
+    view.store %vector_false_word, %output_view[3, %lane] : i32, view<4x64xi32>
+  }
+  func.return
+}
+
+check.scenario @condition_counter_store_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-1) : tensor<18xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<18xi32> -> tensor<10xi32>
+    check.compare<@condition_counter_store, @condition_counter_store_oracle>(%output) : (tensor<10xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<18xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_counter_empty_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-1) : tensor<18xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<18xi32> -> tensor<10xi32>
+    check.compare<@condition_counter_empty, @condition_counter_empty_oracle>(%output) : (tensor<10xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<18xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_counter_nested_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %enabled = check.literal value(false) : i1
+    %storage = check.generate.fill value(-1) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@condition_counter_nested, @condition_counter_nested_oracle>(%output, %enabled) : (tensor<12xi32>, i1) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %enabled = check.literal value(true) : i1
+    %storage = check.generate.fill value(-1) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@condition_counter_nested, @condition_counter_nested_oracle>(%output, %enabled) : (tensor<12xi32>, i1) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_wide_recurrence_values {
+  check.trial[4](%iteration_count: index, %entropy: check.entropy) {
+    %initial = check.literal value(103) : offset
+    %storage = check.generate.fill value(-1) : tensor<9xi64>
+    %output = check.tensor.view %storage offset(32) : tensor<9xi64> -> tensor<1xi64>
+    check.compare<@condition_wide_recurrence, @condition_wide_recurrence_oracle>(%output, %initial, %iteration_count) : (tensor<1xi64>, offset, index) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<9xi64>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_view_values {
+  check.trial[4](%count: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(100) step(1) : tensor<68xi32>
+    %output = check.generate.fill value(-99) : tensor<4xi32>
+    check.compare<@condition_view, @condition_view_oracle>(%input, %output, %count) : (tensor<68xi32>, tensor<4xi32>, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<68xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_guarded_load_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(12) step(-1) period(13) : tensor<37xi32>
+    %output = check.generate.fill value(-99) : tensor<66xi32>
+    check.compare<@condition_guarded_load, @condition_guarded_load_oracle>(%input, %output) : (tensor<37xi32>, tensor<66xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<37xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<66xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @condition_lane_predicate_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %output = check.generate.fill value(0) : tensor<4x64xi32>
+    check.compare<@condition_lane_predicates, @condition_lane_predicates_oracle>(%output) : (tensor<4x64xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x64xi32>
+    }
+  }
+  check.return
+}

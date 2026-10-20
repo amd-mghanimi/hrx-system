@@ -1,0 +1,121 @@
+// RUN: emit source-low target=amdgpu:gfx942 output=low
+
+func.def @broadcast_positions(%scalar: f32, %values: vector<4xf32>) -> (vector<4xf32>, vector<4xf32>) {
+  %lanes = vector.splat %scalar : vector<4xf32>
+  %sum = vector.addf %lanes, %values : vector<4xf32>
+  %product = vector.mulf %values, %lanes : vector<4xf32>
+  func.return %sum, %product : vector<4xf32>, vector<4xf32>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @broadcast_positions(%scalar: reg<amdgpu.vgpr>, %values: reg<amdgpu.vgpr x4>) -> (reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>) asm {
+  %11 = slice %values[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr x2>
+  %12 = v_pk_add_f32.broadcast_lhs %scalar, %11
+  %13 = slice %values[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr x2>
+  %14 = v_pk_add_f32.broadcast_lhs %scalar, %13
+  %sum = concat(%12, %14) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  %17 = v_pk_mul_f32.broadcast_rhs %11, %scalar
+  %19 = v_pk_mul_f32.broadcast_rhs %13, %scalar
+  %product = concat(%17, %19) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  return %sum, %product
+}
+
+// ====
+
+// Both inputs have one register; the result determines packet repetition.
+func.def @broadcast_both(%offset: f32, %scale: f32) -> (vector<4xf32>) {
+  %offsets = vector.splat %offset : vector<4xf32>
+  %scales = vector.splat %scale : vector<4xf32>
+  %result = vector.mulf %offsets, %scales : vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @broadcast_both(%offset: reg<amdgpu.vgpr>, %scale: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x4>) asm {
+  %9 = v_pk_mul_f32.broadcast_lhs_rhs %offset, %scale
+  %result = concat(%9, %9) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  return %result
+}
+
+// ====
+
+// Two uniform loads require a single scalar-to-vector copy before repetition.
+kernel.def @uniform_binary() {
+  %c1 = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%width, %c1, %c1) : index
+} launch(%parameters: buffer, %output: buffer) {
+  %aligned = buffer.assume.alignment %parameters {minimum_alignment = 64} : buffer
+  %scalars, %destination = buffer.assume.noalias %aligned, %output : buffer, buffer
+  %offset = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %source = buffer.view %scalars[%offset] : buffer -> view<2xf32>
+  %left = view.load %source[0] : view<2xf32> -> f32
+  %right = view.load %source[1] : view<2xf32> -> f32
+  %left_lanes = vector.splat %left : vector<8xf32>
+  %right_lanes = vector.splat %right : vector<8xf32>
+  %result = vector.addf %left_lanes, %right_lanes : vector<8xf32>
+  %output_view = buffer.view %destination[%offset] : buffer -> view<64x8xf32>
+  vector.store %result, %output_view[%lane, 0] : vector<8xf32>, view<64x8xf32>
+  kernel.return
+}
+
+// ----
+low.kernel.def target<amdgpu.cdna3.core> abi_layout({constant_count = 0, direct_arg_count = 0, direct_arg_names = {}, direct_arg_offsets = [], direct_arg_parameter_indices = [], direct_arg_sizes = [], parameter_count = 2, resource_count = 2, resource_offsets = [0, 8], resource_parameter_indices = [0, 1], uses_kernarg_segment_ptr = true}) workgroup_size(64, 1, 1) workgroup_count(1, 1, 1) @uniform_binary() asm {
+  %lane = live_in<amdgpu.workitem_id.x> : reg<amdgpu.vgpr>
+  %source = resource<hal_binding> {extent = 8, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %output_view = resource<hal_binding> {extent = 2048, index = 1, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %24 = s_mov_b32 0
+  %left = s_load_dword %source, %24
+  %right = s_load_dword %source, %24 {offset = 4}
+  %28 = v_mov_b32_copy %right
+  %29 = v_pk_add_f32.broadcast_lhs_rhs %left, %28
+  %39 = concat(%29, %29) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  %35 = v_lshlrev_b32_src0_inline %lane, 5
+  global_store_dwordx4_saddr %35, %39, %output_view
+  %38 = concat(%29, %29) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  global_store_dwordx4_saddr %35, %38, %output_view {offset = 16}
+  return
+}
+
+// ====
+
+// Independent uniform vectors retain one scalar source and materialize the
+// other before the packed VOP3P operation.
+func.def @uniform_vector_binary(%lhs_buffer: buffer, %rhs_buffer: buffer) -> (vector<4xf32>) {
+  %base = index.constant 0 : offset
+  %lhs_global = buffer.assume.memory_space<global> %lhs_buffer : buffer
+  %rhs_global = buffer.assume.memory_space<global> %rhs_buffer : buffer
+  %lhs_noalias, %rhs_noalias = buffer.assume.noalias %lhs_global, %rhs_global : buffer, buffer
+  %lhs_view = buffer.view %lhs_noalias[%base] : buffer -> view<4xf32>
+  %rhs_view = buffer.view %rhs_noalias[%base] : buffer -> view<4xf32>
+  %lhs = vector.load %lhs_view[0] : view<4xf32> -> vector<4xf32>
+  %rhs = vector.load %rhs_view[0] : view<4xf32> -> vector<4xf32>
+  %result = vector.addf %lhs, %rhs : vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ----
+low.func.def target<amdgpu.cdna3.core> abi(hal_kernel) @uniform_vector_binary() -> (reg<amdgpu.vgpr x4>) asm {
+  %lhs_view = resource<hal_binding> {extent = 16, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %rhs_view = resource<hal_binding> {extent = 16, index = 1, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %16 = s_mov_b32 0
+  %lhs = s_load_dwordx4 %lhs_view, %16
+  %rhs = s_load_dwordx4 %rhs_view, %16
+  %20 = slice %lhs[0] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr x2>
+  %40 = slice %rhs[0] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr>
+  %23 = v_mov_b32_copy %40
+  %39 = slice %rhs[1] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr>
+  %25 = v_mov_b32_copy %39
+  %26 = concat(%23, %25) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %27 = v_pk_add_f32 %20, %26
+  %28 = slice %lhs[2] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr x2>
+  %38 = slice %rhs[2] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr>
+  %31 = v_mov_b32_copy %38
+  %37 = slice %rhs[3] : reg<amdgpu.sgpr x4> -> reg<amdgpu.sgpr>
+  %33 = v_mov_b32_copy %37
+  %34 = concat(%31, %33) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %35 = v_pk_add_f32 %28, %34
+  %result = concat(%27, %35) : (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) -> reg<amdgpu.vgpr x4>
+  return %result
+}

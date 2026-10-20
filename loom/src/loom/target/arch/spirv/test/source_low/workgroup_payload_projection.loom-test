@@ -1,0 +1,78 @@
+// RUN: pass target-legalize{mode=eager},canonicalize,dce
+
+// Independent wide payloads keep one convergence point, with distinct tail
+// packets and a native scalar in its original position.
+spirv.target<vulkan1_3> @target
+
+kernel.def target(@target) @project_payloads() {
+  %unit = index.constant 1 : index
+  %width = index.constant 67 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %item = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<67x14xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<67x14xf32>
+  %left = vector.load %source[%item, 0] : view<67x14xf32> -> vector<6xf32>
+  %scalar = view.load %source[%item, 6] : view<67x14xf32> -> f32
+  %right = vector.load %source[%item, 7] : view<67x14xf32> -> vector<7xf32>
+  %left_sum, %scalar_sum, %right_sum = kernel.workgroup.reduce<addf> %left, %scalar, %right : vector<6xf32>, f32, vector<7xf32>
+  vector.store %left_sum, %destination[%item, 0] : vector<6xf32>, view<67x14xf32>
+  view.store %scalar_sum, %destination[%item, 6] : f32, view<67x14xf32>
+  vector.store %right_sum, %destination[%item, 7] : vector<7xf32>, view<67x14xf32>
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @target
+
+kernel.def target(@target) @project_payloads() {
+  %unit = index.constant 1 : index
+  %width = index.constant 67 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %item = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<67x14xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<67x14xf32>
+  %40 = index.constant 0 : index
+  %41 = view.load %source[%item, %40] : view<67x14xf32> -> f32
+  %42 = index.constant 1 : index
+  %43 = view.load %source[%item, %42] : view<67x14xf32> -> f32
+  %44 = index.constant 2 : index
+  %45 = view.load %source[%item, %44] : view<67x14xf32> -> f32
+  %46 = index.constant 3 : index
+  %47 = view.load %source[%item, %46] : view<67x14xf32> -> f32
+  %48 = index.constant 4 : index
+  %49 = view.load %source[%item, %48] : view<67x14xf32> -> f32
+  %50 = index.constant 5 : index
+  %51 = view.load %source[%item, %50] : view<67x14xf32> -> f32
+  %left = vector.from_elements %41, %43, %45, %47, %49, %51 : vector<6xf32>
+  %scalar = view.load %source[%item, 6] : view<67x14xf32> -> f32
+  %25 = index.constant 7 : index
+  %26 = view.load %source[%item, %25] : view<67x14xf32> -> f32
+  %27 = index.constant 8 : index
+  %28 = view.load %source[%item, %27] : view<67x14xf32> -> f32
+  %29 = index.constant 9 : index
+  %30 = view.load %source[%item, %29] : view<67x14xf32> -> f32
+  %31 = index.constant 10 : index
+  %32 = view.load %source[%item, %31] : view<67x14xf32> -> f32
+  %33 = index.constant 11 : index
+  %34 = view.load %source[%item, %33] : view<67x14xf32> -> f32
+  %35 = index.constant 12 : index
+  %36 = view.load %source[%item, %35] : view<67x14xf32> -> f32
+  %37 = index.constant 13 : index
+  %38 = view.load %source[%item, %37] : view<67x14xf32> -> f32
+  %right = vector.from_elements %26, %28, %30, %32, %34, %36, %38 : vector<7xf32>
+  %14 = vector.slice %left[0] : vector<6xf32> -> vector<4xf32>
+  %15 = vector.slice %left[4] : vector<6xf32> -> vector<2xf32>
+  %16 = vector.slice %right[0] : vector<7xf32> -> vector<4xf32>
+  %17 = vector.slice %right[4] : vector<7xf32> -> vector<3xf32>
+  %18, %19, %scalar_sum, %21, %22 = kernel.workgroup.reduce<addf> %14, %15, %scalar, %16, %17 : vector<4xf32>, vector<2xf32>, f32, vector<4xf32>, vector<3xf32>
+  %left_sum = vector.concat<0> %18, %19 : vector<4xf32>, vector<2xf32> -> vector<6xf32>
+  %right_sum = vector.concat<0> %21, %22 : vector<4xf32>, vector<3xf32> -> vector<7xf32>
+  vector.store %left_sum, %destination[%item, 0] : vector<6xf32>, view<67x14xf32>
+  view.store %scalar_sum, %destination[%item, 6] : f32, view<67x14xf32>
+  vector.store %right_sum, %destination[%item, 7] : vector<7xf32>, view<67x14xf32>
+  kernel.return
+}

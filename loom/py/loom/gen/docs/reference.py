@@ -95,6 +95,7 @@ DIALECT_REFERENCE_SPECS = (
     DialectReferenceSpec("kernel", "program"),
     DialectReferenceSpec("group", "program"),
     DialectReferenceSpec("pipeline", "program"),
+    DialectReferenceSpec("channel", "program"),
     DialectReferenceSpec("target", "program"),
     DialectReferenceSpec("config", "program"),
     DialectReferenceSpec("check", "testing"),
@@ -255,7 +256,8 @@ def _interface_name(interface: Any) -> str:
 
 
 def _effect_name(effect: Effect) -> str:
-    return f"{effect.kind.value} {effect.operand}"
+    resource = effect.operand if effect.operand is not None else "ambient memory"
+    return f"{effect.kind.value} {resource}"
 
 
 def _ownership_effect_name(

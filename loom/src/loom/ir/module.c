@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#include "iree/base/internal/math.h"
 #include "loom/ir/context.h"
 #include "loom/ir/parameterized_type.h"
 #include "loom/ir/structural_hash.h"
@@ -126,7 +127,8 @@ static iree_status_t loom_module_reserve_type_insert(
   }
   if (iree_status_is_ok(status)) {
     status = loom_intern_table_reserve_insert(
-        &module->arena, &module->type_intern, hash, inout_slot);
+        &module->arena, &module->type_intern, hash, /*insertion_count=*/1,
+        inout_slot);
   }
   if (iree_status_is_ok(status)) {
     module->types = types;
@@ -193,14 +195,14 @@ static void loom_region_adjust_summary_count(uint32_t* count, int32_t delta) {
   }
 }
 
-static void loom_region_adjust_summary_counts(loom_region_t* region,
-                                              int32_t read_delta,
-                                              int32_t write_delta,
-                                              int32_t convergent_delta,
-                                              int32_t observable_delta,
-                                              int32_t memory_access_delta) {
+static void loom_region_adjust_summary_counts(
+    loom_region_t* region, int32_t read_delta, int32_t write_delta,
+    int32_t convergent_delta, int32_t observable_delta,
+    int32_t memory_access_delta, loom_memory_space_mask_t removed_spaces,
+    loom_memory_space_mask_t added_spaces) {
   if (read_delta == 0 && write_delta == 0 && convergent_delta == 0 &&
-      observable_delta == 0 && memory_access_delta == 0) {
+      observable_delta == 0 && memory_access_delta == 0 && !removed_spaces &&
+      !added_spaces) {
     return;
   }
   if (read_delta != 0) {
@@ -221,23 +223,32 @@ static void loom_region_adjust_summary_counts(loom_region_t* region,
     loom_region_adjust_summary_count(&region->memory_access_count,
                                      memory_access_delta);
   }
+  uint32_t changed_spaces = removed_spaces | added_spaces;
+  while (changed_spaces) {
+    const uint32_t space = iree_math_count_trailing_zeros_u32(changed_spaces);
+    const int32_t delta = (added_spaces & (1u << space)) ? 1 : -1;
+    loom_region_adjust_summary_count(&region->write_space_counts[space], delta);
+    changed_spaces &= changed_spaces - 1;
+  }
 }
 
 static void loom_module_adjust_op_ancestor_summary_counts(
     loom_op_t* op, int32_t read_delta, int32_t write_delta,
     int32_t convergent_delta, int32_t observable_delta,
-    int32_t memory_access_delta) {
+    int32_t memory_access_delta, loom_memory_space_mask_t removed_spaces,
+    loom_memory_space_mask_t added_spaces) {
   if (read_delta == 0 && write_delta == 0 && convergent_delta == 0 &&
-      observable_delta == 0 && memory_access_delta == 0) {
+      observable_delta == 0 && memory_access_delta == 0 && !removed_spaces &&
+      !added_spaces) {
     return;
   }
   loom_region_t* region =
       op->parent_block ? op->parent_block->parent_region : NULL;
   loom_op_t* parent_op = op->parent_op;
   while (region) {
-    loom_region_adjust_summary_counts(region, read_delta, write_delta,
-                                      convergent_delta, observable_delta,
-                                      memory_access_delta);
+    loom_region_adjust_summary_counts(
+        region, read_delta, write_delta, convergent_delta, observable_delta,
+        memory_access_delta, removed_spaces, added_spaces);
     if (!parent_op) {
       break;
     }
@@ -288,9 +299,12 @@ static void loom_module_adjust_op_direct_summaries(loom_module_t* module,
       loom_traits_have_observable_effects(traits) ? direction : 0;
   int32_t memory_access_delta =
       loom_traits_may_access_memory(traits) ? direction : 0;
+  const loom_memory_space_mask_t write_spaces =
+      loom_op_written_memory_spaces(op, traits);
   loom_module_adjust_op_ancestor_summary_counts(
       op, read_delta, write_delta, convergent_delta, observable_delta,
-      memory_access_delta);
+      memory_access_delta, direction < 0 ? write_spaces : 0,
+      direction > 0 ? write_spaces : 0);
   if (iree_any_bit_set(traits, LOOM_TRAIT_HINT)) {
     loom_module_adjust_op_hint_sources(op, direction);
   }
@@ -306,6 +320,28 @@ void loom_module_record_op_summaries(loom_module_t* module, loom_op_t* op) {
   }
   loom_module_adjust_op_direct_summaries(module, op, op->traits, +1);
   op->flags |= LOOM_OP_FLAG_SUMMARIES_COUNTED;
+}
+
+void loom_module_record_region_summaries(loom_op_t* parent_op,
+                                         const loom_region_t* region) {
+  if (region->hint_source_count) {
+    loom_module_adjust_op_hint_sources(parent_op, +1);
+  }
+  for (loom_op_t* ancestor = parent_op; ancestor && ancestor->parent_block;
+       ancestor = ancestor->parent_op) {
+    loom_region_t* parent_region = ancestor->parent_block->parent_region;
+    if (!parent_region) {
+      break;
+    }
+    parent_region->read_effect_count += region->read_effect_count;
+    parent_region->write_effect_count += region->write_effect_count;
+    parent_region->convergent_effect_count += region->convergent_effect_count;
+    parent_region->observable_effect_count += region->observable_effect_count;
+    parent_region->memory_access_count += region->memory_access_count;
+    for (uint32_t i = 0; i < LOOM_VALUE_FACT_MEMORY_SPACE_COUNT_; ++i) {
+      parent_region->write_space_counts[i] += region->write_space_counts[i];
+    }
+  }
 }
 
 void loom_module_drop_op_summaries(loom_module_t* module, loom_op_t* op) {
@@ -351,10 +387,15 @@ void loom_module_update_op_direct_summaries(loom_module_t* module,
       loom_traits_have_observable_effects(new_traits) ? 1 : 0;
   int32_t old_memory_access = loom_traits_may_access_memory(old_traits) ? 1 : 0;
   int32_t new_memory_access = loom_traits_may_access_memory(new_traits) ? 1 : 0;
+  const loom_memory_space_mask_t old_spaces =
+      loom_op_written_memory_spaces(op, old_traits);
+  const loom_memory_space_mask_t new_spaces =
+      loom_op_written_memory_spaces(op, new_traits);
   loom_module_adjust_op_ancestor_summary_counts(
       op, new_read - old_read, new_write - old_write,
       new_convergent - old_convergent, new_observable - old_observable,
-      new_memory_access - old_memory_access);
+      new_memory_access - old_memory_access, old_spaces & ~new_spaces,
+      new_spaces & ~old_spaces);
   if (iree_any_bit_set(old_traits ^ new_traits, LOOM_TRAIT_HINT)) {
     loom_module_adjust_op_hint_sources(
         op, iree_any_bit_set(new_traits, LOOM_TRAIT_HINT) ? 1 : -1);
@@ -600,7 +641,9 @@ void loom_value_u32_scratch_release_zeroed(loom_value_u32_scratch_t* scratch) {
 //===----------------------------------------------------------------------===//
 
 typedef struct loom_encoding_equal_context_t {
+  // Module owning the indexed canonical encoding rows.
   const loom_module_t* module;
+  // Candidate structural identity or display alias being queried.
   const loom_encoding_t* encoding;
 } loom_encoding_equal_context_t;
 
@@ -609,6 +652,23 @@ static bool loom_encoding_equal_fn(const void* context, uint32_t index) {
       (const loom_encoding_equal_context_t*)context;
   return loom_encoding_equal(&equal_context->module->encodings.entries[index],
                              equal_context->encoding);
+}
+
+static uint32_t loom_encoding_alias_hash(loom_string_id_t alias_id) {
+  return alias_id * 2654435769u;
+}
+
+static bool loom_encoding_alias_equal_fn(const void* context, uint32_t index) {
+  const loom_encoding_equal_context_t* equal_context = context;
+  return equal_context->module->encodings.entries[index].alias_id ==
+         equal_context->encoding->alias_id;
+}
+
+static void loom_module_index_encoding_alias(loom_module_t* module,
+                                             uint32_t hash, uint32_t index) {
+  const iree_host_size_t slot =
+      loom_intern_table_find_empty_slot(&module->encoding_intern, hash);
+  loom_intern_table_insert(&module->encoding_intern, slot, hash, index);
 }
 
 // Binds freshly canonicalized sparse parameters to their generated descriptor
@@ -696,6 +756,8 @@ iree_status_t loom_module_add_encoding(loom_module_t* module,
 
   loom_attribute_t canonical_attr_dict = {0};
   loom_string_id_t canonical_name_id = encoding->name_id;
+  iree_arena_checkpoint_t candidate_checkpoint;
+  iree_status_t status = iree_ok_status();
   if (name_resolution.alias) {
     const loom_encoding_alias_descriptor_t* alias = name_resolution.alias;
     IREE_RETURN_IF_ERROR(loom_module_intern_string(
@@ -750,22 +812,31 @@ iree_status_t loom_module_add_encoding(loom_module_t* module,
       authored_updates[i] = loom_named_attr_replace(
           encoding->attributes[i].name_id, encoding->attributes[i].value);
     }
-    IREE_RETURN_IF_ERROR(loom_module_replace_canonical_attr_dict(
+    // Family and parameter names outlive a duplicate candidate. Only the
+    // unpublished parameter payloads belong to this checkpoint.
+    candidate_checkpoint = iree_arena_checkpoint_save(&module->arena);
+    status = loom_module_replace_canonical_attr_dict(
         module,
         loom_make_named_attr_slice(alias_entries, alias->parameter_count),
         (loom_named_attr_update_slice_t){
             .updates = authored_updates,
             .count = encoding->attribute_count,
         },
-        &canonical_attr_dict));
+        &canonical_attr_dict);
   } else {
-    IREE_RETURN_IF_ERROR(loom_module_make_canonical_attr_dict(
+    candidate_checkpoint = iree_arena_checkpoint_save(&module->arena);
+    status = loom_module_make_canonical_attr_dict(
         module,
         loom_make_named_attr_slice(encoding->attributes,
                                    encoding->attribute_count),
-        &canonical_attr_dict));
+        &canonical_attr_dict);
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_arena_checkpoint_restore(&candidate_checkpoint);
+    return status;
   }
   if (canonical_attr_dict.count > UINT8_MAX) {
+    iree_arena_checkpoint_restore(&candidate_checkpoint);
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "encoding '%.*s' has %u parameters, max %u",
                             (int)encoding_name.size, encoding_name.data,
@@ -802,19 +873,22 @@ iree_status_t loom_module_add_encoding(loom_module_t* module,
       &module->encoding_intern, hash, loom_encoding_equal_fn, &equal_context);
   const uint32_t existing_index = probe.index;
 
-  // Alias names are rare file-local shorthand. Scan only when one is authored
-  // and reject collisions against any structurally different encoding.
-  if (canonical_encoding.alias_id != LOOM_STRING_ID_INVALID) {
-    for (iree_host_size_t i = 0; i < module->encodings.count; ++i) {
-      if (i == existing_index) {
-        continue;
-      }
-      if (module->encodings.entries[i].alias_id !=
-          canonical_encoding.alias_id) {
-        continue;
-      }
+  // Structural and display-name keys share canonical rows and bucket storage.
+  // Each equality predicate checks its own key, including when a hash from
+  // the other domain collides. Anonymous entries only publish a structural key.
+  const bool has_alias = canonical_encoding.alias_id != LOOM_STRING_ID_INVALID;
+  const uint32_t alias_hash =
+      loom_encoding_alias_hash(canonical_encoding.alias_id);
+  loom_intern_probe_t alias_probe = {0};
+  if (has_alias) {
+    alias_probe =
+        loom_intern_table_probe(&module->encoding_intern, alias_hash,
+                                loom_encoding_alias_equal_fn, &equal_context);
+    if (alias_probe.index != UINT32_MAX &&
+        alias_probe.index != existing_index) {
       iree_string_view_t alias_name =
           loom_string_table_get(&module->strings, canonical_encoding.alias_id);
+      iree_arena_checkpoint_restore(&candidate_checkpoint);
       return iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
           "encoding alias '%.*s' already names a different encoding",
@@ -823,11 +897,17 @@ iree_status_t loom_module_add_encoding(loom_module_t* module,
   }
 
   if (existing_index != UINT32_MAX) {
+    iree_arena_checkpoint_restore(&candidate_checkpoint);
     if (module->encodings.entries[existing_index].alias_id ==
             LOOM_STRING_ID_INVALID &&
-        canonical_encoding.alias_id != LOOM_STRING_ID_INVALID) {
+        has_alias) {
+      IREE_RETURN_IF_ERROR(loom_intern_table_reserve_insert(
+          &module->arena, &module->encoding_intern, alias_hash,
+          /*insertion_count=*/1, &alias_probe.slot));
       module->encodings.entries[existing_index].alias_id =
           canonical_encoding.alias_id;
+      loom_intern_table_insert(&module->encoding_intern, alias_probe.slot,
+                               alias_hash, existing_index);
     }
     *out_encoding_id = (uint16_t)(existing_index + 1);
     return iree_ok_status();
@@ -848,25 +928,36 @@ iree_status_t loom_module_add_encoding(loom_module_t* module,
   // UINT16_MAX is the maximum representable ID, so we can store at
   // most UINT16_MAX entries (IDs 1 through UINT16_MAX).
   if (module->encodings.count >= UINT16_MAX) {
+    iree_arena_checkpoint_restore(&candidate_checkpoint);
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                             "encoding table full (%" PRIhsz " entries, max %u)",
                             module->encodings.count, (unsigned)UINT16_MAX);
   }
 
-  IREE_RETURN_IF_ERROR(
-      loom_encoding_table_ensure_capacity(&module->arena, &module->encodings));
+  // Stage row growth before the final fallible bucket reserve. Rehash can
+  // mutate existing buckets, so only infallible publication follows it.
+  loom_encoding_table_t encodings = module->encodings;
+  status = loom_encoding_table_ensure_capacity(&module->arena, &encodings);
   iree_host_size_t slot = probe.slot;
-  IREE_RETURN_IF_ERROR(loom_intern_table_reserve_insert(
-      &module->arena, &module->encoding_intern, hash, &slot));
-
-  const uint32_t new_index = (uint32_t)module->encodings.count;
-  loom_encoding_t* entry = &module->encodings.entries[new_index];
-  *entry = canonical_encoding;
-  loom_intern_table_insert(&module->encoding_intern, slot, hash, new_index);
-
-  *out_encoding_id = (uint16_t)(new_index + 1);
-  ++module->encodings.count;
-  return iree_ok_status();
+  if (iree_status_is_ok(status)) {
+    status = loom_intern_table_reserve_insert(
+        &module->arena, &module->encoding_intern, hash,
+        /*insertion_count=*/has_alias ? 2 : 1, &slot);
+  }
+  if (iree_status_is_ok(status)) {
+    const uint32_t new_index = (uint32_t)encodings.count;
+    encodings.entries[new_index] = canonical_encoding;
+    ++encodings.count;
+    module->encodings = encodings;
+    loom_intern_table_insert(&module->encoding_intern, slot, hash, new_index);
+    if (has_alias) {
+      loom_module_index_encoding_alias(module, alias_hash, new_index);
+    }
+    *out_encoding_id = (uint16_t)(new_index + 1);
+  } else {
+    iree_arena_checkpoint_restore(&candidate_checkpoint);
+  }
+  return status;
 }
 
 const loom_encoding_vtable_t* loom_module_encoding_vtable(
@@ -1457,6 +1548,10 @@ iree_status_t loom_module_compact_symbols_preserving_symbol_refs(
     const iree_host_size_t slot =
         loom_intern_table_find_empty_slot(&module->encoding_intern, hash);
     loom_intern_table_insert(&module->encoding_intern, slot, hash, (uint32_t)i);
+    if (encoding->alias_id != LOOM_STRING_ID_INVALID) {
+      loom_module_index_encoding_alias(
+          module, loom_encoding_alias_hash(encoding->alias_id), (uint32_t)i);
+    }
   }
 
   for (iree_host_size_t old_index = 0; old_index < old_symbol_count;
@@ -1500,13 +1595,13 @@ iree_status_t loom_module_add_location(loom_module_t* module,
                                        loom_location_entry_t entry,
                                        loom_location_id_t* out_location_id) {
   // Location IDs are 32-bit and ID 0 is reserved for LOOM_LOCATION_UNKNOWN.
-  // IDs 1 through UINT32_MAX are representable, so once count advances past
-  // UINT32_MAX the next cast would wrap to 0 and forge the null sentinel.
-  if (module->locations.count > UINT32_MAX) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "location table full (%" PRIhsz
-                            " entries, max id %u)",
-                            module->locations.count, (unsigned)UINT32_MAX);
+  // IDs 1 through LOOM_LOCATION_ID_MAX are representable, so once count
+  // advances past it the next cast would wrap to the null sentinel.
+  if (module->locations.count > LOOM_LOCATION_ID_MAX) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "location table full (%" PRIhsz " entries, max id %u)",
+        module->locations.count, (unsigned)LOOM_LOCATION_ID_MAX);
   }
 
   loom_location_id_t id = (loom_location_id_t)module->locations.count;
@@ -1528,10 +1623,10 @@ iree_status_t loom_module_add_location(loom_module_t* module,
   return iree_ok_status();
 }
 
-iree_status_t loom_module_attach_location_field_spans(
+static iree_status_t loom_module_attach_location_field_span_data(
     loom_module_t* module, loom_location_id_t location_id,
-    const loom_location_field_span_t* field_spans,
-    iree_host_size_t field_span_count) {
+    loom_location_field_span_format_t format, const void* data, uint16_t count,
+    iree_host_size_t data_length) {
   if (location_id == LOOM_LOCATION_UNKNOWN ||
       (iree_host_size_t)location_id >= module->locations.count) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1547,32 +1642,64 @@ iree_status_t loom_module_attach_location_field_spans(
         "cannot attach field spans to non-file location kind %d",
         (int)entry->kind);
   }
-  if (entry->file.field_span_count > 0 || entry->file.field_spans) {
+  if (entry->file.field_span_count > 0 ||
+      entry->file.field_span_format != LOOM_LOCATION_FIELD_SPAN_FORMAT_NONE ||
+      entry->file.field_span_data) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "location %u already has field spans attached",
                             location_id);
   }
-  if (field_span_count > UINT16_MAX) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "location field span count %" PRIhsz
-                            " exceeds maximum %u",
-                            field_span_count, (unsigned)UINT16_MAX);
+  void* copied_spans = NULL;
+  if (data_length > 0) {
+    IREE_RETURN_IF_ERROR(
+        iree_arena_allocate(&module->arena, data_length, &copied_spans));
+    memcpy(copied_spans, data, data_length);
   }
-  if (field_span_count > 0 && !field_spans) {
+  entry->file.field_span_count = count;
+  entry->file.field_span_format = format;
+  entry->file.field_span_data = copied_spans;
+  return iree_ok_status();
+}
+
+iree_status_t loom_module_attach_location_compact_field_spans(
+    loom_module_t* module, loom_location_id_t location_id,
+    const loom_location_compact_field_span_t* field_spans,
+    uint16_t field_span_count) {
+  return loom_module_attach_location_field_span_data(
+      module, location_id, LOOM_LOCATION_FIELD_SPAN_FORMAT_COMPACT, field_spans,
+      field_span_count,
+      field_span_count * sizeof(loom_location_compact_field_span_t));
+}
+
+iree_status_t loom_module_attach_location_field_spans(
+    loom_module_t* module, loom_location_id_t location_id,
+    loom_location_field_span_array_t field_spans) {
+  if (field_spans.count > LOOM_LOCATION_FIELD_SPAN_COUNT_MAX) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "location field span count %" PRIhsz " exceeds maximum %u",
+        field_spans.count, (unsigned)LOOM_LOCATION_FIELD_SPAN_COUNT_MAX);
+  }
+  if (field_spans.count == 0) {
+    if (field_spans.format != LOOM_LOCATION_FIELD_SPAN_FORMAT_NONE ||
+        field_spans.data) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "empty location field span array must use the none format");
+    }
+  } else if ((field_spans.format != LOOM_LOCATION_FIELD_SPAN_FORMAT_COMPACT &&
+              field_spans.format != LOOM_LOCATION_FIELD_SPAN_FORMAT_WIDE) ||
+             !field_spans.data) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "field_span_count > 0 requires non-NULL spans");
+                            "non-empty location field span array requires a "
+                            "compact or wide payload");
   }
 
-  loom_location_field_span_t* copied_spans = NULL;
-  if (field_span_count > 0) {
-    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        &module->arena, field_span_count, sizeof(*copied_spans),
-        (void**)&copied_spans));
-    memcpy(copied_spans, field_spans, field_span_count * sizeof(*copied_spans));
-  }
-  entry->file.field_span_count = (uint16_t)field_span_count;
-  entry->file.field_spans = copied_spans;
-  return iree_ok_status();
+  return loom_module_attach_location_field_span_data(
+      module, location_id, field_spans.format, field_spans.data,
+      (uint16_t)field_spans.count,
+      loom_location_field_span_data_length(field_spans.format,
+                                           field_spans.count));
 }
 
 //===----------------------------------------------------------------------===//
@@ -2063,8 +2190,9 @@ iree_status_t loom_module_intern_string(loom_module_t* module,
     memcpy(copy, string.data, string.size);
   }
   iree_host_size_t slot = probe.slot;
-  IREE_RETURN_IF_ERROR(loom_intern_table_reserve_insert(
-      &module->arena, &module->string_intern, hash, &slot));
+  IREE_RETURN_IF_ERROR(
+      loom_intern_table_reserve_insert(&module->arena, &module->string_intern,
+                                       hash, /*insertion_count=*/1, &slot));
   const uint32_t new_index = (uint32_t)module->strings.count;
   loom_string_segment_t* segment =
       (loom_string_segment_t*)loom_segmented_storage_segment(
@@ -2585,6 +2713,34 @@ static iree_status_t loom_module_canonicalize_attr_value(
       }
       *out_value = loom_attr_string(value.string_id);
       return iree_ok_status();
+    case LOOM_ATTR_STRING_ARRAY: {
+      if (value.count == 0) {
+        *out_value = loom_attr_string_array(NULL, 0);
+        return iree_ok_status();
+      }
+      if (value.string_ids == NULL) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "non-empty string array attribute has a NULL payload");
+      }
+      loom_string_id_t* values = NULL;
+      IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+          &module->arena, value.count, sizeof(*values), (void**)&values));
+      for (uint16_t i = 0; i < value.count; ++i) {
+        if (value.string_ids[i] == LOOM_STRING_ID_INVALID ||
+            value.string_ids[i] >= module->strings.count) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "string array attribute element %u id %u is out of range "
+              "(module has %" PRIhsz " strings)",
+              (unsigned)i, (unsigned)value.string_ids[i],
+              module->strings.count);
+        }
+        values[i] = value.string_ids[i];
+      }
+      *out_value = loom_attr_string_array(values, value.count);
+      return iree_ok_status();
+    }
     case LOOM_ATTR_BOOL: {
       if (value.raw > 1) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -3092,6 +3248,27 @@ static iree_status_t loom_module_verify_canonical_attr_value(
                                 "attribute string value id %u is out of range "
                                 "(module has %" PRIhsz " strings)",
                                 value->string_id, module->strings.count);
+      }
+      return iree_ok_status();
+    }
+    case LOOM_ATTR_STRING_ARRAY: {
+      IREE_RETURN_IF_ERROR(loom_module_verify_canonical_attr_header(
+          value, IREE_SV("string array attribute")));
+      if ((value->count > 0) != (value->string_ids != NULL)) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "string array attribute pointer does not match its element count");
+      }
+      for (uint16_t i = 0; i < value->count; ++i) {
+        if (value->string_ids[i] == LOOM_STRING_ID_INVALID ||
+            value->string_ids[i] >= module->strings.count) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "string array attribute element %u id %u is out of range "
+              "(module has %" PRIhsz " strings)",
+              (unsigned)i, (unsigned)value->string_ids[i],
+              module->strings.count);
+        }
       }
       return iree_ok_status();
     }
@@ -4547,67 +4724,147 @@ uint16_t loom_block_remove_args(loom_module_t* module, loom_block_t* block,
 //===----------------------------------------------------------------------===//
 
 #define LOOM_BLOCK_ORDINAL_STRIDE UINT64_C(0x100000000)
+// A directional repair always has at least half of the ordinal arena. Limiting
+// the number of gaps to floor(sqrt(UINT64_MAX / 2)) guarantees that the density
+// search finds a repair window before reaching its sentinel.
+#define LOOM_BLOCK_ORDINAL_MAX_OP_COUNT UINT32_C(3037000499)
+static_assert((uint64_t)LOOM_BLOCK_ORDINAL_MAX_OP_COUNT *
+                      LOOM_BLOCK_ORDINAL_MAX_OP_COUNT <=
+                  UINT64_MAX / 2,
+              "block ordinal capacity exceeds the directional repair bound");
+static_assert(
+    (uint64_t)(LOOM_BLOCK_ORDINAL_MAX_OP_COUNT + 1) *
+            (LOOM_BLOCK_ORDINAL_MAX_OP_COUNT + 1) >
+        UINT64_MAX / 2,
+    "block ordinal capacity must use the full directional repair bound");
 
-static iree_status_t loom_block_renumber_ordinals(loom_block_t* block) {
-  uint64_t ordinal = LOOM_BLOCK_ORDINAL_STRIDE;
-  loom_op_t* op = NULL;
-  loom_block_for_each_op(block, op) {
-    op->block_ordinal = ordinal;
-    if (op->next_op && UINT64_MAX - ordinal < LOOM_BLOCK_ORDINAL_STRIDE) {
-      return iree_make_status(
-          IREE_STATUS_RESOURCE_EXHAUSTED,
-          "block has too many operations to assign sparse ordinals");
+static uint64_t loom_block_ordinal_midpoint(uint64_t lower, uint64_t upper) {
+  return lower + (upper - lower) / 2;
+}
+
+// Chooses the side of a sparse gap that preserves room for a repeated
+// insertion stream. The denser outer gap identifies the endpoint that moved on
+// the preceding insertion; placing beside it leaves the current gap available
+// beside the stable endpoint. Equal-density gaps split at the midpoint.
+static uint64_t loom_block_choose_ordinal(const loom_op_t* prev_op,
+                                          const loom_op_t* next_op,
+                                          uint64_t lower, uint64_t upper) {
+  const uint64_t previous_gap =
+      prev_op ? lower - (prev_op->prev_op ? prev_op->prev_op->block_ordinal : 0)
+              : UINT64_MAX;
+  const uint64_t next_gap =
+      next_op
+          ? (next_op->next_op ? next_op->next_op->block_ordinal : UINT64_MAX) -
+                upper
+          : UINT64_MAX;
+  if (previous_gap < next_gap) {
+    return lower + 1;
+  }
+  if (next_gap < previous_gap) {
+    return upper - 1;
+  }
+  return loom_block_ordinal_midpoint(lower, upper);
+}
+
+// Redistributes |count| successive ops across |gap_count| equal-width gaps.
+// Quotient/remainder accumulation avoids an overflowing distance * index
+// intermediate while producing floor(distance * index / gap_count).
+IREE_ATTRIBUTE_NOINLINE static void loom_block_redistribute_ordinals_forward(
+    loom_op_t* first_op, uint32_t count, uint64_t lower, uint64_t distance,
+    uint32_t gap_count) {
+  const uint64_t quotient = distance / gap_count;
+  const uint64_t remainder = distance % gap_count;
+  uint64_t ordinal = lower;
+  uint64_t remainder_accumulator = 0;
+  loom_op_t* op = first_op;
+  for (uint32_t i = 0; i < count; ++i, op = op->next_op) {
+    ordinal += quotient;
+    remainder_accumulator += remainder;
+    if (remainder_accumulator >= gap_count) {
+      ++ordinal;
+      remainder_accumulator -= gap_count;
     }
-    ordinal += LOOM_BLOCK_ORDINAL_STRIDE;
+    op->block_ordinal = ordinal;
   }
-  return iree_ok_status();
 }
 
-static iree_status_t loom_block_append_ordinal(loom_block_t* block,
-                                               uint64_t* out_ordinal) {
+// Opens a congested gap by redistributing a forward run. The first run
+// whose ordinal span exceeds the square of its gap count has enough density
+// slack to pay for the relabeling amortized across the insertions that consumed
+// it. The supported block-size limit guarantees that a run exists.
+static uint64_t loom_block_repair_ordinal_gap_forward(loom_op_t* prev_op,
+                                                      loom_op_t* next_op) {
+  const uint64_t lower = prev_op ? prev_op->block_ordinal : 0;
+  loom_op_t* boundary_op = next_op;
+  uint32_t gap_count = 1;
+  while (true) {
+    const uint64_t upper =
+        boundary_op ? boundary_op->block_ordinal : UINT64_MAX;
+    const uint64_t distance = upper - lower;
+    if (distance > (uint64_t)gap_count * gap_count) {
+      loom_block_redistribute_ordinals_forward(next_op, gap_count - 1, lower,
+                                               distance, gap_count);
+      return loom_block_choose_ordinal(
+          prev_op, next_op, lower,
+          next_op ? next_op->block_ordinal : UINT64_MAX);
+    }
+    IREE_ASSERT(boundary_op);
+    boundary_op = boundary_op->next_op;
+    ++gap_count;
+  }
+}
+
+// Opens a congested gap by redistributing a backward run.
+static uint64_t loom_block_repair_ordinal_gap_backward(loom_block_t* block,
+                                                       loom_op_t* prev_op,
+                                                       loom_op_t* next_op) {
+  const uint64_t upper = next_op ? next_op->block_ordinal : UINT64_MAX;
+  loom_op_t* boundary_op = prev_op;
+  uint32_t gap_count = 1;
+  while (true) {
+    const uint64_t lower = boundary_op ? boundary_op->block_ordinal : 0;
+    const uint64_t distance = upper - lower;
+    if (distance > (uint64_t)gap_count * gap_count) {
+      loom_op_t* first_op =
+          boundary_op ? boundary_op->next_op : block->first_op;
+      loom_block_redistribute_ordinals_forward(first_op, gap_count - 1, lower,
+                                               distance, gap_count);
+      return loom_block_choose_ordinal(
+          prev_op, next_op, prev_op ? prev_op->block_ordinal : 0, upper);
+    }
+    IREE_ASSERT(boundary_op);
+    boundary_op = boundary_op->prev_op;
+    ++gap_count;
+  }
+}
+
+// Repairs an exhausted insertion gap. Kept out of line so the sparse-gap and
+// append paths do not carry the density search and redistribution machinery.
+IREE_ATTRIBUTE_NOINLINE static uint64_t loom_block_repair_ordinal_gap(
+    loom_block_t* block, loom_op_t* prev_op, loom_op_t* next_op) {
+  const uint64_t lower = prev_op ? prev_op->block_ordinal : 0;
+  if (lower < UINT64_MAX / 2) {
+    return loom_block_repair_ordinal_gap_forward(prev_op, next_op);
+  }
+  return loom_block_repair_ordinal_gap_backward(block, prev_op, next_op);
+}
+
+static uint64_t loom_block_insert_ordinal(loom_block_t* block,
+                                          loom_op_t* prev_op,
+                                          loom_op_t* next_op) {
   if (!block->last_op) {
-    *out_ordinal = LOOM_BLOCK_ORDINAL_STRIDE;
-    return iree_ok_status();
-  }
-  if (UINT64_MAX - block->last_op->block_ordinal > LOOM_BLOCK_ORDINAL_STRIDE) {
-    *out_ordinal = block->last_op->block_ordinal + LOOM_BLOCK_ORDINAL_STRIDE;
-    return iree_ok_status();
-  }
-  IREE_RETURN_IF_ERROR(loom_block_renumber_ordinals(block));
-  if (UINT64_MAX - block->last_op->block_ordinal <= LOOM_BLOCK_ORDINAL_STRIDE) {
-    return iree_make_status(
-        IREE_STATUS_RESOURCE_EXHAUSTED,
-        "block has too many operations to append another ordinal");
-  }
-  *out_ordinal = block->last_op->block_ordinal + LOOM_BLOCK_ORDINAL_STRIDE;
-  return iree_ok_status();
-}
-
-static iree_status_t loom_block_insert_ordinal(loom_block_t* block,
-                                               loom_op_t* prev_op,
-                                               loom_op_t* next_op,
-                                               uint64_t* out_ordinal) {
-  if (!next_op) {
-    return loom_block_append_ordinal(block, out_ordinal);
+    return LOOM_BLOCK_ORDINAL_STRIDE;
   }
 
-  uint64_t lower = prev_op ? prev_op->block_ordinal : 0;
-  uint64_t upper = next_op->block_ordinal;
-  if (lower + 1 < upper) {
-    *out_ordinal = prev_op ? lower + 1 : lower + (upper - lower) / 2;
-    return iree_ok_status();
+  const uint64_t lower = prev_op ? prev_op->block_ordinal : 0;
+  const uint64_t upper = next_op ? next_op->block_ordinal : UINT64_MAX;
+  if (upper - lower > 1) {
+    if (!next_op && upper - lower > LOOM_BLOCK_ORDINAL_STRIDE) {
+      return lower + LOOM_BLOCK_ORDINAL_STRIDE;
+    }
+    return loom_block_choose_ordinal(prev_op, next_op, lower, upper);
   }
-
-  IREE_RETURN_IF_ERROR(loom_block_renumber_ordinals(block));
-  lower = prev_op ? prev_op->block_ordinal : 0;
-  upper = next_op->block_ordinal;
-  if (lower + 1 >= upper) {
-    return iree_make_status(
-        IREE_STATUS_RESOURCE_EXHAUSTED,
-        "block has too many operations to assign an insertion ordinal");
-  }
-  *out_ordinal = prev_op ? lower + 1 : lower + (upper - lower) / 2;
-  return iree_ok_status();
+  return loom_block_repair_ordinal_gap(block, prev_op, next_op);
 }
 
 static iree_status_t loom_block_link_op_between(loom_module_t* module,
@@ -4616,9 +4873,11 @@ static iree_status_t loom_block_link_op_between(loom_module_t* module,
                                                 loom_op_t* next_op,
                                                 loom_op_t* op) {
   (void)module;
-  if (block->op_count == UINT32_MAX) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "block op count exceeds UINT32_MAX");
+  if (block->op_count >= LOOM_BLOCK_ORDINAL_MAX_OP_COUNT) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "block operation count exceeds sparse ordinal capacity %u",
+        (unsigned)LOOM_BLOCK_ORDINAL_MAX_OP_COUNT);
   }
   if (op->parent_block && op->parent_block != block) {
     return iree_make_status(
@@ -4631,9 +4890,7 @@ static iree_status_t loom_block_link_op_between(loom_module_t* module,
                             "cannot insert op already linked into a block");
   }
 
-  uint64_t ordinal = 0;
-  IREE_RETURN_IF_ERROR(
-      loom_block_insert_ordinal(block, prev_op, next_op, &ordinal));
+  const uint64_t ordinal = loom_block_insert_ordinal(block, prev_op, next_op);
 
   op->parent_block = block;
   op->block_ordinal = ordinal;

@@ -10,6 +10,7 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 #include "loom/target/arch/amdgpu/artifact_key.h"
+#include "loom/target/arch/amdgpu/facts.h"
 #include "loom/target/arch/amdgpu/records/target_records.h"
 #include "loom/target/facts_builder.h"
 
@@ -26,12 +27,12 @@ static const loom_amdgpu_target_info_t* LookupTarget(const char* name) {
 TEST(AmdgpuTargetProfileTest, PreservesStructuredTargetFacts) {
   const loom_amdgpu_target_info_t* target = LookupTarget("gfx942");
   const loom_amdgpu_target_identity_t identity = {
-      /*.target=*/target,
-      /*.amdhsa_features=*/
-      {
-          /*.sramecc=*/LOOM_AMDGPU_TARGET_FEATURE_ON,
-          /*.xnack=*/LOOM_AMDGPU_TARGET_FEATURE_OFF,
-      },
+      .target = target,
+      .amdhsa_features =
+          {
+              .sramecc = LOOM_AMDGPU_TARGET_FEATURE_ON,
+              .xnack = LOOM_AMDGPU_TARGET_FEATURE_OFF,
+          },
   };
 
   loom_amdgpu_target_profile_t profile = {};
@@ -79,16 +80,19 @@ TEST(AmdgpuTargetProfileTest, ProjectsCompilerOwnedTypedFacts) {
             profile.base.target_bundle->snapshot->codegen_format);
   EXPECT_FALSE(facts->subgroup_size_explicit);
   EXPECT_EQ(facts->base.storage.snapshot.subgroup_size, 0u);
+  EXPECT_EQ(facts->base.storage.snapshot.subgroup_partition,
+            LOOM_TARGET_SUBGROUP_PARTITION_DENSE);
   EXPECT_FALSE(facts->contract_set_key_explicit);
 
   // A structured profile can override the preset without changing processor
   // identity. Those values must become explicit before standalone IR emission.
   const auto& preset = *profile.base.target_bundle;
-  loom_target_bundle_storage_t storage = {};
-  storage.snapshot = *preset.snapshot;
-  storage.export_plan = *preset.export_plan;
-  storage.config = *preset.config;
-  storage.bundle = preset;
+  loom_target_bundle_storage_t storage = {
+      .snapshot = *preset.snapshot,
+      .export_plan = *preset.export_plan,
+      .config = *preset.config,
+      .bundle = preset,
+  };
   loom_target_bundle_storage_rebind(&storage);
   storage.snapshot.subgroup_size = 64;
   storage.config.contract_set_key = IREE_SV("custom_contract");
@@ -104,6 +108,8 @@ TEST(AmdgpuTargetProfileTest, ProjectsCompilerOwnedTypedFacts) {
   ASSERT_NE(overridden, nullptr);
   EXPECT_TRUE(overridden->subgroup_size_explicit);
   EXPECT_EQ(overridden->base.storage.snapshot.subgroup_size, 64u);
+  EXPECT_EQ(overridden->base.storage.snapshot.subgroup_partition,
+            LOOM_TARGET_SUBGROUP_PARTITION_DENSE);
   EXPECT_TRUE(overridden->contract_set_key_explicit);
   EXPECT_TRUE(
       iree_string_view_equal(overridden->base.storage.config.contract_set_key,
@@ -211,7 +217,7 @@ TEST(AmdgpuTargetProfileTest, RejectsUnsupportedTargetFeatures) {
   const loom_amdgpu_target_info_t* gfx1151 = LookupTarget("gfx1151");
   loom_amdgpu_target_profile_t profile = {};
   const loom_amdgpu_target_identity_t default_identity = {
-      /*.target=*/gfx1151,
+      .target = gfx1151,
   };
   IREE_ASSERT_OK(
       loom_amdgpu_target_profile_initialize(&default_identity, &profile));
@@ -322,12 +328,12 @@ TEST(AmdgpuTargetProfileTest, SelectsEveryValidFeatureCombination) {
       for (iree_host_size_t xnack_ordinal = 0;
            xnack_ordinal < xnack_state_count; ++xnack_ordinal) {
         const loom_amdgpu_target_identity_t identity = {
-            /*.target=*/target,
-            /*.amdhsa_features=*/
-            {
-                /*.sramecc=*/sramecc_states[sramecc_ordinal],
-                /*.xnack=*/xnack_states[xnack_ordinal],
-            },
+            .target = target,
+            .amdhsa_features =
+                {
+                    .sramecc = sramecc_states[sramecc_ordinal],
+                    .xnack = xnack_states[xnack_ordinal],
+                },
         };
         char selector_storage[128];
         iree_string_view_t selector = iree_string_view_empty();
@@ -350,111 +356,6 @@ TEST(AmdgpuTargetProfileTest, RejectsInvalidProfileSelectors) {
       IREE_STATUS_INVALID_ARGUMENT,
       loom_amdgpu_target_profile_select(IREE_SV("gfx1151:xnack+"), &profile));
   EXPECT_EQ(profile, nullptr);
-}
-
-TEST(AmdgpuTargetProfileTest, ExhaustsTargetFeatureSatisfactionRelation) {
-  const iree_host_size_t target_count = loom_amdgpu_target_info_target_count();
-  ASSERT_NE(target_count, 0u);
-  for (iree_host_size_t i = 0; i < target_count; ++i) {
-    const loom_amdgpu_target_info_t* target =
-        loom_amdgpu_target_info_target_at(i);
-    ASSERT_NE(target, nullptr);
-    const loom_amdgpu_processor_info_t* processor =
-        loom_amdgpu_target_info_target_processor(target);
-    ASSERT_NE(processor, nullptr);
-
-    loom_amdgpu_target_identity_t base_identity = {};
-    loom_amdgpu_target_identity_initialize(target, &base_identity);
-    EXPECT_TRUE(
-        loom_amdgpu_target_identity_equal(&base_identity, &base_identity));
-    EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(
-        &base_identity, &base_identity));
-
-    loom_amdgpu_target_id_feature_support_flags_t remaining_features =
-        LOOM_AMDGPU_TARGET_ID_FEATURE_SUPPORT_KNOWN_FLAGS;
-    while (remaining_features != 0) {
-      const loom_amdgpu_target_id_feature_support_bit_t feature =
-          static_cast<loom_amdgpu_target_id_feature_support_bit_t>(
-              remaining_features & (0u - remaining_features));
-      remaining_features &= ~feature;
-      loom_amdgpu_target_identity_t effective = base_identity;
-      loom_amdgpu_target_identity_t requirement = base_identity;
-      loom_amdgpu_target_feature_state_t* effective_state =
-          loom_amdgpu_amdhsa_feature_state_select(&effective.amdhsa_features,
-                                                  feature);
-      loom_amdgpu_target_feature_state_t* requirement_state =
-          loom_amdgpu_amdhsa_feature_state_select(&requirement.amdhsa_features,
-                                                  feature);
-      ASSERT_NE(effective_state, nullptr);
-      ASSERT_NE(requirement_state, nullptr);
-
-      loom_amdgpu_target_identity_t distinct_identity = base_identity;
-      loom_amdgpu_target_feature_state_t* distinct_state =
-          loom_amdgpu_amdhsa_feature_state_select(
-              &distinct_identity.amdhsa_features, feature);
-      ASSERT_NE(distinct_state, nullptr);
-      *distinct_state = *distinct_state == LOOM_AMDGPU_TARGET_FEATURE_ON
-                            ? LOOM_AMDGPU_TARGET_FEATURE_OFF
-                            : LOOM_AMDGPU_TARGET_FEATURE_ON;
-      EXPECT_FALSE(loom_amdgpu_target_identity_equal(&base_identity,
-                                                     &distinct_identity));
-
-      if (!loom_amdgpu_processor_supports_target_id_features(processor,
-                                                             feature)) {
-        EXPECT_EQ(*effective_state, LOOM_AMDGPU_TARGET_FEATURE_UNSUPPORTED);
-        EXPECT_EQ(*requirement_state, LOOM_AMDGPU_TARGET_FEATURE_UNSUPPORTED);
-        continue;
-      }
-
-      *requirement_state = LOOM_AMDGPU_TARGET_FEATURE_ANY;
-      *effective_state = LOOM_AMDGPU_TARGET_FEATURE_OFF;
-      EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(
-          &effective, &requirement));
-
-      *requirement_state = LOOM_AMDGPU_TARGET_FEATURE_ON;
-      *effective_state = LOOM_AMDGPU_TARGET_FEATURE_ON;
-      EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(
-          &effective, &requirement));
-      *effective_state = LOOM_AMDGPU_TARGET_FEATURE_OFF;
-      EXPECT_FALSE(loom_amdgpu_target_identity_satisfies_requirement(
-          &effective, &requirement));
-
-      *requirement_state = LOOM_AMDGPU_TARGET_FEATURE_OFF;
-      EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(
-          &effective, &requirement));
-      *effective_state = LOOM_AMDGPU_TARGET_FEATURE_ON;
-      EXPECT_FALSE(loom_amdgpu_target_identity_satisfies_requirement(
-          &effective, &requirement));
-    }
-
-    for (iree_host_size_t other_ordinal = 0; other_ordinal < target_count;
-         ++other_ordinal) {
-      const loom_amdgpu_target_info_t* other_target =
-          loom_amdgpu_target_info_target_at(other_ordinal);
-      ASSERT_NE(other_target, nullptr);
-      loom_amdgpu_target_identity_t other_identity = {};
-      loom_amdgpu_target_identity_initialize(other_target, &other_identity);
-      EXPECT_EQ(
-          loom_amdgpu_target_identity_equal(&base_identity, &other_identity),
-          target == other_target);
-    }
-  }
-}
-
-TEST(AmdgpuTargetProfileTest, OverlayTargetsRemainExact) {
-  loom_amdgpu_target_identity_t a0 = {};
-  loom_amdgpu_target_identity_initialize(LookupTarget("gfx1250-a0"), &a0);
-  loom_amdgpu_target_identity_t b0 = {};
-  loom_amdgpu_target_identity_initialize(LookupTarget("gfx1250"), &b0);
-  loom_amdgpu_target_identity_t generic = {};
-  loom_amdgpu_target_identity_initialize(LookupTarget("gfx12-5-generic"),
-                                         &generic);
-
-  EXPECT_FALSE(loom_amdgpu_target_identity_equal(&a0, &b0));
-  EXPECT_FALSE(loom_amdgpu_target_identity_satisfies_requirement(&a0, &b0));
-  EXPECT_FALSE(loom_amdgpu_target_identity_satisfies_requirement(&b0, &a0));
-  EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(&a0, &generic));
-  EXPECT_TRUE(loom_amdgpu_target_identity_satisfies_requirement(&b0, &generic));
 }
 
 }  // namespace

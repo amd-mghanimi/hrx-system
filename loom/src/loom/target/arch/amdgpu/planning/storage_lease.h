@@ -16,6 +16,13 @@
 extern "C" {
 #endif
 
+typedef enum loom_amdgpu_xcnt_release_group_e {
+  // Vector-memory packet sources retained by translation state.
+  LOOM_AMDGPU_XCNT_RELEASE_GROUP_VMEM = 1,
+  // Scalar-memory packet sources retained by translation state.
+  LOOM_AMDGPU_XCNT_RELEASE_GROUP_SMEM = 2,
+} loom_amdgpu_xcnt_release_group_t;
+
 // Initializes |out_provider| with the stateless AMDGPU storage-lease provider.
 void loom_amdgpu_storage_lease_provider(
     loom_low_storage_lease_provider_t* out_provider);

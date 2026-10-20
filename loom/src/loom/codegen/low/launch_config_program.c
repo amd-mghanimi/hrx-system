@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include "loom/analysis/kernel_launch_config.h"
 #include "loom/codegen/low/storage_layout.h"
 #include "loom/ir/context.h"
 #include "loom/ops/func/ops.h"
@@ -22,21 +23,6 @@
 #include "loom/rewrite/remap.h"
 #include "loom/rewrite/rewriter.h"
 #include "loom/transforms/cleanup/dce.h"
-
-enum {
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_COUNT_X = 0,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_COUNT_Y = 1,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_COUNT_Z = 2,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_SIZE_X = 3,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_SIZE_Y = 4,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_SIZE_Z = 5,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_CLUSTER_SIZE_X = 6,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_CLUSTER_SIZE_Y = 7,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_CLUSTER_SIZE_Z = 8,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_SUBGROUP_SIZE = 9,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_WORKGROUP_STORAGE_BYTES = 10,
-  LOOM_KERNEL_LAUNCH_CONFIG_RESULT_COUNT = 11,
-};
 
 struct loom_kernel_launch_config_program_entry_t {
   // Next entry in capture order.
@@ -221,13 +207,6 @@ static iree_status_t loom_kernel_launch_config_program_build_function(
   for (uint16_t i = 0; i < source_arguments.count; ++i) {
     const loom_type_t source_type =
         loom_module_value_type(source_module, source_arguments.values[i]);
-    if (!loom_type_is_scalar(source_type)) {
-      return iree_make_status(
-          IREE_STATUS_UNIMPLEMENTED,
-          "kernel '@%.*s' launch workload argument %u is not scalar",
-          (int)source_function_name.size, source_function_name.data,
-          (unsigned)i);
-    }
     IREE_RETURN_IF_ERROR(
         loom_ir_remap_type(&remap, source_type, &argument_types[i]));
   }
@@ -246,11 +225,12 @@ static iree_status_t loom_kernel_launch_config_program_build_function(
   IREE_RETURN_IF_ERROR(loom_func_def_build(
       &builder,
       LOOM_FUNC_DEF_BUILD_FLAG_HAS_VISIBILITY |
-          LOOM_FUNC_DEF_BUILD_FLAG_HAS_PURITY,
-      LOOM_FUNC_VISIBILITY_PUBLIC, /*retain=*/0, /*cc=*/0,
-      LOOM_FUNC_PURITY_PURE, /*temperature=*/0, /*inline_policy=*/0,
-      loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
-      LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(),
+          LOOM_FUNC_DEF_BUILD_FLAG_HAS_EFFECT_CONTRACT,
+      LOOM_FUNC_VISIBILITY_PUBLIC, /*linkage=*/0, /*retain=*/0, /*cc=*/0,
+      LOOM_CALLABLE_EFFECT_CONTRACT_PURE, /*temperature=*/0,
+      /*inline_policy=*/0, loom_symbol_ref_null(), /*abi=*/0,
+      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
+      loom_named_attr_slice_empty(),
       (loom_symbol_ref_t){.module_id = 0, .symbol_id = target_symbol_id},
       argument_types, source_arguments.count, result_types,
       IREE_ARRAYSIZE(result_types), /*tied_results=*/NULL,
@@ -399,6 +379,68 @@ iree_status_t loom_kernel_launch_config_program_capture(
   return status;
 }
 
+iree_status_t loom_kernel_launch_config_program_capture_static(
+    loom_kernel_launch_config_program_t* program,
+    iree_string_view_t export_name, const loom_kernel_launch_config_t* config) {
+  loom_module_t* module = program->module;
+  loom_string_id_t name = LOOM_STRING_ID_INVALID;
+  IREE_RETURN_IF_ERROR(loom_module_intern_string(module, export_name, &name));
+  loom_symbol_id_t symbol = LOOM_SYMBOL_ID_INVALID;
+  IREE_RETURN_IF_ERROR(loom_module_add_symbol(module, name, &symbol));
+  loom_type_t result_types[LOOM_KERNEL_LAUNCH_CONFIG_RESULT_COUNT];
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(result_types); ++i) {
+    result_types[i] = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  }
+  loom_builder_t builder;
+  loom_builder_initialize(module, &module->arena, loom_module_block(module),
+                          &builder);
+  loom_op_t* function = NULL;
+  IREE_RETURN_IF_ERROR(loom_func_def_build(
+      &builder,
+      LOOM_FUNC_DEF_BUILD_FLAG_HAS_VISIBILITY |
+          LOOM_FUNC_DEF_BUILD_FLAG_HAS_EFFECT_CONTRACT,
+      LOOM_FUNC_VISIBILITY_PUBLIC, /*linkage=*/0, /*retain=*/0, /*cc=*/0,
+      LOOM_CALLABLE_EFFECT_CONTRACT_PURE, /*temperature=*/0,
+      /*inline_policy=*/0, loom_symbol_ref_null(), /*abi=*/0,
+      loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
+      loom_named_attr_slice_empty(),
+      (loom_symbol_ref_t){.module_id = 0, .symbol_id = symbol},
+      /*arg_types=*/NULL, /*arg_count=*/0, result_types,
+      IREE_ARRAYSIZE(result_types), /*tied_results=*/NULL,
+      /*tied_result_count=*/0, /*predicates=*/NULL, /*predicates_count=*/0,
+      LOOM_LOCATION_UNKNOWN, &function));
+  loom_builder_enter_region(&builder, function, loom_func_def_body(function));
+  const int64_t values[LOOM_KERNEL_LAUNCH_CONFIG_RESULT_COUNT] = {
+      config->workgroup_count.x,
+      config->workgroup_count.y,
+      config->workgroup_count.z,
+      config->workgroup_size.x,
+      config->workgroup_size.y,
+      config->workgroup_size.z,
+      config->workgroup_cluster_size.x,
+      config->workgroup_cluster_size.y,
+      config->workgroup_cluster_size.z,
+      config->subgroup_size,
+      (int64_t)config->workgroup_storage_bytes,
+  };
+  loom_value_id_t results[LOOM_KERNEL_LAUNCH_CONFIG_RESULT_COUNT];
+  iree_status_t status = iree_ok_status();
+  for (iree_host_size_t i = 0;
+       i < IREE_ARRAYSIZE(results) && iree_status_is_ok(status); ++i) {
+    status = loom_kernel_launch_config_build_constant(
+        &builder, values[i], LOOM_LOCATION_UNKNOWN, &results[i]);
+  }
+  loom_op_t* return_op = NULL;
+  if (iree_status_is_ok(status)) {
+    status = loom_func_return_build(&builder, results, IREE_ARRAYSIZE(results),
+                                    LOOM_LOCATION_UNKNOWN, &return_op);
+  }
+  if (iree_status_is_ok(status)) {
+    ++program->entry_count;
+  }
+  return status;
+}
+
 static iree_status_t loom_kernel_launch_config_resolve_low_function(
     const loom_kernel_launch_config_program_t* program,
     const loom_module_t* lowered_module,
@@ -434,15 +476,13 @@ static iree_status_t loom_kernel_launch_config_workgroup_storage_bytes(
     const loom_module_t* module, loom_func_like_t low_function,
     uint64_t* out_bytes) {
   *out_bytes = 0;
-  if (!loom_low_kernel_def_isa(low_function.op)) {
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "launch config entry does not resolve to a final low kernel");
-  }
+  // ABI materialization can replace a kernel with a callable function. Both
+  // carry final storage reservations in their function-like body.
   const loom_region_t* body = loom_func_like_body(low_function);
   if (body == NULL) {
-    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "final low kernel has no body for storage layout");
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "final lowered entry has no body for storage layout");
   }
   loom_low_storage_layout_space_sizes_t sizes = {0};
   loom_block_t* block = NULL;
@@ -456,6 +496,54 @@ static iree_status_t loom_kernel_launch_config_workgroup_storage_bytes(
     }
   }
   *out_bytes = sizes.workgroup_bytes;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_kernel_launch_config_program_project_scalar_arguments(
+    loom_kernel_launch_config_program_t* program,
+    const loom_kernel_launch_config_program_entry_t* entry,
+    iree_arena_allocator_t* scratch_arena) {
+  loom_module_t* module = program->module;
+  loom_block_t* entry_block =
+      loom_region_entry_block(loom_func_like_body(entry->launch_function));
+  if (entry_block->arg_count == 0) {
+    return iree_ok_status();
+  }
+  const iree_string_view_t source_name =
+      loom_string_table_get(&module->strings, entry->source_function_name_id);
+
+  bool* remove_arguments = NULL;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      scratch_arena, entry_block->arg_count, sizeof(*remove_arguments),
+      (void**)&remove_arguments));
+  for (uint16_t i = 0; i < entry_block->arg_count; ++i) {
+    const loom_value_id_t argument = loom_block_arg_id(entry_block, i);
+    remove_arguments[i] =
+        !loom_type_is_scalar(loom_module_value_type(module, argument));
+    if (!remove_arguments[i]) {
+      continue;
+    }
+    if (loom_module_value_has_uses(module, argument)) {
+      const iree_string_view_t argument_name =
+          loom_module_value_name(module, argument);
+      if (!iree_string_view_is_empty(argument_name)) {
+        return iree_make_status(
+            IREE_STATUS_FAILED_PRECONDITION,
+            "kernel '@%.*s' launch-config artifact still depends on "
+            "non-scalar workload argument %u (%%%.*s) after specialization",
+            (int)source_name.size, source_name.data, (unsigned)i,
+            (int)argument_name.size, argument_name.data);
+      }
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "kernel '@%.*s' launch-config artifact still depends on "
+          "non-scalar workload argument %u after specialization",
+          (int)source_name.size, source_name.data, (unsigned)i);
+    }
+  }
+
+  loom_block_remove_args(module, entry_block, remove_arguments,
+                         entry_block->arg_count);
   return iree_ok_status();
 }
 
@@ -522,6 +610,10 @@ iree_status_t loom_kernel_launch_config_program_finalize(
           .statistic_storage = &statistics,
       };
       status = loom_dce_run(&dce_pass, program->module, entry->launch_function);
+      if (iree_status_is_ok(status)) {
+        status = loom_kernel_launch_config_program_project_scalar_arguments(
+            program, entry, &scratch_arena);
+      }
       iree_arena_reset(&scratch_arena);
     }
   }
@@ -530,4 +622,11 @@ iree_status_t loom_kernel_launch_config_program_finalize(
     *out_module = program->module;
   }
   return status;
+}
+
+loom_module_t* loom_kernel_launch_config_program_take_module(
+    loom_kernel_launch_config_program_t* program) {
+  loom_module_t* module = program->module;
+  program->module = NULL;
+  return module;
 }

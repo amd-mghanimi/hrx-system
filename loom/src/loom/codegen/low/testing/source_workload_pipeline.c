@@ -10,9 +10,11 @@
 #include <string.h>
 
 #include "iree/base/internal/arena.h"
+#include "loom/analysis/storage_access.h"
 #include "loom/codegen/low/function.h"
 #include "loom/codegen/low/lower/source_selection.h"
 #include "loom/codegen/low/pipeline/pipeline.h"
+#include "loom/codegen/low/representation_binding.h"
 #include "loom/codegen/low/testing/allocation_checker.h"
 #include "loom/codegen/low/verify.h"
 #include "loom/codegen/pass_environment.h"
@@ -83,7 +85,8 @@ static uint32_t loom_low_source_workload_count_low_descriptor_ops(
     const loom_block_t* block = loom_region_const_block(body, block_index);
     const loom_op_t* op = NULL;
     loom_block_for_each_op(block, op) {
-      if (loom_low_op_isa(op) || loom_low_const_isa(op)) {
+      if (loom_low_descriptor_packet_kind(op) !=
+          LOOM_LOW_DESCRIPTOR_PACKET_NONE) {
         ++count;
       }
     }
@@ -162,11 +165,20 @@ static iree_status_t loom_low_source_workload_prepare_low_functions(
   return status;
 }
 
+typedef struct loom_low_source_workload_function_plan_t {
+  // Complete lowering decisions retained before any source body is replaced.
+  loom_low_lower_function_plan_t* function;
+  // Owned diagnostics and output accounting spanning planning and emission.
+  loom_low_lower_result_t result;
+} loom_low_source_workload_function_plan_t;
+
 iree_status_t loom_low_source_workload_run_pipeline(
     loom_module_t* module,
     const loom_low_source_workload_pipeline_options_t* options,
     iree_arena_block_pool_t* block_pool,
-    loom_low_source_workload_pipeline_counters_t* out_counters) {
+    loom_low_source_workload_pipeline_counters_t* out_counters,
+    bool* out_accepted) {
+  *out_accepted = false;
   memset(out_counters, 0, sizeof(*out_counters));
 
   loom_low_source_workload_count_module_source_ops(
@@ -193,13 +205,24 @@ iree_status_t loom_low_source_workload_run_pipeline(
     loom_low_lower_module_state_t* module_state = NULL;
     if (iree_status_is_ok(status)) {
       status =
-          loom_low_lower_module_state_create(&lowering_arena, &module_state);
+          loom_low_lower_module_state_allocate(&lowering_arena, &module_state);
     }
+    iree_arena_allocator_t access_arena;
+    iree_arena_initialize(block_pool, &access_arena);
+    loom_storage_access_scope_t storage_access;
+    loom_storage_access_scope_initialize(module, &access_arena,
+                                         &storage_access);
+    loom_low_source_workload_function_plan_t* plans = NULL;
+    iree_host_size_t plan_count = 0;
     loom_op_t** lowered_funcs = NULL;
     if (iree_status_is_ok(status) && selection_list.count == 0) {
       status = iree_make_status(
           IREE_STATUS_NOT_FOUND,
           "generated workload has no compatible source functions");
+    }
+    if (iree_status_is_ok(status)) {
+      status = iree_arena_allocate_array(&lowering_arena, selection_list.count,
+                                         sizeof(*plans), (void**)&plans);
     }
     if (iree_status_is_ok(status)) {
       status = iree_arena_allocate_array(&lowering_arena, selection_list.count,
@@ -224,28 +247,34 @@ iree_status_t loom_low_source_workload_run_pipeline(
           .descriptor_registry = options->descriptor_registry,
           .policy = selection->policy,
           .fact_table = fact_table,
+          .storage_access = &storage_access,
           .max_errors = 20,
           .module_state = module_state,
       };
-      loom_low_lower_result_t func_lower_result = {0};
-      status = loom_low_lower_function(module, selection->func, &lower_options,
-                                       &func_lower_result);
+      loom_low_source_workload_function_plan_t* plan = &plans[plan_count++];
+      *plan = (loom_low_source_workload_function_plan_t){0};
+      status = loom_low_lower_plan_function(module, selection->func,
+                                            &lower_options, &lowering_arena,
+                                            &plan->result, &plan->function);
       loom_pass_value_fact_owner_invalidate(&value_facts);
-      lower_result.error_count += func_lower_result.error_count;
-      lower_result.remark_count += func_lower_result.remark_count;
-      if (iree_status_is_ok(status) && func_lower_result.error_count != 0) {
+      lower_result.error_count += plan->result.error_count;
+      lower_result.remark_count += plan->result.remark_count;
+      if (iree_status_is_ok(status) && plan->result.error_count != 0) {
         status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                   "source lowering produced errors");
-      } else if (iree_status_is_ok(status) &&
-                 func_lower_result.low_func_op == NULL) {
-        status = iree_make_status(
-            IREE_STATUS_INTERNAL,
-            "source lowering did not emit a target-low function");
       }
+    }
+    iree_arena_deinitialize(&access_arena);
+    for (iree_host_size_t i = 0; i < plan_count && iree_status_is_ok(status);
+         ++i) {
+      status =
+          loom_low_lower_emit_function(plans[i].function, &plans[i].result);
       if (iree_status_is_ok(status)) {
-        lowered_funcs[i] = func_lower_result.low_func_op;
+        lowered_funcs[i] = plans[i].result.low_func_op;
       }
-      loom_low_lower_result_deinitialize(&func_lower_result);
+    }
+    for (iree_host_size_t i = 0; i < plan_count; ++i) {
+      loom_low_lower_result_deinitialize(&plans[i].result);
     }
     if (iree_status_is_ok(status)) {
       status = loom_low_source_selection_finalize_policies(
@@ -286,12 +315,19 @@ iree_status_t loom_low_source_workload_run_pipeline(
         .descriptor_registry = options->descriptor_registry,
         .schedule_strategy = options->schedule_strategy,
     };
-    for (iree_host_size_t i = 0;
-         i < selection_list.count && iree_status_is_ok(status); ++i) {
+    bool frames_accepted = true;
+    for (iree_host_size_t i = 0; i < selection_list.count &&
+                                 iree_status_is_ok(status) && frames_accepted;
+         ++i) {
       loom_low_emission_frame_t frame = {0};
-      status = loom_low_emission_frame_build(
-          module, lowered_funcs[i], &frame_options, &frame_arena, &frame);
-      if (iree_status_is_ok(status)) {
+      bool frame_accepted = false;
+      status = loom_low_emission_frame_build(module, lowered_funcs[i],
+                                             &frame_options, &frame_arena,
+                                             &frame, &frame_accepted);
+      if (iree_status_is_ok(status) && !frame_accepted) {
+        frames_accepted = false;
+      }
+      if (iree_status_is_ok(status) && frame_accepted) {
         loom_low_allocation_check_result_t check_result = {0};
         status = loom_low_allocation_check_frame(&frame, &frame_arena,
                                                  &check_result);
@@ -310,12 +346,12 @@ iree_status_t loom_low_source_workload_run_pipeline(
               check_result.first_violation.secondary_index);
         }
       }
-      if (iree_status_is_ok(status)) {
+      if (iree_status_is_ok(status) && frame_accepted) {
         ++out_counters->allocation_check_count;
         out_counters->schedule_node_count +=
             frame.schedule.scheduled_node_count;
         out_counters->schedule_dependency_count +=
-            frame.schedule.dependencies.count;
+            frame.schedule.dependency_count;
         out_counters->schedule_resource_use_count +=
             frame.schedule.resource_use_count;
         out_counters->schedule_hazard_gap_count +=
@@ -331,6 +367,9 @@ iree_status_t loom_low_source_workload_run_pipeline(
     }
     if (frame_arena_initialized) {
       iree_arena_deinitialize(&frame_arena);
+    }
+    if (iree_status_is_ok(status) && frames_accepted) {
+      *out_accepted = true;
     }
   }
 

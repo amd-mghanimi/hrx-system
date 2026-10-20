@@ -10,7 +10,6 @@
 
 #include "loom/analysis/cfg_condition_operand_domain.h"
 #include "loom/analysis/cfg_condition_relation_table.h"
-#include "loom/ops/cfg/ops.h"
 #include "loom/util/adaptive_sort.h"
 
 //===----------------------------------------------------------------------===//
@@ -56,12 +55,6 @@ typedef struct loom_cfg_condition_edge_state_t {
   // Borrowed target block.
   const loom_block_t* target_block;
 
-  // Complete raw relations derived from the edge selector.
-  const loom_condition_integer_relation_t* raw_relations;
-
-  // Complete raw Boolean truths derived from the edge selector.
-  const loom_condition_boolean_fact_t* raw_boolean_facts;
-
   // Explicit source-to-target payload images.
   loom_cfg_condition_mapping_t payload_mapping;
 
@@ -76,12 +69,6 @@ typedef struct loom_cfg_condition_edge_state_t {
 
   // Current exact-truth contribution for a join predecessor.
   loom_cfg_condition_truth_t truth_contribution;
-
-  // Number of entries in raw_relations.
-  uint32_t raw_relation_count;
-
-  // Number of entries in raw_boolean_facts.
-  uint32_t raw_boolean_fact_count;
 
   // Stable graph edge ordinal.
   loom_cfg_edge_index_t edge_index;
@@ -193,6 +180,9 @@ typedef struct loom_cfg_condition_relation_solver_t {
   loom_local_value_domain_t* value_domain;
   const loom_cfg_value_identity_table_t* identities;
 
+  // Optional producer of semantic anchors for authored relation operands.
+  const loom_cfg_condition_relation_anchor_provider_t* anchor_provider;
+
   // Arena retained by the caller after solve completion.
   iree_arena_allocator_t* arena;
 
@@ -205,14 +195,26 @@ typedef struct loom_cfg_condition_relation_solver_t {
   // Direct local-value-ordinal to relation-operand mapping.
   loom_cfg_condition_operand_t* relation_operands;
 
+  // Dense SSA operands that participate in integer relation rows.
+  loom_cfg_condition_operand_t* integer_relation_operands;
+
+  // Number of entries in integer_relation_operands.
+  uint32_t integer_relation_operand_count;
+
   // Interned construction sets.
   loom_condition_relation_set_builder_t* set_builder;
+
+  // Optional sparse semantic anchors for authored relation operands.
+  loom_cfg_condition_relation_anchor_builder_t* derived_anchors;
 
   // Reusable high-water matrix candidate storage.
   loom_condition_relation_matrix_builder_t matrix_builder;
 
   // Per-edge construction and propagation state.
   loom_cfg_condition_edge_state_t* edges;
+
+  // Shared selector derivations, borrowed for construction only.
+  const loom_cfg_condition_edge_facts_t* edge_facts;
 
   // Per-block monotone propagation state.
   loom_cfg_condition_block_state_t* blocks;
@@ -405,7 +407,7 @@ static iree_status_t loom_cfg_condition_event_queue_append(
 
 static iree_status_t loom_cfg_condition_event_queue_enqueue_integer(
     loom_cfg_condition_event_queue_t* queue, uint16_t block, uint32_t row,
-    loom_condition_relation_outcome_t outcome) {
+    loom_integer_order_outcome_t outcome) {
   const uint32_t global_row = queue->block_row_offsets[block] + row;
   const uint8_t bit = (uint8_t)(1u << outcome);
   if ((queue->integer_queued_masks[global_row] & bit) != 0) {
@@ -508,39 +510,11 @@ loom_cfg_condition_mapping_lookup(const loom_cfg_condition_mapping_t* mapping,
   return mapping->pairs != NULL ? mapping->pairs + first : NULL;
 }
 
-static loom_condition_relation_outcome_bits_t
-loom_cfg_condition_relation_exclusions(
+static loom_integer_order_outcome_bits_t loom_cfg_condition_relation_exclusions(
     loom_symbolic_integer_relation_t relation) {
-  switch (relation) {
-    case LOOM_SYMBOLIC_INTEGER_RELATION_EQ:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_NE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_LT:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_LE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_GT:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_GE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS;
-    default:
-      return 0;
-  }
-}
-
-static loom_condition_relation_outcome_t loom_cfg_condition_swap_outcome(
-    loom_condition_relation_outcome_t outcome) {
-  if (outcome == LOOM_CONDITION_RELATION_OUTCOME_LESS) {
-    return LOOM_CONDITION_RELATION_OUTCOME_GREATER;
-  }
-  if (outcome == LOOM_CONDITION_RELATION_OUTCOME_GREATER) {
-    return LOOM_CONDITION_RELATION_OUTCOME_LESS;
-  }
-  return outcome;
+  return LOOM_INTEGER_ORDER_OUTCOME_BIT_ALL &
+         (loom_integer_order_outcome_bits_t)~loom_symbolic_integer_relation_outcomes(
+             relation);
 }
 
 static bool loom_cfg_condition_relation_is_boolean_truth(
@@ -567,7 +541,7 @@ static bool loom_cfg_condition_relation_is_boolean_truth(
          loom_type_element_type(type) == LOOM_SCALAR_TYPE_I1;
 }
 
-static iree_status_t loom_cfg_condition_relation_derive_edges(
+static iree_status_t loom_cfg_condition_relation_initialize_edges(
     loom_cfg_condition_relation_solver_t* solver) {
   const loom_cfg_graph_t* graph = solver->graph;
   if (graph->edge_count != 0) {
@@ -576,12 +550,6 @@ static iree_status_t loom_cfg_condition_relation_derive_edges(
         (void**)&solver->edges));
     memset(solver->edges, 0, graph->edge_count * sizeof(*solver->edges));
   }
-
-  loom_condition_query_t query;
-  loom_condition_query_initialize(solver->module, solver->value_domain,
-                                  solver->scratch_arena, &query);
-  loom_condition_derivation_t derivation;
-  loom_condition_derivation_initialize(solver->scratch_arena, &derivation);
   for (loom_cfg_edge_index_t edge_index = 0; edge_index < graph->edge_count;
        ++edge_index) {
     const loom_cfg_edge_info_t* cfg_edge = &graph->edges[edge_index];
@@ -591,8 +559,9 @@ static iree_status_t loom_cfg_condition_relation_derive_edges(
                                            cfg_edge->target_block_index)) {
       continue;
     }
-    loom_cfg_condition_edge_state_t* edge = &solver->edges[edge_index];
-    *edge = (loom_cfg_condition_edge_state_t){
+    const loom_cfg_condition_edge_facts_t* facts =
+        &solver->edge_facts[edge_index];
+    solver->edges[edge_index] = (loom_cfg_condition_edge_state_t){
         .cfg_edge = cfg_edge,
         .target_block = graph->blocks[cfg_edge->target_block_index].block,
         .edge_index = edge_index,
@@ -600,45 +569,8 @@ static iree_status_t loom_cfg_condition_relation_derive_edges(
         .target = cfg_edge->target_block_index,
         .active = true,
     };
-    if (!loom_cfg_cond_br_isa(cfg_edge->terminator) ||
-        cfg_edge->successor_index >= 2) {
-      continue;
-    }
-    const loom_value_id_t condition =
-        loom_cfg_cond_br_condition(cfg_edge->terminator);
-    const bool assumed_truth = cfg_edge->successor_index == 0;
-    IREE_RETURN_IF_ERROR(loom_condition_facts_query_complete(
-        &query, solver->fact_table, condition, assumed_truth, &derivation));
-    if (derivation.integer_facts.integer_relation_count > UINT32_MAX ||
-        derivation.boolean_fact_count > UINT32_MAX) {
-      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                              "condition derivation exceeds uint32_t");
-    }
-    if (derivation.integer_facts.integer_relation_count != 0) {
-      loom_condition_integer_relation_t* relations = NULL;
-      IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-          solver->scratch_arena,
-          derivation.integer_facts.integer_relation_count, sizeof(*relations),
-          (void**)&relations));
-      memcpy(
-          relations, derivation.integer_facts.integer_relations,
-          derivation.integer_facts.integer_relation_count * sizeof(*relations));
-      edge->raw_relations = relations;
-      edge->raw_relation_count =
-          (uint32_t)derivation.integer_facts.integer_relation_count;
-    }
-    if (derivation.boolean_fact_count != 0) {
-      loom_condition_boolean_fact_t* boolean_facts = NULL;
-      IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-          solver->scratch_arena, derivation.boolean_fact_count,
-          sizeof(*boolean_facts), (void**)&boolean_facts));
-      memcpy(boolean_facts, derivation.boolean_facts,
-             derivation.boolean_fact_count * sizeof(*boolean_facts));
-      edge->raw_boolean_facts = boolean_facts;
-      edge->raw_boolean_fact_count = (uint32_t)derivation.boolean_fact_count;
-    }
     solver->has_derived_facts |=
-        edge->raw_relation_count != 0 || edge->raw_boolean_fact_count != 0;
+        facts->integer_relation_count != 0 || facts->boolean_fact_count != 0;
   }
   return iree_ok_status();
 }
@@ -647,8 +579,8 @@ typedef struct loom_cfg_condition_operand_builder_t {
   // Solver receiving the completed compact domain.
   loom_cfg_condition_relation_solver_t* solver;
 
-  // Mark bit indexed by local value ordinal.
-  uint8_t* marked_values;
+  // Domain-membership and integer-relation bits by local value ordinal.
+  uint8_t* value_flags;
 
   // Unsorted literal constants.
   int64_t* constants;
@@ -660,6 +592,11 @@ typedef struct loom_cfg_condition_operand_builder_t {
   iree_host_size_t constant_capacity;
 } loom_cfg_condition_operand_builder_t;
 
+enum loom_cfg_condition_operand_value_flag_bits_e {
+  LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN = 1u << 0,
+  LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_INTEGER_RELATION = 1u << 1,
+};
+
 static loom_value_ordinal_t loom_cfg_condition_operand_builder_value_ordinal(
     const loom_cfg_condition_operand_builder_t* builder,
     loom_value_id_t value_id) {
@@ -669,12 +606,12 @@ static loom_value_ordinal_t loom_cfg_condition_operand_builder_value_ordinal(
                                          canonical);
 }
 
-static loom_value_ordinal_t loom_cfg_condition_operand_builder_mark_value(
-    loom_cfg_condition_operand_builder_t* builder, loom_value_id_t value_id) {
+static void loom_cfg_condition_operand_builder_mark_value(
+    loom_cfg_condition_operand_builder_t* builder, loom_value_id_t value_id,
+    uint8_t flags) {
   const loom_value_ordinal_t ordinal =
       loom_cfg_condition_operand_builder_value_ordinal(builder, value_id);
-  builder->marked_values[ordinal] = 1;
-  return ordinal;
+  builder->value_flags[ordinal] |= flags;
 }
 
 static iree_status_t loom_cfg_condition_operand_builder_add_constant(
@@ -695,7 +632,12 @@ static iree_status_t loom_cfg_condition_operand_builder_add_operand(
     loom_cfg_condition_operand_builder_t* builder,
     loom_condition_integer_operand_t operand) {
   if (operand.kind == LOOM_CONDITION_INTEGER_OPERAND_VALUE) {
-    loom_cfg_condition_operand_builder_mark_value(builder, operand.value_id);
+    uint8_t flags = LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN;
+    if (builder->solver->anchor_provider != NULL) {
+      flags |= LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_INTEGER_RELATION;
+    }
+    loom_cfg_condition_operand_builder_mark_value(builder, operand.value_id,
+                                                  flags);
     return iree_ok_status();
   }
   return loom_cfg_condition_operand_builder_add_constant(builder,
@@ -757,6 +699,32 @@ static iree_status_t loom_cfg_condition_collect_forwarding_pairs(
   return iree_ok_status();
 }
 
+static void loom_cfg_condition_operand_builder_propagate_flag(
+    loom_cfg_condition_operand_builder_t* builder, uint8_t flag,
+    const loom_cfg_condition_mapping_pair_t* forwarding_pairs,
+    const uint32_t* forwarding_offsets, loom_value_ordinal_t* pending_values) {
+  const loom_value_ordinal_t local_value_count =
+      builder->solver->value_domain->value_count;
+  loom_value_ordinal_t pending_count = 0;
+  for (loom_value_ordinal_t value = 0; value < local_value_count; ++value) {
+    if (iree_any_bit_set(builder->value_flags[value], flag)) {
+      pending_values[pending_count++] = value;
+    }
+  }
+  for (loom_value_ordinal_t pending_position = 0;
+       pending_position < pending_count; ++pending_position) {
+    const loom_value_ordinal_t source = pending_values[pending_position];
+    for (uint32_t i = forwarding_offsets[source];
+         i < forwarding_offsets[source + 1]; ++i) {
+      const loom_value_ordinal_t target = forwarding_pairs[i].target;
+      if (!iree_any_bit_set(builder->value_flags[target], flag)) {
+        builder->value_flags[target] |= flag;
+        pending_values[pending_count++] = target;
+      }
+    }
+  }
+}
+
 #if IREE_HAVE_ATTRIBUTE(minsize)
 __attribute__((minsize))
 #endif
@@ -770,11 +738,10 @@ loom_cfg_condition_relation_build_operand_domain(
   };
   if (local_value_count != 0) {
     IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        solver->scratch_arena, local_value_count,
-        sizeof(*builder.marked_values), (void**)&builder.marked_values));
-    memset(
-        builder.marked_values, 0,
-        (iree_host_size_t)local_value_count * sizeof(*builder.marked_values));
+        solver->scratch_arena, local_value_count, sizeof(*builder.value_flags),
+        (void**)&builder.value_flags));
+    memset(builder.value_flags, 0,
+           (iree_host_size_t)local_value_count * sizeof(*builder.value_flags));
   }
 
   for (loom_cfg_edge_index_t edge_index = 0;
@@ -783,9 +750,11 @@ loom_cfg_condition_relation_build_operand_domain(
     if (!edge->active) {
       continue;
     }
-    for (uint32_t i = 0; i < edge->raw_relation_count; ++i) {
+    const loom_cfg_condition_edge_facts_t* facts =
+        &solver->edge_facts[edge_index];
+    for (uint32_t i = 0; i < facts->integer_relation_count; ++i) {
       const loom_condition_integer_relation_t* relation =
-          &edge->raw_relations[i];
+          &facts->integer_relations[i];
       if (loom_cfg_condition_relation_is_boolean_truth(solver->module,
                                                        relation)) {
         continue;
@@ -795,9 +764,10 @@ loom_cfg_condition_relation_build_operand_domain(
       IREE_RETURN_IF_ERROR(loom_cfg_condition_operand_builder_add_operand(
           &builder, relation->right));
     }
-    for (uint32_t i = 0; i < edge->raw_boolean_fact_count; ++i) {
+    for (uint32_t i = 0; i < facts->boolean_fact_count; ++i) {
       loom_cfg_condition_operand_builder_mark_value(
-          &builder, edge->raw_boolean_facts[i].value_id);
+          &builder, facts->boolean_facts[i].value_id,
+          LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN);
     }
   }
 
@@ -829,32 +799,27 @@ loom_cfg_condition_relation_build_operand_domain(
         solver->scratch_arena, local_value_count, sizeof(*pending_values),
         (void**)&pending_values));
   }
-  loom_value_ordinal_t pending_count = 0;
-  for (loom_value_ordinal_t value = 0; value < local_value_count; ++value) {
-    if (builder.marked_values[value]) {
-      pending_values[pending_count++] = value;
-    }
-  }
-  for (loom_value_ordinal_t pending_position = 0;
-       pending_position < pending_count; ++pending_position) {
-    const loom_value_ordinal_t source = pending_values[pending_position];
-    for (uint32_t i = forwarding_offsets[source];
-         i < forwarding_offsets[source + 1]; ++i) {
-      const loom_value_ordinal_t target = forwarding_pairs[i].target;
-      if (!builder.marked_values[target]) {
-        builder.marked_values[target] = 1;
-        pending_values[pending_count++] = target;
-      }
-    }
+  loom_cfg_condition_operand_builder_propagate_flag(
+      &builder, LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN, forwarding_pairs,
+      forwarding_offsets, pending_values);
+  if (solver->anchor_provider != NULL) {
+    loom_cfg_condition_operand_builder_propagate_flag(
+        &builder, LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_INTEGER_RELATION,
+        forwarding_pairs, forwarding_offsets, pending_values);
   }
 
   uint32_t relation_value_count = 0;
+  uint32_t integer_relation_value_count = 0;
   for (loom_value_ordinal_t ordinal = 0; ordinal < local_value_count;
        ++ordinal) {
-    if (!builder.marked_values[ordinal]) {
+    if (!iree_any_bit_set(builder.value_flags[ordinal],
+                          LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN)) {
       continue;
     }
     ++relation_value_count;
+    integer_relation_value_count += iree_any_bit_set(
+        builder.value_flags[ordinal],
+        LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_INTEGER_RELATION);
     int64_t exact_value = 0;
     if (solver->fact_table != NULL &&
         loom_value_facts_as_exact_i64(
@@ -901,15 +866,32 @@ loom_cfg_condition_relation_build_operand_domain(
            (iree_host_size_t)local_value_count *
                sizeof(*solver->relation_operands));
   }
+  if (solver->anchor_provider != NULL && integer_relation_value_count != 0) {
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        solver->scratch_arena, integer_relation_value_count,
+        sizeof(*solver->integer_relation_operands),
+        (void**)&solver->integer_relation_operands));
+  }
   uint32_t relation_value = 0;
+  uint32_t integer_relation_value = 0;
   for (loom_value_ordinal_t ordinal = 0; ordinal < local_value_count;
        ++ordinal) {
-    if (!builder.marked_values[ordinal]) {
+    if (!iree_any_bit_set(builder.value_flags[ordinal],
+                          LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_DOMAIN)) {
       continue;
     }
     relation_values[relation_value] = solver->value_domain->value_ids[ordinal];
-    solver->relation_operands[ordinal] = relation_value++;
+    solver->relation_operands[ordinal] = relation_value;
+    if (solver->anchor_provider != NULL &&
+        iree_any_bit_set(
+            builder.value_flags[ordinal],
+            LOOM_CFG_CONDITION_OPERAND_VALUE_FLAG_INTEGER_RELATION)) {
+      solver->integer_relation_operands[integer_relation_value++] =
+          relation_value;
+    }
+    ++relation_value;
   }
+  solver->integer_relation_operand_count = integer_relation_value;
   solver->operand_domain = (loom_cfg_condition_operand_domain_t){
       .value_domain = solver->value_domain,
       .identities = solver->identities,
@@ -978,20 +960,20 @@ static loom_condition_relation_set_id_t loom_cfg_condition_relation_singleton(
 static iree_status_t loom_cfg_condition_relation_add_symmetric(
     loom_cfg_condition_relation_solver_t* solver,
     loom_cfg_condition_operand_t left, loom_cfg_condition_operand_t right,
-    loom_condition_relation_outcome_bits_t exclusions) {
+    loom_integer_order_outcome_bits_t exclusions) {
   const loom_condition_relation_set_id_t left_set =
       loom_cfg_condition_relation_singleton(left);
   const loom_condition_relation_set_id_t right_set =
       loom_cfg_condition_relation_singleton(right);
-  for (loom_condition_relation_outcome_t outcome = 0;
-       outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+  for (loom_integer_order_outcome_t outcome = 0;
+       outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
     if ((exclusions & (1u << outcome)) == 0) {
       continue;
     }
     IREE_RETURN_IF_ERROR(loom_condition_relation_matrix_builder_add(
         &solver->matrix_builder, outcome, left, right_set));
     IREE_RETURN_IF_ERROR(loom_condition_relation_matrix_builder_add(
-        &solver->matrix_builder, loom_cfg_condition_swap_outcome(outcome),
+        &solver->matrix_builder, loom_integer_order_outcome_swap(outcome),
         right, left_set));
   }
   return iree_ok_status();
@@ -1022,8 +1004,8 @@ static iree_status_t loom_cfg_condition_relation_drop_contradictions(
     if (contradiction == LOOM_CONDITION_RELATION_SET_EMPTY) {
       continue;
     }
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       IREE_RETURN_IF_ERROR(loom_condition_relation_set_builder_difference(
           solver->set_builder, row->excluded[outcome], contradiction,
           &row->excluded[outcome]));
@@ -1283,8 +1265,8 @@ static iree_status_t loom_cfg_condition_relation_project_matrix_into_builder(
     const loom_condition_relation_matrix_row_t* row = &source->rows[row_index];
     const loom_cfg_condition_image_span_t left_images =
         loom_cfg_condition_relation_images(solver, edge, row->left);
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       if (row->excluded[outcome] == LOOM_CONDITION_RELATION_SET_EMPTY) {
         continue;
       }
@@ -1326,8 +1308,8 @@ static iree_status_t loom_cfg_condition_relation_matrix_projection_is_identity(
     if (!loom_cfg_condition_image_span_is_identity(left_images, row->left)) {
       return iree_ok_status();
     }
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       loom_condition_relation_set_id_t projected =
           LOOM_CONDITION_RELATION_SET_EMPTY;
       IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_project_set(
@@ -1396,10 +1378,12 @@ loom_cfg_condition_relation_build_edges(
         loom_cfg_condition_relation_initialize_payload_mapping(solver, edge));
 
     loom_condition_relation_matrix_builder_reset(&solver->matrix_builder);
-    for (uint32_t relation_index = 0; relation_index < edge->raw_relation_count;
-         ++relation_index) {
+    const loom_cfg_condition_edge_facts_t* facts =
+        &solver->edge_facts[edge_index];
+    for (uint32_t relation_index = 0;
+         relation_index < facts->integer_relation_count; ++relation_index) {
       const loom_condition_integer_relation_t* relation =
-          &edge->raw_relations[relation_index];
+          &facts->integer_relations[relation_index];
       if (loom_cfg_condition_relation_is_boolean_truth(solver->module,
                                                        relation)) {
         continue;
@@ -1410,7 +1394,7 @@ loom_cfg_condition_relation_build_edges(
           solver, relation->left, left_variants);
       loom_cfg_condition_relation_solver_operand_variants(
           solver, relation->right, right_variants);
-      const loom_condition_relation_outcome_bits_t exclusions =
+      const loom_integer_order_outcome_bits_t exclusions =
           loom_cfg_condition_relation_exclusions(relation->relation);
       for (uint8_t left_index = 0; left_index < 2; ++left_index) {
         if (left_variants[left_index] == LOOM_CFG_CONDITION_OPERAND_INVALID) {
@@ -1434,10 +1418,10 @@ loom_cfg_condition_relation_build_edges(
         solver, &raw_relations));
 
     loom_cfg_condition_truth_t raw_truth = {0};
-    for (uint32_t truth_index = 0; truth_index < edge->raw_boolean_fact_count;
+    for (uint32_t truth_index = 0; truth_index < facts->boolean_fact_count;
          ++truth_index) {
       const loom_condition_boolean_fact_t fact =
-          edge->raw_boolean_facts[truth_index];
+          facts->boolean_facts[truth_index];
       const loom_cfg_condition_operand_t operand =
           loom_cfg_condition_relation_solver_value_operand(solver,
                                                            fact.value_id);
@@ -1521,8 +1505,8 @@ static iree_status_t loom_cfg_condition_relation_intersect_block(
                 contribution->rows[contribution_position].left == row->left
             ? &contribution->rows[contribution_position]
             : NULL;
-    for (loom_condition_relation_outcome_t outcome = 0;
-         outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+    for (loom_integer_order_outcome_t outcome = 0;
+         outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
       const loom_condition_relation_set_id_t incoming =
           contribution_row ? contribution_row->excluded[outcome]
                            : LOOM_CONDITION_RELATION_SET_EMPTY;
@@ -1689,8 +1673,7 @@ loom_cfg_condition_relation_matrix_exclusions(
 
 static iree_status_t loom_cfg_condition_relation_update_contribution_row(
     loom_cfg_condition_relation_solver_t* solver,
-    loom_cfg_condition_edge_state_t* edge,
-    loom_condition_relation_outcome_t outcome,
+    loom_cfg_condition_edge_state_t* edge, loom_integer_order_outcome_t outcome,
     loom_cfg_condition_operand_t target_left,
     loom_condition_relation_set_id_t candidate) {
   loom_cfg_condition_matrix_state_t* target_facts =
@@ -1927,6 +1910,7 @@ loom_cfg_condition_relation_publish(
   loom_cfg_condition_relation_table_builder_t builder = {
       .operand_domain = &solver->operand_domain,
       .set_builder = solver->set_builder,
+      .derived_anchors = solver->derived_anchors,
       .views = views,
       .edge_view_indices = edge_view_indices,
       .view_count = (uint32_t)view_count,
@@ -1942,12 +1926,16 @@ static iree_status_t loom_cfg_condition_relation_solve(
     loom_cfg_condition_relation_table_t* out_table) {
   loom_condition_relation_matrix_builder_initialize(solver->scratch_arena,
                                                     &solver->matrix_builder);
-  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_derive_edges(solver));
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_initialize_edges(solver));
   if (!solver->has_derived_facts) {
     return iree_ok_status();
   }
   IREE_RETURN_IF_ERROR(
       loom_cfg_condition_relation_build_operand_domain(solver));
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_anchor_builder_build(
+      solver->anchor_provider, &solver->operand_domain,
+      solver->integer_relation_operands, solver->integer_relation_operand_count,
+      solver->set_builder, solver->scratch_arena, &solver->derived_anchors));
   IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_build_edges(solver));
   IREE_RETURN_IF_ERROR(
       loom_cfg_condition_relation_initialize_candidates(solver));
@@ -1959,24 +1947,20 @@ static iree_status_t loom_cfg_condition_relation_solve(
   return loom_cfg_condition_relation_publish(solver, out_table);
 }
 
-iree_status_t loom_cfg_condition_relation_table_compute(
+iree_status_t loom_cfg_condition_relation_table_compute_from_edges(
     const loom_module_t* module, const loom_cfg_graph_t* graph,
     const loom_value_fact_table_t* fact_table,
     const loom_dominance_info_t* dominance,
     loom_local_value_domain_t* value_domain,
     const loom_cfg_value_identity_table_t* identities,
-    iree_arena_allocator_t* arena,
+    const loom_cfg_condition_relation_anchor_provider_t* anchor_provider,
+    const loom_cfg_condition_edge_facts_t* edge_facts,
+    iree_arena_allocator_t* scratch_arena, iree_arena_allocator_t* arena,
     loom_cfg_condition_relation_table_t* out_table) {
   *out_table = (loom_cfg_condition_relation_table_t){0};
   if (graph->malformed || graph->block_count == 0) {
     return iree_ok_status();
   }
-  if (graph->block_count > UINT16_MAX || graph->edge_count > UINT32_MAX) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "condition CFG exceeds index capacity");
-  }
-  iree_arena_allocator_t scratch_arena;
-  iree_arena_initialize(arena->block_pool, &scratch_arena);
   loom_cfg_condition_relation_solver_t solver = {
       .module = module,
       .graph = graph,
@@ -1984,10 +1968,37 @@ iree_status_t loom_cfg_condition_relation_table_compute(
       .dominance = dominance,
       .value_domain = value_domain,
       .identities = identities,
+      .anchor_provider = anchor_provider,
       .arena = arena,
-      .scratch_arena = &scratch_arena,
+      .scratch_arena = scratch_arena,
+      .edge_facts = edge_facts,
   };
-  iree_status_t status = loom_cfg_condition_relation_solve(&solver, out_table);
-  iree_arena_deinitialize(&scratch_arena);
+  return loom_cfg_condition_relation_solve(&solver, out_table);
+}
+
+iree_status_t loom_cfg_condition_relation_table_compute(
+    const loom_module_t* module, const loom_cfg_graph_t* graph,
+    const loom_value_fact_table_t* fact_table,
+    const loom_dominance_info_t* dominance,
+    loom_local_value_domain_t* value_domain,
+    const loom_cfg_value_identity_table_t* identities,
+    const loom_cfg_condition_relation_anchor_provider_t* anchor_provider,
+    iree_arena_allocator_t* arena,
+    loom_cfg_condition_relation_table_t* out_table) {
+  *out_table = (loom_cfg_condition_relation_table_t){0};
+  if (graph->malformed || graph->block_count == 0) {
+    return iree_ok_status();
+  }
+  iree_arena_allocator_t derivation_arena;
+  iree_arena_initialize(arena->block_pool, &derivation_arena);
+  loom_cfg_condition_edge_facts_t* edges = NULL;
+  iree_status_t status = loom_cfg_condition_derive_edges(
+      module, graph, fact_table, value_domain, &derivation_arena, &edges);
+  if (iree_status_is_ok(status)) {
+    status = loom_cfg_condition_relation_table_compute_from_edges(
+        module, graph, fact_table, dominance, value_domain, identities,
+        anchor_provider, edges, &derivation_arena, arena, out_table);
+  }
+  iree_arena_deinitialize(&derivation_arena);
   return status;
 }

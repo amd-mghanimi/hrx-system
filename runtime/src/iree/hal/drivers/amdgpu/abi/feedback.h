@@ -92,8 +92,8 @@ typedef struct IREE_AMDGPU_ALIGNAS(8) iree_hal_amdgpu_feedback_config_t {
   // Opaque host source-context value copied into feedback packets.
   //
   // Device producers must treat this as an uninterpreted value. Host feedback
-  // handling resolves it back to executable-owned source metadata while the
-  // submitting executable is still retained by the retiring work.
+  // handling resolves it back to source metadata retained by the logical
+  // device feedback state until all feedback service threads have stopped.
   uint64_t source_context;
   // Reserved for future feedback configuration state. Must be zero.
   uint64_t reserved[3];

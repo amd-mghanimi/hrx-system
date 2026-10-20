@@ -9,7 +9,7 @@ verification, specialization, unrolling, distribution, and lowering.
 In this chapter, you will learn:
 
 - how definitions, declarations, exact calls, and returns compose;
-- how function modifiers state visibility, purity, placement, and inline policy;
+- how function modifiers state visibility, effects, placement, and inline policy;
 - how authored Low helpers control target instructions and their order;
 - how `scf.if` and `scf.for` produce SSA values;
 - why loop-carried state is explicit; and
@@ -86,6 +86,7 @@ Modifiers sit on the definition or declaration whose behavior they constrain:
 | --- | --- |
 | `public` | The symbol is visible outside the module. Absence means private. |
 | `pure` | The function is deterministic and has no memory effects. |
+| `readonly` | The function may read memory deterministically but cannot write, order memory, allocate unique identities, converge, or produce independently observable effects. |
 | `host` / `device` | The calling convention and intended execution domain. |
 | `inline` | The current IR stage must remove the callable boundary. |
 | `noinline` | The current IR stage preserves the callable boundary. |
@@ -95,6 +96,13 @@ These are semantic inputs, not compiler folklore in comments. `inline` is not
 needed merely because a helper is small; it is used when the source contract
 requires the boundary to disappear at the current stage. Without an explicit
 policy, the consuming pass decides from target, call graph, and cost evidence.
+
+Effect modifiers are checked on definitions and carried by call sites. A
+`pure` call can target only a pure callable. A `readonly` call may target a
+pure or read-only callable, and retains its read effect so memory-aware passes
+cannot move it across an interfering write. An omitted effect modifier is
+conservative until canonicalization or another whole-module analysis proves a
+stronger contract.
 
 ## Invoke an authored Low fragment
 
@@ -447,7 +455,7 @@ logical coordinates and one semantic layout value instead of reproducing each
 candidate as flattened address arithmetic.
 
 The [checked strided-layout
-case](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/conformance/strided_layout_recurrence.loom)
+case](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/memory/view/strided_recurrence.loom)
 selects between two runtime pitches, rotates them through counted and condition
 loops, and verifies the resulting addresses through a nonzero buffer origin.
 When a carried view's type refers to the layout, carry the layout beside the
@@ -480,7 +488,7 @@ keeps an initial or body-local identity on the wrong edge is rejected instead
 of being treated as a static annotation.
 
 The [checked shrinking-view
-case](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/conformance/shrinking_view.loom)
+case](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/memory/view/shrinking.loom)
 changes the row extent while carrying its strided layout, consumes the view in
 the loop body, and checks the final view after zero, one, and three iterations
 on AMDGPU and Vulkan. Pipelining, unrolling, fusion, and other loop
@@ -511,6 +519,13 @@ are insufficient, the request fails with the unresolved bounds rather than
 silently leaving a loop that the author required to be unrolled. More specific
 unroll schedules can express linear, interleaved, or recurrence-aware body
 ordering without changing the logical loop.
+
+An enclosing structured condition participates in that proof. Inside the true
+region of `%remaining >= %tile_size`, a loop ending at
+`index.min %remaining, %tile_size` has the exact full-tile bound. Bare `unroll`
+can materialize it directly; the source does not need to restate the guard with
+`index.assume`. The complementary region remains a runtime tail unless another
+visible fact makes its trip count exact.
 
 `unroll(%factor)` requests partial unrolling with a specialized positive factor.
 The two-slot example uses factor two with a runtime trip count. Each copied
@@ -602,21 +617,30 @@ Depth one retains serial iteration and any separate unroll policy, providing a
 useful control. The depth must specialize to a positive exact value; the unroll
 factor must also specialize before its policy runs.
 
-Nested `scf.if` and `scf.for` normally remain intact within their assigned stage.
-A guarded load retains its guard, and a read-only inner reduction can produce
-one queued result for each outer iteration. A pure inner loop can consume
-queued values and the outer accumulator. Inner loops may also carry their own
-explicit pipeline and unroll policies; pipelining processes the inner policy
-before the outer one, then unrolling processes the reconstructed program.
-The [guarded-row example](../workflows/tune-loop-schedules.md#keep-guards-and-inner-loops-in-the-source)
-checks these combinations through native execution.
+Nested `scf.if` and `scf.for` normally remain intact within their assigned
+stage. A guarded load retains its guard, and a read-only inner reduction can
+produce one queued result for each outer iteration. One bounded exception lets
+a top-level `scf.if` contain a guarded load and the carried-state computation
+that consumes it. When exactly one branch reads, the compiler can retain the
+condition and branch-local read closure as a guarded producer, then rebuild the
+original conditional around the ordered consumer. The opposite branch, result
+types, yields, and skipped-update behavior remain unchanged. A pure inner loop
+can likewise consume queued values and the outer accumulator. Inner loops may
+also carry their own explicit pipeline and unroll policies; pipelining processes
+the inner policy before the outer one, then unrolling processes the reconstructed
+program. The [guarded-row example](../workflows/tune-loop-schedules.md#keep-guards-and-inner-loops-in-the-source)
+checks atomic nested units, and the
+[paged-attention example](../workflows/tune-loop-schedules.md#pipeline-cooperative-paged-attention)
+checks the retained guarded partition through native output.
 
 The read-ahead contract supports ordinary loads and memory-pure consumers, and
 global loads ahead of workgroup-memory consumers, with a positive exact step.
 Read prerequisites may depend on the induction variable and values outside the
-loop. For a nested unit containing reads, this includes
-all captured values, guards, bounds, and initial inner state: the whole unit
-must be independent of outer loop-carried state. A violation is diagnosed.
+loop. An atomic nested unit containing reads requires all captured values,
+guards, bounds, and initial inner state to be independent of outer loop-carried
+state. For a retained guarded partition, that requirement applies to the
+condition and branch-local producer closure; the consumer remainder may use the
+outer carried tuple. A violation is diagnosed.
 Cross-stage value types must be invariant across iterations. Global or unknown
 memory writes, global barriers, volatile effects, explicit asynchronous groups,
 source-order fences, other nested control such as `scf.while`, and consuming
@@ -647,13 +671,20 @@ Subgroup and workgroup reductions can remain in the ordered consumer when the
 requested loop's lower and upper bounds are compile-time exact. This keeps
 every original participant at the same collective site during startup, steady
 iteration, and drain. A fixed tile with runtime tail guards fits this contract:
-place guarded loads in one `scf.if` and the guarded reduction in a separate
-consumer `scf.if`. Each nested region is one scheduling unit, so a region mixing
-loads and collectives cannot advance. A collective result also cannot determine
-a read-ahead address or guard. Runtime bounds on the requested collective loop
-receive a diagnostic; depth one preserves the original loop.
+one top-level `scf.if` may contain the guarded loads, reduction, and carried
+update. The guarded producer advances only the independent read closure; the
+collective and update stay together in the consumer branch. A collective result
+cannot determine a read-ahead address or guard, and a conditional that cannot
+form this interior cut receives a diagnostic. Runtime bounds on the requested
+collective loop also receive a diagnostic; depth one preserves the original
+loop.
 
-The [checked collective recurrence](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/conformance/collective_loop_state.loom)
+Exactness may come from an enclosing structured edge. A full-tile `scf.if`
+guard can make a derived inner bound exact in its true region without an
+`index.assume`; its false region only proves a partial tail and cannot safely
+pipeline a convergent loop at depth greater than one from that fact alone.
+
+The [checked collective recurrence](https://github.com/ROCm/hrx-system/blob/main/loom/src/loom/test/corpus/kernel/workgroup/loop_state.loom)
 applies one template with serial and pipelined policies. It combines 16-lane
 cluster reductions, workgroup reductions, ragged reads, and a nested runtime
 consumer loop, checking each schedule against independent integer results.

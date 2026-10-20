@@ -33,6 +33,7 @@ from loom.dsl import (
     PURE,
     SAFE_TO_SPECULATE,
     AttrDef,
+    ExecutionCondition,
     Op,
     Operand,
     OpPhase,
@@ -56,6 +57,7 @@ scalar_addi = binary_op(
     doc="Integer addition.",
     commutative=True,
     flags=("overflow", IntOverflowFlags),
+    execution_condition=ExecutionCondition.INTEGER_ADD,
     facts="loom_scalar_addi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     effective_traits="loom_scalar_integer_arithmetic_effective_traits",
@@ -64,6 +66,7 @@ scalar_addi = binary_op(
         "%result = scalar.addi %lhs, %rhs : i32",
         "%result = scalar.addi<nuw> %lhs, %rhs : i32",
     ],
+    eager_execution_cost=1,
 )
 
 scalar_subi = binary_op(
@@ -73,11 +76,13 @@ scalar_subi = binary_op(
     type_constraint=INTEGER,
     doc="Integer subtraction.",
     flags=("overflow", IntOverflowFlags),
+    execution_condition=ExecutionCondition.INTEGER_SUBTRACT,
     facts="loom_scalar_subi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     effective_traits="loom_scalar_integer_arithmetic_effective_traits",
     canonicalize="loom_scalar_subi_canonicalize",
     examples=["%result = scalar.subi %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_muli = binary_op(
@@ -88,11 +93,13 @@ scalar_muli = binary_op(
     doc="Integer multiplication.",
     commutative=True,
     flags=("overflow", IntOverflowFlags),
+    execution_condition=ExecutionCondition.INTEGER_MULTIPLY,
     facts="loom_scalar_muli_facts",
     traits=[DISTRIBUTION_TRANSFER],
     effective_traits="loom_scalar_integer_arithmetic_effective_traits",
     canonicalize="loom_scalar_muli_canonicalize",
     examples=["%result = scalar.muli %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_divsi = binary_op(
@@ -100,7 +107,7 @@ scalar_divsi = binary_op(
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Signed integer division (rounds toward zero).",
+    doc=("Signed integer division rounding toward zero. The divisor must be nonzero and the quotient must be representable in the result type."),
     facts="loom_scalar_divsi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_divsi_canonicalize",
@@ -112,11 +119,46 @@ scalar_divui = binary_op(
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Unsigned integer division.",
+    doc="Unsigned integer division with a nonzero divisor.",
     facts="loom_scalar_divui_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_divui_canonicalize",
     examples=["%result = scalar.divui %lhs, %rhs : i32"],
+)
+
+scalar_divremsi = Op(
+    "scalar.divremsi",
+    group=scalar_ops,
+    phase=OpPhase.EXECUTABLE,
+    doc=(
+        "Signed integer quotient and remainder computed from one division. "
+        "The quotient rounds toward zero, the remainder has the sign of the "
+        "dividend, the divisor must be nonzero, and the quotient must be "
+        "representable in the result type."
+    ),
+    operands=[Operand("lhs", INTEGER), Operand("rhs", INTEGER)],
+    results=[Result("quotient", INTEGER), Result("remainder", INTEGER)],
+    constraints=[SameType("lhs", "rhs", "quotient", "remainder")],
+    facts="loom_scalar_divremsi_facts",
+    canonicalize="loom_scalar_divremsi_canonicalize",
+    traits=[PURE, DISTRIBUTION_TRANSFER],
+    format=[Ref("lhs"), COMMA, Ref("rhs"), COLON, TypeOf("quotient")],
+    examples=["%q, %r = scalar.divremsi %lhs, %rhs : i32"],
+)
+
+scalar_divremui = Op(
+    "scalar.divremui",
+    group=scalar_ops,
+    phase=OpPhase.EXECUTABLE,
+    doc=("Unsigned integer quotient and remainder computed from one division with a nonzero divisor."),
+    operands=[Operand("lhs", INTEGER), Operand("rhs", INTEGER)],
+    results=[Result("quotient", INTEGER), Result("remainder", INTEGER)],
+    constraints=[SameType("lhs", "rhs", "quotient", "remainder")],
+    facts="loom_scalar_divremui_facts",
+    canonicalize="loom_scalar_divremui_canonicalize",
+    traits=[PURE, DISTRIBUTION_TRANSFER],
+    format=[Ref("lhs"), COMMA, Ref("rhs"), COLON, TypeOf("quotient")],
+    examples=["%q, %r = scalar.divremui %lhs, %rhs : i32"],
 )
 
 scalar_remsi = binary_op(
@@ -124,7 +166,7 @@ scalar_remsi = binary_op(
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Signed integer remainder.",
+    doc=("Signed integer remainder with the sign of the dividend and a nonzero divisor. The minimum signed value modulo minus one is zero."),
     facts="loom_scalar_remsi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_remsi_canonicalize",
@@ -136,7 +178,7 @@ scalar_remui = binary_op(
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Unsigned integer remainder.",
+    doc="Unsigned integer remainder with a nonzero divisor.",
     facts="loom_scalar_remui_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_remui_canonicalize",
@@ -183,6 +225,7 @@ scalar_negi = unary_op(
     facts="loom_scalar_negi_facts",
     canonicalize="loom_scalar_negi_canonicalize",
     examples=["%result = scalar.negi %input : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_absi = unary_op(
@@ -195,6 +238,7 @@ scalar_absi = unary_op(
     facts="loom_scalar_absi_facts",
     canonicalize="loom_scalar_absi_canonicalize",
     examples=["%result = scalar.absi %input : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_minsi = binary_op(
@@ -208,6 +252,7 @@ scalar_minsi = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_minsi_canonicalize",
     examples=["%result = scalar.minsi %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_maxsi = binary_op(
@@ -221,6 +266,7 @@ scalar_maxsi = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_maxsi_canonicalize",
     examples=["%result = scalar.maxsi %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_minui = binary_op(
@@ -234,6 +280,7 @@ scalar_minui = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_minui_canonicalize",
     examples=["%result = scalar.minui %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 scalar_maxui = binary_op(
@@ -247,6 +294,7 @@ scalar_maxui = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_maxui_canonicalize",
     examples=["%result = scalar.maxui %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -265,6 +313,7 @@ scalar_fmai = Op(
     ],
     results=[Result("result", INTEGER)],
     attrs=[AttrDef("overflow", ATTR_TYPE_FLAGS, optional=True, enum_def=IntOverflowFlags)],
+    execution_condition=ExecutionCondition.INTEGER_MULTIPLY_ADD,
     constraints=[SameType("a", "b", "c", "result")],
     traits=[PURE, DISTRIBUTION_TRANSFER],
     effective_traits="loom_scalar_integer_arithmetic_effective_traits",
@@ -281,6 +330,7 @@ scalar_fmai = Op(
     facts="loom_scalar_fmai_facts",
     canonicalize="loom_scalar_fmai_canonicalize",
     examples=["%result = scalar.fmai %a, %b, %c : i64"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -302,6 +352,7 @@ scalar_addf = binary_op(
         "%result = scalar.addf %lhs, %rhs : f32",
         "%result = scalar.addf<fast> %lhs, %rhs : f32",
     ],
+    eager_execution_cost=1,
 )
 
 scalar_subf = binary_op(
@@ -315,6 +366,7 @@ scalar_subf = binary_op(
     facts="loom_scalar_subf_facts",
     canonicalize="loom_scalar_subf_canonicalize",
     examples=["%result = scalar.subf %lhs, %rhs : f32"],
+    eager_execution_cost=1,
 )
 
 scalar_mulf = binary_op(
@@ -329,6 +381,7 @@ scalar_mulf = binary_op(
     facts="loom_scalar_mulf_facts",
     canonicalize="loom_scalar_mulf_canonicalize",
     examples=["%result = scalar.mulf %lhs, %rhs : f32"],
+    eager_execution_cost=1,
 )
 
 scalar_divf = binary_op(
@@ -342,6 +395,7 @@ scalar_divf = binary_op(
     facts="loom_scalar_divf_facts",
     canonicalize="loom_scalar_divf_canonicalize",
     examples=["%result = scalar.divf %lhs, %rhs : f32"],
+    eager_execution_cost=1,
 )
 
 scalar_remf = binary_op(
@@ -353,6 +407,8 @@ scalar_remf = binary_op(
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_remf_facts",
     examples=["%result = scalar.remf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=0,
 )
 
 scalar_negf = unary_op(
@@ -361,11 +417,12 @@ scalar_negf = unary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=FLOAT,
     doc="Floating-point negation.",
-    traits=[INVOLUTION],
+    traits=[INVOLUTION, SAFE_TO_SPECULATE],
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_negf_facts",
     canonicalize="loom_scalar_negf_canonicalize",
     examples=["%result = scalar.negf %input : f32"],
+    eager_execution_cost=1,
 )
 
 scalar_absf = unary_op(
@@ -374,11 +431,12 @@ scalar_absf = unary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=FLOAT,
     doc="Floating-point absolute value.",
-    traits=[IDEMPOTENT],
+    traits=[IDEMPOTENT, SAFE_TO_SPECULATE],
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_absf_facts",
     canonicalize="loom_scalar_absf_canonicalize",
     examples=["%result = scalar.absf %input : f32"],
+    eager_execution_cost=1,
 )
 
 scalar_minimumf = binary_op(
@@ -391,6 +449,8 @@ scalar_minimumf = binary_op(
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_minimumf_facts",
     examples=["%result = scalar.minimumf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=1,
 )
 
 scalar_maximumf = binary_op(
@@ -403,6 +463,8 @@ scalar_maximumf = binary_op(
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_maximumf_facts",
     examples=["%result = scalar.maximumf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=1,
 )
 
 scalar_minnumf = binary_op(
@@ -415,6 +477,8 @@ scalar_minnumf = binary_op(
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_minnumf_facts",
     examples=["%result = scalar.minnumf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=1,
 )
 
 scalar_maxnumf = binary_op(
@@ -427,6 +491,8 @@ scalar_maxnumf = binary_op(
     flags=("fastmath", FastMathFlags),
     facts="loom_scalar_maxnumf_facts",
     examples=["%result = scalar.maxnumf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=1,
 )
 
 scalar_clampf = Op(
@@ -447,7 +513,7 @@ scalar_clampf = Op(
         AttrDef("fastmath", ATTR_TYPE_FLAGS, optional=True, enum_def=FastMathFlags),
     ],
     constraints=[SameType("value", "lower", "upper", "result")],
-    traits=[PURE],
+    traits=[PURE, SAFE_TO_SPECULATE],
     facts="loom_scalar_clampf_facts",
     canonicalize="loom_scalar_clampf_canonicalize",
     format=[
@@ -465,6 +531,7 @@ scalar_clampf = Op(
         "%result = scalar.clampf<number, nnan|nsz> %value, %lower, %upper : f32",
         "%result = scalar.clampf<ieee> %value, %lower, %upper : f32",
     ],
+    eager_execution_cost=1,
 )
 
 scalar_copysignf = binary_op(
@@ -477,6 +544,8 @@ scalar_copysignf = binary_op(
     facts="loom_scalar_copysignf_facts",
     canonicalize="loom_scalar_copysignf_canonicalize",
     examples=["%result = scalar.copysignf %lhs, %rhs : f32"],
+    traits=[SAFE_TO_SPECULATE],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -489,6 +558,8 @@ ALL_ARITHMETIC_OPS: tuple[Op, ...] = (
     scalar_muli,
     scalar_divsi,
     scalar_divui,
+    scalar_divremsi,
+    scalar_divremui,
     scalar_remsi,
     scalar_remui,
     scalar_ceildivsi,

@@ -318,6 +318,12 @@ typedef struct iree_hal_mock_device_t {
   // Immutable device facts captured at creation time.
   iree_hal_device_spec_t* device_spec;
 
+  // Optional caller-owned native-memory metadata.
+  const iree_hal_memory_backend_t* memory_backend;
+
+  // Retained owner of any native dependencies published by the mock.
+  iree_hal_resource_t* lifetime_owner;
+
   // Number of queue family identities exposed by the device spec.
   iree_host_size_t queue_family_count;
 
@@ -422,6 +428,9 @@ iree_status_t iree_hal_mock_device_create(
   device->assign_topology_info_status_code =
       options->assign_topology_info_status_code;
   device->executable_loading_enabled = options->executable_loading_enabled;
+  device->memory_backend = options->memory_backend;
+  device->lifetime_owner = options->lifetime_owner;
+  iree_hal_resource_retain(device->lifetime_owner);
 
   // Copy identifier into trailing storage.
   iree_string_view_append_to_buffer(
@@ -480,6 +489,7 @@ static void iree_hal_mock_device_destroy(iree_hal_device_t* base_device) {
   iree_hal_mock_device_t* device = iree_hal_mock_device_cast(base_device);
   iree_allocator_t host_allocator = device->host_allocator;
   iree_hal_device_spec_release(device->device_spec);
+  iree_hal_resource_release(device->lifetime_owner);
   iree_allocator_free(host_allocator, device->queue_families);
   iree_allocator_free(host_allocator, device);
 }
@@ -620,7 +630,7 @@ static iree_status_t iree_hal_mock_device_load_executable(
 }
 
 static iree_status_t iree_hal_mock_device_import_file(
-    iree_hal_device_t* base_device,
+    iree_hal_device_t* base_device, iree_hal_pool_t* storage_pool,
     iree_hal_queue_family_affinity_t queue_family_affinity,
     iree_hal_memory_access_t access, iree_io_file_handle_t* handle,
     iree_hal_external_file_flags_t flags, iree_hal_file_t** out_file) {
@@ -641,12 +651,6 @@ iree_hal_mock_device_query_semaphore_compatibility(
   return IREE_HAL_SEMAPHORE_COMPATIBILITY_NONE;
 }
 
-static iree_status_t iree_hal_mock_device_query_queue_pool_backend(
-    iree_hal_device_t* base_device, const iree_hal_queue_family_t* queue_family,
-    iree_hal_queue_pool_backend_t* out_backend) {
-  return iree_make_status(IREE_STATUS_UNIMPLEMENTED);
-}
-
 static iree_status_t iree_hal_mock_device_profiling_begin(
     iree_hal_device_t* base_device,
     const iree_hal_device_profiling_options_t* options) {
@@ -661,6 +665,12 @@ static iree_status_t iree_hal_mock_device_profiling_flush(
 static iree_status_t iree_hal_mock_device_profiling_end(
     iree_hal_device_t* base_device) {
   return iree_make_status(IREE_STATUS_UNIMPLEMENTED);
+}
+
+static const iree_hal_memory_backend_t* iree_hal_mock_device_memory_backend(
+    iree_hal_device_t* base_device) {
+  iree_hal_mock_device_t* device = iree_hal_mock_device_cast(base_device);
+  return device->memory_backend;
 }
 
 //===----------------------------------------------------------------------===//
@@ -688,8 +698,8 @@ static const iree_hal_device_vtable_t iree_hal_mock_device_vtable = {
     .create_semaphore = iree_hal_mock_device_create_semaphore,
     .query_semaphore_compatibility =
         iree_hal_mock_device_query_semaphore_compatibility,
-    .query_queue_pool_backend = iree_hal_mock_device_query_queue_pool_backend,
     .profiling_begin = iree_hal_mock_device_profiling_begin,
     .profiling_flush = iree_hal_mock_device_profiling_flush,
     .profiling_end = iree_hal_mock_device_profiling_end,
+    .memory_backend = iree_hal_mock_device_memory_backend,
 };

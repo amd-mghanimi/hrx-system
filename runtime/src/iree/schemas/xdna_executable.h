@@ -26,10 +26,12 @@
 // run on bind, after prior users have drained. Shards and device role
 // transitions are compiled payload details, not entries or loader operations.
 //
-// Invocation zero establishes entry state. After terminal completion, the named
-// next invocation is valid while context, backing and resident state remain
-// intact. Reset or replacement by another entry invalidates that continuation.
-// The current finite protocol is 0 -> 1 -> 1; a self-contained range can use
+// Invocation zero establishes entry state. A named continuation describes a
+// command range usable only when the execution environment separately proves
+// that the required context, backing, and tile state remain intact after
+// terminal completion. The metadata itself supplies no residency guarantee.
+// Reset or replacement by another entry invalidates a continuation. The
+// current encoded protocol is 0 -> 1 -> 1; a self-contained range can use
 // 0 -> 0. The caller owns the continuation ordinal and completion frontier.
 
 #ifndef IREE_SCHEMAS_XDNA_EXECUTABLE_H_
@@ -53,7 +55,7 @@ enum {
   IREE_XDNA_ELF_PROGRAM_TYPE_LOAD = 1,
   IREE_XDNA_ELF_PROGRAM_TYPE_METADATA = 0x6C584408,
   IREE_XDNA_ELF_METADATA_MAGIC = 0x414E4458,
-  IREE_XDNA_ELF_METADATA_VERSION = 2,
+  IREE_XDNA_ELF_METADATA_VERSION = 3,
   IREE_XDNA_ELF_NATIVE_TRANSACTION_0_1 = 1,
 };
 
@@ -106,6 +108,10 @@ typedef enum iree_xdna_elf_relocation_kind_e {
 
 // Runtime resource kind supplied through one binding.
 typedef enum iree_xdna_elf_binding_kind_e {
+  // Unused ABI slot. Every other field in the binding row is zero and no
+  // relocation may reference it.
+  IREE_XDNA_ELF_BINDING_KIND_NONE = 0,
+  // External logical buffer consumed or produced by the executable.
   IREE_XDNA_ELF_BINDING_KIND_BUFFER = 1,
 } iree_xdna_elf_binding_kind_t;
 
@@ -253,7 +259,7 @@ iree_xdna_elf_entry_record_t iree_xdna_elf_decode_entry(const uint8_t* storage);
 
 // Decoded 40-byte binding row.
 typedef struct iree_xdna_elf_binding_record_t {
-  // Runtime resource kind; this ABI supports buffers.
+  // Runtime resource kind or NONE for an unused ABI slot.
   uint16_t kind;
   // Required resource address space.
   uint16_t address_space;
@@ -311,7 +317,7 @@ void iree_xdna_elf_encode_relocation(
 iree_xdna_elf_relocation_record_t iree_xdna_elf_decode_relocation(
     const uint8_t* storage);
 
-// Decoded 16-byte invocation row.
+// Decoded 24-byte invocation row.
 typedef struct iree_xdna_elf_invocation_record_t {
   // Entry-relative native-command allocation use.
   uint32_t allocation_use;
@@ -319,11 +325,23 @@ typedef struct iree_xdna_elf_invocation_record_t {
   uint32_t byte_offset;
   // Number of initialized command bytes submitted.
   uint32_t byte_length;
-  // Entry-relative continuation after terminal completion with state intact.
+  // Entry-relative continuation requiring externally proven retained state.
   uint32_t next_invocation;
+  // Optional timer interval, as command-relative instruction boundaries. Both
+  // offsets are zero when absent. A present interval starts after the native
+  // header, ends no later than byte_length, and contains no shim timer reset.
+  // The complete command produces no other firmware-result records. A runtime
+  // may insert RECORD_TIMER at these boundaries in an exclusive command copy.
+  // Ordinary command bytes contain no measurement instructions.
+  struct {
+    // Byte offset immediately before the first measured instruction.
+    uint32_t begin;
+    // Byte offset immediately after the final measured instruction.
+    uint32_t end;
+  } measurement;
 } iree_xdna_elf_invocation_record_t;
 
-enum { IREE_XDNA_ELF_INVOCATION_RECORD_SIZE = 16 };
+enum { IREE_XDNA_ELF_INVOCATION_RECORD_SIZE = 24 };
 
 // Encodes one complete invocation row into caller-provided storage.
 void iree_xdna_elf_encode_invocation(

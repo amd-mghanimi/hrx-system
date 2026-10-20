@@ -27,7 +27,7 @@ static_assert(kFloat8[0] == 1.125 && kFloat8[3] == 0.0);
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void constant_vectors(Byte4* partial, Byte4* zero, Byte4* first, Byte4* splat,
                       Float8x4* floating) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   partial[lane] = kPartial;
   zero[lane] = kZero;
   first[lane] = kFirst;

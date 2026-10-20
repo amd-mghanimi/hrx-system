@@ -34,6 +34,7 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     loom::ir
+    loom::ops::callable_effects
     loom::ops::op_defs
     loom::rewrite::remap
   PUBLIC
@@ -328,6 +329,7 @@ loom_cc_library(
     loom::format::bytecode::selected_reader
     loom::format::low_repr
     loom::ir
+    loom::ops::op_defs
   PUBLIC
 )
 
@@ -351,6 +353,7 @@ loom_cc_library(
     loom::ops::func
     loom::ops::kernel
     loom::ops::op_defs
+    loom::ops::pipeline
     loom::ops::type_registry
     loom::rewrite::materialize
     loom::rewrite::remap
@@ -378,11 +381,14 @@ loom_cc_test(
     loom::format::bytecode::writer
     loom::format::text::parser
     loom::ir
+    loom::link::testdata::kernel_contracts
+    loom::link::testdata::pipeline_contracts
     loom::ops::config
     loom::ops::func
     loom::ops::index
     loom::ops::kernel
     loom::ops::op_registry
+    loom::ops::pipeline
     loom::ops::target
     loom::verify
 )
@@ -466,6 +472,8 @@ loom_cc_test(
     loom::format::text::parser
     loom::format::text::printer
     loom::ir
+    loom::link::testdata::config_providers
+    loom::ops::config
     loom::ops::op_defs
     loom::ops::op_registry
     loom::ops::test

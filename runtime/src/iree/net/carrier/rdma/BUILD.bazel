@@ -79,6 +79,7 @@ iree_runtime_cc_library(
     target_compatible_with = RDMA_COMPATIBILITY,
     deps = [
         ":carrier",
+        ":completion_queue",
         ":connection_control",
         ":direct_endpoint",
         "//runtime/src/iree/async",

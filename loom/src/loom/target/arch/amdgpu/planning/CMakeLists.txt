@@ -12,6 +12,44 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_library(
   NAME
+    placement
+  HDRS
+    "placement.h"
+  TEXTUAL_HDRS
+    "${IREE_BINARY_DIR}/loom/src/loom/target/arch/amdgpu/descriptors/placement_bindings.inl"
+  SRCS
+    "placement.c"
+  DEPS
+    iree::base
+    loom::codegen::low::placement_recipe
+    loom::codegen::low::target_binding
+    loom::target::arch::amdgpu::facts
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    placement_test
+  SRCS
+    "placement_test.cc"
+  DEPS
+    ::placement
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::allocation::preference
+    loom::target::arch::amdgpu::descriptors::low_registry
+    loom::target::arch::amdgpu::facts
+    loom::target::arch::amdgpu::target_info
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
     address_state
   HDRS
     "address_state.h"
@@ -32,7 +70,7 @@ loom_cc_library(
 )
 endif()
 
-if(LOOM_TARGET_ARCH_AMDGPU)
+if(LOOM_TARGET_AMDGPU_DESCRIPTOR_SET_RDNA4_GFX125X_CORE AND LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_test(
   NAME
     address_state_test
@@ -81,6 +119,7 @@ loom_cc_library(
     "matrix_wait_states.c"
   DEPS
     iree::base
+    iree::base::internal
     loom::target::arch::amdgpu::target_info_defs
   PUBLIC
 )
@@ -96,8 +135,34 @@ loom_cc_test(
     ::matrix_wait_states
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::target::arch::amdgpu::target_info_defs
   LABELS
     "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
+    matrix_result_wait
+  HDRS
+    "matrix_result_wait.h"
+  SRCS
+    "matrix_result_wait.c"
+  DEPS
+    ::matrix_wait_states
+    ::structural_packet
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::allocation
+    loom::codegen::low::packet
+    loom::codegen::low::schedule
+    loom::ops::low
+    loom::target::arch::amdgpu::matrix::contract
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::util::cfg_dataflow
+    loom::util::cfg_graph
+  PUBLIC
 )
 endif()
 
@@ -124,6 +189,7 @@ loom_cc_library(
     loom::target::arch::amdgpu::refs::target_refs
     loom::target::arch::amdgpu::target_info
     loom::target::arch::amdgpu::target_info_defs
+    loom::util::cfg_dataflow
     loom::util::cfg_graph
   PUBLIC
 )
@@ -184,21 +250,30 @@ loom_cc_library(
   NAME
     wait_states
   HDRS
-    "store_data_wait.h"
+    "mask_write_wait.h"
+    "replay_clause.h"
+    "sgpr_read_wait.h"
+    "short_wait.h"
     "wait_states.h"
   SRCS
-    "store_data_wait.c"
+    "mask_write_wait.c"
+    "replay_clause.c"
+    "sgpr_read_wait.c"
+    "short_wait.c"
     "wait_states.c"
   DEPS
+    ::address_state
     ::delay_alu
     ::descriptor_semantics
     ::matrix_coexecution
+    ::matrix_result_wait
     ::matrix_wait_states
     ::structural_packet
     ::vopd_plan
     ::wait_packets
     ::wait_plan
     iree::base
+    iree::base::internal
     iree::base::internal::arena
     loom::codegen::low::allocation
     loom::codegen::low::packet
@@ -208,10 +283,13 @@ loom_cc_library(
     loom::ir
     loom::ops::low
     loom::target::arch::amdgpu::encoding
-    loom::target::arch::amdgpu::matrix::contract
+    loom::target::arch::amdgpu::facts
     loom::target::arch::amdgpu::refs::target_refs
     loom::target::arch::amdgpu::target_info
+    loom::target::arch::amdgpu::target_info_defs
+    loom::util::cfg_dataflow
     loom::util::cfg_graph
+    loom::util::segmented_storage
   PUBLIC
 )
 endif()
@@ -233,6 +311,24 @@ loom_cc_library(
     loom::util::json
     loom::util::stream
   PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    sgpr_read_wait_test
+  SRCS
+    "sgpr_read_wait_test.cc"
+  DEPS
+    ::wait_states
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::schedule
+    loom::util::cfg_graph_test_util
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
 )
 endif()
 
@@ -312,16 +408,120 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_library(
   NAME
+    wait_classification
+  HDRS
+    "wait_classification.h"
+  SRCS
+    "wait_classification.c"
+  DEPS
+    ::storage_lease
+    ::structural_packet
+    ::wait_completion
+    ::wait_frontier
+    ::wait_packet_tables
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::allocation::table
+    loom::codegen::low::descriptors
+    loom::codegen::low::memory_access
+    loom::codegen::low::packet
+    loom::codegen::low::schedule
+    loom::ops::cache
+    loom::ops::low
+    loom::target::arch::amdgpu::facts
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::target::arch::amdgpu::target_info
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
+    trans_result_window
+  HDRS
+    "trans_result_window.h"
+  SRCS
+    "trans_result_window.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::allocation
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::target::arch::amdgpu::target_info_defs
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
+    wait_dependency_visit
+  HDRS
+    "wait_dependency_visit.h"
+  SRCS
+    "wait_dependency_visit.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    wait_dependency_visit_test
+  SRCS
+    "wait_dependency_visit_test.cc"
+  DEPS
+    ::wait_dependency_visit
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    trans_result_window_test
+  SRCS
+    "trans_result_window_test.cc"
+  DEPS
+    ::trans_result_window
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::target::arch::amdgpu::target_info_defs
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
     wait_plan
   HDRS
+    "wait_actions.h"
     "wait_plan.h"
   SRCS
+    "wait_actions.c"
     "wait_plan.c"
   DEPS
     ::address_state
-    ::structural_packet
+    ::matrix_result_wait
+    ::matrix_wait_states
+    ::trans_result_window
+    ::wait_classification
     ::wait_completion
     ::wait_counters
+    ::wait_dependency_visit
     ::wait_frontier
     ::wait_loop
     ::wait_packet_tables
@@ -343,6 +543,51 @@ loom_cc_library(
     loom::target::arch::amdgpu::refs::target_refs
     loom::util::segmented_storage
   PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_AMDGPU_DESCRIPTOR_SET_RDNA4_GFX125X_CORE AND LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    wait_actions_test
+  SRCS
+    "wait_actions_test.cc"
+  DEPS
+    ::wait_plan
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_AMDGPU_DESCRIPTOR_SET_RDNA4_GFX125X_CORE AND LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    wait_plan_test
+  SRCS
+    "wait_plan_test.cc"
+  DEPS
+    ::storage_lease
+    ::wait_plan
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::builder
+    loom::codegen::low::immediates
+    loom::codegen::low::schedule
+    loom::codegen::low::storage_lease
+    loom::ir
+    loom::ops::cache
+    loom::ops::low
+    loom::target::arch::amdgpu::descriptors::low_registry
+    loom::target::arch::amdgpu::facts
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::target::arch::amdgpu::target_info
+    loom::util::cfg_graph_test_util
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
 )
 endif()
 
@@ -425,13 +670,14 @@ loom_cc_library(
     ::descriptor_semantics
     ::matrix_coexecution
     ::structural_packet
+    ::trans_result_window
     ::wait_packets
     iree::base
     iree::base::internal::arena
     loom::codegen::low::allocation
     loom::codegen::low::diagnostics
     loom::codegen::low::packet
-    loom::codegen::low::placement_pair
+    loom::codegen::low::placement_recipe
     loom::codegen::low::schedule
     loom::ir
     loom::ops::low
@@ -456,6 +702,7 @@ loom_cc_library(
   DEPS
     ::address_state
     ::matrix_coexecution
+    ::matrix_result_wait
     ::vopd_plan
     ::wait_packets
     ::wait_plan
@@ -478,8 +725,12 @@ loom_cc_library(
   SRCS
     "storage_lease.c"
   DEPS
+    ::structural_packet
+    ::wait_counters
     iree::base
     loom::codegen::low::storage_lease
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::target::arch::amdgpu::target_info
     loom::target::arch::amdgpu::target_info_defs
   PUBLIC
 )
@@ -516,12 +767,13 @@ loom_cc_library(
     iree::base::internal::arena
     loom::codegen::low::allocation
     loom::codegen::low::diagnostics
+    loom::codegen::low::storage_layout
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::target::arch::amdgpu::facts
     loom::target::arch::amdgpu::refs::target_refs
     loom::target::arch::amdgpu::target_info_defs
-    loom::target::launch
     loom::target::residency
     loom::target::types
     loom::util::json
@@ -538,9 +790,12 @@ loom_cc_test(
     "occupancy_test.cc"
   DEPS
     ::occupancy
+    ::occupancy_model
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::target::arch::amdgpu::facts
+    loom::target::arch::amdgpu::refs::target_refs
     loom::target::arch::amdgpu::target_info
   LABELS
     "iree-build-requirement=loom.target.arch.amdgpu"

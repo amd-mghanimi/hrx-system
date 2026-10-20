@@ -1,0 +1,183 @@
+// A loop-carried induction value initialized from the lane id must not clobber
+// the original lane id while that value is still live after the loop.
+kernel.def @loop_carried_lane_liveness() {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %row_stride = index.constant 16 : index
+  %workgroup_stride = index.constant 32 : index
+  %scratch_bytes = index.constant 1024 : offset
+  %lane = kernel.workitem.id<x> : index
+  %layout = encoding.layout.strided [1, %row_stride] : encoding<layout>
+  %input_view = buffer.view %input[%base] : buffer -> view<16x32xbf16, %layout>
+  %output_view = buffer.view %output[%base] : buffer -> view<32xbf16>
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %scratch_view = buffer.view %scratch[%base] : buffer -> view<16x32xbf16, %layout>
+
+  %element_count = index.constant 512 : index
+  scf.for %linear = [%lane to %element_count step %workgroup_stride] {
+    %mask = index.constant 15 : index
+    %shift = index.constant 4 : index
+    %column = index.andi %linear, %mask : index
+    %row = index.shrui %linear, %shift : index
+    %value = view.load %input_view[%column, %row] : view<16x32xbf16, %layout> -> bf16
+    view.store %value, %scratch_view[%column, %row] : bf16, view<16x32xbf16, %layout>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+
+  %mask = index.constant 15 : index
+  %shift = index.constant 4 : index
+  %column = index.andi %lane, %mask : index
+  %row = index.shrui %lane, %shift : index
+  %loaded = view.load %scratch_view[%column, %row] : view<16x32xbf16, %layout> -> bf16
+  view.store %loaded, %output_view[%lane] : bf16, view<32xbf16>
+  kernel.return
+}
+
+func.def @loop_carried_lane_liveness_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %output_bytes = index.constant 64 : offset
+  buffer.copy %input[%base], %output[%base], %output_bytes
+  func.return
+}
+
+check.scenario @loop_carried_lane_liveness_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-16.0) step(1.0) period(64) : tensor<32x16xbf16>
+    %output_storage = check.generate.fill value(-123.0) : tensor<40xbf16>
+    %output = check.tensor.view %output_storage offset(8) : tensor<40xbf16> -> tensor<32xbf16>
+    check.compare<@loop_carried_lane_liveness, @loop_carried_lane_liveness_oracle>(%input, %output) : (tensor<32x16xbf16>, tensor<32xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<32x16xbf16>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<40xbf16>
+    }
+  }
+  check.return
+}
+
+// The loop-carried value and the workitem id may be storage-related across the
+// loop entry edge, but the workitem id remains live after the loop and cannot be
+// clobbered by the final backedge value.
+kernel.def @loop_carried_lane_store_after_loop() {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %limit = index.constant 64 : index
+  %step = index.constant 32 : index
+  %current_lane_value = scalar.constant 0 : i32
+  %next_lane_value = scalar.constant 2 : i32
+  %output_view = buffer.view %output[%base] : buffer -> view<96xi32>
+
+  scf.for %linear = [%lane to %limit step %step] {
+    view.store %next_lane_value, %output_view[%linear] : i32, view<96xi32>
+  }
+
+  view.store %current_lane_value, %output_view[%lane] : i32, view<96xi32>
+  kernel.return
+}
+
+func.def @loop_carried_lane_store_after_loop_oracle(%output: buffer) {
+  %base = index.constant 0 : offset
+  %next = index.constant 128 : offset
+  %span = index.constant 128 : offset
+  %current_lane_value = scalar.constant 0 : i32
+  %next_lane_value = scalar.constant 2 : i32
+  buffer.fill %current_lane_value, %output[%base], %span : i32
+  buffer.fill %next_lane_value, %output[%next], %span : i32
+  func.return
+}
+
+check.scenario @loop_carried_lane_store_after_loop_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %output_storage = check.generate.fill value(-123) : tensor<104xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<104xi32> -> tensor<96xi32>
+    check.compare<@loop_carried_lane_store_after_loop, @loop_carried_lane_store_after_loop_oracle>(%output) : (tensor<96xi32>) -> () {
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<104xi32>
+    }
+  }
+  check.return
+}
+
+// A backedge update may reuse the induction value's physical register only
+// after every address calculation in the current iteration has read it.
+kernel.def @loop_edge_exact_extent() {
+  %unit = index.constant 1 : index
+  %workgroup_size = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%workgroup_size, %unit, %unit) : index
+} launch(%input0: buffer, %input1: buffer, %input2: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %element_count = index.constant 128 : index
+  %step = index.constant 32 : index
+  %sum_initial = scalar.constant 0.0 : f32
+  %input0_view = buffer.view %input0[%base] : buffer -> view<128xf32>
+  %input1_view = buffer.view %input1[%base] : buffer -> view<128xf32>
+  %input2_view = buffer.view %input2[%base] : buffer -> view<128xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<32xf32>
+
+  %sum = scf.for %index = [%lane to %element_count step %step](%acc = %sum_initial : f32) -> (f32) {
+    %value0 = view.load %input0_view[%index] : view<128xf32> -> f32
+    %value1 = view.load %input1_view[%index] : view<128xf32> -> f32
+    %value2 = view.load %input2_view[%index] : view<128xf32> -> f32
+    %sum01 = scalar.addf %value0, %value1 : f32
+    %sum012 = scalar.addf %sum01, %value2 : f32
+    %next = scalar.addf %acc, %sum012 : f32
+    scf.yield %next : f32
+  }
+  view.store %sum, %output_view[%lane] : f32, view<32xf32>
+  kernel.return
+}
+
+func.def @loop_edge_exact_extent_oracle(%input0: buffer, %input1: buffer, %input2: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane_begin = index.constant 0 : index
+  %lane_end = index.constant 32 : index
+  %lane_step = index.constant 1 : index
+  %element_count = index.constant 128 : index
+  %row_step = index.constant 32 : index
+  %sum_initial = scalar.constant 0.0 : f32
+  %input0_view = buffer.view %input0[%base] : buffer -> view<128xf32>
+  %input1_view = buffer.view %input1[%base] : buffer -> view<128xf32>
+  %input2_view = buffer.view %input2[%base] : buffer -> view<128xf32>
+  %output_view = buffer.view %output[%base] : buffer -> view<32xf32>
+  scf.for %lane = [%lane_begin to %lane_end step %lane_step] {
+    %sum = scf.for %index = [%lane to %element_count step %row_step](%acc = %sum_initial : f32) -> (f32) {
+      %value0 = view.load %input0_view[%index] : view<128xf32> -> f32
+      %value1 = view.load %input1_view[%index] : view<128xf32> -> f32
+      %value2 = view.load %input2_view[%index] : view<128xf32> -> f32
+      %sum01 = scalar.addf %value0, %value1 : f32
+      %sum012 = scalar.addf %sum01, %value2 : f32
+      %next = scalar.addf %acc, %sum012 : f32
+      scf.yield %next : f32
+    }
+    view.store %sum, %output_view[%lane] : f32, view<32xf32>
+  }
+  func.return
+}
+
+check.scenario @loop_edge_exact_extent_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input0 = check.generate.iota offset(-64.0) step(1.0) : tensor<128xf32>
+    %input1 = check.generate.iota offset(0.5) step(0.5) : tensor<128xf32>
+    %input2 = check.generate.iota offset(32.0) step(-0.25) : tensor<128xf32>
+    %output_storage = check.generate.fill value(-123.0) : tensor<40xf32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<40xf32> -> tensor<32xf32>
+    check.compare<@loop_edge_exact_extent, @loop_edge_exact_extent_oracle>(%input0, %input1, %input2, %output) : (tensor<128xf32>, tensor<128xf32>, tensor<128xf32>, tensor<32xf32>) -> () {
+      check.expect.bitwise actual(%input0) expected(%input0) : tensor<128xf32>
+      check.expect.bitwise actual(%input1) expected(%input1) : tensor<128xf32>
+      check.expect.bitwise actual(%input2) expected(%input2) : tensor<128xf32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<40xf32>
+    }
+  }
+  check.return
+}
+
+check.benchmark<@loop_carried_lane_liveness_values> @loop_carried_lane_liveness_benchmark
+
+check.benchmark<@loop_carried_lane_store_after_loop_values> @loop_carried_lane_store_after_loop_benchmark
+
+check.benchmark<@loop_edge_exact_extent_values> @loop_edge_exact_extent_benchmark

@@ -281,6 +281,30 @@ function(iree_py_library_collect_package_dirs OUTPUT_PACKAGE_DIRS TARGET_NAME)
   set(${OUTPUT_PACKAGE_DIRS} "${_PACKAGE_DIRS}" PARENT_SCOPE)
 endfunction()
 
+# Resolve test imports after all Python libraries have been declared, including
+# libraries in a parent directory declared after its child tests. Test properties
+# consume target metadata at generation time so finalization does not require
+# cross-directory mutation of CTest records.
+function(iree_finalize_python_test_environments)
+  get_property(_TARGETS GLOBAL PROPERTY IREE_PY_TEST_ENVIRONMENT_TARGETS)
+  foreach(_TARGET IN LISTS _TARGETS)
+    get_property(_PACKAGE_DIRS TARGET "${_TARGET}" PROPERTY IREE_PY_IMPORT_DIRS)
+    get_property(_DEPS TARGET "${_TARGET}" PROPERTY IREE_PY_DEPS)
+    foreach(_DEP IN LISTS _DEPS)
+      iree_py_library_collect_package_dirs(_DEP_PACKAGE_DIRS "${_DEP}")
+      list(APPEND _PACKAGE_DIRS ${_DEP_PACKAGE_DIRS})
+    endforeach()
+    list(REMOVE_DUPLICATES _PACKAGE_DIRS)
+    list(REVERSE _PACKAGE_DIRS)
+    set(_MODIFICATIONS)
+    foreach(_PACKAGE_DIR IN LISTS _PACKAGE_DIRS)
+      list(APPEND _MODIFICATIONS "PYTHONPATH=path_list_prepend:${_PACKAGE_DIR}")
+    endforeach()
+    set_property(TARGET "${_TARGET}" PROPERTY IREE_PY_TEST_ENVIRONMENT
+      "${_MODIFICATIONS}")
+  endforeach()
+endfunction()
+
 # Prepends Python package directories to the PYTHONPATH of a CTest test.
 #
 # CTest applies ENVIRONMENT_MODIFICATION entries sequentially. Reverse the
@@ -427,7 +451,9 @@ endfunction()
 #     File paths use the same {{file}} locators as iree_native_test.
 # DATA: Additional files or targets required by the test.
 # LABELS: Additional labels to apply to the test. The package path is added
-#     automatically.
+#     automatically. All Python tests receive the python-test label.
+# RESOURCE_GROUP: If set, tests sharing the same RESOURCE_GROUP name will not
+#     run concurrently under CTest. Maps to CTest's RESOURCE_LOCK property.
 # GENERATED_IN_BINARY_DIR: If present, indicates that the srcs have been
 #   generated in CMAKE_CURRENT_BINARY_DIR.
 # PACKAGE_DIRS: Python package paths to be added to PYTHONPATH.
@@ -439,7 +465,7 @@ function(iree_local_py_test)
   cmake_parse_arguments(
     _RULE
     "GENERATED_IN_BINARY_DIR"
-    "NAME;SRC"
+    "NAME;RESOURCE_GROUP;SRC"
     "ARGS;DATA;DEPS;LABELS;PACKAGE_DIRS;SOURCES;TIMEOUT"
     ${ARGN}
   )
@@ -462,7 +488,7 @@ function(iree_local_py_test)
   iree_package_ns(_PACKAGE_NS)
   string(REPLACE "::" "/" _PACKAGE_PATH ${_PACKAGE_NS})
   set(_NAME_PATH "${_PACKAGE_PATH}/${_RULE_NAME}")
-  list(APPEND _RULE_LABELS "${_PACKAGE_PATH}")
+  list(APPEND _RULE_LABELS "${_PACKAGE_PATH}" "python-test")
   if(NOT DEFINED _RULE_TIMEOUT)
     set(_RULE_TIMEOUT 60)
   endif()
@@ -482,10 +508,15 @@ function(iree_local_py_test)
 
   set_property(TEST ${_NAME_PATH} PROPERTY LABELS "${_RULE_LABELS}")
   set_property(TEST ${_NAME_PATH} PROPERTY TIMEOUT ${_RULE_TIMEOUT})
+  if(_RULE_RESOURCE_GROUP)
+    set_property(TEST ${_NAME_PATH} PROPERTY RESOURCE_LOCK "${_RULE_RESOURCE_GROUP}")
+  endif()
 
   set(_IREE_INSTALL_PACKAGE_DIRS ${_RULE_PACKAGE_DIRS})
 
-  iree_python_test_add_package_dirs("${_NAME_PATH}" ${_RULE_PACKAGE_DIRS})
+  if(NOT _RULE_DEPS)
+    iree_python_test_add_package_dirs("${_NAME_PATH}" ${_RULE_PACKAGE_DIRS})
+  endif()
   set_property(TEST ${_NAME_PATH} PROPERTY ENVIRONMENT
     "PYTHONDONTWRITEBYTECODE=1"
   )
@@ -507,6 +538,16 @@ function(iree_local_py_test)
     iree_add_data_dependencies(NAME "${_TEST_BUILD_TARGET}" DATA ${_RULE_DATA})
     iree_generated_output_add_consumer("${_SOURCE_PATH}" "${_TEST_BUILD_TARGET}")
     list(APPEND _TEST_BUILD_TARGETS "${_TEST_BUILD_TARGET}")
+    if(_RULE_DEPS)
+      set_property(TARGET "${_TEST_BUILD_TARGET}" PROPERTY IREE_PY_IMPORT_DIRS
+        "${_RULE_PACKAGE_DIRS}")
+      set_property(TARGET "${_TEST_BUILD_TARGET}" PROPERTY IREE_PY_DEPS
+        "${_RULE_DEPS}")
+      set_property(GLOBAL APPEND PROPERTY IREE_PY_TEST_ENVIRONMENT_TARGETS
+        "${_TEST_BUILD_TARGET}")
+      set_property(TEST "${_NAME_PATH}" APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "$<TARGET_PROPERTY:${_TEST_BUILD_TARGET},IREE_PY_TEST_ENVIRONMENT>")
+    endif()
   endif()
 
   iree_configure_test(${_NAME_PATH})
@@ -517,6 +558,10 @@ function(iree_local_py_test)
 
   if(IREE_PYTHON_TEST_REGISTRATION_FUNCTION AND
      NOT IREE_SKIP_TEST_REGISTRATION)
+    set(_IREE_REGISTERED_RESOURCE_GROUP)
+    if(_RULE_RESOURCE_GROUP)
+      set(_IREE_REGISTERED_RESOURCE_GROUP RESOURCE_GROUP "${_RULE_RESOURCE_GROUP}")
+    endif()
     if(COMMAND ${IREE_PYTHON_TEST_REGISTRATION_FUNCTION})
       cmake_language(CALL ${IREE_PYTHON_TEST_REGISTRATION_FUNCTION}
         NAME
@@ -537,6 +582,7 @@ function(iree_local_py_test)
           ${_IREE_INSTALL_PACKAGE_DIRS}
         TIMEOUT
           ${_RULE_TIMEOUT}
+        ${_IREE_REGISTERED_RESOURCE_GROUP}
       )
     endif()
   endif()
@@ -554,16 +600,18 @@ endfunction()
 #     File paths use the same {{file}} locators as iree_native_test.
 # DATA: Additional files or targets required by the test.
 # LABELS: Additional labels to apply to the test. The package path is added
-#     automatically.
+#     automatically. All Python tests receive the python-test label.
 # IMPORTS: List of package import directories relative to the current package.
 # DEPS: List of iree_py_library targets needed by the test.
+# RESOURCE_GROUP: If set, tests sharing the same RESOURCE_GROUP name will not
+#     run concurrently under CTest. Maps to CTest's RESOURCE_LOCK property.
 # GENERATED_IN_BINARY_DIR: If present, indicates that the srcs have been
 #   generated in CMAKE_CURRENT_BINARY_DIR.
 function(iree_py_test)
   cmake_parse_arguments(
     _RULE
     "GENERATED_IN_BINARY_DIR"
-    "MAIN;NAME"
+    "MAIN;NAME;RESOURCE_GROUP"
     "ARGS;DATA;LABELS;PACKAGE_DIRS;IMPORTS;DEPS;SRCS;TIMEOUT"
     ${ARGN}
   )
@@ -576,14 +624,11 @@ function(iree_py_test)
       "iree_py_test ${_RULE_NAME} requires MAIN when declaring multiple SRCS")
   endif()
 
-  set(_HAS_EXPLICIT_PACKAGE_DIRS FALSE)
   if(NOT _RULE_PACKAGE_DIRS)
     set(_RULE_PACKAGE_DIRS
       "${IREE_BINARY_DIR}/compiler/bindings/python"
       "${IREE_BINARY_DIR}/runtime/bindings/python"
     )
-  else()
-    set(_HAS_EXPLICIT_PACKAGE_DIRS TRUE)
   endif()
 
   foreach(_IMPORT ${_RULE_IMPORTS})
@@ -599,12 +644,6 @@ function(iree_py_test)
   iree_package_ns(_PACKAGE_NS)
   list(TRANSFORM _RULE_DEPS REPLACE "^::" "${_PACKAGE_NS}::")
   set(_RULE_SOURCE_FILES ${_RULE_SRCS})
-  if(NOT _HAS_EXPLICIT_PACKAGE_DIRS)
-    foreach(_DEP ${_RULE_DEPS})
-      iree_py_library_collect_package_dirs(_DEP_PACKAGE_DIRS "${_DEP}")
-      list(APPEND _RULE_PACKAGE_DIRS ${_DEP_PACKAGE_DIRS})
-    endforeach()
-  endif()
   if(_RULE_PACKAGE_DIRS)
     list(REMOVE_DUPLICATES _RULE_PACKAGE_DIRS)
   endif()
@@ -630,6 +669,8 @@ function(iree_py_test)
       ${_RULE_LABELS}
     PACKAGE_DIRS
       ${_RULE_PACKAGE_DIRS}
+    RESOURCE_GROUP
+      ${_RULE_RESOURCE_GROUP}
     ${_GENERATED_OPTION}
     TIMEOUT
       ${_RULE_TIMEOUT}

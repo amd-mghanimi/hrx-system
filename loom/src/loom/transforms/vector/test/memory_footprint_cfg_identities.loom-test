@@ -51,6 +51,35 @@ func.def @distinct_forwarded_source_rejects_guard(%storage: buffer, %raw: index,
 
 // RUN: pass vector-memory-footprint
 
+// Arithmetic anchors follow exact CFG argument identities while retaining the
+// original quotient relation.
+func.def @forwarded_quotient_anchors_preserve_guard(%storage: buffer, %coordinate_raw: index, %extent_raw: index) {
+  %base = index.constant 0 : offset
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %coordinate = index.assume %coordinate_raw [range(%coordinate_raw, 0, 511)] : index
+  %extent = index.assume %extent_raw [range(%extent_raw, 8, 1023)] : index
+  %left = index.div %coordinate, %c4 : index
+  %right = index.div %extent, %c8 : index
+  %fits = index.cmp slt, %left, %right : index
+  cfg.cond_br %fits, ^forward, ^exit
+^forward:
+  cfg.br ^access(%coordinate: index, %extent: index)
+^access(%forwarded_coordinate: index, %forwarded_extent: index):
+  %origin = index.mul %forwarded_coordinate, %c2 : index
+  %view = buffer.view %storage[%base] : buffer -> view<[%forwarded_extent]xi32>
+  %loaded = vector.load %view[%origin] : view<[%forwarded_extent]xi32> -> vector<2xi32>
+  test.use %loaded : vector<2xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
 // Correlated loop arguments remain equal while their positions rotate on the backedge.
 func.def @correlated_loop_rotation_preserves_identity(%storage: buffer, %raw: index, %bound_raw: index, %choice: i1) {
   %base = index.constant 0 : offset
@@ -562,6 +591,242 @@ func.def @distinct_expression_classes_do_not_merge(%storage: buffer, %raw: index
   test.use %loaded : vector<4xi8>
   %next = index.add %iteration, %step : index
   cfg.br ^header(%next: index, %slot0: index, %slot1: index, %slot2: index, %slot3: index)
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// The guarded coordinate has two symbolic terms, while the dynamic view
+// bound is a cast of an input range contract. Both record coordinates add 4.
+func.def @compound_record_translation_cfg(%input: buffer, %storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %base = index.assume %base_raw [range(%base_raw, 0, 992), multiple_of(%base_raw, 32)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %payload = buffer.view %input[%origin] : buffer -> view<[%limit]xi32>
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %in_bounds = index.cmp ult, %element, %limit : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  %value = view.load %payload[%element] : view<[%limit]xi32> -> i32
+  %record_element = index.add %element, %header_words : index
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: with-checks pass scf-to-cfg,vector-memory-footprint
+
+// The ordinary tile loop and partial-tile guard reach the same indexed CFG
+// proof through the production SCF conversion.
+func.def @compound_record_translation_after_scf_to_cfg(%storage: buffer, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %first_element = index.constant 0 : index
+  %tile_step = index.constant 32 : index
+  %header_words = index.constant 4 : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  scf.for %base = [%first_element to %limit step %tile_step] {
+    %element = index.add %base, %lane : index
+    %in_bounds = index.cmp ult, %element, %limit : index
+    scf.if %in_bounds {
+      %record_element = index.add %element, %header_words : index
+      view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+    }
+  }
+  func.return
+}
+
+// ----
+CHECK: cfg.cond_br %in_bounds, *
+CHECK: view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+CHECK-NOT: scf.for *
+CHECK-NOT: scf.if *
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// A guard on the translated endpoints must keep using their raw SSA relation
+// even when both arithmetic summaries have nonconstant materializations.
+func.def @translated_endpoint_guard_keeps_raw_relation(%storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %base = index.assume %base_raw [range(%base_raw, 0, 992), multiple_of(%base_raw, 32)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %record_element = index.add %element, %header_words : index
+  %in_bounds = index.cmp ult, %record_element, %record_count : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// Equal negative translations preserve the order. The input domains also
+// establish that the translated origin and extent are nonnegative.
+func.def @compound_record_negative_translation(%storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %base = index.assume %base_raw [range(%base_raw, 4, 992)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 4, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.sub %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %in_bounds = index.cmp ult, %element, %limit : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  %record_element = index.sub %element, %header_words : index
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// The false edge permits element == limit. The join has no strict bound at
+// all; a successful proof on the true edge must not leak into either scope.
+func.def @compound_record_guard_stays_in_selected_scope(%storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %base = index.assume %base_raw [range(%base_raw, 0, 992), multiple_of(%base_raw, 32)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %record_element = index.add %element, %header_words : index
+  %in_bounds = index.cmp ult, %element, %limit : index
+  cfg.cond_br %in_bounds, ^selected, ^other
+^selected:
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^join
+^other:
+  // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^join
+^join:
+  // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// At element == limit - 1, adding 5 selects the exclusive record endpoint.
+func.def @compound_record_rejects_extra_word(%storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %extra_header_words = index.constant 5 : index
+  %base = index.assume %base_raw [range(%base_raw, 0, 992), multiple_of(%base_raw, 32)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %in_bounds = index.cmp ult, %element, %limit : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  %record_element = index.add %element, %extra_header_words : index
+  // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// A non-strict guard admits element == limit and cannot prove a scalar access.
+func.def @compound_record_rejects_nonstrict_guard(%storage: buffer, %base_raw: index, %lane_raw: index, %word_count: i32, %value: i32) {
+  %origin = index.constant 0 : offset
+  %header_words = index.constant 4 : index
+  %base = index.assume %base_raw [range(%base_raw, 0, 992), multiple_of(%base_raw, 32)] : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
+  %count_input = index.cast %word_count : i32 to offset
+  %count = index.assume %count_input [range(%count_input, 1, 1024)] : offset
+  %limit = index.cast %count : offset to index
+  %record_count = index.add %limit, %header_words : index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %element = index.add %base, %lane : index
+  %in_bounds = index.cmp ule, %element, %limit : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  %record_element = index.add %element, %header_words : index
+  // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// RUN: pass vector-memory-footprint
+
+// For element=4294967291 and limit=4294967292, the guard is true but the
+// translated i32 payloads widen to origin=4294967295 and extent=0. Unsigned
+// widening establishes nonnegative coordinates; it cannot undo the wrap.
+func.def @record_translation_rejects_modular_wrap(%storage: buffer, %element_raw: index, %limit_raw: index, %value: i32) {
+  %origin = index.constant 0 : offset
+  %element = index.assume %element_raw [range(%element_raw, 0, 4294967291)] : index
+  %limit = index.assume %limit_raw [range(%limit_raw, 1, 4294967295)] : index
+  %header_words = scalar.constant 4 : i32
+  %element_payload = index.cast %element : index to i32
+  %limit_payload = index.cast %limit : index to i32
+  %record_element_payload = scalar.addi %element_payload, %header_words : i32
+  %record_count_payload = scalar.addi %limit_payload, %header_words : i32
+  %record_element_wide = scalar.extui %record_element_payload : i32 to i64
+  %record_count_wide = scalar.extui %record_count_payload : i32 to i64
+  %record_element = index.cast %record_element_wide : i64 to index
+  %record_count = index.cast %record_count_wide : i64 to index
+  %record = buffer.view %storage[%origin] : buffer -> view<[%record_count]xi32>
+  %in_bounds = index.cmp ult, %element, %limit : index
+  cfg.cond_br %in_bounds, ^store, ^exit
+^store:
+  // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+  view.store %value, %record[%record_element] : i32, view<[%record_count]xi32>
+  cfg.br ^exit
 ^exit:
   func.return
 }

@@ -65,6 +65,10 @@ typedef struct amdf_kmt_api_t {
   PFND3DKMT_FREEGPUVIRTUALADDRESS free_gpu_virtual_address;
   // Establishes one allocation mapping in a device address space.
   PFND3DKMT_MAPGPUVIRTUALADDRESS map_gpu_virtual_address;
+  // Applies a vector after a queue fence and signals the following point.
+  PFND3DKMT_UPDATEGPUVIRTUALADDRESS update_gpu_virtual_address;
+  // Orders later hardware commands after a native monitored-fence point.
+  PFND3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE wait_on_hardware_queue;
   // Establishes residency without forcing a device error on exhaustion.
   PFND3DKMT_MAKERESIDENT make_resident;
   // Locks one allocation for explicit host access.
@@ -118,14 +122,6 @@ bool amdf_kmt_api_supports_xdna_kernel_execution(const amdf_kmt_api_t* api);
 
 // Returns true for immediate success and queued asynchronous acceptance.
 bool amdf_kmt_status_is_success_or_pending(NTSTATUS status);
-
-// Waits for one paging point unless its mapped fence has already retired.
-// Successful observation excludes the monitored fence's reset sentinel, both
-// before and after a blocking wait. Device loss supplies no paging completion.
-amdf_status_t amdf_kmt_wait_for_paging(
-    const amdf_kmt_api_t* api, D3DKMT_HANDLE device,
-    D3DKMT_HANDLE paging_sync_object,
-    const volatile uint64_t* current_paging_fence, uint64_t target_value);
 
 // Queries one typed block of adapter information.
 amdf_status_t amdf_kmt_query_adapter_info(const amdf_kmt_api_t* api,

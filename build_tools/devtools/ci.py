@@ -35,11 +35,13 @@ BAZEL_HAL_DRIVER_DEFINES = (
     ("task", "IREE_HAL_DRIVER_TASK"),
     ("vulkan", "IREE_HAL_DRIVER_VULKAN"),
     ("webgpu", "IREE_HAL_DRIVER_WEBGPU"),
+    ("xdna", "IREE_HAL_DRIVER_XDNA"),
 )
 CMAKE_HAL_DRIVER_DEFINES = (
     ("amdgpu", "IREE_HAL_DRIVER_AMDGPU"),
     ("vulkan", "IREE_HAL_DRIVER_VULKAN"),
     ("webgpu", "IREE_HAL_DRIVER_WEBGPU"),
+    ("xdna", "IREE_HAL_DRIVER_XDNA"),
 )
 CMAKE_LOOM_TARGET_DEFINES = (
     ("amdgpu", "LOOM_TARGET_AMDGPU"),
@@ -60,6 +62,7 @@ REPOSITORY_BUILD_HAL_DRIVERS = (
     "task",
     "vulkan",
     "webgpu",
+    "xdna",
 )
 REPOSITORY_BUILD_LOOM_TARGETS = (
     "amdgpu",
@@ -96,6 +99,8 @@ BAZEL_COMMANDS = {
     "iree-bazel-amdgpu-asan": ("amdgpu", "asan"),
     "iree-bazel-amdgpu-tsan": ("amdgpu", "tsan"),
     "iree-bazel-amdgpu-ubsan": ("amdgpu", "ubsan"),
+    "iree-bazel-amdgpu-native": ("amdgpu-native", None),
+    "iree-bazel-amdgpu-native-asan": ("amdgpu-native", "asan"),
     "iree-bazel-loom-amdgpu": ("loom-amdgpu", None),
     "iree-bazel-vulkan": ("vulkan", None),
 }
@@ -134,7 +139,7 @@ else:
     from build_tools.devtools import ci_config
 
 from build_tools.ci import windows_diagnostics
-from build_tools.devtools import run_requirements
+from build_tools.devtools import bazel_test_results, run_requirements
 
 
 @dataclass(frozen=True)
@@ -152,6 +157,8 @@ class CiStep:
     env: tuple[tuple[str, str], ...] = ()
     # Metadata preflight that must succeed before executing a test command.
     requirement_audit: RequirementAudit | None = None
+    # Current-invocation Bazel test evidence staged after this command.
+    test_results: bazel_test_results.BazelTestResultsCapture | None = None
 
     def command_line(self) -> str:
         env_args = tuple(f"{key}={value}" for key, value in self.env)
@@ -184,36 +191,85 @@ def dev_command(*args: str) -> tuple[str, ...]:
     return (os.environ.get("IREE_CI_PYTHON", "python3"), "dev.py", *args)
 
 
-def python_command(path: str, *args: str) -> tuple[str, ...]:
-    return (os.environ.get("IREE_CI_PYTHON", "python3"), path, *args)
-
-
 def sanitizer_env(config: str | None) -> tuple[tuple[str, str], ...]:
     if config != "tsan":
         return ()
     return (("TSAN_OPTIONS", f"suppressions={TSAN_SUPPRESSIONS_FILE}"),)
 
 
-def amdgpu_libhsa_test_env() -> tuple[tuple[str, str], ...]:
+def platform_coverage_enabled() -> bool:
+    selection = os.environ.get("IREE_CI_PLATFORM_COVERAGE", "0")
+    if selection not in ("0", "1"):
+        raise ValueError("IREE_CI_PLATFORM_COVERAGE must be 0 or 1")
+    return selection == "1"
+
+
+def platform_coverage_build_steps(step: CiStep) -> list[CiStep]:
+    return [step] if platform_coverage_enabled() else []
+
+
+def codec_options(build_system: str) -> tuple[str, ...]:
+    enabled = platform_coverage_enabled()
+    groups = (
+        ("image", ci_config.OPTIONAL_IMAGE_CODECS),
+        ("audio", ci_config.OPTIONAL_AUDIO_CODECS),
+    )
+    if build_system == "cmake":
+        return tuple(
+            "-DLOOM_SERVE_"
+            + kind.upper()
+            + "_CODECS="
+            + ";".join(codecs if enabled else ())
+            for kind, codecs in groups
+        )
+    return tuple(
+        "--//loom/config/serve:"
+        + kind
+        + "_codecs="
+        + ",".join(codecs if enabled else ())
+        for kind, codecs in groups
+    )
+
+
+# Bazel test actions do not inherit the client environment. Preserve the
+# selectors that establish the runner's GPU lease without choosing one here.
+AMDGPU_DEVICE_VISIBILITY_ENV_VARS = (
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+    "GPU_DEVICE_ORDINAL",
+    "AMDF_CTS_GPU_NATIVE_IDENTITY",
+)
+
+
+def amdgpu_test_env() -> tuple[tuple[str, str], ...]:
+    test_env = []
+    for name in AMDGPU_DEVICE_VISIBILITY_ENV_VARS:
+        value = os.environ.get(name)
+        if value:
+            test_env.append((name, value))
+
     libhsa_path = os.environ.get("IREE_HAL_AMDGPU_LIBHSA_PATH")
     if not libhsa_path:
         rocm_root = os.environ.get("HRX_ROCM_ROOT")
         if not rocm_root:
-            return ()
+            return tuple(test_env)
         relative_path = (
             Path("bin/hsa-runtime64.dll")
             if sys.platform == "win32"
             else Path("lib/libhsa-runtime64.so.1")
         )
         libhsa_path = str(Path(rocm_root) / relative_path)
-    return (("IREE_HAL_AMDGPU_LIBHSA_PATH", libhsa_path),)
+    test_env.append(("IREE_HAL_AMDGPU_LIBHSA_PATH", libhsa_path))
+    return tuple(test_env)
 
 
 def vulkan_device_test_env() -> tuple[tuple[str, str], ...]:
-    dri_prime = os.environ.get("DRI_PRIME")
-    if not dri_prime:
-        return ()
-    return (("DRI_PRIME", dri_prime),)
+    return tuple(
+        (name, value)
+        for name in ("DRI_PRIME", "AMDF_CTS_GPU_NATIVE_IDENTITY")
+        if (value := os.environ.get(name))
+    )
 
 
 def cmake_amdgpu_device_binary_options() -> tuple[str, ...]:
@@ -283,7 +339,10 @@ def bazel_configure_step(
         command.append(
             "--//loom/config/import:enable=" + ",".join(enabled_loom_importers)
         )
-    return CiStep("Configure Bazel", dev_command(*command, *extra_options))
+    return CiStep(
+        "Configure Bazel",
+        dev_command(*command, *codec_options("bazel"), *extra_options),
+    )
 
 
 def bazel_build_step(
@@ -292,7 +351,12 @@ def bazel_build_step(
     config: str | None = None,
     bazel_options: tuple[str, ...] = (),
 ) -> CiStep:
-    command = ["bazel", "build", *ci_config.BAZEL_DEFAULT_OPTIONS]
+    command = [
+        "bazel",
+        "build",
+        *ci_config.BAZEL_DEFAULT_OPTIONS,
+        *codec_options("bazel"),
+    ]
     if config is not None:
         command.append(f"--config={config}")
     command.extend(bazel_options)
@@ -307,20 +371,25 @@ def bazel_test_step(
     targets: tuple[str, ...],
     config: str | None = None,
     test_tag_filters: tuple[str, ...] = (),
+    test_language_filters: tuple[str, ...] = (),
     test_env: tuple[tuple[str, str], ...] = (),
     bazel_options: tuple[str, ...] = (),
     available_resources: tuple[str, ...] = (),
 ) -> CiStep:
-    if any(option.split("=", 1)[0] == "--test_tag_filters" for option in bazel_options):
-        raise ValueError(
-            "Use test_tag_filters to compose test focus with resource admission"
-        )
+    for option_name, argument_name in (
+        ("--test_tag_filters", "test_tag_filters"),
+        ("--test_lang_filters", "test_language_filters"),
+    ):
+        if any(option.split("=", 1)[0] == option_name for option in bazel_options):
+            raise ValueError(f"Use {argument_name} to compose Bazel test filters")
     options = list(ci_config.BAZEL_DEFAULT_OPTIONS)
+    options.extend(codec_options("bazel"))
     if config is not None:
         options.append(f"--config={config}")
     for key, value in sanitizer_env(config) + test_env:
         options.append(f"--test_env={key}={value}")
     options.extend(bazel_options)
+    options.append("--build_tests_only")
     # Focus filters compose with mandatory all-participant admission.
     test_tag_filters = tuple(
         dict.fromkeys(
@@ -329,6 +398,8 @@ def bazel_test_step(
     )
     if test_tag_filters:
         options.append("--test_tag_filters=" + ",".join(test_tag_filters))
+    if test_language_filters:
+        options.append("--test_lang_filters=" + ",".join(test_language_filters))
     command = ["bazel", "test", *options]
     if any(target.startswith("-") for target in targets):
         command.append("--")
@@ -354,7 +425,14 @@ def bazel_run_step(
     program_args: tuple[str, ...] = (),
     bazel_options: tuple[str, ...] = (),
 ) -> CiStep:
-    command = ["bazel", "run", *ci_config.BAZEL_DEFAULT_OPTIONS, *bazel_options, target]
+    command = [
+        "bazel",
+        "run",
+        *ci_config.BAZEL_DEFAULT_OPTIONS,
+        *codec_options("bazel"),
+        *bazel_options,
+        target,
+    ]
     if program_args:
         command.extend(("--", *program_args))
     return CiStep(name, dev_command(*command))
@@ -387,6 +465,7 @@ def cmake_configure_step(
         "-DLIBHRX_BUILD=OFF",
         "-DIREE_ENABLE_VULKAN=OFF",
         "-DIREE_ENABLE_D3D12=OFF",
+        *codec_options("cmake"),
     ]
     for driver, define in CMAKE_HAL_DRIVER_DEFINES:
         command.append(f"-D{define}={'ON' if driver in enabled_driver_set else 'OFF'}")
@@ -432,6 +511,19 @@ def cmake_build_step(
         name,
         cmake_dev_command(command_name, "build", *targets, "--parallel"),
     )
+
+
+def cmake_explicit_build_steps(
+    command_name: str,
+    name: str,
+    targets: tuple[str, ...] = (),
+    *,
+    tests_enabled: bool,
+) -> list[CiStep]:
+    step = cmake_build_step(command_name, name, targets)
+    if not tests_enabled:
+        return [step]
+    return platform_coverage_build_steps(step)
 
 
 def combine_ctest_regex(*regexes: str) -> str:
@@ -481,7 +573,7 @@ def cpu_steps(targets: tuple[str, ...]) -> list[CiStep]:
     scoped_targets = targets + ci_config.CPU_BAZEL_TARGET_EXCLUDES
     return [
         bazel_configure_step(),
-        bazel_build_step("Build IREE", scoped_targets),
+        *platform_coverage_build_steps(bazel_build_step("Build IREE", scoped_targets)),
         bazel_test_step(
             "Test IREE",
             scoped_targets + ci_config.CPU_XFAIL_TARGETS,
@@ -490,23 +582,33 @@ def cpu_steps(targets: tuple[str, ...]) -> list[CiStep]:
     ]
 
 
+def repository_configure_step() -> CiStep:
+    return bazel_configure_step(
+        enabled_drivers=REPOSITORY_BUILD_HAL_DRIVERS,
+        enabled_loom_targets=REPOSITORY_BUILD_LOOM_TARGETS,
+        enabled_loom_importers=REPOSITORY_BUILD_LOOM_IMPORTERS,
+        extra_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
+    )
+
+
+def repository_build_step() -> CiStep:
+    return bazel_build_step(
+        "Build repository",
+        ("//...",),
+        bazel_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
+    )
+
+
 def repository_build_steps() -> list[CiStep]:
     return [
-        bazel_configure_step(
-            enabled_drivers=REPOSITORY_BUILD_HAL_DRIVERS,
-            enabled_loom_targets=REPOSITORY_BUILD_LOOM_TARGETS,
-            enabled_loom_importers=REPOSITORY_BUILD_LOOM_IMPORTERS,
-            extra_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
-        ),
-        bazel_build_step(
-            "Build repository",
-            ("//...",),
-            bazel_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
-        ),
+        repository_configure_step(),
+        repository_build_step(),
     ]
 
 
-def repository_integration_steps(amdgpu_target_selector: str) -> list[CiStep]:
+def repository_integration_steps(
+    amdgpu_target_selector: str, *, include_python_tests: bool
+) -> list[CiStep]:
     if not os.environ.get("HRX_ROCM_ROOT"):
         raise ValueError(
             "iree-bazel-repository-integration requires HRX_ROCM_ROOT so the "
@@ -514,7 +616,8 @@ def repository_integration_steps(amdgpu_target_selector: str) -> list[CiStep]:
         )
     amdgpu_options = amdgpu_bazel_options(amdgpu_target_selector)
     return [
-        *repository_build_steps(),
+        repository_configure_step(),
+        *platform_coverage_build_steps(repository_build_step()),
         bazel_build_step(
             "Build AMDGPU device toolchain smoke",
             ci_config.BAZEL_REPOSITORY_INTEGRATION_DEVICE_TARGETS,
@@ -524,11 +627,12 @@ def repository_integration_steps(amdgpu_target_selector: str) -> list[CiStep]:
             "Test repository",
             ci_config.BAZEL_REPOSITORY_TEST_TARGETS,
             test_tag_filters=ci_config.CPU_RESOURCE_TAG_EXCLUDES,
+            test_language_filters=(
+                ()
+                if include_python_tests
+                else ci_config.PYTHON_TEST_BAZEL_LANGUAGE_EXCLUSIONS
+            ),
             bazel_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
-        ),
-        CiStep(
-            "Test lock-free Bazel launch",
-            python_command("build_tools/devtools/bazel_launcher_integration_test.py"),
         ),
         bazel_run_step(
             "Run dynamic library environment smoke",
@@ -541,7 +645,29 @@ def repository_integration_steps(amdgpu_target_selector: str) -> list[CiStep]:
             program_args=("--help",),
             bazel_options=ci_config.REPOSITORY_BAZEL_OPTIONS,
         ),
+        shared_tool_bazel_step(bazel_options=ci_config.REPOSITORY_BAZEL_OPTIONS),
     ]
+
+
+def shared_tool_bazel_step(
+    config: str | None = None, bazel_options: tuple[str, ...] = ()
+) -> CiStep:
+    return bazel_test_step(
+        "Test shared Loom tools",
+        (
+            "//loom/src/loom/tools/loom-compile:execution_test",
+            "//loom/src/loom/tools/loom-opt:execution_test",
+            "//loom/src/loom/tools/loom-format:execution_test",
+            "//loom/src/loom/tools/loom-link:execution_test",
+            "//loom/src/loom/import/cxx/tooling:execution_test",
+            "//loom/src/loom/tools/loom-import-cxx:execution_test",
+            "//loom/src/loom/tools/loom-import-cxx:export_roundtrip_test",
+            "//loom/src/loom/tools/loom-serve:execution_test",
+            "//loom/src/loom/tooling/target/cpu/serve:all",
+        ),
+        config=config,
+        bazel_options=bazel_options + ("--//loom/config:shared_tools",),
+    )
 
 
 def cpu_sanitizer_steps(targets: tuple[str, ...]) -> list[CiStep]:
@@ -554,14 +680,30 @@ def cpu_sanitizer_steps(targets: tuple[str, ...]) -> list[CiStep]:
 def cpu_config_steps(targets: tuple[str, ...], config: str) -> list[CiStep]:
     scoped_targets = targets + ci_config.CPU_BAZEL_TARGET_EXCLUDES
     if config in ci_config.SANITIZER_TEST_CONFIGS:
-        return [
+        steps = [
+            *platform_coverage_build_steps(
+                bazel_build_step(
+                    f"Build IREE with {config.upper()}",
+                    scoped_targets,
+                    config=config,
+                )
+            ),
             bazel_test_step(
                 f"Test IREE with {config.upper()}",
                 scoped_targets + ci_config.CPU_SANITIZERS_XFAIL_TARGETS,
                 config=config,
                 test_tag_filters=ci_config.CPU_RESOURCE_TAG_EXCLUDES,
-            )
+                test_language_filters=ci_config.PYTHON_TEST_BAZEL_LANGUAGE_EXCLUSIONS,
+            ),
         ]
+        if config == "asan":
+            steps.append(
+                shared_tool_bazel_step(
+                    config=config,
+                    bazel_options=("--//loom/config/import:enable=cxx",),
+                )
+            )
+        return steps
     if config in ci_config.SANITIZER_BUILD_CONFIGS:
         return [
             bazel_build_step(
@@ -575,19 +717,23 @@ def cpu_config_steps(targets: tuple[str, ...], config: str) -> list[CiStep]:
 
 def xdna_steps(targets: tuple[str, ...], config: str | None) -> list[CiStep]:
     config_name = f" / {config.upper()}" if config is not None else ""
-    # The ELF consumers need the base runtime, not GPU drivers or ROCr.
+    # Native ELF consumers and the HAL share the XDNA provider.
     options = (
-        "--//libamdf/config:enabled=true",
         "--//libamdf/config:families=xdna",
-        "--//runtime/config/hal:drivers=task",
+        "--//runtime/config/hal:drivers=task,xdna",
+        "--//loom/config/execute:enable=iree_hal",
     )
     return [
-        bazel_configure_step(enabled_loom_targets=("xdna",), extra_options=options),
-        bazel_build_step(
-            f"Build IREE / XDNA{config_name}",
-            targets,
-            config=config,
-            bazel_options=options,
+        bazel_configure_step(
+            enabled_loom_targets=("vm", "xdna"), extra_options=options
+        ),
+        *platform_coverage_build_steps(
+            bazel_build_step(
+                f"Build IREE / XDNA{config_name}",
+                targets,
+                config=config,
+                bazel_options=options,
+            )
         ),
         bazel_test_step(
             f"Test IREE / XDNA{config_name}",
@@ -614,11 +760,13 @@ def amd_client_steps(targets: tuple[str, ...], config: str | None) -> list[CiSte
     targets = targets or default_targets
     return [
         bazel_configure_step(extra_options=options),
-        bazel_build_step(
-            f"Build IREE / AMD RDNA+XDNA{config_name}",
-            targets,
-            config=config,
-            bazel_options=options,
+        *platform_coverage_build_steps(
+            bazel_build_step(
+                f"Build IREE / AMD RDNA+XDNA{config_name}",
+                targets,
+                config=config,
+                bazel_options=options,
+            )
         ),
         bazel_test_step(
             f"Test IREE / AMD RDNA+XDNA{config_name}",
@@ -631,7 +779,7 @@ def amd_client_steps(targets: tuple[str, ...], config: str | None) -> list[CiSte
     ]
 
 
-def amdgpu_build_and_test_steps(
+def amdgpu_test_steps(
     targets: tuple[str, ...],
     target_selector: str,
     config: str | None = None,
@@ -639,16 +787,20 @@ def amdgpu_build_and_test_steps(
 ) -> list[CiStep]:
     config_name = f" / {config.upper()}" if config is not None else ""
     scoped_targets = targets + ci_config.AMDGPU_BAZEL_TARGET_EXCLUDES
-    bazel_options = amdgpu_bazel_options(target_selector)
+    bazel_options = (
+        amdgpu_bazel_options(target_selector) + ci_config.AMDGPU_BAZEL_OPTIONS
+    )
     host_sanitizer_tag_filters = (
         (f"-{ci_config.HOST_TSAN_INCOMPATIBLE_TEST_LABEL}",) if config == "tsan" else ()
     )
     return [
-        bazel_build_step(
-            f"Build IREE / AMDGPU{config_name}",
-            scoped_targets,
-            config=config,
-            bazel_options=bazel_options,
+        *platform_coverage_build_steps(
+            bazel_build_step(
+                f"Build IREE / AMDGPU{config_name}",
+                scoped_targets,
+                config=config,
+                bazel_options=bazel_options,
+            )
         ),
         bazel_test_step(
             f"Test IREE / AMDGPU{config_name}",
@@ -658,19 +810,92 @@ def amdgpu_build_and_test_steps(
                 ci_config.AMDGPU_BAZEL_TEST_TAG_FILTERS + host_sanitizer_tag_filters
             ),
             available_resources=ci_config.AMDGPU_RESOURCES,
-            test_env=amdgpu_libhsa_test_env(),
+            test_env=amdgpu_test_env(),
             bazel_options=bazel_options,
         ),
     ]
 
 
-def amdgpu_steps(targets: tuple[str, ...], target_selector: str) -> list[CiStep]:
+def amdgpu_windows_steps(
+    targets: tuple[str, ...], target_selector: str, config: str | None
+) -> list[CiStep]:
+    options = ci_config.AMDGPU_WINDOWS_BAZEL_OPTIONS
+    config_name = f" / {config.upper()}" if config is not None else ""
+    # A required finite PM4 copy establishes the exact GPU and usable native
+    # transport. SDMA remains capability-admitted; its skip is not a proof.
+    queue_options = options + (
+        f"--test_arg=--amdf_gpu_target={target_selector}",
+        "--test_arg=--amdf_require_test=Pm4KernelQueueTest.ExecutesMaterializedCopyData",
+        "--test_arg=--gtest_fail_fast=1",
+    )
+    steps = [
+        bazel_configure_step(extra_options=options),
+        bazel_test_step(
+            "Query Windows GPU native queue capabilities",
+            ("//libamdf/src/gpu/umd/wddm/wkmi:adapter_info_system_test",),
+            config=config,
+            available_resources=ci_config.AMDGPU_WINDOWS_RESOURCES,
+            bazel_options=options
+            + (
+                f"--test_arg=--amdf_gpu_target={target_selector}",
+                "--test_output=all",
+            ),
+        ),
+        bazel_run_step(
+            "Enumerate Windows GPU queue families",
+            "//libamdf/examples:enumerate",
+            bazel_options=options
+            + ((f"--config={config}",) if config is not None else ()),
+        ),
+    ]
+    for lifetime in ("process", "instance"):
+        steps.append(
+            bazel_test_step(
+                f"Check Windows GPU finite copies / {lifetime}{config_name}",
+                (ci_config.AMDGPU_WINDOWS_QUEUE_TARGET,),
+                config=config,
+                available_resources=ci_config.AMDGPU_WINDOWS_RESOURCES,
+                bazel_options=queue_options
+                + (
+                    f"--test_arg=--amdf_native_lifetime={lifetime}",
+                    "--test_filter=" + ci_config.AMDGPU_WINDOWS_COPY_FILTER,
+                ),
+            )
+        )
+    steps.append(
+        bazel_test_step(
+            f"Test IREE / Windows AMDGPU{config_name}",
+            targets or ci_config.AMDGPU_WINDOWS_BAZEL_TARGETS,
+            config=config,
+            available_resources=ci_config.AMDGPU_WINDOWS_RESOURCES,
+            bazel_options=options + ("--test_arg=--gtest_fail_fast=1",),
+        )
+    )
+    steps.append(
+        bazel_test_step(
+            f"Test Windows GPU queues / instance{config_name}",
+            (ci_config.AMDGPU_WINDOWS_QUEUE_TARGET,),
+            config=config,
+            available_resources=ci_config.AMDGPU_WINDOWS_RESOURCES,
+            bazel_options=queue_options
+            + ("--test_arg=--amdf_native_lifetime=instance",),
+        )
+    )
+    return steps
+
+
+def amdgpu_steps(
+    targets: tuple[str, ...],
+    target_selector: str,
+    enabled_loom_importers: tuple[str, ...] | None = None,
+) -> list[CiStep]:
     return [
         bazel_configure_step(
             enabled_drivers=("amdgpu",),
-            enabled_loom_targets=("amdgpu",),
+            enabled_loom_targets=("amdgpu", "vm"),
+            enabled_loom_importers=enabled_loom_importers,
         ),
-        *amdgpu_build_and_test_steps(
+        *amdgpu_test_steps(
             targets,
             target_selector,
             xfail_targets=(
@@ -683,7 +908,7 @@ def amdgpu_steps(targets: tuple[str, ...], target_selector: str) -> list[CiStep]
 
 def loom_amdgpu_bazel_steps() -> list[CiStep]:
     return [
-        bazel_configure_step(enabled_loom_targets=("amdgpu",)),
+        bazel_configure_step(enabled_loom_targets=("amdgpu", "vm")),
         bazel_test_step(
             "Test Loom AMDGPU compile coverage",
             ci_config.LOOM_AMDGPU_BAZEL_COMPILE_TEST_TARGETS,
@@ -700,7 +925,7 @@ def amdgpu_config_steps(
         if config == "tsan"
         else ci_config.AMDGPU_SANITIZERS_XFAIL_TARGETS
     )
-    return amdgpu_build_and_test_steps(
+    return amdgpu_test_steps(
         targets,
         target_selector,
         config=config,
@@ -721,13 +946,15 @@ def vulkan_steps(targets: tuple[str, ...]) -> list[CiStep]:
     return [
         bazel_configure_step(
             enabled_drivers=("vulkan",),
-            enabled_loom_targets=("spirv",),
+            enabled_loom_targets=("spirv", "vm"),
             extra_options=api_options,
         ),
-        bazel_build_step(
-            "Build IREE / Vulkan",
-            scoped_targets,
-            bazel_options=bazel_options,
+        *platform_coverage_build_steps(
+            bazel_build_step(
+                "Build IREE / Vulkan",
+                scoped_targets,
+                bazel_options=bazel_options,
+            )
         ),
         bazel_test_step(
             "Test IREE / Vulkan",
@@ -754,7 +981,11 @@ def cmake_cpu_steps(command_name: str, sanitizer: str | None) -> list[CiStep]:
     )
     steps = [
         cmake_configure_step(command_name, sanitizer=sanitizer),
-        cmake_build_step(command_name, f"Build IREE CMake{sanitizer_name}"),
+        *cmake_explicit_build_steps(
+            command_name,
+            f"Build IREE CMake{sanitizer_name}",
+            tests_enabled=tests_enabled,
+        ),
     ]
     if tests_enabled:
         steps.append(
@@ -766,8 +997,48 @@ def cmake_cpu_steps(command_name: str, sanitizer: str | None) -> list[CiStep]:
                 label_exclude_regex=combine_ctest_regex(
                     ci_config.CTEST_RESOURCE_LABEL_EXCLUDE_REGEX,
                     ci_config.CTEST_MANUAL_LABEL_EXCLUDE_REGEX,
+                    (
+                        ci_config.PYTHON_TEST_CTEST_LABEL_REGEX
+                        if sanitizer is not None
+                        else ""
+                    ),
                 ),
             )
+        )
+    if sanitizer is None:
+        # Reuse the static qualification tree so both final-link modes are
+        # exercised without another compilation tree or worker job.
+        steps.extend(
+            [
+                CiStep(
+                    "Configure shared Loom tools",
+                    cmake_dev_command(
+                        command_name,
+                        "configure",
+                        "-DLOOM_LINK_SHARED_TOOLS=ON",
+                        "-DLOOM_IMPORT_CXX=ON",
+                    ),
+                ),
+                cmake_build_step(
+                    command_name,
+                    "Build shared Loom tools",
+                    (
+                        "loom-compile",
+                        "loom-opt",
+                        "loom-format",
+                        "loom-link",
+                        "loom-import-cxx",
+                        "loom_import_cxx_tooling_execution_test_test_deps",
+                        "loom-serve",
+                        "loom_tooling_target_cpu_serve_loom-serve-test-tool",
+                    ),
+                ),
+                cmake_test_step(
+                    command_name,
+                    "Test shared Loom tools",
+                    regex=r"^(loom/tools/(loom-compile|loom-opt|loom-format|loom-link|loom-import-cxx|loom-serve)/(execution_test|export_roundtrip_test)|loom/import/cxx/tooling/execution_test|loom/tooling/target/cpu/serve/serve_command_test)$",
+                ),
+            ]
         )
     return steps
 
@@ -782,7 +1053,6 @@ def cmake_repository_build_steps(command_name: str) -> list[CiStep]:
             amdgpu_target_selector=None,
             amdgpu_device_binary_mode="prebuilt",
             extra_options=(
-                "-DAMDF_BUILD=ON",
                 "-DIREE_ENABLE_VULKAN=ON",
                 "-DIREE_ENABLE_D3D12=ON",
             ),
@@ -803,46 +1073,56 @@ def cmake_repository_build_steps(command_name: str) -> list[CiStep]:
 
 def cmake_xdna_steps(command_name: str, sanitizer: str | None) -> list[CiStep]:
     sanitizer_name = f" with {sanitizer.upper()}" if sanitizer is not None else ""
+    tests_enabled = cmake_tests_enabled(sanitizer)
     package_regex = combine_ctest_regex(
         ci_config.AMDF_CTEST_REGEX, ci_config.XDNA_CTEST_PACKAGE_REGEX
     )
-    return [
+    steps = [
         cmake_configure_step(
             command_name,
-            enabled_loom_targets=("xdna",),
+            enabled_drivers=("xdna",),
+            enabled_loom_targets=("vm", "xdna"),
             sanitizer=sanitizer,
             extra_options=(
-                "-DAMDF_BUILD=ON",
                 "-DAMDF_FAMILY_RDNA=OFF",
                 "-DAMDF_FAMILY_CDNA=OFF",
                 "-DAMDF_FAMILY_XDNA=ON",
-                "-DLOOM_BUILD=OFF",
+                "-DLOOM_BUILD=ON",
             ),
         ),
-        cmake_build_step(
+        *cmake_explicit_build_steps(
             command_name,
             f"Build IREE CMake XDNA{sanitizer_name}",
             ci_config.XDNA_CMAKE_BUILD_TARGETS,
-        ),
-        cmake_test_step(
-            command_name,
-            f"Test IREE CMake XDNA package tests{sanitizer_name}",
-            regex=package_regex,
-            label_exclude_regex=combine_ctest_regex(
-                ci_config.CTEST_MANUAL_LABEL_EXCLUDE_REGEX,
-                ci_config.CTEST_RESOURCE_LABEL_EXCLUDE_REGEX,
-            ),
-            parallelism=1,
-        ),
-        cmake_test_step(
-            command_name,
-            f"Test IREE CMake XDNA resource tests{sanitizer_name}",
-            label_regex=ci_config.XDNA_CTEST_RESOURCE_LABEL,
-            available_resources=ci_config.XDNA_RESOURCES,
-            label_exclude_regex=ci_config.CTEST_MANUAL_LABEL_EXCLUDE_REGEX,
-            parallelism=1,
+            tests_enabled=tests_enabled,
         ),
     ]
+    if not tests_enabled:
+        return steps
+
+    steps.extend(
+        [
+            cmake_test_step(
+                command_name,
+                f"Test IREE CMake XDNA package tests{sanitizer_name}",
+                regex=package_regex,
+                label_exclude_regex=combine_ctest_regex(
+                    ci_config.CTEST_MANUAL_LABEL_EXCLUDE_REGEX,
+                    ci_config.CTEST_RESOURCE_LABEL_EXCLUDE_REGEX,
+                ),
+                parallelism=1,
+            ),
+            cmake_test_step(
+                command_name,
+                f"Test IREE CMake XDNA resource tests{sanitizer_name}",
+                label_regex=ci_config.XDNA_CTEST_RESOURCE_LABEL,
+                available_resources=ci_config.XDNA_RESOURCES,
+                label_exclude_regex=ci_config.CTEST_MANUAL_LABEL_EXCLUDE_REGEX,
+                parallelism=1,
+            ),
+        ]
+    )
+    return steps
 
 
 def cmake_amdgpu_steps(
@@ -856,19 +1136,27 @@ def cmake_amdgpu_steps(
         xfail_regex = ci_config.AMDGPU_SANITIZERS_CTEST_EXCLUDE_REGEX
     else:
         xfail_regex = ci_config.AMDGPU_CTEST_EXCLUDE_REGEX
-    build_targets = ci_config.AMDGPU_CMAKE_DRIVER_TARGETS
+    build_targets = ci_config.AMDGPU_CMAKE_BUILD_TARGETS
     steps = [
         cmake_configure_step(
             command_name,
             enabled_drivers=("amdgpu",),
-            enabled_loom_targets=("amdgpu",),
+            enabled_loom_targets=("amdgpu", "vm"),
             amdgpu_target_selector=target_selector,
             sanitizer=sanitizer,
+            extra_options=(
+                "-DAMDF_BUILD=ON",
+                "-DAMDF_FAMILY_RDNA=ON",
+                "-DAMDF_FAMILY_CDNA=ON",
+                "-DAMDF_FAMILY_XDNA=OFF",
+                "-DLOOM_BUILD=ON",
+            ),
         ),
-        cmake_build_step(
+        *cmake_explicit_build_steps(
             command_name,
             f"Build IREE CMake AMDGPU{sanitizer_name}",
             build_targets,
+            tests_enabled=tests_enabled,
         ),
     ]
     if not tests_enabled:
@@ -881,7 +1169,7 @@ def cmake_amdgpu_steps(
             regex="^iree/hal/drivers/amdgpu/",
             exclude_regex=xfail_regex,
             available_resources=ci_config.AMDGPU_RESOURCES,
-            env=sanitizer_env(sanitizer) + amdgpu_libhsa_test_env(),
+            env=sanitizer_env(sanitizer) + amdgpu_test_env(),
             parallelism=1,
         )
     )
@@ -902,7 +1190,7 @@ def cmake_amdgpu_steps(
             label_exclude_regex=resource_label_exclude_regex,
             exclude_regex=resource_exclude_regex,
             available_resources=ci_config.AMDGPU_RESOURCES,
-            env=sanitizer_env(sanitizer) + amdgpu_libhsa_test_env(),
+            env=sanitizer_env(sanitizer) + amdgpu_test_env(),
             parallelism=1,
         )
     )
@@ -911,7 +1199,7 @@ def cmake_amdgpu_steps(
 
 def cmake_loom_amdgpu_steps(command_name: str) -> list[CiStep]:
     return [
-        cmake_configure_step(command_name, enabled_loom_targets=("amdgpu",)),
+        cmake_configure_step(command_name, enabled_loom_targets=("amdgpu", "vm")),
         cmake_test_step(
             command_name,
             "Test Loom CMake AMDGPU compile coverage",
@@ -931,14 +1219,15 @@ def cmake_vulkan_steps(command_name: str, sanitizer: str | None) -> list[CiStep]
         cmake_configure_step(
             command_name,
             enabled_drivers=("vulkan",),
-            enabled_loom_targets=("spirv",),
+            enabled_loom_targets=("spirv", "vm"),
             sanitizer=sanitizer,
             extra_options=("-DIREE_ENABLE_VULKAN=ON",),
         ),
-        cmake_build_step(
+        *cmake_explicit_build_steps(
             command_name,
             f"Build IREE CMake Vulkan{sanitizer_name}",
             build_targets,
+            tests_enabled=tests_enabled,
         ),
     ]
     if tests_enabled:
@@ -1054,6 +1343,7 @@ def tilelang_importer_steps(command_name: str) -> list[CiStep]:
                 "test",
                 "--importer-env",
                 "tilelang",
+                *codec_options("bazel"),
                 *ci_config.IMPORTER_TILELANG_BAZEL_TEST_TARGETS,
             ),
         ),
@@ -1068,6 +1358,7 @@ def tilelang_importer_steps(command_name: str) -> list[CiStep]:
                 "tilelang",
                 "-DIREE_BUILD_TESTS=ON",
                 "-DLIBHRX_BUILD=OFF",
+                *codec_options("cmake"),
             ),
         ),
         CiStep(
@@ -1101,6 +1392,7 @@ def _steps_from_args(args: argparse.Namespace) -> list[CiStep]:
     cmake_target_group = CMAKE_COMMANDS.get(args.command, (None, None))[0]
     amdgpu_target_bazel_groups = (
         "amdgpu",
+        "amdgpu-native",
         "repository-integration",
     )
     accepts_amdgpu_target = (
@@ -1112,8 +1404,20 @@ def _steps_from_args(args: argparse.Namespace) -> list[CiStep]:
             "--amdgpu-target is only supported for AMDGPU and "
             "repository-integration CI commands"
         )
+    if args.loom_importer is not None and bazel_target_group != "amdgpu":
+        raise ValueError(
+            "--loom-importer is only supported for AMDGPU Bazel CI commands"
+        )
+    if args.exclude_python_tests and bazel_target_group != "repository-integration":
+        raise ValueError(
+            "--exclude-python-tests is only supported for repository-integration "
+            "CI commands"
+        )
     amdgpu_target_selector = (
         args.amdgpu_target or ci_config.DEFAULT_AMDGPU_TARGET_SELECTOR
+    )
+    enabled_loom_importers = (
+        tuple(args.loom_importer) if args.loom_importer is not None else None
     )
 
     if args.command == CMAKE_SANITIZER_SMOKE_COMMAND:
@@ -1143,6 +1447,14 @@ def _steps_from_args(args: argparse.Namespace) -> list[CiStep]:
             tuple(args.target or ()),
             sanitizer,
         )
+    if bazel_target == "amdgpu-native":
+        if sys.platform != "win32":
+            raise ValueError("Native kernel-queue CI requires Windows")
+        if args.amdgpu_target is None:
+            raise ValueError("Windows GPU CI requires an exact --amdgpu-target")
+        return amdgpu_windows_steps(
+            tuple(args.target or ()), amdgpu_target_selector, sanitizer
+        )
     if bazel_target == "xdna":
         return xdna_steps(
             tuple(args.target) if args.target else ci_config.XDNA_BAZEL_TARGETS,
@@ -1165,7 +1477,10 @@ def _steps_from_args(args: argparse.Namespace) -> list[CiStep]:
             raise ValueError(
                 "--target is not supported by the repository-wide integration command"
             )
-        return repository_integration_steps(amdgpu_target_selector)
+        return repository_integration_steps(
+            amdgpu_target_selector,
+            include_python_tests=not args.exclude_python_tests,
+        )
     targets = command_targets(args.target)
     if bazel_target == "cpu":
         if sanitizer == "all":
@@ -1174,15 +1489,22 @@ def _steps_from_args(args: argparse.Namespace) -> list[CiStep]:
             return [bazel_configure_step(), *cpu_config_steps(targets, sanitizer)]
         return cpu_steps(targets)
     if bazel_target == "amdgpu":
+        if not args.target:
+            targets += ci_config.AMDF_BAZEL_TARGETS
         if sanitizer is not None:
             return [
                 bazel_configure_step(
                     enabled_drivers=("amdgpu",),
-                    enabled_loom_targets=("amdgpu",),
+                    enabled_loom_targets=("amdgpu", "vm"),
+                    enabled_loom_importers=enabled_loom_importers,
                 ),
                 *amdgpu_config_steps(targets, amdgpu_target_selector, sanitizer),
             ]
-        return amdgpu_steps(targets, amdgpu_target_selector)
+        return amdgpu_steps(
+            targets,
+            amdgpu_target_selector,
+            enabled_loom_importers=enabled_loom_importers,
+        )
     if bazel_target == "vulkan":
         return vulkan_steps(targets)
     raise ValueError(f"unknown Bazel CI target: {bazel_target}")
@@ -1225,16 +1547,72 @@ def add_bazel_profiles(steps: list[CiStep], profile_dir: Path) -> list[CiStep]:
     return profiled_steps
 
 
+def add_bazel_test_results(steps: list[CiStep], output_dir: Path) -> list[CiStep]:
+    captured_steps = []
+    event_owners = {}
+    for step in steps:
+        if step.argv[1:4] != ("dev.py", "bazel", "test"):
+            captured_steps.append(step)
+            continue
+
+        if any(
+            arg == "--build_event_json_file"
+            or arg.startswith("--build_event_json_file=")
+            for arg in step.argv[4:]
+        ):
+            raise ValueError(f"{step.name} already configures a Bazel build event file")
+        event_stem = "-".join(
+            token.lower() for token in re.findall(r"[A-Za-z0-9]+", step.name)
+        )
+        if not event_stem:
+            raise ValueError(
+                f"cannot derive a Bazel build event name from {step.name!r}"
+            )
+        event_path = output_dir / ".events" / f"{event_stem}.json"
+        if previous_owner := event_owners.get(event_path):
+            raise ValueError(
+                f"Bazel build event path collision between {previous_owner!r} and "
+                f"{step.name!r}: {event_path}"
+            )
+        event_owners[event_path] = step.name
+        captured_steps.append(
+            replace(
+                step,
+                argv=step.argv[:4]
+                + (f"--build_event_json_file={event_path}",)
+                + step.argv[4:],
+                test_results=bazel_test_results.BazelTestResultsCapture(
+                    build_event_path=event_path,
+                    output_dir=output_dir / event_stem,
+                ),
+            )
+        )
+    if not event_owners:
+        raise ValueError("--bazel-test-results-dir requires a Bazel test phase")
+    return captured_steps
+
+
 def bazel_profile_dir(args: argparse.Namespace) -> Path | None:
     if args.bazel_profile_dir is None:
         return None
     return args.bazel_profile_dir.expanduser().resolve()
 
 
+def bazel_test_results_dir(args: argparse.Namespace) -> Path | None:
+    if args.bazel_test_results_dir is None:
+        return None
+    return args.bazel_test_results_dir.expanduser().resolve()
+
+
 def steps_from_args(args: argparse.Namespace) -> list[CiStep]:
     profile_dir = bazel_profile_dir(args)
+    test_results_dir = bazel_test_results_dir(args)
     if profile_dir is not None and args.command not in BAZEL_COMMANDS:
         raise ValueError("--bazel-profile-dir is only supported for Bazel CI commands")
+    if test_results_dir is not None and args.command not in BAZEL_COMMANDS:
+        raise ValueError(
+            "--bazel-test-results-dir is only supported for Bazel CI commands"
+        )
     steps = _steps_from_args(args)
     if args.keep_going:
         # Continue independent actions inside each phase as well as subsequent
@@ -1249,8 +1627,16 @@ def steps_from_args(args: argparse.Namespace) -> list[CiStep]:
                 steps[index] = replace(
                     step, argv=step.argv[:4] + ("--keep_going",) + step.argv[4:]
                 )
+            elif step.argv[1:3] == ("dev.py", "--cmake-build-dir") and step.argv[
+                4:6
+            ] == ("cmake", "build"):
+                # CI CMake configurations use Ninja. Pass native build options
+                # after CMake's argument separator.
+                steps[index] = replace(step, argv=step.argv + ("--", "-k", "0"))
     if profile_dir is not None:
         steps = add_bazel_profiles(steps, profile_dir)
+    if test_results_dir is not None:
+        steps = add_bazel_test_results(steps, test_results_dir)
     return steps
 
 
@@ -1327,6 +1713,20 @@ def run_step(step: CiStep, verbose: bool) -> StepResult:
         returncode = subprocess.run(
             step.argv, cwd=REPO_ROOT, env=environment
         ).returncode
+    if step.test_results is not None:
+        try:
+            output_count = bazel_test_results.stage(
+                step.test_results.build_event_path,
+                step.test_results.output_dir,
+            )
+            print(
+                f"[artifact] Staged {output_count} current Bazel test outputs",
+                flush=True,
+            )
+        except bazel_test_results.BazelTestResultsError as error:
+            print(f"[fail] Stage Bazel test results: {error}", file=sys.stderr)
+            if returncode == 0:
+                returncode = 1
     elapsed_seconds = time.monotonic() - start_time
     result = StepResult(step, returncode)
     if result.ok:
@@ -1397,7 +1797,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--keep-going",
         action="store_true",
         help=(
-            "Run every phase, let Bazel finish independent actions after failures, "
+            "Run every phase, let build tools finish independent actions after failures, "
             "and report failures at the end."
         ),
     )
@@ -1415,11 +1815,37 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--loom-importer",
+        action="append",
+        choices=REPOSITORY_BUILD_LOOM_IMPORTERS,
+        help=(
+            "Loom importer to enable for AMDGPU Bazel CI commands. May be "
+            "specified more than once."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-python-tests",
+        action="store_true",
+        help=(
+            "Exclude Python tests from a duplicate repository-integration lane. "
+            "Only supported for repository-integration CI commands."
+        ),
+    )
+    parser.add_argument(
         "--bazel-profile-dir",
         type=Path,
         help=(
             "Write one compressed Bazel execution profile per build/test/run phase "
             "to this directory. Only supported for Bazel CI commands."
+        ),
+    )
+    parser.add_argument(
+        "--bazel-test-results-dir",
+        type=Path,
+        help=(
+            "Stage test.log and test.xml outputs named by the current Bazel "
+            "invocation into this fresh directory. Only supported for Bazel "
+            "CI commands."
         ),
     )
     parser.add_argument(
@@ -1437,8 +1863,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_arguments(argv)
     steps = steps_from_args(args)
     profile_dir = bazel_profile_dir(args)
+    test_results_dir = bazel_test_results_dir(args)
     if profile_dir is not None and not args.dry_run:
         profile_dir.mkdir(parents=True, exist_ok=True)
+    if test_results_dir is not None and not args.dry_run:
+        bazel_test_results.prepare_output_directory(test_results_dir)
     return run_steps(
         steps,
         dry_run=args.dry_run,

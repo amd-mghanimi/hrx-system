@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test")
+load("//loom/build_tools/bazel:loom_check.bzl", "loom_check_test_suite")
 
 package(
     default_visibility = [
@@ -17,15 +18,22 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
+loom_check_test_suite(
+    name = "representation_test",
+    srcs = ["representation_filters.loom-test"],
+)
+
 loom_cc_library(
     name = "registry",
     srcs = ["registry.c"],
     hdrs = ["registry.h"],
     deps = [
         "//loom/src/loom/analysis:ownership_lifetime",
+        "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/test",
         "//loom/src/loom/pass:environment",
+        "//loom/src/loom/pass:options",
         "//loom/src/loom/pass:registry",
         "//loom/src/loom/pass:report",
         "//loom/src/loom/pass:types",
@@ -64,6 +72,7 @@ loom_cc_test(
     deps = [
         ":harness",
         ":registry",
+        "//loom/src/loom/pass:options",
         "//loom/src/loom/pass:registry",
         "//loom/src/loom/pass:types",
         "//loom/src/loom/pass/testing:registry_verify",

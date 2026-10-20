@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/nested_view_selection.loom-test
 // RUN: emit source-low target=vm:core output=low
 
 // A derived selection retains both the selected buffer and its byte base.
@@ -32,12 +31,12 @@ low.func.def target<vm.core> abi(vm_function) @derived_selection(%first_aligned:
 ^_bb2:
   low.br ^_bb3(%second_aligned: reg<vm.ref : buffer>, %base1: reg<vm.value : i64>)
 ^_bb3(%pair_root: reg<vm.ref : buffer>, %pair_offset: reg<vm.value : i64>):
-  %54 = constant.i64 2
-  %55 = integer.shift.left.i64 %position, %54
-  %56 = integer.add.i64 %pair_offset, %55
+  %53 = constant.i64 2
+  %54 = integer.shift.left.i64 %position, %53
+  %55 = integer.add.i64 %pair_offset, %54
   low.cond_br %select_pair, ^_bb4, ^_bb5 : reg<vm.value : i1>
 ^_bb4:
-  low.br ^_bb6(%pair_root: reg<vm.ref : buffer>, %56: reg<vm.value : i64>)
+  low.br ^_bb6(%pair_root: reg<vm.ref : buffer>, %55: reg<vm.value : i64>)
 ^_bb5:
   low.br ^_bb6(%third_aligned: reg<vm.ref : buffer>, %base2: reg<vm.value : i64>)
 ^_bb6(%selected: reg<vm.ref : buffer>, %selected_offset: reg<vm.value : i64>):
@@ -76,11 +75,11 @@ func.def @selection_with_side_effects(%first: buffer, %second: buffer, %third: b
 low.func.def target<vm.core> abi(vm_function) @selection_with_side_effects(%first_view: reg<vm.ref : buffer>, %second_aligned: reg<vm.ref : buffer>, %third_view: reg<vm.ref : buffer>, %select_first: reg<vm.value : i1>, %select_pair: reg<vm.value : i1>, %enter: reg<vm.value : i1>, %side: reg<vm.value : i1>, %initial: reg<vm.value : i32>) -> (reg<vm.value : i32>) asm {
   low.cond_br %enter, ^producer, ^exit : reg<vm.value : i1>
 ^producer:
-  %40 = constant.i64 0
-  buffer.store %third_view, %40, %40, %initial, 0, "i32.x1"
+  %41 = constant.i64 0
+  buffer.store %third_view, %41, %41, %initial, 0, "i32.x1"
   low.cond_br %side, ^_bb2, ^_bb3 : reg<vm.value : i1>
 ^_bb2:
-  buffer.store %first_view, %40, %40, %initial, 0, "i32.x1"
+  buffer.store %first_view, %41, %41, %initial, 0, "i32.x1"
   low.br ^_bb3
 ^_bb3:
   low.cond_br %select_first, ^_bb4, ^_bb5 : reg<vm.value : i1>
@@ -95,7 +94,7 @@ low.func.def target<vm.core> abi(vm_function) @selection_with_side_effects(%firs
 ^_bb8:
   low.br ^_bb9(%third_view: reg<vm.ref : buffer>)
 ^_bb9(%selected: reg<vm.ref : buffer>):
-  %result = buffer.load %selected, %40, %40, 0, "i32.x1" : reg<vm.value : i32>
+  %result = buffer.load %selected, %41, %41, 0, "i32.x1" : reg<vm.value : i32>
   return %result
 ^exit:
   return %initial

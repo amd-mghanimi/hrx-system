@@ -11,6 +11,7 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "loom/error/emitter.h"
 #include "loom/ir/ir.h"
 #include "loom/target/arch/cmd/abi_layout.h"
 #include "loom/target/arch/cmd/lower/schedule.h"
@@ -52,13 +53,15 @@ typedef struct loom_cmd_transient_layout_t {
 // definitions or uses share a concurrent wave never alias.
 // Allocation lengths must have finite positive maxima after source
 // specialization. The resulting ranges and requirement remain valid until
-// |scratch_arena| resets.
+// |scratch_arena| resets. Unrepresentable allocation requirements emit a
+// diagnostic and leave |out_valid| false.
 iree_status_t loom_cmd_transient_layout_build(
     const loom_module_t* module, loom_func_like_t program,
     const loom_value_fact_table_t* fact_table,
     const loom_cmd_schedule_plan_t* schedule, uint32_t binding_index,
+    iree_diagnostic_emitter_t diagnostic_emitter,
     iree_arena_allocator_t* scratch_arena,
-    loom_cmd_transient_layout_t* out_layout);
+    loom_cmd_transient_layout_t* out_layout, bool* out_valid);
 
 #ifdef __cplusplus
 }  // extern "C"

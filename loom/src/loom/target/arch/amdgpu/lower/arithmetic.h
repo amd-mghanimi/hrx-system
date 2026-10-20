@@ -59,7 +59,7 @@ bool loom_amdgpu_select_fma_mix_half_result_zero_addend_descriptor(
     loom_amdgpu_descriptor_ref_t* out_descriptor_ref,
     loom_amdgpu_fma_mix_plan_flags_t* out_flags);
 
-// Selects a packed f16 FMA plan for vector.fmaf over even lane-pair vectors.
+// Selects a packed F16/BF16/F32 FMA plan for vector.fmaf over lane pairs.
 iree_status_t loom_amdgpu_select_vector_packed_fmaf_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_packed_ternary_plan_t* out_plan, bool* out_selected);

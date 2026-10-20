@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "iree/hal/api.h"
+#include "iree/hal/cts/util/pool_test_util.h"
 #include "iree/hal/cts/util/registry.h"
 #include "iree/hal/cts/util/test_base.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
@@ -115,8 +116,8 @@ static iree_hal_buffer_ref_list_t MakeHostcallBufferBindingList(
   *out_binding =
       iree_hal_make_buffer_ref(output_buffer, /*offset=*/0, sizeof(uint64_t));
   return {
-      /*.count=*/1,
-      /*.values=*/out_binding,
+      .count = 1,
+      .values = out_binding,
   };
 }
 
@@ -129,9 +130,9 @@ static iree_status_t DispatchHostcallBufferDirect(
   iree_hal_semaphore_t* signal_ptr = signal.get();
   uint64_t signal_value = 1;
   const iree_hal_semaphore_list_t signal_list = {
-      /*.count=*/1,
-      /*.semaphores=*/&signal_ptr,
-      /*.payload_values=*/&signal_value,
+      .count = 1,
+      .semaphores = &signal_ptr,
+      .payload_values = &signal_value,
   };
   iree_hal_buffer_ref_t binding;
   IREE_RETURN_IF_ERROR(iree_hal_queue_dispatch(
@@ -139,7 +140,7 @@ static iree_status_t DispatchHostcallBufferDirect(
       iree_hal_executable_function_from_index(0),
       iree_hal_make_static_dispatch_config(1, 1, 1),
       iree_const_byte_span_empty(),
-      MakeHostcallBufferBindingList(output_buffer, &binding),
+      MakeHostcallBufferBindingList(output_buffer, &binding), /*barriers=*/NULL,
       IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_RETURN_IF_ERROR(iree_hal_semaphore_wait(signal, signal_value,
                                                iree_infinite_timeout(),
@@ -179,9 +180,9 @@ static iree_status_t ExecuteHostcallBufferCommandBuffer(
       iree_hal_buffer_map_zero(output_buffer, /*offset=*/0, sizeof(uint64_t)));
   iree_hal_semaphore_t* signal_ptr = signal;
   iree_hal_semaphore_list_t signal_list = {
-      /*.count=*/1,
-      /*.semaphores=*/&signal_ptr,
-      /*.payload_values=*/&signal_value,
+      .count = 1,
+      .semaphores = &signal_ptr,
+      .payload_values = &signal_value,
   };
   IREE_RETURN_IF_ERROR(iree_hal_queue_execute(
       queue, iree_hal_semaphore_list_empty(), signal_list, command_buffer,
@@ -237,37 +238,21 @@ static iree_status_t ImportNativeFile(iree_hal_device_t* device,
   iree_io_file_handle_t* handle = NULL;
   IREE_RETURN_IF_ERROR(iree_io_file_handle_open(
       mode, path.path_view(), iree_allocator_system(), &handle));
-  iree_status_t status =
-      iree_hal_file_import(device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access,
-                           handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file);
+  iree_status_t status = iree_hal_file_import(
+      device, /*storage_pool=*/nullptr, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+      access, handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file);
   iree_io_file_handle_release(handle);
   return status;
 }
 #endif  // IREE_FILE_IO_ENABLE
 
 static iree_status_t QueueHostVisibleDispatchTransientBuffer(
-    iree_hal_amdgpu_host_queue_t* queue,
+    iree_hal_amdgpu_host_queue_t* queue, iree_hal_pool_t* pool,
     const iree_hal_semaphore_list_t signal_list, iree_device_size_t buffer_size,
     iree_hal_buffer_t** out_buffer) {
-  iree_hal_buffer_params_t params = {0};
-  params.type =
-      IREE_HAL_MEMORY_TYPE_HOST_VISIBLE | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE;
-  params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER |
-                 IREE_HAL_BUFFER_USAGE_STORAGE |
-                 IREE_HAL_BUFFER_USAGE_MAPPING_SCOPED;
-  params.queue_family_affinity = iree_hal_make_queue_family_affinity(
-      iree_hal_queue_family_ordinal(iree_hal_queue_family(&queue->base)));
-  iree_hal_pool_t* pool =
-      iree_hal_pool_set_select(queue->default_pool_set, params, buffer_size);
-  if (!pool) {
-    return iree_make_status(IREE_STATUS_NOT_FOUND,
-                            "no queue pool supports the transient request");
-  }
-  const iree_hal_pool_reservation_request_t request = {
-      /*.params=*/params,
-      /*.allocation_size=*/buffer_size,
-  };
+  const iree_hal_pool_reservation_request_t request =
+      iree_hal_make_pool_reservation_request(buffer_size,
+                                             /*min_alignment=*/16);
   return iree_hal_queue_alloca(&queue->base, iree_hal_semaphore_list_empty(),
                                signal_list, pool,
                                /*request_count=*/1, &request, out_buffer);
@@ -323,12 +308,10 @@ TEST_F(HostQueueCommandBufferTest, DispatchSummariesRetainPacketOrdinals) {
   EXPECT_EQ(summary->next, nullptr);
 }
 
-TEST_F(HostQueueCommandBufferTest,
-       TsanAssignmentPlanForcesBarrierWhenShadowSlotsWouldOverlap) {
+TEST_F(HostQueueCommandBufferTest, TsanDispatchesUseSerializedShadowArena) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);
   options.preallocate_pools = 0;
-  options.tsan.shadow_slot_count = 1;
 
   TestLogicalDevice test_device;
   IREE_ASSERT_OK(test_device.InitializeWithRuntimeFeatures(
@@ -339,6 +322,7 @@ TEST_F(HostQueueCommandBufferTest,
   IREE_ASSERT_OK(LoadCtsExecutable(
       iree_hal_queue_family(test_device.queue()),
       iree_make_cstring_view("tsan_executable_test.bin"), &executable));
+  ASSERT_TRUE(iree_hal_amdgpu_executable_uses_tsan(executable));
 
   Ref<iree_hal_buffer_t> input_buffer;
   IREE_ASSERT_OK(CreateHostVisibleDispatchBuffer(
@@ -369,12 +353,12 @@ TEST_F(HostQueueCommandBufferTest,
                                iree_hal_buffer_byte_length(input_buffer)),
   };
   const iree_hal_buffer_ref_list_t bindings0 = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs0),
-      /*.values=*/binding_refs0,
+      .count = IREE_ARRAYSIZE(binding_refs0),
+      .values = binding_refs0,
   };
   const iree_hal_buffer_ref_list_t bindings1 = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs1),
-      /*.values=*/binding_refs1,
+      .count = IREE_ARRAYSIZE(binding_refs1),
+      .values = binding_refs1,
   };
 
   Ref<iree_hal_command_buffer_t> command_buffer;
@@ -406,7 +390,7 @@ TEST_F(HostQueueCommandBufferTest,
   const iree_hal_amdgpu_command_buffer_command_header_t* command =
       iree_hal_amdgpu_command_buffer_block_commands_const(block);
   ASSERT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
-  EXPECT_FALSE(iree_any_bit_set(
+  EXPECT_TRUE(iree_any_bit_set(
       command->flags, IREE_HAL_AMDGPU_COMMAND_BUFFER_COMMAND_FLAG_HAS_BARRIER));
   command = iree_hal_amdgpu_command_buffer_command_next_const(command);
   ASSERT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_DISPATCH);
@@ -483,7 +467,7 @@ TEST_F(HostQueueCommandBufferTest,
 }
 
 TEST_F(HostQueueCommandBufferTest,
-       PrepublishedKernargsUseRecordedDeviceFineStorage) {
+       PrepublishedKernargsSelectDeviceFineStorage) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);
   options.preallocate_pools = 0;
@@ -499,21 +483,16 @@ TEST_F(HostQueueCommandBufferTest,
       &logical_device->physical_devices[0]->prepublished_kernarg_storage;
   if (storage->mode ==
       IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_MODE_DISABLED) {
-    GTEST_SKIP() << "fine-grained GPU memory pool is not available";
+    const auto& memory = logical_device->physical_devices[0]->memory_system;
+    GTEST_SKIP() << "prepublished kernargs require a fine-grained GPU pool and "
+                    "coherent CPU access to device memory; fine pool="
+                 << memory.device_local.fine_host_visible
+                 << ", coherent host access=" << memory.svm.direct_host_access;
   }
 
   EXPECT_EQ(
       storage->mode,
       IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_MODE_DEVICE_FINE_HOST_COHERENT);
-  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.type,
-                                IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL |
-                                    IREE_HAL_MEMORY_TYPE_HOST_VISIBLE |
-                                    IREE_HAL_MEMORY_TYPE_HOST_COHERENT));
-  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.access,
-                                IREE_HAL_MEMORY_ACCESS_ALL));
-  EXPECT_TRUE(iree_all_bits_set(storage->buffer_params.usage,
-                                IREE_HAL_BUFFER_USAGE_DISPATCH_UNIFORM_READ |
-                                    IREE_HAL_BUFFER_USAGE_MAPPING));
 }
 
 TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
@@ -532,7 +511,11 @@ TEST_F(HostQueueCommandBufferTest, DirectDispatchUsesPrepublishedKernargs) {
       &logical_device->physical_devices[0]->prepublished_kernarg_storage;
   if (storage->mode ==
       IREE_HAL_AMDGPU_AQL_PREPUBLISHED_KERNARG_STORAGE_MODE_DISABLED) {
-    GTEST_SKIP() << "fine-grained GPU memory pool is not available";
+    const auto& memory = logical_device->physical_devices[0]->memory_system;
+    GTEST_SKIP() << "prepublished kernargs require a fine-grained GPU pool and "
+                    "coherent CPU access to device memory; fine pool="
+                 << memory.device_local.fine_host_visible
+                 << ", coherent host access=" << memory.svm.direct_host_access;
   }
 
   iree_hal_executable_t* executable = NULL;
@@ -828,8 +811,8 @@ TEST_F(HostQueueCommandBufferTest,
     uint32_t* output;
   };
   const nested_pointer_args_t pointers = {
-      /*.input=*/static_cast<uint32_t*>(device_pointer(input_buffer)),
-      /*.output=*/static_cast<uint32_t*>(device_pointer(output_buffer)),
+      .input = static_cast<uint32_t*>(device_pointer(input_buffer)),
+      .output = static_cast<uint32_t*>(device_pointer(output_buffer)),
   };
   ASSERT_NE(nullptr, pointers.input);
   ASSERT_NE(nullptr, pointers.output);
@@ -854,22 +837,22 @@ TEST_F(HostQueueCommandBufferTest,
                                iree_hal_buffer_byte_length(output_buffer)),
   };
   const iree_hal_buffer_ref_list_t normal_bindings = {
-      /*.count=*/IREE_ARRAYSIZE(normal_binding_refs),
-      /*.values=*/normal_binding_refs,
+      .count = IREE_ARRAYSIZE(normal_binding_refs),
+      .values = normal_binding_refs,
   };
   const uint32_t normal_constants[2] = {3, 10};
   uint64_t normal_signal_value = 1;
   const iree_hal_semaphore_list_t normal_signal_semaphores = {
-      /*.count=*/1,
-      /*.semaphores=*/&dispatch_signal_ptr,
-      /*.payload_values=*/&normal_signal_value,
+      .count = 1,
+      .semaphores = &dispatch_signal_ptr,
+      .payload_values = &normal_signal_value,
   };
   IREE_ASSERT_OK(iree_hal_queue_dispatch(
       test_device.queue(), iree_hal_semaphore_list_empty(),
       normal_signal_semaphores, executable, normal_function,
       iree_hal_make_static_dispatch_config(1, 1, 1),
       iree_make_const_byte_span(normal_constants, sizeof(normal_constants)),
-      normal_bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+      normal_bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_semaphore_wait(dispatch_signal, normal_signal_value,
                                          iree_infinite_timeout(),
                                          IREE_ASYNC_WAIT_FLAG_NONE));
@@ -894,16 +877,16 @@ TEST_F(HostQueueCommandBufferTest,
     memcpy(native_arguments.data() + offset_parameter->native_abi_offset,
            &offset, sizeof(offset));
     const iree_hal_semaphore_list_t signal_semaphores = {
-        /*.count=*/1,
-        /*.semaphores=*/&dispatch_signal_ptr,
-        /*.payload_values=*/&signal_value,
+        .count = 1,
+        .semaphores = &dispatch_signal_ptr,
+        .payload_values = &signal_value,
     };
     return iree_hal_queue_dispatch(
         test_device.queue(), iree_hal_semaphore_list_empty(), signal_semaphores,
         executable, function, iree_hal_make_static_dispatch_config(1, 1, 1),
         iree_make_const_byte_span(native_arguments.data(),
                                   native_arguments.size()),
-        iree_hal_buffer_ref_list_empty(),
+        iree_hal_buffer_ref_list_empty(), /*barriers=*/NULL,
         IREE_HAL_DISPATCH_FLAG_CUSTOM_DIRECT_ARGUMENTS);
   };
 
@@ -1400,15 +1383,22 @@ TEST_F(HostQueueCommandBufferTest,
       IREE_HAL_FILL_FLAG_NONE));
 
   const iree_hal_memory_barrier_t transfer_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_READ |
-          IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_READ |
+                      IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
   };
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer, IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_STAGE_TRANSFER, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &transfer_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &transfer_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_copy_buffer(
       command_buffer,
       iree_hal_make_buffer_ref(static_source, /*offset=*/0, kBufferLength),
@@ -1421,11 +1411,8 @@ TEST_F(HostQueueCommandBufferTest,
       iree_hal_make_indirect_buffer_ref(/*buffer_slot=*/1, /*offset=*/0,
                                         kBufferLength),
       IREE_HAL_COPY_FLAG_NONE));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer, IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_STAGE_TRANSFER, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &transfer_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_update_buffer(
       command_buffer, update_source, kUpdateSourceOffset,
       iree_hal_make_buffer_ref(static_target, kStaticUpdateOffset,
@@ -1472,25 +1459,25 @@ TEST_F(HostQueueCommandBufferTest,
 
     iree_hal_buffer_binding_t bindings[2] = {
         {
-            /*.buffer=*/dynamic_sources[replay].get(),
-            /*.offset=*/0,
-            /*.length=*/IREE_HAL_WHOLE_BUFFER,
+            .buffer = dynamic_sources[replay].get(),
+            .offset = 0,
+            .length = IREE_HAL_WHOLE_BUFFER,
         },
         {
-            /*.buffer=*/dynamic_targets[replay].get(),
-            /*.offset=*/0,
-            /*.length=*/IREE_HAL_WHOLE_BUFFER,
+            .buffer = dynamic_targets[replay].get(),
+            .offset = 0,
+            .length = IREE_HAL_WHOLE_BUFFER,
         },
     };
     const iree_hal_buffer_binding_table_t binding_table = {
-        /*.count=*/IREE_ARRAYSIZE(bindings),
-        /*.bindings=*/bindings,
+        .count = IREE_ARRAYSIZE(bindings),
+        .bindings = bindings,
     };
     uint64_t signal_value = replay + 1;
     const iree_hal_semaphore_list_t signal_list = {
-        /*.count=*/1,
-        /*.semaphores=*/&signal_ptr,
-        /*.payload_values=*/&signal_value,
+        .count = 1,
+        .semaphores = &signal_ptr,
+        .payload_values = &signal_value,
     };
     IREE_ASSERT_OK(iree_hal_queue_execute(
         test_device.queue(), iree_hal_semaphore_list_empty(), signal_list,
@@ -1616,14 +1603,21 @@ TEST_F(HostQueueCommandBufferTest,
       iree_hal_make_static_dispatch_config(1, 1, 1), constants,
       dispatch_bindings, IREE_HAL_DISPATCH_FLAG_NONE));
   const iree_hal_memory_barrier_t dispatch_to_transfer_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
   };
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer, IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_STAGE_TRANSFER, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &dispatch_to_transfer_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t dispatch_dependency = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &dispatch_to_transfer_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &dispatch_dependency));
   const uint32_t fill_pattern = 0xA1B2C3D4u;
   IREE_ASSERT_OK(iree_hal_command_buffer_fill_buffer(
       command_buffer,
@@ -2200,7 +2194,7 @@ TEST_F(HostQueueCommandBufferTest,
       test_device.queue(), iree_hal_semaphore_list_empty(),
       pressure_signal_list, pressure_buffer,
       /*target_offset=*/0, sizeof(pressure_pattern), &pressure_pattern,
-      sizeof(pressure_pattern), IREE_HAL_FILL_FLAG_NONE);
+      sizeof(pressure_pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
 
   uint64_t command_buffer_signal_value = 1;
   iree_hal_semaphore_t* command_buffer_signal_ptr = command_buffer_signal.get();
@@ -2287,9 +2281,15 @@ TEST_F(HostQueueCommandBufferTest,
       /*semaphores=*/&alloca_signal_ptr,
       /*payload_values=*/&alloca_signal_value,
   };
+  Ref<iree_hal_pool_t> transient_pool;
+  IREE_ASSERT_OK(iree::hal::cts::CreateQueueSlabPool(
+      test_device.device_group(), iree_hal_queue_family(&queue->base),
+      IREE_HAL_BUFFER_USAGE_TRANSFER, /*host_access=*/{}, host_allocator_,
+      transient_pool.out()));
   iree_hal_buffer_t* transient_raw = NULL;
-  IREE_ASSERT_OK(QueueTransientTransferBuffer(
-      queue, alloca_signal_list, sizeof(uint32_t), &transient_raw));
+  IREE_ASSERT_OK(
+      QueueTransientTransferBuffer(queue, transient_pool, alloca_signal_list,
+                                   sizeof(uint32_t), &transient_raw));
   Ref<iree_hal_buffer_t> transient_buffer(transient_raw);
   IREE_ASSERT_OK(iree_hal_semaphore_wait(alloca_signal, alloca_signal_value,
                                          iree_infinite_timeout(),
@@ -2344,7 +2344,7 @@ TEST_F(HostQueueCommandBufferTest,
       test_device.queue(), iree_hal_semaphore_list_empty(),
       pressure_signal_list, pressure_buffer,
       /*target_offset=*/0, sizeof(pressure_pattern), &pressure_pattern,
-      sizeof(pressure_pattern), IREE_HAL_FILL_FLAG_NONE);
+      sizeof(pressure_pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
 
   uint64_t command_buffer_signal_value = 1;
   iree_hal_semaphore_t* command_buffer_signal_ptr = command_buffer_signal.get();
@@ -2469,9 +2469,19 @@ TEST_F(HostQueueCommandBufferTest,
   };
   static constexpr iree_device_size_t kTransientByteLength = 201326592;
   static constexpr iree_device_size_t kDispatchInputOffset = 100663296;
+  const iree_hal_pool_host_access_t host_access = {
+      .access = IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE,
+      .modes = IREE_HAL_MAPPING_MODE_SCOPED,
+  };
+  Ref<iree_hal_pool_t> transient_pool;
+  IREE_ASSERT_OK(iree::hal::cts::CreateQueueSlabPool(
+      test_device.device_group(), iree_hal_queue_family(queue),
+      IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
+      host_access, host_allocator_, transient_pool.out()));
   iree_hal_buffer_t* transient_raw = NULL;
   IREE_ASSERT_OK(QueueHostVisibleDispatchTransientBuffer(
-      host_queue, alloca_signal_list, kTransientByteLength, &transient_raw));
+      host_queue, transient_pool, alloca_signal_list, kTransientByteLength,
+      &transient_raw));
   Ref<iree_hal_buffer_t> transient_buffer(transient_raw);
 
   Ref<iree_hal_command_buffer_t> command_buffer;
@@ -2518,7 +2528,7 @@ TEST_F(HostQueueCommandBufferTest,
   IREE_ASSERT_OK(iree_hal_queue_read(
       queue, read_wait_list, read_signal_list, source_file, /*source_offset=*/0,
       transient_buffer, kDispatchInputOffset, sizeof(input_values),
-      IREE_HAL_READ_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
 
   Ref<iree_hal_semaphore_t> dispatch_signal;
   IREE_ASSERT_OK(
@@ -2603,9 +2613,15 @@ TEST_F(HostQueueCommandBufferTest,
       /*semaphores=*/&alloca_signal_ptr,
       /*payload_values=*/&alloca_signal_value,
   };
+  Ref<iree_hal_pool_t> transient_pool;
+  IREE_ASSERT_OK(iree::hal::cts::CreateQueueSlabPool(
+      test_device.device_group(), iree_hal_queue_family(&queue->base),
+      IREE_HAL_BUFFER_USAGE_TRANSFER, /*host_access=*/{}, host_allocator_,
+      transient_pool.out()));
   iree_hal_buffer_t* transient_raw = NULL;
-  IREE_ASSERT_OK(QueueTransientTransferBuffer(
-      queue, alloca_signal_list, sizeof(uint32_t), &transient_raw));
+  IREE_ASSERT_OK(
+      QueueTransientTransferBuffer(queue, transient_pool, alloca_signal_list,
+                                   sizeof(uint32_t), &transient_raw));
   Ref<iree_hal_buffer_t> transient_buffer(transient_raw);
 
   Ref<iree_hal_command_buffer_t> command_buffer;

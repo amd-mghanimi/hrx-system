@@ -39,11 +39,11 @@ static iree_status_t SubmitProfiledQueueFill(TestLogicalDevice* test_device) {
       /*payload_values=*/&signal_value,
   };
   const uint32_t pattern = 0xA11CA7E5u;
-  IREE_RETURN_IF_ERROR(
-      iree_hal_queue_fill(test_device->queue(), iree_hal_semaphore_list_empty(),
-                          signal_list, target_buffer,
-                          /*target_offset=*/0, sizeof(pattern), &pattern,
-                          sizeof(pattern), IREE_HAL_FILL_FLAG_NONE));
+  IREE_RETURN_IF_ERROR(iree_hal_queue_fill(
+      test_device->queue(), iree_hal_semaphore_list_empty(), signal_list,
+      target_buffer,
+      /*target_offset=*/0, sizeof(pattern), &pattern, sizeof(pattern),
+      /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
   return iree_hal_semaphore_wait(signal, signal_value, iree_infinite_timeout(),
                                  IREE_ASYNC_WAIT_FLAG_NONE);
 }

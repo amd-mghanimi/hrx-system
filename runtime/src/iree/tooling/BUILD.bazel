@@ -33,8 +33,37 @@ iree_runtime_cc_test(
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:span",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:heap_pool",
+        "//runtime/src/iree/hal/testing:mapped_transfer_buffer",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_library(
+    name = "device_flags",
+    srcs = ["device_flags.c"],
+    hdrs = ["device_flags.h"],
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/tooling:flags",
+    ],
+)
+
+iree_runtime_cc_library(
+    name = "device_profiling",
+    srcs = ["device_profiling.c"],
+    hdrs = ["device_profiling.h"],
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/base/threading:thread",
+        "//runtime/src/iree/base/tooling:flags",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/utils:profile_file",
+        "//runtime/src/iree/hal/utils:statistics_sink",
+        "//runtime/src/iree/io:file_handle",
     ],
 )
 
@@ -43,17 +72,65 @@ iree_runtime_cc_library(
     srcs = ["device_util.c"],
     hdrs = ["device_util.h"],
     deps = [
+        ":device_flags",
         "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/threading",
-        "//runtime/src/iree/base/threading:thread",
         "//runtime/src/iree/base/tooling:flags",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/hal/drivers",
         "//runtime/src/iree/hal/utils:mpi_channel_provider",
-        "//runtime/src/iree/hal/utils:profile_file",
-        "//runtime/src/iree/hal/utils:statistics_sink",
-        "//runtime/src/iree/io:file_handle",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "device_util_default_device_test",
+    srcs = ["device_util_test.cc"],
+    args = ["--gtest_filter=DeviceUtilTest.CreatesDefaultDevice"],
+    deps = [
+        ":device_util",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "device_util_flag_device_test",
+    srcs = ["device_util_test.cc"],
+    args = [
+        "--device=task",
+        "--gtest_filter=DeviceUtilTest.CreatesFlagDevice",
+    ],
+    deps = [
+        ":device_util",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "device_util_repeated_device_test",
+    srcs = ["device_util_test.cc"],
+    args = [
+        "--device=task",
+        "--device=task",
+        "--gtest_filter=DeviceUtilTest.RejectsRepeatedDeviceFlags",
+    ],
+    deps = [
+        ":device_util",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 
@@ -77,6 +154,7 @@ iree_runtime_cc_test(
         ":value_io",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:heap_pool",
         "//runtime/src/iree/io:file_handle",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -100,10 +178,8 @@ iree_runtime_cc_test(
     srcs = ["numpy_io_test.cc"],
     tags = ["requires-filesystem"],
     deps = [
-        ":device_util",
         ":numpy_io",
-        "//runtime/src/iree/async/util:proactor_pool",
-        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal/memory:heap_pool",
         "//runtime/src/iree/io:stream",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -127,18 +203,39 @@ iree_runtime_cc_library(
     ],
 )
 
+_PARAMETER_UTIL_TEST_DEPS = [
+    ":parameter_util",
+    "//runtime/src/iree/base",
+    "//runtime/src/iree/base/internal:path",
+    "//runtime/src/iree/base/tooling:flags",
+    "//runtime/src/iree/io:file_handle",
+    "//runtime/src/iree/io:parameter_index",
+    "//runtime/src/iree/testing:gtest",
+    "//runtime/src/iree/testing:gtest_main",
+    "//runtime/src/iree/testing:temp_file",
+]
+
 iree_runtime_cc_test(
     name = "parameter_util_test",
     srcs = ["parameter_util_test.cc"],
     tags = ["requires-filesystem"],
-    deps = [
-        ":parameter_util",
-        "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal:path",
-        "//runtime/src/iree/io:file_handle",
-        "//runtime/src/iree/io:parameter_index",
-        "//runtime/src/iree/testing:gtest",
-        "//runtime/src/iree/testing:gtest_main",
-        "//runtime/src/iree/testing:temp_file",
-    ],
+    deps = _PARAMETER_UTIL_TEST_DEPS,
 )
+
+[
+    iree_runtime_cc_test(
+        name = "parameter_util_%s_test" % mode,
+        srcs = ["parameter_util_test.cc"],
+        args = [
+            "--parameter_mode=" + mode,
+            "--expected_parameter_mode=" + mode,
+        ],
+        tags = ["requires-filesystem"],
+        deps = _PARAMETER_UTIL_TEST_DEPS,
+    )
+    for mode in [
+        "direct",
+        "preload",
+        "invalid",
+    ]
+]

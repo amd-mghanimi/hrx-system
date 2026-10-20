@@ -1,0 +1,136 @@
+// RUN: emit source-low output=low control-flow=structured-low
+
+// Loop-carried values retain each native shape without depending on vector memory.
+spirv.target<vulkan1_3> @target {contract_feature_bits = 1086626759166}
+
+func.def target(@target) @signed_widths(%first: i64, %second: i64, %third: i64, %count: index) -> (i64) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second, %third : vector<3xi64>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<3xi64>) -> (vector<3xi64>) {
+    %bytes = vector.trunci %state : vector<3xi64> to vector<3xi8>
+    %signed = vector.extsi %bytes : vector<3xi8> to vector<3xi16>
+    %unsigned = vector.extui %signed : vector<3xi16> to vector<3xi64>
+    scf.yield %unsigned : vector<3xi64>
+  }
+  %value = vector.extract %result[1] : vector<3xi64> -> i64
+  func.return %value : i64
+}
+
+// ----
+low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @signed_widths(%first: reg<spirv.id : i64>, %second: reg<spirv.id : i64>, %third: reg<spirv.id : i64>, %count: reg<spirv.id : index>) -> (reg<spirv.id : i64>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v3i64 %first, %second, %third
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<3xi64>>) -> (reg<spirv.id : vector<3xi64>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<3xi64>>) {
+    %bytes = OpSConvert.v3i64.v3i8 %state
+    %signed = OpSConvert.v3i8.v3i16 %bytes
+    %28 = OpBitcast.v3i16.v3u16 %signed
+    %29 = OpUConvert.v3u16.v3u64 %28
+    %unsigned = OpBitcast.v3u64.v3i64 %29
+    low.scf.yield %unsigned : reg<spirv.id : vector<3xi64>>
+  }
+  %value = OpCompositeExtract.v3i64.i64 %result, 1
+  return %value
+}
+
+// ====
+
+spirv.target<vulkan1_3> @target {contract_feature_bits = 2186138386942}
+
+func.def target(@target) @signed_floating(%first: f64, %second: f64, %count: index) -> (f64) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second : vector<2xf64>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<2xf64>) -> (vector<2xf64>) {
+    %halves = vector.fptrunc %state : vector<2xf64> to vector<2xf16>
+    %integers = vector.fptosi %halves : vector<2xf16> to vector<2xi64>
+    %singles = vector.sitofp %integers : vector<2xi64> to vector<2xf32>
+    %doubles = vector.extf %singles : vector<2xf32> to vector<2xf64>
+    scf.yield %doubles : vector<2xf64>
+  }
+  %value = vector.extract %result[1] : vector<2xf64> -> f64
+  func.return %value : f64
+}
+
+// ----
+low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @signed_floating(%first: reg<spirv.id : f64>, %second: reg<spirv.id : f64>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f64>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v2f64 %first, %second
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<2xf64>>) -> (reg<spirv.id : vector<2xf64>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<2xf64>>) {
+    %halves = OpFConvert.v2f64.v2f16 %state
+    %integers = OpConvertFToS.v2f16.v2i64 %halves
+    %singles = OpConvertSToF.v2i64.v2f32 %integers
+    %doubles = OpFConvert.v2f32.v2f64 %singles
+    low.scf.yield %doubles : reg<spirv.id : vector<2xf64>>
+  }
+  %value = OpCompositeExtract.v2f64.f64 %result, 1
+  return %value
+}
+
+// ====
+
+spirv.target<vulkan1_3> @target {contract_feature_bits = 1086626759166}
+
+func.def target(@target) @unsigned_floating(%input: f32, %count: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.splat %input : vector<4xf32>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<4xf32>) -> (vector<4xf32>) {
+    %integers = vector.fptoui %state : vector<4xf32> to vector<4xi16>
+    %doubles = vector.uitofp %integers : vector<4xi16> to vector<4xf64>
+    %singles = vector.fptrunc %doubles : vector<4xf64> to vector<4xf32>
+    scf.yield %singles : vector<4xf32>
+  }
+  %value = vector.extract %result[3] : vector<4xf32> -> f32
+  func.return %value : f32
+}
+
+// ----
+low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @unsigned_floating(%input: reg<spirv.id : f32>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f32>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v4f32 %input, %input, %input, %input
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<4xf32>>) -> (reg<spirv.id : vector<4xf32>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<4xf32>>) {
+    %22 = OpConvertFToU.v4f32.v4u16 %state
+    %integers = OpBitcast.v4u16.v4i16 %22
+    %24 = OpBitcast.v4i16.v4u16 %integers
+    %doubles = OpConvertUToF.v4u16.v4f64 %24
+    %singles = OpFConvert.v4f64.v4f32 %doubles
+    low.scf.yield %singles : reg<spirv.id : vector<4xf32>>
+  }
+  %value = OpCompositeExtract.v4f32.f32 %result, 3
+  return %value
+}
+
+// ====
+
+spirv.target<vulkan1_3> @target {contract_feature_bits = 1086626759166}
+
+func.def target(@target) @singleton(%input: i32, %count: index) -> (i32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.splat %input : vector<1xi32>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<1xi32>) -> (vector<1xi32>) {
+    %bytes = vector.trunci %state : vector<1xi32> to vector<1xi8>
+    %integers = vector.extui %bytes : vector<1xi8> to vector<1xi32>
+    scf.yield %integers : vector<1xi32>
+  }
+  %value = vector.extract %result[0] : vector<1xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @singleton(%initial: reg<spirv.id : i32>, %count: reg<spirv.id : index>) -> (reg<spirv.id : i32>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %value = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : i32>) -> (reg<spirv.id : i32>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : i32>) {
+    %bytes = OpSConvert.i32.i8 %state
+    %21 = OpBitcast.i8.u8 %bytes
+    %22 = OpUConvert.u8.u32 %21
+    %integers = OpBitcast.u32.i32 %22
+    low.scf.yield %integers : reg<spirv.id : i32>
+  }
+  return %value
+}

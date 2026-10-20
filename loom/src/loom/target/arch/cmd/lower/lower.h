@@ -41,13 +41,13 @@ typedef enum loom_cmd_lower_dispatch_argument_kind_e {
 typedef struct loom_cmd_lower_dispatch_argument_t {
   // Portable argument representation.
   loom_cmd_lower_dispatch_argument_kind_t kind;
-  // Source value used to reuse its prepared low representation.
+  // Source value used to reuse its materialized low representation.
   loom_value_id_t source_value;
   // Exact logical scalar bit pattern; ignored for buffer arguments.
   uint64_t scalar_bits;
 } loom_cmd_lower_dispatch_argument_t;
 
-// Resolved executable placement for one prepared dispatch row.
+// Resolved executable placement for one classified dispatch row.
 typedef struct loom_cmd_lower_dispatch_t {
   // Dense executable-table index selected for the dispatch.
   uint32_t executable_index;
@@ -78,7 +78,7 @@ typedef struct loom_cmd_lower_plan_t {
   iree_host_size_t buffer_range_count;
   // External resource-table shape emitted on the lowered function.
   loom_cmd_abi_layout_t abi_layout;
-  // Prepared command and wave order borrowed from source scheduling.
+  // Classified command and wave order borrowed from source scheduling.
   const loom_cmd_schedule_plan_t* schedule;
   // Physical workgroup-count placement in schedule command order.
   const loom_cmd_dispatch_count_t* dispatch_counts;
@@ -92,11 +92,12 @@ typedef struct loom_cmd_lower_plan_t {
 //
 // The portable issue-time ABI accepts buffer roots and explicitly resolved
 // view ranges plus workgroup counts classified by |plan->dispatch_counts|.
-// Exact tuples become direct dispatches. Stable source views remain static
-// indirect, while transient source views become dynamic indirect after a
-// preceding execution barrier. Buffer and view arguments become
-// resolved ranges; exact scalar arguments preserve their logical kind and
-// bits. Address scalars remain target-width-independent until materialization.
+// Exact tuples become direct dispatches. Immutable source views remain static
+// indirect, while mutable source views use dynamic indirect fetches. Schedule
+// barriers order any count producers before their consumers. Buffer and view
+// arguments become resolved ranges; exact scalar arguments preserve their
+// logical kind and bits. Address scalars remain target-width-independent until
+// materialization.
 // Unsupported kernel-argument forms fail without changing the source program.
 // On success the replacement keeps the source symbol identity and is returned
 // in |out_low_function|.

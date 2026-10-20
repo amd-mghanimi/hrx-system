@@ -49,7 +49,7 @@ class _RowMacroSignature:
     storage_policy_argument: int | None = None
     source_count_argument: int | None = None
     preselect_policy_argument: int | None = None
-    report_key_argument: int | None = None
+    report_kind_argument: int | None = None
     capability_argument: int | None = None
 
 
@@ -65,8 +65,8 @@ _ROW_MACRO_SIGNATURES = {
     "STRUCTURAL_DATA_STORAGE_ROW": _RowMacroSignature(
         argument_count=6, storage_policy_argument=5
     ),
-    "STRUCTURAL_DATA_STORAGE_REPORT_KEY_ROW": _RowMacroSignature(
-        argument_count=7, storage_policy_argument=5, report_key_argument=6
+    "STRUCTURAL_DATA_STORAGE_REPORT_ROW": _RowMacroSignature(
+        argument_count=7, storage_policy_argument=5, report_kind_argument=6
     ),
     "VALUE_STRUCTURAL_DIRECT_STORAGE_ROW": _RowMacroSignature(
         argument_count=5, storage_policy_argument=4
@@ -80,8 +80,8 @@ _ROW_MACRO_SIGNATURES = {
     "VALUE_DATA_STORAGE_ROW": _RowMacroSignature(
         argument_count=6, storage_policy_argument=5
     ),
-    "VALUE_DATA_STORAGE_REPORT_KEY_ROW": _RowMacroSignature(
-        argument_count=7, storage_policy_argument=5, report_key_argument=6
+    "VALUE_DATA_STORAGE_REPORT_ROW": _RowMacroSignature(
+        argument_count=7, storage_policy_argument=5, report_kind_argument=6
     ),
     "VALUE_DATA_SOURCE_ROW": _RowMacroSignature(
         argument_count=6, source_count_argument=5
@@ -92,8 +92,8 @@ _ROW_MACRO_SIGNATURES = {
     "MEMORY_DATA_STORAGE_ROW": _RowMacroSignature(
         argument_count=6, storage_policy_argument=5
     ),
-    "MEMORY_DATA_STORAGE_REPORT_KEY_ROW": _RowMacroSignature(
-        argument_count=7, storage_policy_argument=5, report_key_argument=6
+    "MEMORY_DATA_STORAGE_REPORT_ROW": _RowMacroSignature(
+        argument_count=7, storage_policy_argument=5, report_kind_argument=6
     ),
     "RECIPE_DIRECT_STORAGE_ROW": _RowMacroSignature(
         argument_count=5, storage_policy_argument=4
@@ -102,25 +102,25 @@ _ROW_MACRO_SIGNATURES = {
     "RECIPE_DATA_STORAGE_ROW": _RowMacroSignature(
         argument_count=6, storage_policy_argument=5
     ),
-    "RECIPE_DATA_STORAGE_REPORT_KEY_ROW": _RowMacroSignature(
-        argument_count=7, storage_policy_argument=5, report_key_argument=6
+    "RECIPE_DATA_STORAGE_REPORT_ROW": _RowMacroSignature(
+        argument_count=7, storage_policy_argument=5, report_kind_argument=6
     ),
     "RECIPE_CAPABILITY_DATA_STORAGE_ROW": _RowMacroSignature(
         argument_count=7,
         storage_policy_argument=5,
         capability_argument=6,
     ),
-    "RECIPE_CAPABILITY_DATA_STORAGE_REPORT_KEY_ROW": _RowMacroSignature(
+    "RECIPE_CAPABILITY_DATA_STORAGE_REPORT_ROW": _RowMacroSignature(
         argument_count=8,
         storage_policy_argument=5,
-        report_key_argument=6,
+        report_kind_argument=6,
         capability_argument=7,
     ),
     "RECIPE_DATA_SOURCE_ROW": _RowMacroSignature(
         argument_count=6, source_count_argument=5
     ),
-    "RECIPE_DATA_SOURCE_REPORT_KEY_ROW": _RowMacroSignature(
-        argument_count=7, source_count_argument=5, report_key_argument=6
+    "RECIPE_DATA_SOURCE_REPORT_ROW": _RowMacroSignature(
+        argument_count=7, source_count_argument=5, report_kind_argument=6
     ),
     "GENERATED_PRESELECT_DIRECT_POLICY_ROW": _RowMacroSignature(
         argument_count=6, storage_policy_argument=4, preselect_policy_argument=5
@@ -144,6 +144,9 @@ _STORAGE_POLICY_NAMES = frozenset(
         "LOOM_AMDGPU_STORAGE_FRAGMENT_MEMORY",
         "LOOM_AMDGPU_STORAGE_SUBGROUP_BROADCAST",
         "LOOM_AMDGPU_STORAGE_SUBGROUP_SHUFFLE",
+        "LOOM_AMDGPU_STORAGE_TABLE_LOOKUP",
+        "LOOM_AMDGPU_STORAGE_INTEGER_DIVISION",
+        "LOOM_AMDGPU_STORAGE_SOURCE_OPERANDS",
         "LOOM_AMDGPU_STORAGE_NONE",
         "LOOM_AMDGPU_STORAGE_ASYNC_GATHER",
         "LOOM_AMDGPU_STORAGE_ASYNC_CLUSTER",
@@ -163,37 +166,38 @@ _PRESELECT_POLICY_NAMES = frozenset(
     }
 )
 
-_REPORT_KEY_NAMES = frozenset(
+_REPORT_NAMES = frozenset(
     {
-        "LOOM_AMDGPU_REPORT_KEY_FRAGMENT_REPACK_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_FRAGMENT_MEMORY_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_TABLE_LOOKUP_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_KERNEL_BARRIER_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_SUBGROUP_REDUCE_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_SUBGROUP_BROADCAST_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_VECTOR_16BIT_FLOAT_CONVERSION_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_VECTOR_TRANSFORM_STRATEGY",
-        "LOOM_AMDGPU_REPORT_KEY_WORKGROUP_REDUCE_PUBLICATION",
-        "LOOM_AMDGPU_REPORT_KEY_TENSOR_MEMORY_PACKET",
+        "LOOM_AMDGPU_REPORT_FRAGMENT_REPACK_STRATEGY",
+        "LOOM_AMDGPU_REPORT_FRAGMENT_MEMORY_STRATEGY",
+        "LOOM_AMDGPU_REPORT_MEMORY_PACKETS",
+        "LOOM_AMDGPU_REPORT_TABLE_LOOKUP_STRATEGY",
+        "LOOM_AMDGPU_REPORT_KERNEL_BARRIER_STRATEGY",
+        "LOOM_AMDGPU_REPORT_SUBGROUP_REDUCE_STRATEGY",
+        "LOOM_AMDGPU_REPORT_SUBGROUP_BROADCAST_STRATEGY",
+        "LOOM_AMDGPU_REPORT_VECTOR_16BIT_FLOAT_CONVERSION_STRATEGY",
+        "LOOM_AMDGPU_REPORT_VECTOR_TRANSFORM_STRATEGY",
+        "LOOM_AMDGPU_REPORT_WORKGROUP_REDUCE_PUBLICATION",
+        "LOOM_AMDGPU_REPORT_TENSOR_MEMORY_PACKET",
     }
 )
 
 _ROW_TAG_NAMES_BY_KIND = {
     "storage": _STORAGE_POLICY_NAMES,
     "preselect": _PRESELECT_POLICY_NAMES,
-    "report_key": _REPORT_KEY_NAMES,
+    "report": _REPORT_NAMES,
 }
 
 _ROW_TAG_DESCRIPTIONS = {
     "storage": "storage policy",
     "preselect": "preselect policy",
-    "report_key": "report key",
+    "report": "report kind",
 }
 
 _ROW_TAG_PREFIXES = (
     "LOOM_AMDGPU_STORAGE_",
     "LOOM_AMDGPU_PRESELECT_",
-    "LOOM_AMDGPU_REPORT_KEY_",
+    "LOOM_AMDGPU_REPORT_",
 )
 _SOURCE_COUNT_NAMES = frozenset({"1", "2", "3"})
 
@@ -332,8 +336,8 @@ def _validate_dispatch_row_shape(row: DispatchRow) -> None:
         expected_row_tag_arguments[signature.storage_policy_argument] = "storage"
     if signature.preselect_policy_argument is not None:
         expected_row_tag_arguments[signature.preselect_policy_argument] = "preselect"
-    if signature.report_key_argument is not None:
-        expected_row_tag_arguments[signature.report_key_argument] = "report_key"
+    if signature.report_kind_argument is not None:
+        expected_row_tag_arguments[signature.report_kind_argument] = "report"
     if (
         signature.source_count_argument is not None
         and row.arguments[signature.source_count_argument] not in _SOURCE_COUNT_NAMES

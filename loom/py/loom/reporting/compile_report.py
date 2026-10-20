@@ -12,7 +12,19 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from loom.reporting.compile_report_expansions import CompileReportExpansionInventory
+    from loom.reporting.compile_report_math_relaxations import (
+        CompileReportMathRelaxationInventory,
+    )
+    from loom.reporting.compile_report_scalarization import (
+        CompileReportScalarizationInventory,
+    )
+    from loom.reporting.compile_report_wait_reasons import (
+        CompileReportWaitReasonInventory,
+    )
 
 COMPILE_REPORT_KIND = "loom.compile_report"
 COMPILE_REPORT_SCHEMA_VERSION = 0
@@ -145,6 +157,14 @@ class CompileReportDocument:
     envelope_context: tuple[tuple[str, str | int | bool], ...]
     # Validated final constraints indexed once at the document input boundary.
     residency_constraints_by_function: dict[str, tuple[dict[str, object], ...]]
+    # Validated scalar legalization events indexed once at the input boundary.
+    scalarization_inventory: CompileReportScalarizationInventory | None
+    # Validated per-operation lowering counts, independent of scalarization.
+    expansion_inventory: CompileReportExpansionInventory
+    # Target-native math alternatives indexed without rediscovering policy.
+    math_relaxation_inventory: CompileReportMathRelaxationInventory
+    # Validated wait reasons indexed once at the document input boundary.
+    wait_reason_inventory: CompileReportWaitReasonInventory | None
 
     @property
     def mode(self) -> str:
@@ -316,6 +336,22 @@ def parse_compile_report(
             binding_map[key] = binding_value
         config_bindings = tuple(sorted(binding_map.items()))
 
+    # Kept local to avoid making report view modules part of this module's
+    # definition-time dependency cycle. Report parsing is the public boundary
+    # and owns construction of every retained index.
+    from loom.reporting.compile_report_expansions import parse_compile_report_expansions
+    from loom.reporting.compile_report_math_relaxations import (
+        parse_compile_report_math_relaxations,
+    )
+    from loom.reporting.compile_report_scalarization import (
+        parse_compile_report_scalarization,
+    )
+    from loom.reporting.compile_report_wait_reasons import (
+        parse_compile_report_wait_reasons,
+    )
+
+    scalarization_inventory = parse_compile_report_scalarization(report, mode, source)
+    wait_reason_inventory = parse_compile_report_wait_reasons(report, entries, source)
     return CompileReportDocument(
         source=source,
         container_kind=container_kind,
@@ -324,6 +360,12 @@ def parse_compile_report(
         config_bindings=config_bindings,
         envelope_context=envelope_context,
         residency_constraints_by_function=_index_residency_constraints(report, source),
+        scalarization_inventory=scalarization_inventory,
+        expansion_inventory=parse_compile_report_expansions(report, mode, source),
+        math_relaxation_inventory=parse_compile_report_math_relaxations(
+            report, mode, source
+        ),
+        wait_reason_inventory=wait_reason_inventory,
     )
 
 

@@ -231,13 +231,19 @@ iree_status_t hrx_graph_record_node_barrier(
 
   if (has_hazard) {
     const iree_hal_memory_barrier_t memory_barrier = {
-        .source_scope = IREE_HAL_MEMORY_ACCESS_ALL,
-        .target_scope = IREE_HAL_MEMORY_ACCESS_ALL,
+        .source_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_READ |
+                        IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
+        .target_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_READ |
+                        IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
     };
-    IREE_RETURN_IF_ERROR(iree_hal_command_buffer_execution_barrier(
-        command_buffer, IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-        IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE,
-        IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, 1, &memory_barrier, 0, NULL));
+    const iree_hal_barrier_t execution_barrier = {
+        .source_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+        .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE,
+        .memory_barrier_count = 1,
+        .memory_barriers = &memory_barrier,
+    };
+    IREE_RETURN_IF_ERROR(
+        iree_hal_command_buffer_barrier(command_buffer, &execution_barrier));
     hrx_graph_barrier_state_reset(state);
     *out_did_barrier = true;
   }
@@ -715,7 +721,7 @@ hrx_status_t hrx_graph_exec_launch(hrx_graph_exec_t exec, hrx_stream_t stream) {
     switch (block->type) {
       case HRX_GRAPH_BLOCK_TYPE_QUEUE_BARRIER:
         status = iree_hal_queue_barrier(stream->hal_queue, wait_semaphores,
-                                        signal_semaphores,
+                                        signal_semaphores, /*barriers=*/NULL,
                                         ptrs.attrs->barrier.flags);
         break;
       case HRX_GRAPH_BLOCK_TYPE_QUEUE_FILL:
@@ -723,14 +729,15 @@ hrx_status_t hrx_graph_exec_launch(hrx_graph_exec_t exec, hrx_stream_t stream) {
             exec->device->transfer_queue, wait_semaphores, signal_semaphores,
             ptrs.attrs->fill.target_buffer, ptrs.attrs->fill.target_offset,
             ptrs.attrs->fill.length, &ptrs.attrs->fill.pattern,
-            ptrs.attrs->fill.pattern_length, ptrs.attrs->fill.flags);
+            ptrs.attrs->fill.pattern_length, /*barriers=*/NULL,
+            ptrs.attrs->fill.flags);
         break;
       case HRX_GRAPH_BLOCK_TYPE_QUEUE_COPY:
         status = iree_hal_queue_copy(
             exec->device->transfer_queue, wait_semaphores, signal_semaphores,
             ptrs.attrs->copy.source_buffer, ptrs.attrs->copy.source_offset,
             ptrs.attrs->copy.target_buffer, ptrs.attrs->copy.target_offset,
-            ptrs.attrs->copy.length, ptrs.attrs->copy.flags);
+            ptrs.attrs->copy.length, /*barriers=*/NULL, ptrs.attrs->copy.flags);
         break;
       case HRX_GRAPH_BLOCK_TYPE_QUEUE_DISPATCH: {
         iree_hal_buffer_ref_list_t bindings_list = {
@@ -743,7 +750,7 @@ hrx_status_t hrx_graph_exec_launch(hrx_graph_exec_t exec, hrx_stream_t stream) {
             iree_hal_executable_function_from_index(
                 (uint32_t)ptrs.attrs->dispatch.entry_point),
             ptrs.attrs->dispatch.config, ptrs.attrs->dispatch.constants,
-            bindings_list, ptrs.attrs->dispatch.flags);
+            bindings_list, /*barriers=*/NULL, ptrs.attrs->dispatch.flags);
         break;
       }
       case HRX_GRAPH_BLOCK_TYPE_QUEUE_EXECUTE:

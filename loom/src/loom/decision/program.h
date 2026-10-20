@@ -27,7 +27,7 @@ extern "C" {
 // Encoded predicate operand reference.
 typedef uint32_t loom_decision_program_operand_ref_t;
 
-// Encoded unresolved constraint reference.
+// Encoded scalar-predicate or contextual-feature constraint reference.
 typedef uint32_t loom_decision_program_constraint_ref_t;
 
 // Invalid action ordinal.
@@ -303,8 +303,8 @@ typedef struct loom_decision_program_choice_evidence_t {
   // Reserved bytes. Always zero.
   uint8_t reserved[3];
 
-  // First unresolved constraint, or the invalid constraint.
-  loom_decision_program_constraint_ref_t unresolved_constraint;
+  // First constraint deciding rejection or uncertainty, or invalid on match.
+  loom_decision_program_constraint_ref_t decisive_constraint;
 } loom_decision_program_choice_evidence_t;
 
 static_assert(sizeof(loom_decision_program_choice_evidence_t) == 8,

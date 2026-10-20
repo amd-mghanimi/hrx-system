@@ -7,6 +7,9 @@
 #ifndef AMDF_CTS_GPU_GPU_DEVICE_FIXTURE_H_
 #define AMDF_CTS_GPU_GPU_DEVICE_FIXTURE_H_
 
+#include <cinttypes>
+#include <cstdio>
+#include <string>
 #include <vector>
 
 #include "amdf/amdf.h"
@@ -14,6 +17,48 @@
 #include "gtest/gtest.h"
 #include "util/device_cache.h"
 #include "util/provider.h"
+
+// Records the exact endpoint and its contemporaneous native correlation key.
+// Physical topology and exclusive assignment remain runner-owned facts.
+inline void RecordGpuEndpointProperties(
+    const char* prefix, const amdf_endpoint_info_t& endpoint_info,
+    const amdf_gpu_endpoint_info_t& gpu_info) {
+  const std::string property_prefix(prefix);
+  char identity[64];
+  std::snprintf(identity, sizeof(identity), "%016" PRIx64 ":%016" PRIx64,
+                endpoint_info.id.words[0], endpoint_info.id.words[1]);
+  ::testing::Test::RecordProperty(property_prefix + "_endpoint_id", identity);
+  const auto& native_identity = endpoint_info.native_identity;
+  switch (native_identity.type) {
+    case AMDF_ENDPOINT_NATIVE_IDENTITY_TYPE_NONE:
+      std::snprintf(identity, sizeof(identity), "none");
+      break;
+    case AMDF_ENDPOINT_NATIVE_IDENTITY_TYPE_LINUX_DEVICE:
+      std::snprintf(identity, sizeof(identity), "linux_device:%u:%u",
+                    native_identity.value.linux_device.major,
+                    native_identity.value.linux_device.minor);
+      break;
+    case AMDF_ENDPOINT_NATIVE_IDENTITY_TYPE_WINDOWS_ADAPTER:
+      std::snprintf(
+          identity, sizeof(identity), "windows_adapter:%016" PRIx64 ":%u",
+          native_identity.value.windows_adapter.luid,
+          native_identity.value.windows_adapter.physical_adapter_index);
+      break;
+    default:
+      FAIL() << "unknown native endpoint identity type "
+             << native_identity.type;
+  }
+  ::testing::Test::RecordProperty(property_prefix + "_native_identity",
+                                  identity);
+  char target[32];
+  std::snprintf(target, sizeof(target), "gfx%u%x%x", gpu_info.gfx_ip.major,
+                gpu_info.gfx_ip.minor, gpu_info.gfx_ip.stepping);
+  ::testing::Test::RecordProperty(property_prefix + "_target", target);
+  ::testing::Test::RecordProperty(property_prefix + "_asic_revision",
+                                  gpu_info.asic_revision);
+  ::testing::Test::RecordProperty(property_prefix + "_xcc_count",
+                                  gpu_info.topology.xcc_count);
+}
 
 // Finds a backing profile qualified for the requested live device access.
 inline uint32_t FindGpuMemoryProfileOrdinal(
@@ -33,6 +78,7 @@ inline uint32_t FindGpuMemoryProfileOrdinal(
                   << " code=" << amdf_status_code(scope_status);
     return AMDF_MEMORY_PROFILE_ORDINAL_UNKNOWN;
   }
+  amdf_status_t unavailable = AMDF_STATUS_OK;
   for (uint32_t ordinal = 0; ordinal < scope_info.memory_profile_count;
        ++ordinal) {
     amdf_memory_profile_t profile = {};
@@ -54,10 +100,16 @@ inline uint32_t FindGpuMemoryProfileOrdinal(
     }
     if ((profile.roles & required_roles) == required_roles &&
         (required_flags & ~profile.supported_flags) == 0) {
+      if (!amdf_status_is_ok(profile.availability)) {
+        unavailable = profile.availability;
+        continue;
+      }
       return ordinal;
     }
   }
-  ADD_FAILURE() << "no matching memory profile";
+  ADD_FAILURE() << "no available matching memory profile: domain="
+                << amdf_status_domain(unavailable)
+                << " code=" << amdf_status_code(unavailable);
   return AMDF_MEMORY_PROFILE_ORDINAL_UNKNOWN;
 }
 
@@ -119,22 +171,51 @@ class GpuDeviceFixture : public ::testing::Test {
       ASSERT_TRUE(amdf_status_is_ok(api_->endpoint_enumerate(
           instance_, endpoint_count, summaries.data(), &endpoint_count)));
     }
+    const auto& requested_endpoint = GetCtsDeviceCache().gpu_endpoint_id();
+    bool requested_endpoint_present = !requested_endpoint.has_value();
     for (const amdf_endpoint_summary_t& summary : summaries) {
       if (summary.engine_kind != AMDF_ENGINE_KIND_GPU) {
         continue;
       }
+      if (!GetCtsDeviceCache().IsGpuEndpointSelected(summary.id)) {
+        continue;
+      }
+      requested_endpoint_present = true;
       ASSERT_TRUE(amdf_status_is_ok(
           GetCtsDeviceCache().OpenEndpoint(summary.id, &endpoint_)));
+      amdf_gpu_endpoint_info_t gpu_info = {};
+      gpu_info.type = AMDF_STRUCTURE_TYPE_GPU_ENDPOINT_INFO;
+      gpu_info.structure_size = sizeof(gpu_info);
+      ASSERT_EQ(gpu_api_->endpoint_query_info(endpoint_, &gpu_info),
+                AMDF_STATUS_OK);
+      char target[32];
+      std::snprintf(target, sizeof(target), "gfx%u%x%x", gpu_info.gfx_ip.major,
+                    gpu_info.gfx_ip.minor, gpu_info.gfx_ip.stepping);
+      const auto& requested_target = GetCtsDeviceCache().gpu_target();
+      if (!requested_target.empty() && requested_target != target) {
+        endpoint_ = nullptr;
+        continue;
+      }
       bool matches = false;
       status = MatchGpuEndpoint(endpoint_, &matches);
       ASSERT_EQ(status, AMDF_STATUS_OK)
           << "domain=" << amdf_status_domain(status)
           << " code=" << amdf_status_code(status);
       if (matches) {
+        gpu_endpoint_info_ = gpu_info;
+        amdf_endpoint_info_t endpoint_info = {};
+        endpoint_info.type = AMDF_STRUCTURE_TYPE_ENDPOINT_INFO;
+        endpoint_info.structure_size = sizeof(endpoint_info);
+        ASSERT_EQ(api_->endpoint_query_info(endpoint_, &endpoint_info),
+                  AMDF_STATUS_OK);
+        ASSERT_NO_FATAL_FAILURE(
+            RecordGpuEndpointProperties("amdf_gpu", endpoint_info, gpu_info));
         break;
       }
       endpoint_ = nullptr;
     }
+    ASSERT_TRUE(requested_endpoint_present)
+        << "requested GPU endpoint is absent from discovery";
     if (endpoint_ == nullptr) {
       GTEST_SKIP() << "no qualified GPU endpoint present";
     }
@@ -206,6 +287,8 @@ class GpuDeviceFixture : public ::testing::Test {
   amdf_instance_t* instance_ = nullptr;
   // Shared query endpoint borrowed from the CTS cache.
   amdf_endpoint_t* endpoint_ = nullptr;
+  // Physical identity and topology of the selected endpoint, queried once.
+  amdf_gpu_endpoint_info_t gpu_endpoint_info_ = {};
   // Shared native device; each case releases only its workload children.
   amdf_device_t* device_ = nullptr;
   // Borrowed system scope discovered before device activation.

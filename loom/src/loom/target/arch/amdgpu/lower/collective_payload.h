@@ -13,16 +13,23 @@
 #include <stdint.h>
 
 #include "loom/codegen/low/lower/lower.h"
-#include "loom/target/arch/amdgpu/lower/plan.h"
+#include "loom/target/arch/amdgpu/lower/collective_plan.h"
 #include "loom/target/low_legality.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Returns true when the source value can be represented as one or more native
-// 32-bit VGPR payload registers for AMDGPU collective packets.
-bool loom_amdgpu_collective_payload_is_supported(
+// Returns the native word count for fixed-width numeric bit transport, or zero
+// when the scalar/vector payload has no supported register storage. Packed
+// elements share words; wide elements span words. Predicate masks and logical
+// addresses have separate representations and are not numeric payloads.
+uint32_t loom_amdgpu_collective_transport_register_count(loom_type_t type);
+
+// Returns true for the 32-bit integer/float elements supported by native
+// arithmetic reduce and scan recipes. Transport word counts alone do not
+// establish arithmetic element boundaries.
+bool loom_amdgpu_collective_arithmetic_payload_is_supported(
     const loom_module_t* module, loom_value_id_t value_id,
     loom_amdgpu_subgroup_payload_kind_t* out_kind,
     uint32_t* out_register_count);
@@ -54,6 +61,8 @@ typedef struct loom_amdgpu_workgroup_collective_shape_t {
   uint32_t flat_workgroup_size;
   // Number of cross-wave partitions spanned by the workgroup.
   uint32_t wave_count;
+  // Exact LDS scratch extent emitted for this collective shape.
+  uint32_t scratch_byte_length;
   // Shape properties derived from the workgroup and partition sizes.
   loom_amdgpu_workgroup_collective_shape_flags_t flags;
 } loom_amdgpu_workgroup_collective_shape_t;
@@ -68,13 +77,19 @@ bool loom_amdgpu_collective_resolve_workgroup_shape(
     loom_amdgpu_workgroup_collective_shape_t* out_shape,
     loom_amdgpu_workgroup_collective_shape_failure_t* out_failure);
 
-// Looks up or materializes a source payload value in low IR form.
+// Retains scalar integer payload materializations for reduce and scan plans.
+iree_status_t loom_amdgpu_finalize_collective_payload(
+    loom_low_lower_context_t* context, loom_low_lower_plan_t plan);
+
+// Looks up or materializes a source payload using its selected operand recipe.
 iree_status_t loom_amdgpu_collective_lookup_payload(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_value_id_t value, loom_amdgpu_subgroup_payload_kind_t payload_kind,
-    loom_value_id_t* out_low_value);
+    const void* materialization, loom_value_id_t* out_low_value);
 
-// Extracts one 32-bit payload register from a scalar or vector low value.
+// Extracts one fully defined 32-bit payload register from a scalar or vector
+// low value. Narrow scalar producers define only the low register part and are
+// widened before use by full-register cross-lane packets.
 iree_status_t loom_amdgpu_collective_payload_register(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     uint32_t register_count, loom_value_id_t low_value, uint32_t register_index,

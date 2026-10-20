@@ -14,12 +14,14 @@ loom_cc_library(
     projection_core
   HDRS
     "projection_apply.h"
+    "projection_branch.h"
     "projection_driver.h"
     "projection_loop.h"
     "projection_plan.h"
     "projection_rule.h"
   SRCS
     "projection_apply.c"
+    "projection_branch.c"
     "projection_driver.c"
     "projection_loop.c"
     "projection_plan.c"
@@ -85,15 +87,24 @@ loom_cc_library(
   NAME
     projection
   HDRS
+    "loop_predicate_projection.h"
     "projection.h"
   SRCS
+    "loop_predicate_projection.c"
     "projection.c"
   DEPS
     ::projection_core
     iree::base
+    loom::ir
+    loom::ops::scalar
+    loom::ops::scf
+    loom::ops::vector
     loom::pass::types
+    loom::target::function_version
     loom::target::pass_environment
-    loom::transforms::encoding::cfg_layout_projection
+    loom::target::provider
+    loom::transforms::encoding::layout_projection
+    loom::transforms::vector::packet_boundary_projection
     loom::transforms::view::boundary_projection
   PUBLIC
 )

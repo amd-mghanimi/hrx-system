@@ -12,6 +12,38 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_VM)
 loom_cc_library(
   NAME
+    loom_check
+  HDRS
+    "check/loom_check.h"
+  SRCS
+    "check/loom_check.c"
+  DEPS
+    iree::base
+    iree::vm::bytecode::disassembler
+    loom::tools::loom-check::execute
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_VM)
+loom_cc_library(
+  NAME
+    check_provider
+  HDRS
+    "check/provider.h"
+  SRCS
+    "check/provider.c"
+  DEPS
+    ::loom_check
+    iree::base
+    loom::tools::loom-check::provider
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_VM)
+loom_cc_library(
+  NAME
     testbench
   HDRS
     "testbench.h"
@@ -22,16 +54,10 @@ loom_cc_library(
     iree::hal
     iree::vm
     iree::vm::bytecode::module
-    loom::error::source
-    loom::link::linker
-    loom::ops::func
-    loom::ops::op_defs
-    loom::target::arch::vm::module
-    loom::target::arch::vm::provider
-    loom::target::provider
-    loom::tooling::compile::pipeline
-    loom::tooling::config
-    loom::tooling::testbench::invocation
+    loom::binding::c::loomc
+    loom::binding::c::target::vm
+    loom::tooling::testbench::compiled_provider
+    loom::tooling::testbench::scenario::executor
   PUBLIC
 )
 endif()
@@ -87,22 +113,17 @@ loom_cc_test(
     iree::testing::gtest_main
     iree::vm
     iree::vm::bytecode::module
-    loom::format::bytecode::reader
+    loom::binding::c::loomc
+    loom::binding::c::target::vm
     loom::format::bytecode::writer
     loom::format::location
     loom::ir
-    loom::link::linker
     loom::ops::func
     loom::ops::func::location_capture
     loom::ops::func::location_capture_test_data
     loom::ops::op_defs
     loom::ops::op_registry
-    loom::target::arch::vm::module
-    loom::target::arch::vm::provider
-    loom::target::provider
-    loom::tooling::compile::pipeline
     loom::tooling::input
-    loom::transforms::cleanup::configured
   LABELS
     "iree-build-requirement=loom.target.arch.vm"
 )
@@ -172,15 +193,10 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::ir
-    loom::ops::func
-    loom::ops::op_registry
-    loom::target::arch::vm::module
-    loom::target::arch::vm::provider
-    loom::target::provider
-    loom::tooling::compile::pipeline
-    loom::tooling::input
-    loom::transforms::cleanup::configured
+    loom::binding::c::interop
+    loom::binding::c::loomc
+    loom::binding::c::target::vm
+    loom::target::emit::vm::module_compiler
   LABELS
     "iree-build-requirement=loom.target.arch.vm"
 )

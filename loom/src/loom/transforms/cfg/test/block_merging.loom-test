@@ -1,10 +1,6 @@
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-// Independent equivalent paths share one structural edit.
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
+// Equivalent terminal paths share their computation and return.
 func.def @merge_terminal_paths(%selector: i32, %value: i32) -> (i32) {
   %otherwise = scalar.constant 9 : i32
   cfg.br ^check_0
@@ -37,17 +33,33 @@ func.def @merge_terminal_paths(%selector: i32, %value: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"iterations":3,*
-CHECK: *"duplicate-blocks-merged":3}*
-
-// ====
-// RUN: with-checks pass-report @measure
-
-// Independent equivalent paths share one structural edit.
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
+func.def @merge_terminal_paths(%selector: i32, %value: i32) -> (i32) {
+  %otherwise = scalar.constant 9 : i32
+  %key_0 = scalar.constant 0 : i32
+  %choose_0 = scalar.cmpi eq, %selector, %key_0 : i32
+  cfg.cond_br %choose_0, ^case_0, ^check_1
+^check_1:
+  %key_1 = scalar.constant 1 : i32
+  %choose_1 = scalar.cmpi eq, %selector, %key_1 : i32
+  cfg.cond_br %choose_1, ^case_0, ^check_2
+^check_2:
+  %key_2 = scalar.constant 2 : i32
+  %choose_2 = scalar.cmpi eq, %selector, %key_2 : i32
+  cfg.cond_br %choose_2, ^case_0, ^check_3
+^check_3:
+  %key_3 = scalar.constant 3 : i32
+  %choose_3 = scalar.cmpi eq, %selector, %key_3 : i32
+  cfg.cond_br %choose_3, ^case_0, ^check_4
+^check_4:
+  func.return %otherwise : i32
+^case_0:
+  func.return %value : i32
 }
 
+// ====
+// RUN: pass cfg-simplify
+
+// Equivalent terminal paths share their computation and return.
 func.def @merge_alpha_paths(%selector: i32, %value: i32) -> (i32) {
   %bias = scalar.constant 11 : i32
   %otherwise = scalar.constant 9 : i32
@@ -85,8 +97,30 @@ func.def @merge_alpha_paths(%selector: i32, %value: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"iterations":3,*
-CHECK: *"duplicate-blocks-merged":3}*
+func.def @merge_alpha_paths(%selector: i32, %value: i32) -> (i32) {
+  %bias = scalar.constant 11 : i32
+  %otherwise = scalar.constant 9 : i32
+  %key_0 = scalar.constant 0 : i32
+  %choose_0 = scalar.cmpi eq, %selector, %key_0 : i32
+  cfg.cond_br %choose_0, ^case_0, ^check_1
+^check_1:
+  %key_1 = scalar.constant 1 : i32
+  %choose_1 = scalar.cmpi eq, %selector, %key_1 : i32
+  cfg.cond_br %choose_1, ^case_0, ^check_2
+^check_2:
+  %key_2 = scalar.constant 2 : i32
+  %choose_2 = scalar.cmpi eq, %selector, %key_2 : i32
+  cfg.cond_br %choose_2, ^case_0, ^check_3
+^check_3:
+  %key_3 = scalar.constant 3 : i32
+  %choose_3 = scalar.cmpi eq, %selector, %key_3 : i32
+  cfg.cond_br %choose_3, ^case_0, ^check_4
+^check_4:
+  func.return %otherwise : i32
+^case_0:
+  %result_0 = scalar.addi %value, %bias : i32
+  func.return %result_0 : i32
+}
 
 // ====
 // RUN: pass cfg-simplify
@@ -211,13 +245,9 @@ kernel.def @preserve_convergent_returns() {
 }
 
 // ====
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
-// Successor merges expose all preceding pairs in the same structural edit.
+// Equivalent decision tails share the complete selector chain.
 func.def @merge_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
   %c0 = scalar.constant 0 : i32
   %choose = scalar.cmpi eq, %choice, %c0 : i32
@@ -253,17 +283,28 @@ func.def @merge_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i3
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"duplicate-blocks-merged":3}*
-
-// ====
-// RUN: with-checks pass-report @measure
-
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
+func.def @merge_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
+  %left_key_0 = scalar.constant 0 : i32
+  %left_test_0 = scalar.cmpi eq, %selector, %left_key_0 : i32
+  cfg.cond_br %left_test_0, ^matched, ^left_1
+^left_1:
+  %left_key_1 = scalar.constant 1 : i32
+  %left_test_1 = scalar.cmpi eq, %selector, %left_key_1 : i32
+  cfg.cond_br %left_test_1, ^matched, ^left_2
+^left_2:
+  %left_key_2 = scalar.constant 2 : i32
+  %left_test_2 = scalar.cmpi eq, %selector, %left_key_2 : i32
+  cfg.cond_br %left_test_2, ^matched, ^fallback
+^matched:
+  func.return %selector : i32
+^fallback:
+  func.return %value : i32
 }
 
-// Successor merges expose all preceding pairs in the same structural edit.
+// ====
+// RUN: pass cfg-simplify
+
+// Equivalent decision tails share the complete selector chain.
 func.def @merge_reordered_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
   %c0 = scalar.constant 0 : i32
   %choose = scalar.cmpi eq, %choice, %c0 : i32
@@ -299,15 +340,26 @@ func.def @merge_reordered_decision_tails(%choice: i32, %selector: i32, %value: i
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"duplicate-blocks-merged":3}*
+func.def @merge_reordered_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
+  %left_key_0 = scalar.constant 0 : i32
+  %left_test_0 = scalar.cmpi ne, %selector, %left_key_0 : i32
+  cfg.cond_br %left_test_0, ^left_1, ^matched
+^left_1:
+  %left_key_1 = scalar.constant 1 : i32
+  %left_test_1 = scalar.cmpi ne, %selector, %left_key_1 : i32
+  cfg.cond_br %left_test_1, ^left_2, ^matched
+^left_2:
+  %left_key_2 = scalar.constant 2 : i32
+  %left_test_2 = scalar.cmpi ne, %selector, %left_key_2 : i32
+  cfg.cond_br %left_test_2, ^fallback, ^matched
+^matched:
+  func.return %selector : i32
+^fallback:
+  func.return %value : i32
+}
 
 // ====
-// RUN: with-checks pass-report @measure
-
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
+// RUN: pass cfg-simplify
 
 // Positional arguments remain attached to the original incoming edges.
 func.def @merge_argument_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
@@ -338,8 +390,19 @@ func.def @merge_argument_tails(%choice: i32, %selector: i32, %value: i32) -> (i3
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"duplicate-blocks-merged":4}*
+func.def @merge_argument_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
+  %c0 = scalar.constant 0 : i32
+  %pick = scalar.cmpi slt, %selector, %c0 : i32
+  cfg.cond_br %pick, ^left_sum, ^left_difference
+^left_sum:
+  %left_added = scalar.addi %selector, %value : i32
+  cfg.br ^left_result(%left_added: i32)
+^left_difference:
+  %left_subtracted = scalar.subi %selector, %value : i32
+  cfg.br ^left_result(%left_subtracted: i32)
+^left_result(%left_value: i32):
+  func.return %left_value : i32
+}
 
 // ====
 // RUN: pass cfg-simplify
@@ -377,10 +440,8 @@ func.def @merge_tails_entering_loop(%choice: i32, %selector: i32, %value: i32) -
 
 // ----
 func.def @merge_tails_entering_loop(%choice: i32, %selector: i32, %value: i32) -> (i32) {
-  %c0 = scalar.constant 0 : i32
   %step = scalar.constant 1 : i32
   %key = scalar.constant 5 : i32
-  %choose = scalar.cmpi eq, %choice, %c0 : i32
   %left_match = scalar.cmpi eq, %selector, %key : i32
   cfg.cond_br %left_match, ^matched, ^left_loop
 ^left_loop:
@@ -399,14 +460,9 @@ func.def @merge_tails_entering_loop(%choice: i32, %selector: i32, %value: i32) -
 }
 
 // ====
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
-// Loop-body successors finish before their predecessors while the shared
-// loop header keeps its identity throughout the edit.
+// Equivalent decision tails merge while preserving the loop recurrence.
 func.def @merge_loop_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
   %initial = scalar.constant 0 : i32
   %step = scalar.constant 1 : i32
@@ -451,18 +507,38 @@ func.def @merge_loop_decision_tails(%choice: i32, %selector: i32, %value: i32) -
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"duplicate-blocks-merged":3}*
-
-// ====
-// RUN: with-checks pass-report @measure
-
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
+func.def @merge_loop_decision_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
+  %initial = scalar.constant 0 : i32
+  %step = scalar.constant 1 : i32
+  cfg.br ^header(%initial: i32)
+^header(%iteration: i32):
+  %continue = scalar.cmpi slt, %iteration, %value : i32
+  cfg.cond_br %continue, ^dispatch, ^fallback
+^dispatch:
+  %left_key_0 = scalar.constant 0 : i32
+  %left_test_0 = scalar.cmpi eq, %selector, %left_key_0 : i32
+  cfg.cond_br %left_test_0, ^matched, ^left_1
+^left_1:
+  %left_key_1 = scalar.constant 1 : i32
+  %left_test_1 = scalar.cmpi eq, %selector, %left_key_1 : i32
+  cfg.cond_br %left_test_1, ^matched, ^left_2
+^left_2:
+  %left_key_2 = scalar.constant 2 : i32
+  %left_test_2 = scalar.cmpi eq, %selector, %left_key_2 : i32
+  cfg.cond_br %left_test_2, ^matched, ^advance
+^advance:
+  %next = scalar.addi %iteration, %step : i32
+  cfg.br ^header(%next: i32)
+^matched:
+  func.return %selector : i32
+^fallback:
+  func.return %value : i32
 }
 
-// Reversing branch slots and block order preserves the same bounded merge.
-// These tails remain in the loop component until the complete edit is applied.
+// ====
+// RUN: pass cfg-simplify
+
+// Reversed branch slots and block order preserve the loop recurrence.
 func.def @merge_reordered_loop_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
   %initial = scalar.constant 0 : i32
   %step = scalar.constant 1 : i32
@@ -507,5 +583,30 @@ func.def @merge_reordered_loop_tails(%choice: i32, %selector: i32, %value: i32) 
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"duplicate-blocks-merged":3}*
+func.def @merge_reordered_loop_tails(%choice: i32, %selector: i32, %value: i32) -> (i32) {
+  %initial = scalar.constant 0 : i32
+  %step = scalar.constant 1 : i32
+  cfg.br ^header(%initial: i32)
+^header(%iteration: i32):
+  %continue = scalar.cmpi slt, %iteration, %value : i32
+  cfg.cond_br %continue, ^dispatch, ^fallback
+^dispatch:
+  %left_key_0 = scalar.constant 0 : i32
+  %left_test_0 = scalar.cmpi ne, %selector, %left_key_0 : i32
+  cfg.cond_br %left_test_0, ^left_1, ^matched
+^left_1:
+  %left_key_1 = scalar.constant 1 : i32
+  %left_test_1 = scalar.cmpi ne, %selector, %left_key_1 : i32
+  cfg.cond_br %left_test_1, ^left_2, ^matched
+^left_2:
+  %left_key_2 = scalar.constant 2 : i32
+  %left_test_2 = scalar.cmpi ne, %selector, %left_key_2 : i32
+  cfg.cond_br %left_test_2, ^advance, ^matched
+^advance:
+  %next = scalar.addi %iteration, %step : i32
+  cfg.br ^header(%next: i32)
+^matched:
+  func.return %selector : i32
+^fallback:
+  func.return %value : i32
+}

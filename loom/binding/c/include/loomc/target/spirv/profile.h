@@ -140,8 +140,98 @@ typedef enum loomc_spirv_feature_e {
   /// Core subgroup operations and subgroup memory scope.
   LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM = 16,
 
+  /// Vulkan memory-model Device scope support.
+  LOOMC_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE = 17,
+
+  /// 64-bit integer atomics in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_INT64_ATOMICS = 18,
+
+  /// 64-bit integer atomics in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_INT64_ATOMICS = 19,
+
+  /// 16-bit floating-point basic atomics in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMICS = 20,
+
+  /// 16-bit floating-point basic atomics in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMICS = 21,
+
+  /// 16-bit floating-point atomic add in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMIC_ADD = 22,
+
+  /// 16-bit floating-point atomic add in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMIC_ADD = 23,
+
+  /// 32-bit floating-point basic atomics in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMICS = 24,
+
+  /// 32-bit floating-point basic atomics in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMICS = 25,
+
+  /// 32-bit floating-point atomic add in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMIC_ADD = 26,
+
+  /// 32-bit floating-point atomic add in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMIC_ADD = 27,
+
+  /// 64-bit floating-point basic atomics in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMICS = 28,
+
+  /// 64-bit floating-point basic atomics in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMICS = 29,
+
+  /// 64-bit floating-point atomic add in storage-buffer memory.
+  LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMIC_ADD = 30,
+
+  /// 64-bit floating-point atomic add in workgroup memory.
+  LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMIC_ADD = 31,
+
+  /// F32 DenormPreserve independent of other floating-point widths.
+  LOOMC_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE = 32,
+
+  /// Subgroup ballot operations.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT = 33,
+
+  /// F16/F64 DenormPreserve modes selectable together without changing F32.
+  LOOMC_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE = 34,
+
+  /// F16/F64 RoundingModeRTE modes selectable together without changing F32.
+  LOOMC_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE = 35,
+
+  /// F32 RoundingModeRTE independent of other floating-point widths.
+  LOOMC_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE = 36,
+
+  /// F16 SignedZeroInfNanPreserve execution-mode support.
+  LOOMC_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE = 37,
+
+  /// F32 SignedZeroInfNanPreserve execution-mode support.
+  LOOMC_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE = 38,
+
+  /// F64 SignedZeroInfNanPreserve execution-mode support.
+  LOOMC_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE = 39,
+
+  /// Native F64-to-F16 conversion satisfies the scalar.fptrunc contract.
+  LOOMC_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION = 40,
+
+  /// Boolean votes over active subgroup invocations.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE = 41,
+
+  /// Arithmetic reductions over active subgroup invocations.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_ARITHMETIC = 42,
+
+  /// Arithmetic reductions over contiguous power-of-two subgroup clusters.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_CLUSTERED = 43,
+
+  /// Logical Vulkan device enables subgroup operations on I8/I16/I64 and F16.
+  LOOMC_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES = 44,
+
+  /// Subgroup indexed and XOR shuffle operations.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE = 45,
+
+  /// Subgroup up and down shuffle operations.
+  LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE = 46,
+
   /// Number of public SPIR-V feature identifiers.
-  LOOMC_SPIRV_FEATURE_COUNT = 17,
+  LOOMC_SPIRV_FEATURE_COUNT = 47,
 } loomc_spirv_feature_t;
 
 /// Bitset of `loomc_spirv_feature_t` values.
@@ -221,6 +311,7 @@ typedef enum loomc_spirv_limit_e {
   LOOMC_SPIRV_LIMIT_MAX_FLAT_WORKGROUP_SIZE = 4,
 
   /// Maximum bytes reserved in SPIR-V Workgroup storage by one entry point.
+  /// Known values must fit the IR's non-negative int64_t attribute range.
   LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES = 5,
 
   /// Fixed target-wide subgroup size in invocations.
@@ -245,10 +336,24 @@ typedef enum loomc_spirv_limit_e {
   LOOMC_SPIRV_LIMIT_MAX_GRID_SIZE_Z = 12,
 
   /// Maximum product of dispatched grid dimensions, in workitems.
+  /// Known values must fit the IR's non-negative int64_t attribute range.
   LOOMC_SPIRV_LIMIT_MAX_FLAT_GRID_SIZE = 13,
 
+  /// Device preference when a root has no fixed subgroup requirement.
+  LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE = 14,
+
+  /// Smallest selectable compute subgroup width (powers of two only).
+  LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE = 15,
+
+  /// Largest selectable compute subgroup width. Every power of two in the
+  /// inclusive minimum/maximum range is supported.
+  LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE = 16,
+
+  /// Maximum subgroups per workgroup for a requested nondefault width.
+  LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SUBGROUP_COUNT = 17,
+
   /// Number of public SPIR-V limit identifiers.
-  LOOMC_SPIRV_LIMIT_COUNT = 14,
+  LOOMC_SPIRV_LIMIT_COUNT = 18,
 } loomc_spirv_limit_t;
 
 /// Stable SPIR-V numeric environment fact identifier.
@@ -669,7 +774,9 @@ typedef struct loomc_spirv_cooperative_matrix_row_t {
   /// Accepted pointer storage classes for load/store operations.
   loomc_spirv_storage_class_flags_t storage_class_flags;
 
-  /// Required cooperative matrix operand bits for this row.
+  /// Required cooperative matrix operand bits for this row. Each signed
+  /// component flag must be present if and only if its component type is
+  /// signed.
   loomc_spirv_cooperative_matrix_operand_flags_t operand_flags;
 } loomc_spirv_cooperative_matrix_row_t;
 
@@ -769,6 +876,9 @@ LOOMC_API_EXPORT loomc_status_t loomc_target_profile_create_spirv(
 /// value match. Contradictory facts fail `out_result` and preserve provenance
 /// from both the base fact and the refining fact. Empty `options->identifier`
 /// carries the base profile identifier into the refined profile.
+/// Named profiles selected with `loomc_target_profile_select` are also valid
+/// bases. Their enabled features, supplied limits, and entry ABI are retained;
+/// omitted optional facts remain unknown and may be supplied by refinement.
 ///
 /// @ownership
 /// The caller owns `out_profile` when the returned result succeeds and releases
@@ -784,6 +894,9 @@ LOOMC_API_EXPORT loomc_status_t loomc_spirv_target_profile_refine(
     loomc_target_profile_t** out_profile, loomc_result_t** out_result);
 
 /// Returns the known state for one SPIR-V feature fact.
+///
+/// Queries accept both named and fact-constructed SPIR-V profiles. An optional
+/// feature omitted from a named profile is unknown, not explicitly false.
 ///
 /// @param profile SPIR-V target profile to query.
 /// @param feature Feature fact to inspect.

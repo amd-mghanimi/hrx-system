@@ -80,6 +80,7 @@ loom_generated_cc_library(
   EXTRA_OUTPUT_FLAGS
     "--cache-policy-encoding-rows"
     "--cache-policy-temporal-th"
+    "--cache-policy-native-names"
     "--lds-bank-service-model-rows"
     "--matrix-coexecution-source-layouts"
     "--low-registry-tables"
@@ -91,6 +92,7 @@ loom_generated_cc_library(
   EXTRA_OUTPUTS
     "memory_cache_policy_encoding_rows.inl"
     "memory_cache_policy_temporal_th.inl"
+    "memory_cache_policy_native_names.inl"
     "lds_bank_service_model_rows.inl"
     "matrix_coexecution_source_layouts.inl"
     "low_registry_tables.inl"
@@ -123,15 +125,49 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_library(
   NAME
+    target_identity
+  HDRS
+    "target_identity.h"
+  SRCS
+    "target_identity.c"
+  DEPS
+    ::target_info
+    ::target_info_defs
+    iree::base
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    target_identity_test
+  SRCS
+    "target_identity_test.cc"
+  DEPS
+    ::target_identity
+    ::target_info
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
     facts
   HDRS
     "facts.h"
   SRCS
     "facts.c"
   DEPS
+    ::target_identity
     ::target_info
     ::target_info_defs
     iree::base
+    loom::codegen::low::read_retention
     loom::codegen::low::target_binding
     loom::target::facts
     loom::target::facts_builder
@@ -148,7 +184,7 @@ loom_cc_library(
   SRCS
     "amdhsa_target_id.c"
   DEPS
-    ::facts
+    ::target_identity
     ::target_info
     iree::base
     iree::base::internal::arena
@@ -184,7 +220,7 @@ loom_cc_library(
     "artifact_key.c"
   DEPS
     ::amdhsa_target_id
-    ::facts
+    ::target_identity
     ::target_info
     iree::base
     iree::base::internal::arena
@@ -221,6 +257,7 @@ loom_cc_library(
   DEPS
     ::artifact_key
     ::facts
+    ::target_identity
     ::target_info
     iree::base
     loom::target::arch::amdgpu::records::target_records
@@ -238,6 +275,7 @@ loom_cc_test(
     "profile_test.cc"
   DEPS
     ::artifact_key
+    ::facts
     ::profile
     ::target_info
     iree::base::internal::arena
@@ -291,41 +329,6 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_library(
   NAME
-    runtime_requirements
-  HDRS
-    "runtime_requirements.h"
-  SRCS
-    "runtime_requirements.c"
-  DEPS
-    iree::base
-    loom::ir
-    loom::target::arch::amdgpu::abi::asan
-    loom::target::arch::amdgpu::abi::feedback
-    loom::target::arch::amdgpu::abi::tsan
-  PUBLIC
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_cc_test(
-  NAME
-    runtime_requirements_test
-  SRCS
-    "runtime_requirements_test.cc"
-  DEPS
-    ::runtime_requirements
-    iree::base::internal::arena
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::ir
-  LABELS
-    "iree-build-requirement=loom.target.arch.amdgpu"
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_cc_library(
-  NAME
     legalization
   HDRS
     "legalization.h"
@@ -334,8 +337,10 @@ loom_cc_library(
   DEPS
     ::facts
     iree::base
+    loom::analysis::control_uniformity
     loom::analysis::symbolic_expr
     loom::codegen::low::descriptors
+    loom::codegen::low::source_memory_plan
     loom::ir
     loom::ops::atomic
     loom::ops::index
@@ -351,9 +356,16 @@ loom_cc_library(
     loom::target::arch::amdgpu::refs::target_refs
     loom::target::arch::amdgpu::target_info_defs
     loom::target::legalization
+    loom::transforms::conversion::target_legalization
+    loom::transforms::kernel::target_legalization
+    loom::transforms::scalar::target_legalization
+    loom::transforms::vector::cast_packet_legalization
     loom::transforms::vector::packet_legalization
+    loom::transforms::vector::shape_legalization
+    loom::transforms::vector::table_legalization
+    loom::transforms::vector::target_legalization
     loom::transforms::vector::to_scalar
-    loom::transforms::view::target_legalization
+    loom::transforms::view::atomic
   PUBLIC
 )
 endif()
@@ -411,10 +423,30 @@ loom_cc_library(
     loom::codegen::low::packet
     loom::codegen::low::verify
     loom::error::error_defs
+    loom::error::parameter
     loom::ops::low
     loom::target::arch::amdgpu::encoding
     loom::target::arch::amdgpu::facts
     loom::target::arch::amdgpu::refs::target_refs
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
+    ir_provider
+  HDRS
+    "ir_provider.h"
+  SRCS
+    "ir_provider.c"
+  DEPS
+    ::facts
+    ::low_asm_diagnostics
+    iree::base
+    loom::target::arch::amdgpu::descriptors::low_registry
+    loom::target::arch::amdgpu::ops
+    loom::target::provider
   PUBLIC
 )
 endif()
@@ -440,6 +472,7 @@ loom_cc_library(
     loom::target::arch::amdgpu::descriptors::low_registry
     loom::target::arch::amdgpu::diagnostics::packet_diagnostics
     loom::target::arch::amdgpu::lower
+    loom::target::arch::amdgpu::lower::kinds
     loom::target::arch::amdgpu::ops
     loom::target::provider
   PUBLIC
@@ -520,6 +553,36 @@ loom_cc_test(
 endif()
 
 if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_test(
+  NAME
+    sanitizer_race_lifetime_test
+  SRCS
+    "sanitizer_race_lifetime_test.cc"
+  DEPS
+    iree::base
+    iree::base::core_headers
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::pass_environment
+    loom::format::text::parser
+    loom::ir
+    loom::ops::low
+    loom::ops::op_registry
+    loom::pass::builtin_registry
+    loom::pass::tooling
+    loom::target::arch::amdgpu::abi::tsan
+    loom::target::arch::amdgpu::descriptors::low_registry
+    loom::target::arch::amdgpu::lower
+    loom::target::arch::amdgpu::ops
+    loom::target::arch::amdgpu::refs::target_refs
+    loom::testing::module_ptr
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
 loom_cc_library(
   NAME
     pass_registry
@@ -530,7 +593,6 @@ loom_cc_library(
   DEPS
     iree::base
     loom::codegen::low::pipeline::pass_environment
-    loom::codegen::low::pipeline::pass_requirements
     loom::pass::registry
     loom::target::arch::amdgpu::hal::binding_materialization_pass
   PUBLIC
@@ -563,17 +625,15 @@ loom_check_compile_tests(
 )
 endif()
 
-file(GLOB _GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS test/source_low/*.loom-test)
-file(GLOB _GLOB_TEST/SOURCE_LOW/MEMORY_STABILITY_LOOM-TEST_49E0437B LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS test/source_low/memory_stability.loom-test)
-list(REMOVE_ITEM _GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B ${_GLOB_TEST/SOURCE_LOW/MEMORY_STABILITY_LOOM-TEST_49E0437B})
-file(GLOB _GLOB_TEST/SOURCE_LOW/SOURCE_LOW_MEMORY_FLOAT64_LOOM-TEST_49E0437B LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS test/source_low/source_low_memory_float64.loom-test)
-list(REMOVE_ITEM _GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B ${_GLOB_TEST/SOURCE_LOW/SOURCE_LOW_MEMORY_FLOAT64_LOOM-TEST_49E0437B})
+file(GLOB _GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS test/source_low/*.loom-test)
+file(GLOB _GLOB_TEST/SOURCE_LOW/MEMORY_STABILITY_LOOM-TEST_BE73FC6D LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS test/source_low/memory_stability.loom-test)
+list(REMOVE_ITEM _GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D ${_GLOB_TEST/SOURCE_LOW/MEMORY_STABILITY_LOOM-TEST_BE73FC6D})
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_check_test_suite(
   NAME
     loom_check_file_test
   SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
   TEST_NAME_PREFIX_TO_STRIP
     "test/source_low/"
 )
@@ -582,11 +642,373 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_check_compile_tests(
   NAME
-    "source_low_memory_atomic_observations_gfx1200"
+    "address_cast_banks"
   SRC
-    "test/source_low/source_low_memory_atomic_observations_gfx1200.loom-test"
+    "test/source_low/address_cast_banks.loom-test"
   REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx942
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "cluster_query_carriers"
+  SRC
+    "test/source_low/cluster_query_carriers.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx1250
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "float64_narrow"
+  SRC
+    "test/source_low/float64_narrow.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "immutable_storage"
+  SRC
+    "test/source_low/immutable_storage.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "memory_float64_carrier"
+  SRC
+    "test/source_low/memory_float64_carrier.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "memory_mixed_wide_offsets"
+  SRC
+    "test/source_low/memory_mixed_wide_offsets.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "memory_scalar_packets"
+  SRC
+    "test/source_low/memory_scalar_packets.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "memory_strided_packed_packets"
+  SRC
+    "test/source_low/memory_strided_packed_packets.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "narrow_float_arguments"
+  SRC
+    "test/source_low/narrow_float_arguments.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "narrow_kernel_arguments"
+  SRC
+    "test/source_low/narrow_kernel_arguments.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "predicate_truncation"
+  SRC
+    "test/source_low/predicate_truncation.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
+    loom::target::amdgpu::gfx12-generic
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1201
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
+    loom::target::amdgpu::gfx1251
+    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
+    loom::target::amdgpu::gfx942
+    loom::target::amdgpu::gfx950
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "query_carriers"
+  SRC
+    "test/source_low/query_carriers.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
+  TARGETS
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1200
+    loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx942
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_check_compile_tests(
+  NAME
+    "source_low_system_scope_store_wait"
+  SRC
+    "test/source_low/source_low_system_scope_store_wait.loom-test"
+  REGISTERED_SRCS
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
   TARGETS
     loom::target::amdgpu::gfx12-generic
     loom::target::amdgpu::gfx1200
@@ -597,73 +1019,35 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_check_compile_tests(
   NAME
-    "source_low_memory_atomic_observations_gfx1250"
+    "source_low_uniform_vector_extract"
   SRC
-    "test/source_low/source_low_memory_atomic_observations_gfx1250.loom-test"
+    "test/source_low/source_low_uniform_vector_extract.loom-test"
   REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
   TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
     loom::target::amdgpu::gfx12-5-generic
-    loom::target::amdgpu::gfx1250
-    loom::target::amdgpu::gfx1251
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_observations_gfx9_4_generic"
-  SRC
-    "test/source_low/source_low_memory_atomic_observations_gfx9_4_generic.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
-    loom::target::amdgpu::gfx9-4-generic
-    loom::target::amdgpu::gfx942
-    loom::target::amdgpu::gfx950
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_publication_gfx1200"
-  SRC
-    "test/source_low/source_low_memory_atomic_publication_gfx1200.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
     loom::target::amdgpu::gfx12-generic
     loom::target::amdgpu::gfx1200
     loom::target::amdgpu::gfx1201
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_publication_gfx1250"
-  SRC
-    "test/source_low/source_low_memory_atomic_publication_gfx1250.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
-    loom::target::amdgpu::gfx12-5-generic
     loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
     loom::target::amdgpu::gfx1251
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_publication_gfx9_4_generic"
-  SRC
-    "test/source_low/source_low_memory_atomic_publication_gfx9_4_generic.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
     loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
     loom::target::amdgpu::gfx942
     loom::target::amdgpu::gfx950
 )
@@ -672,58 +1056,35 @@ endif()
 if(LOOM_TARGET_ARCH_AMDGPU)
 loom_check_compile_tests(
   NAME
-    "source_low_memory_atomic_scopes_gfx1200"
+    "trigonometry"
   SRC
-    "test/source_low/source_low_memory_atomic_scopes_gfx1200.loom-test"
+    "test/source_low/trigonometry.loom-test"
   REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
   TARGETS
+    loom::target::amdgpu::gfx11-generic
+    loom::target::amdgpu::gfx1100
+    loom::target::amdgpu::gfx1101
+    loom::target::amdgpu::gfx1102
+    loom::target::amdgpu::gfx1103
+    loom::target::amdgpu::gfx1150
+    loom::target::amdgpu::gfx1151
+    loom::target::amdgpu::gfx1152
+    loom::target::amdgpu::gfx1153
+    loom::target::amdgpu::gfx1170
+    loom::target::amdgpu::gfx1171
+    loom::target::amdgpu::gfx1172
+    loom::target::amdgpu::gfx12-5-generic
     loom::target::amdgpu::gfx12-generic
     loom::target::amdgpu::gfx1200
     loom::target::amdgpu::gfx1201
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_scopes_gfx1250"
-  SRC
-    "test/source_low/source_low_memory_atomic_scopes_gfx1250.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
-    loom::target::amdgpu::gfx12-5-generic
     loom::target::amdgpu::gfx1250
+    loom::target::amdgpu::gfx1250-a0
     loom::target::amdgpu::gfx1251
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_atomic_scopes_gfx9_4_generic"
-  SRC
-    "test/source_low/source_low_memory_atomic_scopes_gfx9_4_generic.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
     loom::target::amdgpu::gfx9-4-generic
-    loom::target::amdgpu::gfx942
-    loom::target::amdgpu::gfx950
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_global_atomic_gfx9_4_generic"
-  SRC
-    "test/source_low/source_low_memory_global_atomic_gfx9_4_generic.loom-test"
-  REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
-  TARGETS
-    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
+    loom::target::amdgpu::gfx940
+    loom::target::amdgpu::gfx941
     loom::target::amdgpu::gfx942
     loom::target::amdgpu::gfx950
 )
@@ -736,7 +1097,7 @@ loom_check_compile_tests(
   SRC
     "test/source_low/uniform_packed_memory.loom-test"
   REGISTERED_SRCS
-    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_49E0437B}"
+    "${_GLOB_TEST_SOURCE_LOW_X_LOOM_TEST_BE73FC6D}"
   TARGETS
     loom::target::amdgpu::gfx11-generic
     loom::target::amdgpu::gfx1100
@@ -758,54 +1119,7 @@ loom_check_compile_tests(
     loom::target::amdgpu::gfx1250-a0
     loom::target::amdgpu::gfx1251
     loom::target::amdgpu::gfx9-4-generic
-    loom::target::amdgpu::gfx940
-    loom::target::amdgpu::gfx941
-    loom::target::amdgpu::gfx942
-    loom::target::amdgpu::gfx950
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-iree_native_test(
-  NAME
-    "source_low_memory_float64"
-  WORKING_DIRECTORY "${IREE_ROOT_DIR}"
-  ARGS
-    "{{${CMAKE_CURRENT_SOURCE_DIR}/test/source_low/source_low_memory_float64.loom-test}}"
-  SRC
-    loom::tools::loom-check::loom-check-test
-  LABELS
-    "loom-check"
-)
-endif()
-
-if(LOOM_TARGET_ARCH_AMDGPU)
-loom_check_compile_tests(
-  NAME
-    "source_low_memory_float64"
-  SRC
-    "test/source_low/source_low_memory_float64.loom-test"
-  TARGETS
-    loom::target::amdgpu::gfx11-generic
-    loom::target::amdgpu::gfx1100
-    loom::target::amdgpu::gfx1101
-    loom::target::amdgpu::gfx1102
-    loom::target::amdgpu::gfx1103
-    loom::target::amdgpu::gfx1150
-    loom::target::amdgpu::gfx1151
-    loom::target::amdgpu::gfx1152
-    loom::target::amdgpu::gfx1153
-    loom::target::amdgpu::gfx1170
-    loom::target::amdgpu::gfx1171
-    loom::target::amdgpu::gfx1172
-    loom::target::amdgpu::gfx12-5-generic
-    loom::target::amdgpu::gfx12-generic
-    loom::target::amdgpu::gfx1200
-    loom::target::amdgpu::gfx1201
-    loom::target::amdgpu::gfx1250
-    loom::target::amdgpu::gfx1250-a0
-    loom::target::amdgpu::gfx1251
-    loom::target::amdgpu::gfx9-4-generic
+    loom::target::amdgpu::gfx90a
     loom::target::amdgpu::gfx940
     loom::target::amdgpu::gfx941
     loom::target::amdgpu::gfx942

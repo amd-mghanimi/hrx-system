@@ -20,6 +20,7 @@
 #include "loom/codegen/low/allocation.h"
 #include "loom/error/emitter.h"
 #include "loom/ir/ir.h"
+#include "loom/target/arch/amdgpu/target_info.h"
 #include "loom/target/types.h"
 
 #ifdef __cplusplus
@@ -32,13 +33,17 @@ extern "C" {
 // Required kernarg alignment for HAL binding pointers.
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_GLOBAL_BUFFER_KERNARG_ALIGNMENT 8u
 
-// Kernarg storage for one 32-bit direct dispatch constant word.
-// Narrow i8/i16 integers use sign-extended words, matching their scalar value
-// representation. Unsigned source operations interpret the declared low bits.
+// Kernarg storage for one 32-bit direct dispatch constant word. Logical
+// payloads narrower than a word occupy its low-address bytes. Padding is
+// unspecified; source lowering establishes each consumer's carrier contract.
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_DIRECT_SCALAR_KERNARG_SIZE 4u
 
 // Required kernarg alignment for direct dispatch constant words.
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_DIRECT_SCALAR_KERNARG_ALIGNMENT 4u
+
+// Maximum physical word count carried by one direct dispatch argument. This
+// covers the widest source vector representation admitted by AMDGPU lowering.
+#define LOOM_AMDGPU_HAL_KERNEL_ABI_DIRECT_ARG_MAX_UNIT_COUNT 32u
 
 // Stable low.live_in source spelling for the AMDGPU kernarg segment pointer.
 #define LOOM_AMDGPU_HAL_KERNEL_ABI_KERNARG_SEGMENT_PTR_SOURCE \
@@ -275,7 +280,8 @@ typedef struct loom_amdgpu_hal_kernarg_resource_t {
 } loom_amdgpu_hal_kernarg_resource_t;
 
 typedef struct loom_amdgpu_hal_kernarg_direct_arg_t {
-  // Entry block argument value loaded from the HAL constant segment.
+  // Entry block argument loaded from the HAL constant segment, or INVALID
+  // when only its ABI metadata remains after argument materialization.
   loom_value_id_t arg_id;
   // Metadata name copied from the entry block argument when present.
   iree_string_view_t name;
@@ -287,6 +293,8 @@ typedef struct loom_amdgpu_hal_kernarg_direct_arg_t {
   uint32_t kernarg_offset;
   // Byte length of the direct argument in the kernarg segment.
   uint32_t kernarg_size;
+  // Byte length consumed from the dense HAL dispatch constant stream.
+  uint32_t payload_size;
   // Byte alignment of the direct argument in the kernarg segment.
   uint32_t kernarg_alignment;
   // Target-low value type produced by materializing this argument.
@@ -306,7 +314,7 @@ typedef struct loom_amdgpu_hal_kernel_abi_layout_t {
   // Source lowering may initialize this conservatively; HAL ABI materialization
   // refines it after low-level dead-code elimination.
   bool uses_kernarg_segment_ptr;
-  // HAL dispatch constant word count consumed by direct arguments.
+  // Physical kernarg word count occupied by direct arguments.
   uint32_t constant_count;
   // Resource records in HAL binding/kernarg offset order.
   const loom_amdgpu_hal_kernarg_resource_t* resources;
@@ -321,13 +329,22 @@ typedef struct loom_amdgpu_hal_kernel_abi_layout_t {
 typedef struct loom_amdgpu_hal_kernel_abi_verify_result_t {
   // Number of AMDGPU HAL-kernel ABI errors emitted for the function.
   uint32_t error_count;
+  // Verified kernarg pointer live-in, or INVALID when not yet materialized.
+  loom_value_id_t kernarg_segment_ptr;
   // Bitset of verified ABI source kinds present in the function.
   uint64_t live_in_source_bits;
   // Launch workgroup-coordinate state required by the verified low function.
   loom_amdgpu_hal_kernel_abi_launch_workgroup_id_flags_t
       launch_workgroup_id_flags;
-  // Number of hidden user SGPRs consumed by verified ABI live-ins.
+  // User SGPR extent, including padding for optional flat-scratch inputs.
   uint32_t user_sgpr_count;
+  // Launch registers consumed by the entry prologue on legacy flat scratch.
+  struct {
+    // First register of the two-SGPR absolute scratch base.
+    uint32_t init;
+    // Register holding the byte offset of this wave's scratch allocation.
+    uint32_t wavefront_offset;
+  } flat_scratch_sgprs;
   // Fixed physical values retained from verified ABI live-ins.
   loom_low_allocation_fixed_value_t
       fixed_values[LOOM_AMDGPU_HAL_KERNEL_ABI_MAX_FIXED_VALUE_COUNT];
@@ -339,10 +356,12 @@ typedef struct loom_amdgpu_hal_kernel_abi_verify_result_t {
 //
 // Status is reserved for diagnostic emission and table-allocation failures.
 // User-visible ABI violations are emitted through |emitter| and counted in
-// |out_result|.
+// |out_result|. |properties| supplies the resolved processor's launch layout;
+// it may be NULL for a representation-only function without a processor.
 iree_status_t loom_amdgpu_hal_kernel_abi_verify_low(
     const loom_module_t* module, const loom_op_t* function_op,
-    const loom_low_descriptor_set_t* descriptor_set, uint32_t max_errors,
+    const loom_low_descriptor_set_t* descriptor_set,
+    const loom_amdgpu_processor_properties_t* properties, uint32_t max_errors,
     iree_diagnostic_emitter_t emitter,
     loom_amdgpu_hal_kernel_abi_verify_result_t* out_result,
     iree_arena_allocator_t* arena);

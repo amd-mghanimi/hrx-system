@@ -71,17 +71,18 @@ void iree_hal_cmd_block_recording_release(
 //   iree_hal_cmd_fixup_t* fixups = NULL;
 //   iree_host_size_t cmd_size =
 //       iree_host_align(offsetof(iree_hal_cmd_dispatch_t, constants) +
-//                       constant_count * sizeof(uint32_t), 8);
+//                       constant_byte_length, 8);
 //   IREE_RETURN_IF_ERROR(iree_hal_cmd_block_builder_append_cmd(
 //       &builder, IREE_HAL_CMD_DISPATCH, IREE_HAL_CMD_FLAG_NONE,
 //       cmd_size, binding_count, binding_count,
 //       tile_count, (void**)&dispatch, &fixups));
 //   // Fill fixups[0..binding_count-1] with binding resolution entries.
 //   dispatch->function = function;
-//   dispatch->environment = environment;
+//   dispatch->executable = executable;
+//   dispatch->constant_byte_length = constant_byte_length;
 //   dispatch->workgroup_size[0] = 64;
 //   // ... fill remaining fields ...
-//   memcpy(dispatch->constants, constants, constant_count * sizeof(uint32_t));
+//   memcpy(dispatch->constants, constants, constant_byte_length);
 //
 //   IREE_RETURN_IF_ERROR(iree_hal_cmd_block_builder_barrier(&builder));
 //
@@ -231,7 +232,8 @@ iree_status_t iree_hal_cmd_block_builder_end(
 //   opcode: Work-command opcode to encode.
 //   flags: command flags (INDIRECT, PREDICATED, SEQUENTIAL).
 //   cmd_bytes: total command size including header and trailing data
-//              (e.g., sizeof(iree_hal_cmd_dispatch_t) + constant_count * 4).
+//              For dispatches, align offsetof(iree_hal_cmd_dispatch_t,
+//              constants) + constant_byte_length to eight bytes.
 //              Must be a multiple of 8. Maximum 255 * 8 = 2040 bytes.
 //   fixup_count: number of fixup entries to reserve at the end of the block.
 //   binding_count: .data binding_ptrs[] slots consumed by this command.
@@ -242,6 +244,7 @@ iree_status_t iree_hal_cmd_block_builder_end(
 //               FILL/COPY: ceil(length / transfer tile length).
 //               UPDATE: 0 or 1 due to inline command payload size.
 //               ATOMIC_WAIT/STORE/RMW: 1.
+//               FENCE: 1.
 //
 // Returns a pointer to the command in the block via |out_cmd|. Header fields
 // (opcode, flags, size_qwords) are initialized. For DISPATCH commands,

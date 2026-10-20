@@ -46,12 +46,12 @@ value even before an exact definition is available:
 
 ```loom
 config.decl @model.layer_count : %value: index where [range(%value, 1, 256)]
-config.decl @model.prefill_batch_size : %value: index where [range(%value, 64, 512), mul(%value, 64), pow2(%value)]
+config.decl @model.prefill_batch_size : %value: index where [range(%value, 64, 512), multiple_of(%value, 64), power_of_two(%value)]
 config.decl @model.weight_encoding : encoding<schema>
 ```
 
-`range(%value, lo, hi)` is inclusive. `mul(%value, 64)` means that the value
-is a multiple of 64; it does not perform multiplication. `pow2` records a
+`range(%value, lo, hi)` is inclusive. `multiple_of(%value, 64)` records
+divisibility without performing multiplication. `power_of_two` records a
 power-of-two contract. Relational predicates such as `lt`, `le`, `eq`, and
 `ne` may relate a value to a literal or another SSA value.
 
@@ -124,12 +124,26 @@ The result equals the operand, but only `%bounded_expert_id` carries the new fac
 edge. Memory accesses, casts, loop transforms, and provider selection that need
 the proof consume the refined value.
 
+Range endpoints may be SSA values when one dynamic quantity is bounded by
+another. Each endpoint contributes the interval facts already known for that
+value, so the count below is non-negative and no greater than the maximum
+possible row count without repeating that maximum:
+
+```loom
+%rows = index.assume %rows0 [range(%rows0, 1, 709)] : index
+%count = index.assume %count0 [range(%count0, 0, %rows)] : index
+```
+
+This form keeps the relationship to `%rows` as well as the finite interval. It
+is useful for routed expert counts, page-table lengths, ragged tile extents, and
+other loaded metadata whose capacity is already represented by an SSA value.
+
 [`scalar.assume`](../reference/dialects/scalar/ops/assume.md) provides the same
 contract for fixed-width integer and floating-point payloads:
 
 ```loom
 %finite_scale = scalar.assume %scale [finite(%scale)] : f32
-%aligned_length = scalar.assume %length [mul(%length, 16)] : i64
+%aligned_length = scalar.assume %length [multiple_of(%length, 16)] : i64
 ```
 
 An assumption is not an executable check. It records a fact established by the
@@ -139,7 +153,7 @@ checks the predicates, aborts the execution path on failure, and returns
 refined aliases on success:
 
 ```loom
-%checked_length = sanitizer.assert.value %length [range(%length, 0, 4096), mul(%length, 16)] : index
+%checked_length = sanitizer.assert.value %length [range(%length, 0, 4096), multiple_of(%length, 16)] : index
 ```
 
 The distinction is semantic: `assume` makes a promise to the compiler;
@@ -168,6 +182,12 @@ The condition controls runtime execution and simultaneously gives each
 compile-time application site a stronger context. This lets a structured
 program preserve the reason a specialization is valid instead of cloning a
 function under an opaque generated name.
+
+The same path facts feed bounds proofs and explicit loop schedules. For
+example, a true `%remaining >= %tile_size` edge makes
+`index.min %remaining, %tile_size` exact inside that region, so an enclosed
+fixed-tile pipeline or full unroll needs no duplicate `index.assume`. The false
+region retains the complementary relation but still has a dynamic tail length.
 
 ## A template family selects an implementation
 

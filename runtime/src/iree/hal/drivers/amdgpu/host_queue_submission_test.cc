@@ -6,8 +6,12 @@
 
 #include "iree/hal/drivers/amdgpu/host_queue_submission.h"
 
+#include <atomic>
 #include <cstdint>
+#include <initializer_list>
+#include <thread>
 
+#include "iree/base/threading/notification.h"
 #include "iree/hal/api.h"
 #include "iree/hal/cts/util/test_base.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
@@ -17,6 +21,7 @@
 #include "iree/hal/drivers/amdgpu/host_queue_waits.h"
 #include "iree/hal/drivers/amdgpu/logical_device.h"
 #include "iree/hal/drivers/amdgpu/physical_device.h"
+#include "iree/hal/drivers/amdgpu/semaphore.h"
 #include "iree/hal/drivers/amdgpu/util/pm4_capabilities.h"
 #include "iree/hal/drivers/amdgpu/util/pm4_emitter.h"
 #include "iree/testing/gtest.h"
@@ -238,6 +243,151 @@ TEST_F(HostQueueSubmissionTest, GroupedLogicalDeviceQueueFrontiersAreDistinct) {
       IREE_HSA_FENCE_SCOPE_SYSTEM);
 }
 
+TEST_F(HostQueueSubmissionTest, DeferredSignalsRetireAfterHostAssembly) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  TestLogicalDeviceGroup test_group;
+  IREE_ASSERT_OK(
+      test_group.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+  auto* producer_device =
+      iree_hal_device_group_device_at(test_group.device_group(), 0);
+  auto* consumer_device =
+      iree_hal_device_group_device_at(test_group.device_group(), 1);
+  auto* producer_queue = iree_hal_device_queue(producer_device, 0, 0);
+  auto* consumer_queue = iree_hal_device_queue(consumer_device, 0, 0);
+  ASSERT_NE(producer_queue, nullptr);
+  ASSERT_NE(consumer_queue, nullptr);
+
+  for (uint32_t i = 0; i < 64; ++i) {
+    iree::hal::cts::SemaphoreList produced(producer_device, {0}, {1});
+    iree::hal::cts::SemaphoreList consumed(consumer_device, {0}, {1});
+    // The consumer is issued from the producer's completion callback. It
+    // transfers its signal retain to another queue's completion owner.
+    IREE_ASSERT_OK(iree_hal_queue_barrier(consumer_queue, produced, consumed,
+                                          /*barriers=*/NULL,
+                                          IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_queue_barrier(
+        producer_queue, iree_hal_semaphore_list_empty(), produced,
+        /*barriers=*/NULL, IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
+        consumed, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+    // Releasing the caller's references after completion must also join all
+    // submission-side semaphore reads, independent of which thread frees it.
+  }
+}
+
+TEST_F(HostQueueSubmissionTest, HostWaitRequiresPublishedProducerRetirement) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology_, host_allocator_));
+  auto* queue = test_device.first_host_queue();
+  ASSERT_NE(queue, nullptr);
+  iree::hal::cts::SemaphoreList completed(test_device.base_device(), {0}, {1});
+  struct CompletionState {
+    // Borrowed semaphore whose completion must follow the retirement action.
+    iree_hal_semaphore_t* semaphore;
+    // Number of retirement actions observed across completion threads.
+    std::atomic<uint32_t> callback_count{0};
+    // Semaphore value visible when the retirement action began.
+    std::atomic<uint64_t> observed_value{UINT64_MAX};
+  } completion_state{completed.semaphores[0]};
+
+  // Model the interval after a packet header becomes device-visible but before
+  // its submitter publishes the epoch's final host-side resource accesses.
+  auto* ring = &queue->notification_ring;
+  iree_slim_mutex_lock(&queue->locks.submission_mutex);
+  iree_status_t status = iree_hal_amdgpu_notification_ring_reserve(
+      ring, /*entry_count=*/1, /*frontier_snapshot_count=*/0);
+  auto* reclaim_entry = iree_hal_amdgpu_notification_ring_reclaim_entry(ring);
+  iree_hal_resource_t** resources = nullptr;
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_amdgpu_reclaim_entry_prepare(
+        reclaim_entry, queue->block_pool, /*count=*/1, &resources);
+  }
+  uint64_t producer_epoch = 0;
+  if (iree_status_is_ok(status)) {
+    resources[0] =
+        reinterpret_cast<iree_hal_resource_t*>(completed.semaphores[0]);
+    iree_hal_resource_retain(resources[0]);
+    reclaim_entry->signal_semaphore_count = 1;
+    reclaim_entry->count = 1;
+    reclaim_entry->pre_signal_action = {
+        [](iree_hal_amdgpu_reclaim_entry_t*, void* user_data,
+           const iree_status_t action_status) {
+          IREE_EXPECT_OK(iree_status_clone(action_status));
+          auto* state = static_cast<CompletionState*>(user_data);
+          uint64_t value = 0;
+          IREE_EXPECT_OK(iree_hal_semaphore_query(state->semaphore, &value));
+          state->observed_value.store(value, std::memory_order_release);
+          state->callback_count.fetch_add(1, std::memory_order_release);
+        },
+        &completion_state};
+    producer_epoch = iree_hal_amdgpu_notification_ring_advance_epoch(ring);
+    iree_hal_amdgpu_notification_ring_push(
+        ring, producer_epoch,
+        reinterpret_cast<iree_async_semaphore_t*>(completed.semaphores[0]),
+        /*timeline_value=*/1, IREE_HAL_AMDGPU_NOTIFICATION_ENTRY_FLAG_NONE);
+    iree_async_single_frontier_t producer_frontier;
+    iree_async_single_frontier_initialize(&producer_frontier, queue->axis,
+                                          producer_epoch);
+    EXPECT_TRUE(iree_hal_amdgpu_semaphore_publish_signal(
+        completed.semaphores[0], queue->axis,
+        iree_async_single_frontier_as_const_frontier(&producer_frontier),
+        producer_epoch, /*producer_value=*/1));
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_slim_mutex_unlock(&queue->locks.submission_mutex);
+  }
+  IREE_ASSERT_OK(status);
+
+  // Let hardware complete while the publisher still owns submission_mutex.
+  // Both the direct waiter below and the queue completion thread may observe
+  // the completed epoch, but neither may classify it or publish the semaphore
+  // until this submitter either publishes or leaves the critical section.
+  iree_notification_t hardware_completion_notification;
+  iree_notification_initialize(&hardware_completion_notification);
+  std::atomic<bool> hardware_completed{false};
+  std::thread waiter_thread([&]() {
+    iree_hsa_signal_store_screlease(
+        IREE_LIBHSA(&libhsa_), ring->epoch.signal,
+        (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+                             producer_epoch));
+    hardware_completed.store(true, std::memory_order_release);
+    iree_notification_post(&hardware_completion_notification, IREE_ALL_WAITERS);
+    iree_hal_amdgpu_host_queue_drain_completions_for_waiter(queue);
+  });
+  iree_notification_await(
+      &hardware_completion_notification,
+      [](void* user_data) {
+        return static_cast<std::atomic<bool>*>(user_data)->load(
+            std::memory_order_acquire);
+      },
+      &hardware_completed, iree_infinite_timeout());
+
+  // Hardware completion alone cannot authorize host-visible completion.
+  uint64_t value = 0;
+  IREE_EXPECT_OK(iree_hal_semaphore_query(completed.semaphores[0], &value));
+  EXPECT_EQ(value, 0u);
+  EXPECT_EQ(completion_state.callback_count.load(std::memory_order_acquire),
+            0u);
+
+  iree_hal_amdgpu_notification_ring_publish_epoch(ring, producer_epoch);
+  iree_slim_mutex_unlock(&queue->locks.submission_mutex);
+  waiter_thread.join();
+  iree_notification_deinitialize(&hardware_completion_notification);
+
+  IREE_EXPECT_OK(iree_hal_semaphore_wait(completed.semaphores[0], /*value=*/1,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+  EXPECT_EQ(completion_state.callback_count.load(std::memory_order_acquire),
+            1u);
+  EXPECT_EQ(completion_state.observed_value.load(std::memory_order_acquire),
+            0u);
+  EXPECT_FALSE(iree_hal_amdgpu_host_queue_has_error(queue));
+}
+
 class HostQueueHsaProfilingScope {
  public:
   explicit HostQueueHsaProfilingScope(iree_hal_amdgpu_host_queue_t* queue)
@@ -306,10 +456,10 @@ static iree_status_t NoopProfileSinkEndSession(
 }
 
 static const iree_hal_profile_sink_vtable_t kNoopProfileSinkVTable = {
-    /*.destroy=*/NoopProfileSinkDestroy,
-    /*.begin_session=*/NoopProfileSinkBeginSession,
-    /*.write=*/NoopProfileSinkWrite,
-    /*.end_session=*/NoopProfileSinkEndSession,
+    .destroy = NoopProfileSinkDestroy,
+    .begin_session = NoopProfileSinkBeginSession,
+    .write = NoopProfileSinkWrite,
+    .end_session = NoopProfileSinkEndSession,
 };
 
 static void NoopProfileSinkInitialize(NoopProfileSink* sink) {
@@ -339,7 +489,7 @@ TEST(HostQueueSubmissionUnitTest, WritesPersistentPm4IbPacketBody) {
   const uint32_t ib_dword_count = 0x13579u;
   const iree_hal_amdgpu_aql_packet_control_t packet_control =
       iree_hal_amdgpu_aql_packet_control_barrier_system();
-  const iree_hsa_signal_t completion_signal = {/*.handle=*/0x2468u};
+  const iree_hsa_signal_t completion_signal = {.handle = 0x2468u};
 
   uint16_t setup = 0;
   const uint16_t header = iree_hal_amdgpu_host_queue_write_pm4_ib_packet_body(
@@ -362,7 +512,7 @@ TEST(HostQueueSubmissionUnitTest, WritesPersistentPm4IbPacketBody) {
 
 TEST(HostQueueSubmissionUnitTest, CommitsSignalBarrierPacket) {
   iree_hal_amdgpu_aql_packet_t packet = {};
-  const iree_hsa_signal_t signal = {/*.handle=*/0x12345678u};
+  const iree_hsa_signal_t signal = {.handle = 0x12345678u};
 
   iree_hal_amdgpu_host_queue_commit_signal_barrier(&packet, signal);
 
@@ -378,6 +528,41 @@ TEST(HostQueueSubmissionUnitTest, CommitsSignalBarrierPacket) {
     EXPECT_EQ(packet.barrier_and.dep_signal[i].handle, 0u);
   }
   EXPECT_EQ(packet.barrier_and.completion_signal.handle, 0u);
+}
+
+TEST(HostQueueSubmissionUnitTest, PayloadFencesSurroundWorkAndOwnCompletion) {
+  iree_hal_amdgpu_aql_packet_t packets[8] = {};
+  iree_hal_amdgpu_host_queue_t queue = {};
+  queue.aql_ring.base = packets;
+  queue.aql_ring.mask = 7;
+  queue.notification_ring.epoch.signal.handle = 0x1234;
+  iree_hal_amdgpu_wait_resolution_t resolution = {
+      .barrier_count = 2,
+      .inline_acquire_scope = IREE_HSA_FENCE_SCOPE_AGENT,
+  };
+  resolution.payload_barriers.before.release = IREE_HSA_FENCE_SCOPE_SYSTEM;
+  resolution.payload_barriers.after.acquire = IREE_HSA_FENCE_SCOPE_SYSTEM;
+
+  // Two wait packets, a payload release, work, and a payload acquire. The
+  // terminal epoch belongs to the acquire after work, never the release.
+  iree_hal_amdgpu_host_queue_emit_payload_prefix(&queue, &resolution, 0);
+  iree_hal_amdgpu_host_queue_emit_payload_suffix(
+      &queue, &resolution, iree_hal_semaphore_list_empty(), 4);
+  EXPECT_EQ(packets[2].barrier_and.header,
+            iree_hal_amdgpu_aql_make_header(
+                IREE_HSA_PACKET_TYPE_BARRIER_AND,
+                iree_hal_amdgpu_aql_packet_control_barrier(
+                    IREE_HSA_FENCE_SCOPE_AGENT, IREE_HSA_FENCE_SCOPE_SYSTEM)));
+  EXPECT_EQ(packets[2].barrier_and.completion_signal.handle, 0u);
+  EXPECT_EQ(packets[4].barrier_and.header,
+            iree_hal_amdgpu_aql_make_header(
+                IREE_HSA_PACKET_TYPE_BARRIER_AND,
+                iree_hal_amdgpu_aql_packet_control_barrier(
+                    IREE_HSA_FENCE_SCOPE_SYSTEM, IREE_HSA_FENCE_SCOPE_AGENT)));
+  EXPECT_EQ(packets[4].barrier_and.completion_signal.handle, 0x1234u);
+  for (int i : {0, 1, 3, 5, 6, 7}) {
+    EXPECT_EQ(packets[i].barrier_and.header, 0u);
+  }
 }
 
 typedef struct DispatchSubmissionPlanCase {
@@ -402,20 +587,22 @@ typedef struct DispatchSubmissionPlanCase {
 
 static void ExpectDispatchSubmissionPlan(
     iree_hal_amdgpu_host_queue_t* queue,
-    const DispatchSubmissionPlanCase& plan_case) {
+    const DispatchSubmissionPlanCase& plan_case,
+    iree_hal_amdgpu_queue_barriers_t payload_barriers = {}) {
   iree_hal_amdgpu_wait_resolution_t resolution = {0};
   resolution.barrier_count = plan_case.barrier_count;
+  resolution.payload_barriers = payload_barriers;
   const iree_hal_semaphore_list_t empty_signal_list =
       iree_hal_semaphore_list_empty();
   iree_hal_amdgpu_profile_dispatch_event_reservation_t profile_events = {0};
   iree_hal_amdgpu_host_queue_profile_event_info_t profile_queue_event_info = {
-      /*.type=*/IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_DISPATCH,
-      /*.flags=*/{},
-      /*.submission_id=*/{},
-      /*.command_buffer_id=*/{},
-      /*.allocation_id=*/{},
-      /*.payload_length=*/{},
-      /*.operation_count=*/1,
+      .type = IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_DISPATCH,
+      .flags = {},
+      .submission_id = {},
+      .command_buffer_id = {},
+      .allocation_id = {},
+      .payload_length = {},
+      .operation_count = 1,
   };
   iree_hal_amdgpu_host_queue_set_profile_flags(
       queue, plan_case.reserve_queue_device_event
@@ -473,6 +660,10 @@ static void ExpectDispatchSubmissionPlan(
         submission.dispatch_completion_signal.handle != 0;
     EXPECT_EQ(plan_case.expect_dispatch_completion_signal,
               has_dispatch_completion_signal);
+    if (payload_barriers.after.acquire != IREE_HSA_FENCE_SCOPE_NONE) {
+      EXPECT_NE(submission.dispatch_completion_signal.handle,
+                queue->notification_ring.epoch.signal.handle);
+    }
 
     iree_hal_amdgpu_host_queue_cancel_profile_queue_device_events(
         queue, submission.profile_queue_device_events);
@@ -506,19 +697,21 @@ typedef struct Pm4IbSubmissionPlanCase {
 
 static void ExpectPm4IbSubmissionPlan(
     iree_hal_amdgpu_host_queue_t* queue,
-    const Pm4IbSubmissionPlanCase& plan_case) {
+    const Pm4IbSubmissionPlanCase& plan_case,
+    iree_hal_amdgpu_queue_barriers_t payload_barriers = {}) {
   iree_hal_amdgpu_wait_resolution_t resolution = {0};
   resolution.barrier_count = plan_case.barrier_count;
+  resolution.payload_barriers = payload_barriers;
   const iree_hal_semaphore_list_t empty_signal_list =
       iree_hal_semaphore_list_empty();
   iree_hal_amdgpu_host_queue_profile_event_info_t profile_queue_event_info = {
-      /*.type=*/IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_UPDATE,
-      /*.flags=*/{},
-      /*.submission_id=*/{},
-      /*.command_buffer_id=*/{},
-      /*.allocation_id=*/{},
-      /*.payload_length=*/{},
-      /*.operation_count=*/1,
+      .type = IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_UPDATE,
+      .flags = {},
+      .submission_id = {},
+      .command_buffer_id = {},
+      .allocation_id = {},
+      .payload_length = {},
+      .operation_count = 1,
   };
   iree_hal_amdgpu_host_queue_set_profile_flags(
       queue, plan_case.reserve_queue_device_event
@@ -667,7 +860,32 @@ TEST_F(HostQueueSubmissionTest, DispatchPacketAccountingCombinations) {
         !HostQueueSupportsQueueDeviceProfiling(queue)) {
       GTEST_SKIP() << "queue device profiling is not supported";
     }
-    ExpectDispatchSubmissionPlan(queue, plan_case);
+    for (uint32_t boundaries = 0; boundaries < 4; ++boundaries) {
+      const uint32_t prefix_count = boundaries & 1;
+      const uint32_t suffix_count = (boundaries >> 1) & 1;
+      auto expected = plan_case;
+      expected.expected_packet_count += prefix_count + suffix_count;
+      expected.expected_dispatch_packet_offset += prefix_count;
+      if (expected.expected_completion_barrier_packet_offset !=
+          kNoCompletionBarrierPacketOffset) {
+        expected.expected_completion_barrier_packet_offset += prefix_count;
+      }
+      if (expected.expected_harvest_packet_offset != kNoHarvestPacketOffset) {
+        expected.expected_harvest_packet_offset += prefix_count;
+      }
+      // Profiling retains its own dispatch timestamp signal. Only the queue
+      // epoch moves to the payload suffix.
+      expected.expect_dispatch_completion_signal &=
+          suffix_count == 0 || plan_case.reserve_dispatch_event;
+      iree_hal_amdgpu_queue_barriers_t payload_barriers = {};
+      if (prefix_count) {
+        payload_barriers.before.release = IREE_HSA_FENCE_SCOPE_SYSTEM;
+      }
+      if (suffix_count) {
+        payload_barriers.after.acquire = IREE_HSA_FENCE_SCOPE_SYSTEM;
+      }
+      ExpectDispatchSubmissionPlan(queue, expected, payload_barriers);
+    }
   }
 }
 
@@ -684,10 +902,10 @@ TEST_F(HostQueueSubmissionTest, LightweightStatisticsAvoidDeviceTimestamps) {
   NoopProfileSink sink = {};
   NoopProfileSinkInitialize(&sink);
 
-  iree_hal_device_profiling_options_t profiling_options = {};
-  profiling_options.flags =
-      IREE_HAL_DEVICE_PROFILING_FLAG_LIGHTWEIGHT_STATISTICS;
-  profiling_options.sink = NoopProfileSinkAsBase(&sink);
+  iree_hal_device_profiling_options_t profiling_options = {
+      .flags = IREE_HAL_DEVICE_PROFILING_FLAG_LIGHTWEIGHT_STATISTICS,
+      .sink = NoopProfileSinkAsBase(&sink),
+  };
   IREE_ASSERT_OK(iree_hal_device_profiling_begin(test_device.base_device(),
                                                  &profiling_options));
 
@@ -785,7 +1003,25 @@ TEST_F(HostQueueSubmissionTest, Pm4IbPacketAccountingCombinations) {
         !HostQueueSupportsQueueDeviceProfiling(queue)) {
       GTEST_SKIP() << "queue device profiling is not supported";
     }
-    ExpectPm4IbSubmissionPlan(queue, plan_case);
+    for (uint32_t boundaries = 0; boundaries < 4; ++boundaries) {
+      const uint32_t prefix_count = boundaries & 1;
+      const uint32_t suffix_count = (boundaries >> 1) & 1;
+      auto expected = plan_case;
+      expected.expected_packet_count += prefix_count + suffix_count;
+      expected.expected_pm4_ib_packet_offset += prefix_count;
+      if (expected.expected_publication_packet_offset !=
+          kNoPublicationPacketOffset) {
+        expected.expected_publication_packet_offset += prefix_count;
+      }
+      iree_hal_amdgpu_queue_barriers_t payload_barriers = {};
+      if (prefix_count) {
+        payload_barriers.before.release = IREE_HSA_FENCE_SCOPE_SYSTEM;
+      }
+      if (suffix_count) {
+        payload_barriers.after.acquire = IREE_HSA_FENCE_SCOPE_SYSTEM;
+      }
+      ExpectPm4IbSubmissionPlan(queue, expected, payload_barriers);
+    }
   }
 }
 

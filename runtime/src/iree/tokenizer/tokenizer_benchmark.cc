@@ -518,7 +518,7 @@ BENCHMARK_DEFINE_F(BatchEncodeBenchmark, Batch)(benchmark::State& state) {
         IREE_TOKENIZER_ENCODE_FLAG_NONE,
         iree_make_byte_span(state_storage_.data(), state_storage_.size()),
         iree_make_byte_span(transform_buffer_.data(), transform_buffer_.size()),
-        iree_tokenizer_offset_run_list_empty()));
+        iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
     iree_host_size_t batch_tokens = 0;
     for (size_t i = 0; i < batch_size_; ++i) {
@@ -610,7 +610,8 @@ BENCHMARK_DEFINE_F(StreamingEncodeBenchmark, Stream)
         iree_make_byte_span(state_storage_.data(), state_storage_.size()),
         iree_make_byte_span(transform_buffer_.data(), transform_buffer_.size()),
         iree_tokenizer_offset_run_list_empty(),
-        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &encode_state));
+        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+        &encode_state));
 
     // Feed text in chunks.
     iree_host_size_t total_tokens = 0;
@@ -644,6 +645,11 @@ BENCHMARK_DEFINE_F(StreamingEncodeBenchmark, Stream)
                                          NULL,
                                          token_ids_.size() - total_tokens),
         &final_tokens));
+    IREE_CHECK_OK(
+        iree_tokenizer_encode_state_has_pending(encode_state)
+            ? iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                               "benchmark token output capacity exhausted")
+            : iree_ok_status());
 
     iree_tokenizer_encode_state_deinitialize(encode_state);
     benchmark::DoNotOptimize(total_tokens + final_tokens);
@@ -806,8 +812,8 @@ BENCHMARK_DEFINE_F(DecodeBenchmark, Decode)(benchmark::State& state) {
     token_index_ = (token_index_ + 1) % kTokenPoolSize;
 
     iree_tokenizer_token_id_list_t id_list = {
-        /*.count=*/tokens.size(),
-        /*.values=*/reinterpret_cast<const int32_t*>(tokens.data()),
+        .count = tokens.size(),
+        .values = reinterpret_cast<const int32_t*>(tokens.data()),
     };
 
     iree_tokenizer_decode_state_t* decode_state = nullptr;
@@ -951,9 +957,9 @@ BENCHMARK_DEFINE_F(StreamingDecodeBenchmark, Stream)
       }
 
       iree_tokenizer_token_id_list_t id_list = {
-          /*.count=*/chunk,
-          /*.values=*/
-          reinterpret_cast<const int32_t*>(tokens.data() + token_position),
+          .count = chunk,
+          .values =
+              reinterpret_cast<const int32_t*>(tokens.data() + token_position),
       };
 
       iree_host_size_t tokens_consumed = 0;

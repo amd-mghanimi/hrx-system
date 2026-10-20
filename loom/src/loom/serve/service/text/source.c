@@ -1,0 +1,223 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#include "loom/serve/service/text/source.h"
+
+#include <string.h>
+
+#include "iree/tokenizer/vocab/vocab.h"
+#include "loom/serve/runtime/program/input.h"
+#include "loom/serve/runtime/program/json.h"
+#include "loom/serve/runtime/program/program.h"
+#include "loomc/iree.h"
+
+iree_status_t loom_serve_text_source_resolve_tokenizer(
+    loom_serve_text_source_t* source) {
+  iree_const_byte_span_t bytes;
+  IREE_RETURN_IF_ERROR(iree_vm_buffer_map_read(
+      source->terminal_marker, 0,
+      iree_vm_buffer_length(source->terminal_marker), &bytes));
+  source->eos_token = iree_tokenizer_vocab_lookup(
+      iree_tokenizer_vocab(source->tokenizer),
+      iree_make_string_view((const char*)bytes.data, bytes.data_length));
+  if (source->eos_token < 0) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND,
+                            "tokenizer has no source-declared terminal marker");
+  }
+  return iree_ok_status();
+}
+
+// Bootstrap returns ordinary source-owned references. Its temporary program
+// is gone before device setup; the shared environment outlives warm control.
+static iree_status_t loom_serve_text_prepare(
+    loomc_target_environment_t* target_environment,
+    loom_serve_text_source_t* source, const loom_serve_text_options_t* options,
+    loom_serve_text_storage_t* storage) {
+  const iree_allocator_t host_allocator = source->host_allocator;
+  IREE_RETURN_IF_ERROR(
+      iree_vm_environment_allocate(host_allocator, &source->environment));
+  IREE_RETURN_IF_ERROR(
+      iree_vm_ref_types_resolve(iree_vm_environment_lookup_ref_type_table(
+                                    source->environment, IREE_SV("vm")),
+                                &source->vm_types));
+  iree_vm_buffer_t* shapes = NULL;
+  iree_status_t status =
+      iree_vm_buffer_create(options->epoch_count * 2 * sizeof(int64_t),
+                            iree_alignof(int64_t), host_allocator, &shapes);
+  iree_byte_span_t shape_bytes = iree_byte_span_empty();
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_buffer_map_write(shapes, 0, iree_vm_buffer_length(shapes),
+                                      &shape_bytes);
+  }
+  if (iree_status_is_ok(status)) {
+    for (iree_host_size_t i = 0; i < options->epoch_count; ++i) {
+      iree_unaligned_store_le_u64(shape_bytes.data + i * 16,
+                                  options->epoch_shapes[i].token_capacity);
+      iree_unaligned_store_le_u64(shape_bytes.data + i * 16 + 8,
+                                  options->epoch_shapes[i].span_capacity);
+    }
+  }
+  iree_vm_buffer_t* weights = NULL;
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_buffer_clone(
+        IREE_VM_BUFFER_ACCESS_FLAG_READ,
+        iree_make_const_byte_span(options->weights_path.data,
+                                  options->weights_path.size),
+        1, host_allocator, &weights);
+  }
+  if (iree_status_is_ok(status)) {
+    const iree_string_view_t json = iree_string_view_is_empty(options->options)
+                                        ? IREE_SV("{}")
+                                        : options->options;
+    status =
+        iree_vm_buffer_clone(IREE_VM_BUFFER_ACCESS_FLAG_READ,
+                             iree_make_const_byte_span(json.data, json.size), 1,
+                             host_allocator, &source->options);
+  }
+  iree_vm_variant_t arguments[] = {
+      iree_vm_variant_from_i64((int64_t)options->prefill_capacity),
+      iree_vm_variant_from_i64((int64_t)options->context_capacity),
+      iree_vm_variant_from_i64((int64_t)options->pool_capacity),
+      iree_vm_variant_from_i64((int64_t)options->row_count),
+      iree_vm_variant_from_i64((int64_t)options->checkpoint_capacity),
+      iree_vm_variant_from_i32((int32_t)options->draft_depth),
+      iree_vm_buffer_variant_from_ptr_move(&source->vm_types, &shapes),
+      iree_vm_variant_from_i64((int64_t)options->epoch_count),
+      iree_vm_buffer_variant_from_ptr_move(&source->vm_types, &weights),
+      iree_vm_buffer_variant_from_ptr_borrowed(&source->vm_types,
+                                               source->options),
+  };
+  iree_vm_variant_t results[4 + LOOM_SERVE_TEXT_STORAGE_RESULT_COUNT] = {0};
+  iree_vm_module_t* modules[2] = {0};
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_input_module_create(source->environment, NULL,
+                                            host_allocator, &modules[0]);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_json_module_create(source->environment, host_allocator,
+                                           &modules[1]);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_preparation_allocate(
+        target_environment, source->environment, &options->sources,
+        options->sources.prepare, IREE_SV("prepare"),
+        iree_vm_variant_span_from_array(arguments),
+        iree_vm_variant_span_from_array(results),
+        iree_vm_module_span_from_array(modules), &source->compilation,
+        host_allocator, &source->preparation);
+  }
+  int64_t prefill_capacity = 0;
+  int32_t shared_stage_count = 0;
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_i64_from_variant(results[0], &prefill_capacity);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_i32_from_variant(results[1], &shared_stage_count);
+  }
+  if (iree_status_is_ok(status) &&
+      (prefill_capacity < 1 ||
+       (uint64_t)prefill_capacity > options->context_capacity ||
+       shared_stage_count < 1 ||
+       (iree_host_size_t)shared_stage_count >
+           loom_serve_preparation_stage_count(source->preparation))) {
+    status =
+        iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                         "source bootstrap exceeds token runner capacities");
+  }
+  if (iree_status_is_ok(status)) {
+    source->prefill_capacity = (iree_host_size_t)prefill_capacity;
+    source->shared_stage_count = (iree_host_size_t)shared_stage_count;
+    status = iree_vm_buffer_ptr_from_variant_move(
+        &source->vm_types, &results[2], &source->control_state);
+  }
+  if (iree_status_is_ok(status) && !source->control_state) {
+    status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "source control state must not be null");
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_vm_buffer_ptr_from_variant_move(
+        &source->vm_types, &results[3], &source->terminal_marker);
+  }
+  if (iree_status_is_ok(status) && !source->terminal_marker) {
+    status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "source terminal marker must not be null");
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_serve_text_storage_initialize(
+        &source->vm_types, results + 4, options->row_count,
+        options->context_capacity, options->pool_capacity,
+        source->host_allocator, storage);
+  }
+  if (iree_status_is_ok(status)) {
+    const iree_host_size_t slots =
+        options->checkpoint_capacity
+            ? 2 * options->row_count + options->checkpoint_capacity
+            : options->row_count;
+    const uint64_t carry_bytes = iree_unaligned_load_le_u64(
+        storage->bytes[LOOM_SERVE_TEXT_STORAGE_ALLOCATIONS].data + 6 * 24);
+    if (storage->recurrent.capacity < slots ||
+        (storage->carry_stride &&
+         options->row_count + options->checkpoint_capacity >
+             carry_bytes / storage->carry_stride)) {
+      status = iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "source storage lacks configured checkpoint headroom");
+    }
+  }
+  iree_vm_variant_span_reset(iree_vm_variant_span_from_array(results));
+  iree_vm_variant_span_reset(iree_vm_variant_span_from_array(arguments));
+  iree_vm_module_release(modules[1]);
+  iree_vm_module_release(modules[0]);
+  return status;
+}
+
+iree_status_t loom_serve_text_source_initialize(
+    loomc_target_environment_t* target_environment,
+    const loom_serve_text_options_t* options, iree_allocator_t host_allocator,
+    loom_serve_text_source_t* out_source,
+    loom_serve_text_storage_t* out_storage) {
+  memset(out_source, 0, sizeof(*out_source));
+  out_source->host_allocator = host_allocator;
+  IREE_RETURN_IF_ERROR(loom_serve_text_prepare(target_environment, out_source,
+                                               options, out_storage));
+  const iree_vm_ref_type_table_t* table = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_hal_module_register_types(out_source->environment, &table));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_module_types_resolve(table, &out_source->types));
+  const iree_string_view_t roots[] = {IREE_SVL("step"),
+                                      IREE_SVL("epoch"),
+                                      IREE_SVL("encode_epoch"),
+                                      IREE_SVL("publish_epoch"),
+                                      IREE_SVL("encode_state"),
+                                      IREE_SVL("render_tool"),
+                                      IREE_SVL("prepare_input"),
+                                      IREE_SVL("output_next"),
+                                      IREE_SVL("complete_text"),
+                                      IREE_SVL("model_name"),
+                                      IREE_SVL("chat_image_limits"),
+                                      IREE_SVL("chat_begin"),
+                                      IREE_SVL("chat_message"),
+                                      IREE_SVL("chat_end"),
+                                      IREE_SVL("parse_tools"),
+                                      IREE_SVL("request_defaults"),
+                                      IREE_SVL("request_options"),
+                                      IREE_SVL("bind_request")};
+  return loom_serve_program_compile(
+      target_environment, out_source->environment, &options->sources,
+      options->sources.control, IREE_ARRAYSIZE(roots), roots,
+      &out_source->compilation, host_allocator, &out_source->module);
+}
+
+void loom_serve_text_source_deinitialize(loom_serve_text_source_t* source) {
+  loom_serve_preparation_free(source->preparation);
+  iree_vm_module_release(source->module);
+  iree_vm_buffer_release(source->control_state);
+  iree_vm_buffer_release(source->options);
+  iree_tokenizer_free(source->tokenizer);
+  iree_vm_buffer_release(source->terminal_marker);
+  iree_vm_environment_free(source->environment);
+}

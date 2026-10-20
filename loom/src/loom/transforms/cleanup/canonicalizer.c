@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "loom/analysis/symbolic_expr.h"
+#include "loom/ir/attribute_schema.h"
 #include "loom/ir/context.h"
 #include "loom/ir/facts.h"
 #include "loom/ir/module.h"
@@ -17,7 +18,10 @@
 #include "loom/rewrite/greedy.h"
 #include "loom/rewrite/rewriter.h"
 #include "loom/rewrite/type_propagation.h"
+#include "loom/target/facts.h"
+#include "loom/transforms/cleanup/fact_refinement.h"
 #include "loom/transforms/cleanup/patterns.h"
+#include "loom/util/predicate_facts.h"
 #include "loom/util/walk.h"
 
 //===----------------------------------------------------------------------===//
@@ -286,6 +290,84 @@ static iree_status_t loom_canonicalize_try_elide_empty_op(
   return iree_ok_status();
 }
 
+static bool loom_canonicalize_predicate_lists_are_empty(
+    const loom_op_t* op, const loom_op_vtable_t* vtable) {
+  const loom_attribute_t* attributes = loom_op_const_attrs(op);
+  for (uint8_t i = 0; i < vtable->attribute_count; ++i) {
+    if (vtable->attr_descriptors[i].attr_kind == LOOM_ATTR_PREDICATE_LIST &&
+        attributes[i].count != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool loom_canonicalize_predicate_lists_implied_by_carrier(
+    const loom_value_fact_table_t* fact_table, const loom_module_t* module,
+    const loom_op_t* op, const loom_op_vtable_t* vtable,
+    const loom_op_t* carrier_op) {
+  const loom_attribute_t* attributes = loom_op_const_attrs(op);
+  for (uint8_t i = 0; i < vtable->attribute_count; ++i) {
+    if (vtable->attr_descriptors[i].attr_kind != LOOM_ATTR_PREDICATE_LIST) {
+      continue;
+    }
+    const loom_attribute_t* conclusion_attribute = &attributes[i];
+    for (uint16_t j = 0; j < conclusion_attribute->count; ++j) {
+      if (!loom_value_fact_table_carrier_implies_predicate(
+              fact_table, module, carrier_op,
+              &conclusion_attribute->predicate_list[j])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static iree_status_t loom_canonicalize_try_elide_redundant_fact_identity(
+    loom_rewriter_t* rewriter, loom_op_t* op, const loom_op_vtable_t* vtable,
+    bool* out_elided) {
+  *out_elided = false;
+  if (!vtable ||
+      !iree_all_bits_set(op->traits,
+                         LOOM_TRAIT_PURE | LOOM_TRAIT_FACT_IDENTITY) ||
+      !iree_any_bit_set(vtable->vtable_flags,
+                        LOOM_OP_VTABLE_HAS_PREDICATE_LIST)) {
+    return iree_ok_status();
+  }
+
+  // An empty fact identity is the ordinary identity operation. Nonempty
+  // identities require one explicit immediate carrier for the complete input
+  // tuple. Looking through only this O(1) SSA definition edge ensures the
+  // premise survives this rewrite; ambient loop and branch facts cannot erase
+  // the operation that materializes them for later pipelines.
+  if (!loom_canonicalize_predicate_lists_are_empty(op, vtable)) {
+    loom_op_t* carrier_op = NULL;
+    const loom_value_id_t* operands = loom_op_const_operands(op);
+    for (uint16_t i = 0; i < op->operand_count; ++i) {
+      const loom_value_t* operand =
+          loom_module_value(rewriter->module, operands[i]);
+      if (loom_value_is_block_arg(operand)) {
+        return iree_ok_status();
+      }
+      loom_op_t* definition = loom_value_def_op(operand);
+      if (!definition || (carrier_op && carrier_op != definition)) {
+        return iree_ok_status();
+      }
+      carrier_op = definition;
+    }
+    if (!carrier_op ||
+        !loom_canonicalize_predicate_lists_implied_by_carrier(
+            rewriter->fact_table, rewriter->module, op, vtable, carrier_op)) {
+      return iree_ok_status();
+    }
+  }
+
+  IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_and_erase(
+      rewriter, op, loom_op_const_operands(op), op->operand_count));
+  *out_elided = true;
+  return iree_ok_status();
+}
+
 struct loom_canonicalizer_state_t {
   // Shared greedy rewrite session used by canonicalize region runs.
   loom_greedy_rewrite_driver_t rewrite_driver;
@@ -322,6 +404,7 @@ iree_status_t loom_canonicalizer_initialize(
     loom_module_t* module, iree_arena_allocator_t* parent_arena,
     loom_pass_value_fact_owner_t* value_facts,
     const loom_cleanup_special_value_policy_t* special_value_policy,
+    const loom_fact_refinement_policy_t* fact_refinement_policy,
     loom_canonicalizer_t* out_canonicalizer) {
   memset(out_canonicalizer, 0, sizeof(*out_canonicalizer));
   loom_canonicalizer_state_t* state = NULL;
@@ -331,6 +414,7 @@ iree_status_t loom_canonicalizer_initialize(
   out_canonicalizer->module = module;
   out_canonicalizer->value_facts = value_facts;
   out_canonicalizer->special_value_policy = special_value_policy;
+  out_canonicalizer->fact_refinement_policy = fact_refinement_policy;
   out_canonicalizer->parent_arena = parent_arena;
   out_canonicalizer->state = state;
   iree_arena_initialize(parent_arena->block_pool,
@@ -366,6 +450,9 @@ typedef struct loom_canonicalize_rewrite_state_t {
   // Compiler-selected special-value policy, or NULL.
   const loom_cleanup_special_value_policy_t* special_value_policy;
 
+  // Dialect-composed relation preservation selected once for this region run.
+  const loom_fact_refinement_policy_t* fact_refinement_policy;
+
   // Symbolic expression context for exact address/integer cleanup.
   loom_symbolic_expr_context_t expression_context;
 
@@ -390,6 +477,12 @@ typedef struct loom_canonicalize_rewrite_state_t {
   // True after ordered region-initialization patterns have run.
   bool region_initialization_complete;
 } loom_canonicalize_rewrite_state_t;
+
+static iree_status_t loom_canonicalize_preserve_pending_exact_relations(
+    void* user_data, loom_rewriter_t* rewriter) {
+  return loom_fact_refinement_preserve_pending(
+      rewriter, (const loom_fact_refinement_policy_t*)user_data);
+}
 
 static iree_status_t loom_canonicalize_prepare_region(
     void* user_data, loom_greedy_rewrite_driver_t* driver,
@@ -489,26 +582,36 @@ static iree_status_t loom_canonicalize_begin_iteration(
   *out_changed = false;
   const loom_rewrite_pattern_registry_t* initialization_registry =
       state->patterns.region_initialization;
-  if (state->region_initialization_complete ||
-      initialization_registry == NULL ||
-      initialization_registry->pattern_count == 0) {
-    state->region_initialization_complete = true;
-    return iree_ok_status();
+  if (!state->region_initialization_complete && initialization_registry &&
+      initialization_registry->pattern_count > 0) {
+    loom_canonicalize_region_initialization_t initialization = {
+        .state = state,
+        .rewriter = &driver->rewriter,
+        .result = result,
+    };
+    loom_walk_result_t walk_result = LOOM_WALK_CONTINUE;
+    IREE_RETURN_IF_ERROR(loom_walk_region(
+        driver->module, region, LOOM_WALK_PRE_ORDER,
+        (loom_walk_callback_t){loom_canonicalize_initialize_region_op,
+                               &initialization},
+        &walk_result));
+    *out_changed = initialization.changed;
   }
-
-  loom_canonicalize_region_initialization_t initialization = {
-      .state = state,
-      .rewriter = &driver->rewriter,
-      .result = result,
-  };
-  loom_walk_result_t walk_result = LOOM_WALK_CONTINUE;
-  IREE_RETURN_IF_ERROR(loom_walk_region(
-      driver->module, region, LOOM_WALK_PRE_ORDER,
-      (loom_walk_callback_t){loom_canonicalize_initialize_region_op,
-                             &initialization},
-      driver->scratch_arena, &walk_result));
   state->region_initialization_complete = true;
-  *out_changed = initialization.changed;
+
+  if (state->fact_refinement_policy &&
+      loom_value_fact_table_has_pending_exact_relations(
+          driver->rewriter.fact_table)) {
+    driver->rewriter.flags = 0;
+    IREE_RETURN_IF_ERROR(loom_fact_refinement_preserve_pending(
+        &driver->rewriter, state->fact_refinement_policy));
+    if (iree_any_bit_set(driver->rewriter.flags, LOOM_REWRITER_FLAG_CHANGED)) {
+      loom_greedy_rewrite_result_record_change(
+          result, &driver->rewriter,
+          LOOM_GREEDY_REWRITE_CHANGE_FLAG_COUNT_MODIFIED_OP);
+      *out_changed = true;
+    }
+  }
   return iree_ok_status();
 }
 
@@ -581,6 +684,20 @@ static iree_status_t loom_canonicalize_rewrite_op(
   loom_greedy_rewrite_result_record_rewriter_flags(result, rewriter);
 
   const loom_op_vtable_t* vtable = loom_op_vtable(driver->module, op);
+
+  // Collapse duplicate explicit fact carriers one SSA edge at a time. Retained
+  // canonical identities compare renamed predicate arguments without walking
+  // producer chains; greedy rewriting naturally converges long carrier chains.
+  bool fact_identity_elided = false;
+  rewriter->flags = 0;
+  IREE_RETURN_IF_ERROR(loom_canonicalize_try_elide_redundant_fact_identity(
+      rewriter, op, vtable, &fact_identity_elided));
+  if (fact_identity_elided) {
+    loom_greedy_rewrite_result_record_change(
+        result, rewriter, LOOM_GREEDY_REWRITE_CHANGE_FLAG_COUNT_MODIFIED_OP);
+    *out_changed = true;
+    return iree_ok_status();
+  }
 
   // Table-driven type propagation: generated equality constraints and
   // value facts can narrow dynamic shapes, encoding roles, and static
@@ -655,6 +772,7 @@ static iree_status_t loom_canonicalizer_run_precomputed_region(
   }
   loom_canonicalize_rewrite_state_t state = {
       .special_value_policy = canonicalizer->special_value_policy,
+      .fact_refinement_policy = canonicalizer->fact_refinement_policy,
       .patterns = options ? options->patterns
                           : (loom_canonicalizer_pattern_registries_t){0},
       .refine_boundary = options
@@ -670,7 +788,16 @@ static iree_status_t loom_canonicalizer_run_precomputed_region(
           canonicalizer->special_value_policy
               ? canonicalizer->special_value_policy->materialize_constant
               : NULL,
+      .pending_exact_relations_callback =
+          {
+              .user_data = (void*)canonicalizer->fact_refinement_policy,
+              .fn = canonicalizer->fact_refinement_policy
+                        ? loom_canonicalize_preserve_pending_exact_relations
+                        : NULL,
+          },
       .math_policy = options ? options->math_policy : NULL,
+      .math_target_bundle =
+          options ? loom_target_facts_bundle(options->target_facts) : NULL,
   };
   loom_greedy_rewrite_callbacks_t callbacks = {
       .user_data = &state,
@@ -701,15 +828,14 @@ static iree_status_t loom_canonicalizer_prepare_region_facts(
     loom_region_t* region, loom_op_t* parent_op,
     const loom_canonicalizer_options_t* options) {
   loom_value_fact_table_t* facts = NULL;
-  IREE_RETURN_IF_ERROR(loom_pass_value_fact_owner_prepare(
-      canonicalizer->value_facts, canonicalizer->module,
+  loom_pass_value_fact_scope_t scope =
       loom_pass_value_fact_scope_region_for_target(
-          function, region, parent_op, options ? options->target_facts : NULL),
-      &facts));
-  if (options && options->seed_facts.table) {
-    IREE_RETURN_IF_ERROR(loom_value_fact_table_clone_values(
-        facts, options->seed_facts, canonicalizer->module));
+          function, region, parent_op, options ? options->target_facts : NULL);
+  if (options) {
+    scope.seed_facts = options->seed_facts;
   }
+  IREE_RETURN_IF_ERROR(loom_pass_value_fact_owner_prepare(
+      canonicalizer->value_facts, canonicalizer->module, scope, &facts));
   IREE_RETURN_IF_ERROR(loom_value_fact_table_compute_region(
       facts, canonicalizer->module, function, region, parent_op));
   loom_greedy_rewrite_driver_set_fact_table(
@@ -720,15 +846,14 @@ static iree_status_t loom_canonicalizer_prepare_region_facts(
 static iree_status_t loom_canonicalizer_prepare_function_facts(
     loom_canonicalizer_t* canonicalizer, loom_func_like_t function,
     const loom_canonicalizer_options_t* options) {
-  const loom_pass_value_fact_scope_t scope =
+  loom_pass_value_fact_scope_t scope =
       loom_pass_value_fact_scope_function_for_target(
           function, options ? options->target_facts : NULL);
   loom_value_fact_table_t* facts = NULL;
   if (options && options->seed_facts.table) {
+    scope.seed_facts = options->seed_facts;
     IREE_RETURN_IF_ERROR(loom_pass_value_fact_owner_prepare(
         canonicalizer->value_facts, canonicalizer->module, scope, &facts));
-    IREE_RETURN_IF_ERROR(loom_value_fact_table_clone_values(
-        facts, options->seed_facts, canonicalizer->module));
     IREE_RETURN_IF_ERROR(
         loom_value_fact_table_compute(facts, canonicalizer->module, function));
   } else {

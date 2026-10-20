@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -52,10 +53,28 @@ void ReleaseAlignedAllocation(void* user_data,
   iree_allocator_free_aligned(iree_allocator_system(), user_data);
 }
 
+struct AlignedAllocationDeleter {
+  void operator()(uint8_t* ptr) const {
+    iree_allocator_free_aligned(iree_allocator_system(), ptr);
+  }
+};
+
+using AlignedAllocation = std::unique_ptr<uint8_t, AlignedAllocationDeleter>;
+
 }  // namespace
 
 class FileTest : public CtsTestBase<> {
  protected:
+  void TearDown() override {
+    iree_hal_pool_release(file_storage_pool_);
+    file_storage_pool_ = nullptr;
+    iree_hal_pool_release(transfer_source_pool_);
+    transfer_source_pool_ = nullptr;
+    iree_hal_pool_release(transfer_target_pool_);
+    transfer_target_pool_ = nullptr;
+    CtsTestBase::TearDown();
+  }
+
   class TestFile {
    public:
     TestFile() = default;
@@ -132,6 +151,9 @@ class FileTest : public CtsTestBase<> {
       iree_io_file_handle_release(native_handle_);
       native_handle_ = nullptr;
       memory_contents_ = nullptr;
+      if (native_path_) {
+        EXPECT_TRUE(native_path_.Remove());
+      }
       native_path_.Reset();
     }
 
@@ -144,6 +166,7 @@ class FileTest : public CtsTestBase<> {
       native_handle_ = other.native_handle_;
       other.native_handle_ = nullptr;
       native_path_ = std::move(other.native_path_);
+      other.native_path_.Reset();
     }
 
     // Imported HAL file under test.
@@ -200,28 +223,145 @@ class FileTest : public CtsTestBase<> {
 
   Ref<iree_hal_buffer_t> CreateBufferWithAccess(iree_hal_memory_access_t access,
                                                 iree_device_size_t length) {
-    iree_hal_buffer_params_t params = {0};
-    params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER;
-    params.access = access;
-    params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
+    iree_hal_pool_t** pool_slot = access == IREE_HAL_MEMORY_ACCESS_READ
+                                      ? &transfer_source_pool_
+                                      : &transfer_target_pool_;
+    if (!*pool_slot) {
+      const iree_hal_buffer_usage_t usage =
+          access == IREE_HAL_MEMORY_ACCESS_READ
+              ? IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE
+              : IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET;
+      IREE_CHECK_OK(CreateDevicePool(usage, pool_slot));
+    }
     Ref<iree_hal_buffer_t> buffer;
-    IREE_CHECK_OK(iree_hal_allocator_allocate_buffer(device_allocator_, params,
-                                                     length, buffer.out()));
+    IREE_CHECK_OK(iree_hal_pool_allocate_buffer(
+        *pool_slot,
+        iree_hal_make_pool_reservation_request(length, /*min_alignment=*/1),
+        iree_infinite_timeout(), buffer.out()));
     return buffer;
+  }
+
+  iree_status_t CreateHostFileStoragePool(
+      iree_hal_pool_t** out_pool, iree_hal_slab_pool_owned_mode_t owned_mode =
+                                      IREE_HAL_SLAB_POOL_IMPORT_ONLY) {
+    *out_pool = nullptr;
+    const iree_hal_pool_family_access_t family_access = {
+        .family = iree_hal_queue_family(transfer_queue_),
+        .usage = IREE_HAL_BUFFER_USAGE_TRANSFER,
+    };
+    const iree_hal_pool_scope_t scope = {
+        .family_count = 1,
+        .families = &family_access,
+    };
+    const iree_hal_pool_import_class_t import_class = {
+        .storage_class = iree_hal_make_external_storage_class(
+            IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER),
+    };
+    iree_hal_slab_pool_options_t options;
+    iree_hal_slab_pool_options_initialize(&options);
+    options.owned.mode = owned_mode;
+    options.imports.class_count = 1;
+    options.imports.classes = &import_class;
+    options.trace_name = IREE_SV("cts.file.storage");
+    return iree_hal_slab_pool_create(device_group_, scope, &options,
+                                     iree_allocator_system(), out_pool);
+  }
+
+  // Returns the fixture-owned host import pool when the backend exposes one.
+  // A null result is a supported outcome for devices that stage host-only
+  // memory files through another native I/O path.
+  iree_status_t GetHostFileStoragePool(iree_hal_pool_t** out_pool) {
+    *out_pool = nullptr;
+    if (!file_storage_pool_queried_) {
+      iree_status_t status = CreateHostFileStoragePool(&file_storage_pool_);
+      if (iree_status_is_unavailable(status) ||
+          iree_status_is_unimplemented(status)) {
+        iree_status_free(status);
+      } else {
+        IREE_RETURN_IF_ERROR(status);
+      }
+      file_storage_pool_queried_ = true;
+    }
+    *out_pool = file_storage_pool_;
+    return iree_ok_status();
+  }
+
+  static bool HostStorageMeetsImportRequirements(
+      iree_const_byte_span_t storage,
+      const iree_hal_pool_import_requirements_t& requirements) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(storage.data);
+    return storage.data_length >= requirements.min_byte_length &&
+           (!requirements.max_byte_length ||
+            storage.data_length <= requirements.max_byte_length) &&
+           requirements.base_alignment != 0 &&
+           address % requirements.base_alignment == 0 &&
+           requirements.byte_length_granularity != 0 &&
+           storage.data_length % requirements.byte_length_granularity == 0;
+  }
+
+  iree_status_t SelectHostFileStoragePool(iree_const_byte_span_t storage,
+                                          iree_hal_pool_t** out_pool) {
+    IREE_RETURN_IF_ERROR(GetHostFileStoragePool(out_pool));
+    if (!*out_pool) {
+      return iree_ok_status();
+    }
+    iree_hal_pool_import_requirements_t requirements;
+    if (!iree_hal_pool_query_import_requirements(
+            *out_pool,
+            iree_hal_make_external_storage_class(
+                IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER),
+            &requirements) ||
+        !HostStorageMeetsImportRequirements(storage, requirements)) {
+      *out_pool = nullptr;
+    }
+    return iree_ok_status();
+  }
+
+  iree_status_t AllocateBorrowedHostFileStorage(
+      iree_device_size_t length, AlignedAllocation* out_allocation) {
+    out_allocation->reset();
+    iree_host_size_t alignment = kFileAlignment;
+    iree_hal_pool_t* storage_pool = nullptr;
+    IREE_RETURN_IF_ERROR(GetHostFileStoragePool(&storage_pool));
+    if (storage_pool) {
+      iree_hal_pool_import_requirements_t requirements;
+      if (iree_hal_pool_query_import_requirements(
+              storage_pool,
+              iree_hal_make_external_storage_class(
+                  IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER),
+              &requirements)) {
+        if (requirements.base_alignment > IREE_HOST_SIZE_MAX) {
+          return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                  "host import alignment exceeds host size");
+        }
+        alignment = std::max(alignment, static_cast<iree_host_size_t>(
+                                            requirements.base_alignment));
+      }
+    }
+    void* ptr = nullptr;
+    IREE_RETURN_IF_ERROR(iree_allocator_malloc_aligned(
+        iree_allocator_system(), static_cast<iree_host_size_t>(length),
+        alignment, 0, &ptr));
+    out_allocation->reset(static_cast<uint8_t*>(ptr));
+    return iree_ok_status();
   }
 
   iree_status_t CreateBorrowedMemoryTestFile(iree_hal_memory_access_t access,
                                              iree_byte_span_t contents,
                                              TestFile* out_file) {
     out_file->Reset();
+    iree_hal_pool_t* storage_pool = nullptr;
+    IREE_RETURN_IF_ERROR(SelectHostFileStoragePool(
+        iree_make_const_byte_span(contents.data, contents.data_length),
+        &storage_pool));
     iree_io_file_handle_t* handle = nullptr;
     IREE_RETURN_IF_ERROR(iree_io_file_handle_wrap_host_allocation(
         IREE_IO_FILE_ACCESS_READ | IREE_IO_FILE_ACCESS_WRITE, contents,
         iree_io_file_handle_release_callback_null(), iree_allocator_system(),
         &handle));
     iree_status_t status = iree_hal_file_import(
-        device_, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access, handle,
-        IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file->out_file());
+        device_, storage_pool, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access,
+        handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file->out_file());
     iree_io_file_handle_release(handle);
     if (iree_status_is_ok(status)) {
       out_file->SetMemoryContents(contents.data);
@@ -238,7 +378,8 @@ class FileTest : public CtsTestBase<> {
     SemaphoreList read_signal(device_, {0}, {1});
     IREE_ASSERT_OK(iree_hal_queue_read(
         transfer_queue_, empty_wait, read_signal, source_file, source_offset,
-        target_buffer, target_offset, length, IREE_HAL_READ_FLAG_NONE));
+        target_buffer, target_offset, length, /*barriers=*/NULL,
+        IREE_HAL_READ_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
         read_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -252,7 +393,8 @@ class FileTest : public CtsTestBase<> {
     SemaphoreList write_signal(device_, {0}, {1});
     IREE_ASSERT_OK(iree_hal_queue_write(
         transfer_queue_, empty_wait, write_signal, source_buffer, source_offset,
-        target_file, target_offset, length, IREE_HAL_WRITE_FLAG_NONE));
+        target_file, target_offset, length, /*barriers=*/NULL,
+        IREE_HAL_WRITE_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
         write_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -263,20 +405,36 @@ class FileTest : public CtsTestBase<> {
                           iree_hal_buffer_t* target_buffer,
                           iree_device_size_t target_offset,
                           iree_device_size_t length) {
+    iree_hal_barrier_t action = {
+        .flags = IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE |
+                 IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE,
+    };
+    const iree_hal_barrier_list_t list = {1, &action};
+    const iree_hal_queue_barriers_t barriers = {&list, &list};
     SemaphoreList empty_wait;
     SemaphoreList write_signal(device_, {0}, {1});
     SemaphoreList read_signal(device_, {0}, {1});
     IREE_ASSERT_OK(iree_hal_queue_write(
         transfer_queue_, empty_wait, write_signal, source_buffer, source_offset,
-        file, file_offset, length, IREE_HAL_WRITE_FLAG_NONE));
-    IREE_ASSERT_OK(iree_hal_queue_read(
-        transfer_queue_, write_signal, read_signal, file, file_offset,
-        target_buffer, target_offset, length, IREE_HAL_READ_FLAG_NONE));
+        file, file_offset, length, &barriers, IREE_HAL_WRITE_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_queue_read(transfer_queue_, write_signal,
+                                       read_signal, file, file_offset,
+                                       target_buffer, target_offset, length,
+                                       &barriers, IREE_HAL_READ_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
         read_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
   }
 
  private:
+  // Owned directional sources used by negative transfer-access coverage.
+  iree_hal_pool_t* transfer_source_pool_ = nullptr;
+  iree_hal_pool_t* transfer_target_pool_ = nullptr;
+  // Owned import-only pool used when memory file storage satisfies its exact
+  // native geometry requirements.
+  iree_hal_pool_t* file_storage_pool_ = nullptr;
+  // True after the backend's host import route has been queried once.
+  bool file_storage_pool_queried_ = false;
+
   iree_status_t CreateTestFileStatus(
       const FileProvider& provider, iree_hal_memory_access_t access,
       const std::vector<uint8_t>& initial_contents, TestFile* out_file) {
@@ -307,10 +465,36 @@ class FileTest : public CtsTestBase<> {
   iree_status_t CreateMemoryTestFile(
       iree_hal_memory_access_t access,
       const std::vector<uint8_t>& initial_contents, TestFile* out_file) {
+    iree_hal_pool_t* storage_pool = nullptr;
+    IREE_RETURN_IF_ERROR(GetHostFileStoragePool(&storage_pool));
+    iree_host_size_t allocation_alignment = kFileAlignment;
+    if (storage_pool) {
+      iree_hal_pool_import_requirements_t requirements;
+      if (!iree_hal_pool_query_import_requirements(
+              storage_pool,
+              iree_hal_make_external_storage_class(
+                  IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER),
+              &requirements) ||
+          initial_contents.size() < requirements.min_byte_length ||
+          (requirements.max_byte_length &&
+           initial_contents.size() > requirements.max_byte_length) ||
+          requirements.byte_length_granularity == 0 ||
+          initial_contents.size() % requirements.byte_length_granularity != 0) {
+        storage_pool = nullptr;
+      } else if (requirements.base_alignment > IREE_HOST_SIZE_MAX) {
+        return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "host import alignment exceeds host size");
+      } else {
+        allocation_alignment = std::max(
+            allocation_alignment,
+            static_cast<iree_host_size_t>(requirements.base_alignment));
+      }
+    }
+
     void* file_contents = nullptr;
     IREE_RETURN_IF_ERROR(iree_allocator_malloc_aligned(
-        iree_allocator_system(), initial_contents.size(), kFileAlignment, 0,
-        &file_contents));
+        iree_allocator_system(), initial_contents.size(), allocation_alignment,
+        0, &file_contents));
     std::memcpy(file_contents, initial_contents.data(),
                 initial_contents.size());
 
@@ -328,8 +512,8 @@ class FileTest : public CtsTestBase<> {
     }
     if (iree_status_is_ok(status)) {
       status = iree_hal_file_import(
-          device_, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access, handle,
-          IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file->out_file());
+          device_, storage_pool, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access,
+          handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file->out_file());
     }
     if (iree_status_is_ok(status)) {
       out_file->SetMemoryContents(static_cast<uint8_t*>(file_contents));
@@ -341,9 +525,11 @@ class FileTest : public CtsTestBase<> {
     return status;
   }
 
+ protected:
   iree_status_t CreateNativeTestFile(
       iree_hal_memory_access_t access,
-      const std::vector<uint8_t>& initial_contents, TestFile* out_file) {
+      const std::vector<uint8_t>& initial_contents, TestFile* out_file,
+      iree_io_file_mode_t additional_mode = 0) {
     iree::testing::TempFilePath path("iree_hal_cts_file");
     IREE_RETURN_IF_ERROR(iree_io_file_contents_write(
         path.path_view(),
@@ -355,27 +541,94 @@ class FileTest : public CtsTestBase<> {
     iree_status_t status = iree_io_file_handle_open(
         IREE_IO_FILE_MODE_READ | IREE_IO_FILE_MODE_WRITE |
             IREE_IO_FILE_MODE_RANDOM_ACCESS | IREE_IO_FILE_MODE_SHARE_READ |
-            IREE_IO_FILE_MODE_SHARE_WRITE | IREE_IO_FILE_MODE_ASYNC,
+            IREE_IO_FILE_MODE_SHARE_WRITE | IREE_IO_FILE_MODE_ASYNC |
+            additional_mode,
         path.path_view(), iree_allocator_system(), &handle);
     if (iree_status_is_ok(status)) {
       EXPECT_TRUE(iree_io_file_handle_uses_async_io(handle));
     }
     if (iree_status_is_ok(status)) {
-      status = iree_hal_file_import(
-          device_, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access, handle,
-          IREE_HAL_EXTERNAL_FILE_FLAG_NONE, out_file->out_file());
+      status = iree_hal_file_import(device_, /*storage_pool=*/nullptr,
+                                    IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, access,
+                                    handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE,
+                                    out_file->out_file());
     }
 
     if (iree_status_is_ok(status)) {
       out_file->SetNativeFile(std::move(path), handle);
     } else {
       iree_io_file_handle_release(handle);
+      EXPECT_TRUE(path.Remove());
     }
     return status;
   }
 };
 
 class AsyncFileTest : public FileTest {};
+
+TEST_P(AsyncFileTest, DirectFileRoundTripUsesReportedRequirements) {
+  // A range large enough to cross ordinary staging slots, with untouched file
+  // and buffer guards. The native query supplies every required alignment.
+  constexpr size_t kFileLength = 20 * 1024 * 1024;
+  std::vector<uint8_t> expected(kFileLength, 0xCD);
+  TestFile file;
+  iree::Status status = CreateNativeTestFile(
+      IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE, expected,
+      &file, IREE_IO_FILE_MODE_DIRECT);
+  if (status.code() == iree::StatusCode::kUnavailable ||
+      status.code() == iree::StatusCode::kUnimplemented) {
+    GTEST_SKIP() << status.ToString();
+  }
+  IREE_ASSERT_OK(status);
+  const auto& requirements = *iree_hal_file_requirements(file.get());
+  const auto alignment = std::max(requirements.read.buffer_alignment,
+                                  requirements.write.buffer_alignment);
+  const uint64_t stride = std::max(
+      {requirements.read.offset_alignment, requirements.write.offset_alignment,
+       uint64_t(requirements.read.length_alignment),
+       uint64_t(requirements.write.length_alignment)});
+  ASSERT_LE(alignment, 1024 * 1024u);
+  ASSERT_LE(stride, 1024 * 1024u);
+  const size_t length = iree_host_align(16 * 1024 * 1024 + 17, stride);
+  const size_t buffer_offset = alignment;
+  const uint64_t file_offset = stride;
+  const size_t buffer_length = length + 2 * alignment;
+  iree_hal_pool_t* pool = nullptr;
+  IREE_ASSERT_OK(GetDevicePool(&pool));
+  Ref<iree_hal_buffer_t> source, target;
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      pool, iree_hal_make_pool_reservation_request(buffer_length, alignment),
+      iree_infinite_timeout(), source.out()));
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      pool, iree_hal_make_pool_reservation_request(buffer_length, alignment),
+      iree_infinite_timeout(), target.out()));
+  std::vector<uint8_t> source_contents = MakeDeterministicBytes(buffer_length);
+  const std::vector<uint8_t> target_contents(buffer_length, 0xA5);
+  SemaphoreList empty_wait;
+  SemaphoreList initialized(device_, {0}, {1});
+  IREE_ASSERT_OK(iree_hal_queue_upload(transfer_queue_, empty_wait, initialized,
+                                       source_contents.data(), source.get(), 0,
+                                       buffer_length, nullptr));
+  IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
+      initialized, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+  SemaphoreList target_initialized(device_, {0}, {1});
+  IREE_ASSERT_OK(iree_hal_queue_upload(
+      transfer_queue_, empty_wait, target_initialized, target_contents.data(),
+      target.get(), 0, buffer_length, nullptr));
+  IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
+      target_initialized, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+  ASSERT_NO_FATAL_FAILURE(
+      QueueWriteThenRead(source.get(), buffer_offset, file.get(), file_offset,
+                         target.get(), buffer_offset, length));
+  std::vector<uint8_t> expected_buffer = target_contents;
+  std::memcpy(expected_buffer.data() + buffer_offset,
+              source_contents.data() + buffer_offset, length);
+  std::memcpy(expected.data() + file_offset,
+              source_contents.data() + buffer_offset, length);
+  EXPECT_THAT(ReadBufferBytes(target.get(), 0, buffer_length),
+              ContainerEq(expected_buffer));
+  EXPECT_THAT(file.ReadContents(0, kFileLength), ContainerEq(expected));
+}
 
 TEST_P(FileTest, ReadEntireFile) {
   ForEachProvider([&](const FileProvider& provider) {
@@ -408,12 +661,100 @@ TEST_P(FileTest, ImportRejectsUnknownFlags) {
   iree_hal_file_t* file = nullptr;
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_INVALID_ARGUMENT,
-      iree_hal_file_import(device_, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
-                           IREE_HAL_MEMORY_ACCESS_READ, handle,
-                           static_cast<iree_hal_external_file_flags_t>(1u),
-                           &file));
+      iree_hal_file_import(
+          device_, /*storage_pool=*/nullptr, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+          IREE_HAL_MEMORY_ACCESS_READ, handle,
+          static_cast<iree_hal_external_file_flags_t>(1u), &file));
   EXPECT_EQ(file, nullptr);
   iree_io_file_handle_release(handle);
+}
+
+TEST_P(FileTest, MemoryFileUsesExplicitStoragePool) {
+  for (auto owned_mode :
+       {IREE_HAL_SLAB_POOL_IMPORT_ONLY, IREE_HAL_SLAB_POOL_OWNED_ENABLED}) {
+    SCOPED_TRACE(owned_mode);
+    Ref<iree_hal_pool_t> storage_pool;
+    iree_status_t pool_status =
+        CreateHostFileStoragePool(storage_pool.out(), owned_mode);
+    if (iree_status_is_unavailable(pool_status) ||
+        iree_status_is_unimplemented(pool_status)) {
+      iree_status_free(pool_status);
+      GTEST_SKIP() << "device does not support host-pointer pool imports";
+    }
+    IREE_ASSERT_OK(pool_status);
+
+    iree_hal_pool_import_requirements_t requirements;
+    ASSERT_TRUE(iree_hal_pool_query_import_requirements(
+        storage_pool,
+        iree_hal_make_external_storage_class(
+            IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER),
+        &requirements));
+    const iree_device_size_t file_length =
+        ((std::max<iree_device_size_t>(128, requirements.min_byte_length) - 1) /
+             requirements.byte_length_granularity +
+         1) *
+        requirements.byte_length_granularity;
+    ASSERT_TRUE(requirements.max_byte_length == 0 ||
+                file_length <= requirements.max_byte_length);
+    ASSERT_LE(file_length, static_cast<iree_device_size_t>(IREE_HOST_SIZE_MAX));
+    const iree_device_size_t device_alignment = std::max<iree_device_size_t>(
+        kFileAlignment, requirements.base_alignment);
+    ASSERT_LE(device_alignment,
+              static_cast<iree_device_size_t>(IREE_HOST_SIZE_MAX));
+    const iree_host_size_t file_alignment =
+        static_cast<iree_host_size_t>(device_alignment);
+
+    void* file_contents = nullptr;
+    IREE_ASSERT_OK(iree_allocator_malloc_aligned(
+        iree_allocator_system(), static_cast<iree_host_size_t>(file_length),
+        file_alignment, 0, &file_contents));
+    AlignedAllocation allocation(static_cast<uint8_t*>(file_contents));
+    const std::vector<uint8_t> expected = MakeDeterministicBytes(file_length);
+    std::memcpy(file_contents, expected.data(), expected.size());
+    const iree_io_file_handle_release_callback_t release_callback = {
+        ReleaseAlignedAllocation,
+        file_contents,
+    };
+    iree_io_file_handle_t* handle = nullptr;
+    IREE_ASSERT_OK(iree_io_file_handle_wrap_host_allocation(
+        IREE_IO_FILE_ACCESS_READ | IREE_IO_FILE_ACCESS_WRITE,
+        iree_make_byte_span(file_contents,
+                            static_cast<iree_host_size_t>(file_length)),
+        release_callback, iree_allocator_system(), &handle));
+    allocation.release();
+
+    TestFile file;
+    iree::Status import_status = iree_hal_file_import(
+        device_, storage_pool, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+        IREE_HAL_MEMORY_ACCESS_READ, handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE,
+        file.out_file());
+    iree_io_file_handle_release(handle);
+    IREE_ASSERT_OK(import_status);
+
+    iree_hal_buffer_t* storage_buffer =
+        iree_hal_file_storage_buffer(file.get());
+    ASSERT_NE(storage_buffer, nullptr);
+    EXPECT_EQ(iree_hal_buffer_byte_length(storage_buffer), file_length);
+    EXPECT_TRUE(iree_all_bits_set(iree_hal_buffer_memory_type(storage_buffer),
+                                  IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE));
+    EXPECT_EQ(iree_hal_buffer_allowed_access(storage_buffer),
+              IREE_HAL_MEMORY_ACCESS_READ);
+    EXPECT_EQ(iree_hal_buffer_allowed_usage(storage_buffer),
+              IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE);
+    Ref<iree_hal_buffer_t> target;
+    if (owned_mode == IREE_HAL_SLAB_POOL_OWNED_ENABLED) {
+      IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+          storage_pool, iree_hal_make_pool_reservation_request(file_length, 0),
+          iree_infinite_timeout(), target.out()));
+    } else {
+      target = CreateZeroedBuffer(file_length);
+    }
+    ASSERT_TRUE(target);
+    ASSERT_NO_FATAL_FAILURE(
+        QueueReadAndWait(file.get(), 0, target.get(), 0, file_length));
+    EXPECT_THAT(ReadBufferBytes(target.get(), 0, file_length),
+                ContainerEq(expected));
+  }
 }
 
 TEST_P(FileTest, ImportRejectsEmptyQueueFamilyAffinity) {
@@ -428,7 +769,8 @@ TEST_P(FileTest, ImportRejectsEmptyQueueFamilyAffinity) {
   iree_hal_file_t* file = nullptr;
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_INVALID_ARGUMENT,
-      iree_hal_file_import(device_, /*queue_family_affinity=*/0,
+      iree_hal_file_import(device_, /*storage_pool=*/nullptr,
+                           /*queue_family_affinity=*/0,
                            IREE_HAL_MEMORY_ACCESS_READ, handle,
                            IREE_HAL_EXTERNAL_FILE_FLAG_NONE, &file));
   EXPECT_EQ(file, nullptr);
@@ -445,10 +787,10 @@ TEST_P(FileTest, ReadRejectsFileRangeOverflow) {
   SemaphoreList signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
-      iree_hal_queue_read(transfer_queue_, iree_hal_semaphore_list_empty(),
-                          signal, file.get(), UINT64_MAX - 3,
-                          target_buffer.get(), /*target_offset=*/0,
-                          /*length=*/8, IREE_HAL_READ_FLAG_NONE));
+      iree_hal_queue_read(
+          transfer_queue_, iree_hal_semaphore_list_empty(), signal, file.get(),
+          UINT64_MAX - 3, target_buffer.get(), /*target_offset=*/0,
+          /*length=*/8, /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
 }
 
 TEST_P(FileTest, ReadRejectsRangePastBufferEnd) {
@@ -464,7 +806,7 @@ TEST_P(FileTest, ReadRejectsRangePastBufferEnd) {
       iree_hal_queue_read(
           transfer_queue_, iree_hal_semaphore_list_empty(), signal, file.get(),
           /*source_offset=*/0, target_buffer.get(), /*target_offset=*/15,
-          /*length=*/2, IREE_HAL_READ_FLAG_NONE));
+          /*length=*/2, /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
 }
 
 TEST_P(FileTest, WriteRejectsRangePastFileEnd) {
@@ -477,10 +819,11 @@ TEST_P(FileTest, WriteRejectsRangePastFileEnd) {
   SemaphoreList signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
-      iree_hal_queue_write(
-          transfer_queue_, iree_hal_semaphore_list_empty(), signal,
-          source_buffer.get(), /*source_offset=*/0, file.get(),
-          /*target_offset=*/15, /*length=*/2, IREE_HAL_WRITE_FLAG_NONE));
+      iree_hal_queue_write(transfer_queue_, iree_hal_semaphore_list_empty(),
+                           signal, source_buffer.get(), /*source_offset=*/0,
+                           file.get(),
+                           /*target_offset=*/15, /*length=*/2,
+                           /*barriers=*/NULL, IREE_HAL_WRITE_FLAG_NONE));
 }
 
 TEST_P(FileTest, WriteRejectsRangePastBufferEnd) {
@@ -493,10 +836,11 @@ TEST_P(FileTest, WriteRejectsRangePastBufferEnd) {
   SemaphoreList signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
-      iree_hal_queue_write(
-          transfer_queue_, iree_hal_semaphore_list_empty(), signal,
-          source_buffer.get(), /*source_offset=*/15, file.get(),
-          /*target_offset=*/0, /*length=*/2, IREE_HAL_WRITE_FLAG_NONE));
+      iree_hal_queue_write(transfer_queue_, iree_hal_semaphore_list_empty(),
+                           signal, source_buffer.get(), /*source_offset=*/15,
+                           file.get(),
+                           /*target_offset=*/0, /*length=*/2, /*barriers=*/NULL,
+                           IREE_HAL_WRITE_FLAG_NONE));
 }
 
 TEST_P(FileTest, ReadRejectsIncompatibleBufferAccess) {
@@ -513,7 +857,8 @@ TEST_P(FileTest, ReadRejectsIncompatibleBufferAccess) {
       iree_hal_queue_read(transfer_queue_, iree_hal_semaphore_list_empty(),
                           access_signal, file.get(), /*source_offset=*/0,
                           read_only_buffer.get(), /*target_offset=*/0,
-                          /*length=*/1, IREE_HAL_READ_FLAG_NONE));
+                          /*length=*/1, /*barriers=*/NULL,
+                          IREE_HAL_READ_FLAG_NONE));
 }
 
 TEST_P(FileTest, WriteRejectsIncompatibleBufferAccess) {
@@ -527,10 +872,11 @@ TEST_P(FileTest, WriteRejectsIncompatibleBufferAccess) {
   SemaphoreList access_signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_PERMISSION_DENIED,
-      iree_hal_queue_write(
-          transfer_queue_, iree_hal_semaphore_list_empty(), access_signal,
-          write_only_buffer.get(), /*source_offset=*/0, file.get(),
-          /*target_offset=*/0, /*length=*/1, IREE_HAL_WRITE_FLAG_NONE));
+      iree_hal_queue_write(transfer_queue_, iree_hal_semaphore_list_empty(),
+                           access_signal, write_only_buffer.get(),
+                           /*source_offset=*/0, file.get(),
+                           /*target_offset=*/0, /*length=*/1, /*barriers=*/NULL,
+                           IREE_HAL_WRITE_FLAG_NONE));
 }
 
 TEST_P(FileTest, ReadRejectsWriteOnlyFile) {
@@ -546,7 +892,7 @@ TEST_P(FileTest, ReadRejectsWriteOnlyFile) {
       iree_hal_queue_read(
           transfer_queue_, iree_hal_semaphore_list_empty(), signal, file.get(),
           /*source_offset=*/0, target_buffer.get(), /*target_offset=*/0,
-          /*length=*/1, IREE_HAL_READ_FLAG_NONE));
+          /*length=*/1, /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
 }
 
 TEST_P(FileTest, WriteRejectsReadOnlyFile) {
@@ -559,10 +905,11 @@ TEST_P(FileTest, WriteRejectsReadOnlyFile) {
   SemaphoreList signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_PERMISSION_DENIED,
-      iree_hal_queue_write(
-          transfer_queue_, iree_hal_semaphore_list_empty(), signal,
-          source_buffer.get(), /*source_offset=*/0, file.get(),
-          /*target_offset=*/0, /*length=*/1, IREE_HAL_WRITE_FLAG_NONE));
+      iree_hal_queue_write(transfer_queue_, iree_hal_semaphore_list_empty(),
+                           signal, source_buffer.get(), /*source_offset=*/0,
+                           file.get(),
+                           /*target_offset=*/0, /*length=*/1, /*barriers=*/NULL,
+                           IREE_HAL_WRITE_FLAG_NONE));
 }
 
 TEST_P(FileTest, ReadRejectsUnknownFlags) {
@@ -578,7 +925,7 @@ TEST_P(FileTest, ReadRejectsUnknownFlags) {
       iree_hal_queue_read(
           transfer_queue_, iree_hal_semaphore_list_empty(), signal, file.get(),
           /*source_offset=*/0, target_buffer.get(), /*target_offset=*/0,
-          /*length=*/1, (iree_hal_read_flags_t)1u));
+          /*length=*/1, /*barriers=*/NULL, (iree_hal_read_flags_t)1u));
 }
 
 TEST_P(FileTest, WriteRejectsUnknownFlags) {
@@ -591,10 +938,11 @@ TEST_P(FileTest, WriteRejectsUnknownFlags) {
   SemaphoreList signal(device_, {0}, {1});
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_INVALID_ARGUMENT,
-      iree_hal_queue_write(
-          transfer_queue_, iree_hal_semaphore_list_empty(), signal,
-          source_buffer.get(), /*source_offset=*/0, file.get(),
-          /*target_offset=*/0, /*length=*/1, (iree_hal_write_flags_t)1u));
+      iree_hal_queue_write(transfer_queue_, iree_hal_semaphore_list_empty(),
+                           signal, source_buffer.get(), /*source_offset=*/0,
+                           file.get(),
+                           /*target_offset=*/0, /*length=*/1, /*barriers=*/NULL,
+                           (iree_hal_write_flags_t)1u));
 }
 
 TEST_P(FileTest, SynchronousReadRejectsRangePastFileEnd) {
@@ -602,12 +950,12 @@ TEST_P(FileTest, SynchronousReadRejectsRangePastFileEnd) {
   TestFile file;
   ASSERT_TRUE(TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_READ,
                                 std::vector<uint8_t>(16, 0), &file));
-  Ref<iree_hal_buffer_t> target_buffer = CreateZeroedBuffer(16);
+  uint8_t target[2] = {};
 
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
-      iree_hal_file_read(file.get(), /*file_offset=*/15, target_buffer.get(),
-                         /*buffer_offset=*/0, /*length=*/2));
+      iree_hal_file_read(file.get(), /*file_offset=*/15,
+                         iree_make_byte_span(target, sizeof(target))));
 }
 
 TEST_P(FileTest, SynchronousWriteRejectsReadOnlyFile) {
@@ -615,12 +963,119 @@ TEST_P(FileTest, SynchronousWriteRejectsReadOnlyFile) {
   TestFile file;
   ASSERT_TRUE(TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_READ,
                                 std::vector<uint8_t>(16, 0), &file));
-  Ref<iree_hal_buffer_t> source_buffer = CreateZeroedBuffer(16);
+  const uint8_t source = 0;
 
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_PERMISSION_DENIED,
-      iree_hal_file_write(file.get(), /*file_offset=*/0, source_buffer.get(),
-                          /*buffer_offset=*/0, /*length=*/1));
+      iree_hal_file_write(file.get(), /*file_offset=*/0,
+                          iree_make_const_byte_span(&source, sizeof(source))));
+}
+
+TEST_P(FileTest, SynchronousHostSpans) {
+  ForEachProvider([&](const FileProvider& provider) {
+    std::vector<uint8_t> file_contents(256);
+    for (size_t i = 0; i < file_contents.size(); ++i) {
+      file_contents[i] = static_cast<uint8_t>(i);
+    }
+    TestFile file;
+    if (!TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_ALL, file_contents,
+                           &file)) {
+      return;
+    }
+    ASSERT_TRUE(iree_hal_file_supports_synchronous_io(file.get()));
+
+    // Unaligned host spans need no HAL allocation, import or public mapping.
+    std::vector<uint8_t> target(80, 0xA5);
+    IREE_ASSERT_OK(iree_hal_file_read(
+        file.get(), 19, iree_make_byte_span(target.data() + 3, 67)));
+    std::vector<uint8_t> expected_target(80, 0xA5);
+    std::copy_n(file_contents.data() + 19, 67, expected_target.data() + 3);
+    EXPECT_THAT(target, ContainerEq(expected_target));
+
+    const std::vector<uint8_t> source = target;
+    IREE_ASSERT_OK(iree_hal_file_write(
+        file.get(), 103, iree_make_const_byte_span(source.data() + 7, 59)));
+    std::copy_n(source.data() + 7, 59, file_contents.data() + 103);
+
+    // Empty spans permit a null pointer and preserve the logical file bound.
+    IREE_ASSERT_OK(iree_hal_file_read(file.get(), file_contents.size(),
+                                      iree_byte_span_empty()));
+    IREE_ASSERT_OK(iree_hal_file_write(file.get(), file_contents.size(),
+                                       iree_const_byte_span_empty()));
+    IREE_EXPECT_STATUS_IS(
+        IREE_STATUS_OUT_OF_RANGE,
+        iree_hal_file_read(file.get(), file_contents.size() + 1,
+                           iree_byte_span_empty()));
+    IREE_EXPECT_STATUS_IS(
+        IREE_STATUS_OUT_OF_RANGE,
+        iree_hal_file_write(file.get(), file_contents.size() + 1,
+                            iree_const_byte_span_empty()));
+    IREE_EXPECT_STATUS_IS(
+        IREE_STATUS_OUT_OF_RANGE,
+        iree_hal_file_write(file.get(), file_contents.size() - 1,
+                            iree_make_const_byte_span(source.data(), 2)));
+    EXPECT_THAT(file.ReadContents(0, file_contents.size()),
+                ContainerEq(file_contents));
+  });
+}
+
+TEST_P(FileTest, SynchronousSpansRequireStorage) {
+  const FileProvider provider = {"memory_file", FileProviderKind::kMemory};
+  TestFile file;
+  ASSERT_TRUE(TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_ALL,
+                                std::vector<uint8_t>(16, 0), &file));
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_file_read(file.get(), 0, iree_make_byte_span(nullptr, 1)));
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_file_write(file.get(), 0,
+                          iree_make_const_byte_span(nullptr, 1)));
+}
+
+TEST_P(AsyncFileTest, SynchronousAndQueuedAccessShareFile) {
+  ForEachProvider([&](const FileProvider& provider) {
+    TestFile file;
+    if (!TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_ALL,
+                           std::vector<uint8_t>(256, 0), &file)) {
+      return;
+    }
+    Ref<iree_hal_buffer_t> buffer = CreateZeroedBuffer(128);
+    const std::vector<uint8_t> contents = MakeDeterministicBytes(81);
+
+    // Native files have already been imported into the device's proactor.
+    // Synchronous operations must consume only their own completion; queued
+    // operations continue through the proactor on the same underlying file.
+    IREE_ASSERT_OK(iree_hal_file_write(
+        file.get(), 11,
+        iree_make_const_byte_span(contents.data(), contents.size())));
+    std::vector<uint8_t> readback(contents.size(), 0);
+    IREE_ASSERT_OK(iree_hal_file_read(
+        file.get(), 11, iree_make_byte_span(readback.data(), readback.size())));
+    EXPECT_THAT(readback, ContainerEq(contents));
+
+    QueueReadAndWait(file.get(), 11, buffer.get(), 7, contents.size());
+    EXPECT_THAT(ReadBufferBytes(buffer.get(), 7, contents.size()),
+                ContainerEq(contents));
+    QueueWriteAndWait(buffer.get(), 7, file.get(), 139, contents.size());
+    std::fill(readback.begin(), readback.end(), 0);
+    IREE_ASSERT_OK(iree_hal_file_read(
+        file.get(), 139,
+        iree_make_byte_span(readback.data(), readback.size())));
+    EXPECT_THAT(readback, ContainerEq(contents));
+  });
+}
+
+TEST_P(FileTest, SynchronousReadRejectsWriteOnlyFile) {
+  const FileProvider provider = {"memory_file", FileProviderKind::kMemory};
+  TestFile file;
+  ASSERT_TRUE(TryCreateTestFile(provider, IREE_HAL_MEMORY_ACCESS_WRITE,
+                                std::vector<uint8_t>(16, 0), &file));
+  uint8_t target = 0;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_PERMISSION_DENIED,
+      iree_hal_file_read(file.get(), 0,
+                         iree_make_byte_span(&target, sizeof(target))));
 }
 
 TEST_P(AsyncFileTest, ZeroLengthReadForwardsDependencies) {
@@ -635,7 +1090,7 @@ TEST_P(AsyncFileTest, ZeroLengthReadForwardsDependencies) {
   IREE_ASSERT_OK(iree_hal_queue_read(
       transfer_queue_, wait_signal, read_signal, file.get(),
       /*source_offset=*/16, target_buffer.get(), /*target_offset=*/16,
-      /*length=*/0, IREE_HAL_READ_FLAG_NONE));
+      /*length=*/0, /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
 
   uint64_t read_value = 0;
   IREE_ASSERT_OK(
@@ -660,7 +1115,8 @@ TEST_P(AsyncFileTest, ZeroLengthWriteForwardsDependencies) {
   IREE_ASSERT_OK(iree_hal_queue_write(
       transfer_queue_, wait_signal, write_signal, source_buffer.get(),
       /*source_offset=*/16, file.get(),
-      /*target_offset=*/16, /*length=*/0, IREE_HAL_WRITE_FLAG_NONE));
+      /*target_offset=*/16, /*length=*/0, /*barriers=*/NULL,
+      IREE_HAL_WRITE_FLAG_NONE));
 
   uint64_t write_value = 0;
   IREE_ASSERT_OK(
@@ -683,17 +1139,25 @@ TEST_P(AsyncFileTest, MemoryFileChainRetainsDeferredResources) {
   const iree_device_size_t target_offset = 29;
   const iree_device_size_t file_length = 512;
 
-  std::vector<uint8_t> source_contents(file_length, 0x11);
-  std::vector<uint8_t> target_contents(file_length, 0xC7);
+  AlignedAllocation source_contents;
+  IREE_ASSERT_OK(
+      AllocateBorrowedHostFileStorage(file_length, &source_contents));
+  std::memset(source_contents.get(), 0x11, static_cast<size_t>(file_length));
+  AlignedAllocation target_contents;
+  IREE_ASSERT_OK(
+      AllocateBorrowedHostFileStorage(file_length, &target_contents));
+  std::memset(target_contents.get(), 0xC7, static_cast<size_t>(file_length));
   TestFile source_file;
   IREE_ASSERT_OK(CreateBorrowedMemoryTestFile(
       IREE_HAL_MEMORY_ACCESS_READ,
-      iree_make_byte_span(source_contents.data(), source_contents.size()),
+      iree_make_byte_span(source_contents.get(),
+                          static_cast<iree_host_size_t>(file_length)),
       &source_file));
   TestFile target_file;
   IREE_ASSERT_OK(CreateBorrowedMemoryTestFile(
       IREE_HAL_MEMORY_ACCESS_WRITE,
-      iree_make_byte_span(target_contents.data(), target_contents.size()),
+      iree_make_byte_span(target_contents.get(),
+                          static_cast<iree_host_size_t>(file_length)),
       &target_file));
 
   Ref<iree_hal_buffer_t> allocation = CreateZeroedBuffer(allocation_length);
@@ -708,10 +1172,10 @@ TEST_P(AsyncFileTest, MemoryFileChainRetainsDeferredResources) {
   IREE_ASSERT_OK(iree_hal_queue_read(
       transfer_queue_, host_producer_signal, read_signal, source_file.get(),
       source_offset, subspan.get(), buffer_offset, transfer_length,
-      IREE_HAL_READ_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_READ_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_queue_write(
       transfer_queue_, read_signal, write_signal, subspan.get(), buffer_offset,
-      target_file.get(), target_offset, transfer_length,
+      target_file.get(), target_offset, transfer_length, /*barriers=*/NULL,
       IREE_HAL_WRITE_FLAG_NONE));
 
   uint64_t write_value = 0;
@@ -721,7 +1185,7 @@ TEST_P(AsyncFileTest, MemoryFileChainRetainsDeferredResources) {
 
   const std::vector<uint8_t> produced_contents =
       MakeDeterministicBytes(transfer_length);
-  std::memcpy(source_contents.data() + source_offset, produced_contents.data(),
+  std::memcpy(source_contents.get() + source_offset, produced_contents.data(),
               produced_contents.size());
 
   // Accepted operations retain every resource they need until terminal
@@ -739,7 +1203,9 @@ TEST_P(AsyncFileTest, MemoryFileChainRetainsDeferredResources) {
   std::vector<uint8_t> expected(file_length, 0xC7);
   std::copy(produced_contents.begin(), produced_contents.end(),
             expected.begin() + target_offset);
-  EXPECT_THAT(target_contents, ContainerEq(expected));
+  const std::vector<uint8_t> actual(target_contents.get(),
+                                    target_contents.get() + file_length);
+  EXPECT_THAT(actual, ContainerEq(expected));
 }
 
 TEST_P(FileTest, ReadSubrangeWithOffsets) {

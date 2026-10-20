@@ -10,6 +10,7 @@
 #include "iree/testing/status_matchers.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
+#include "loom/ops/low/ops.h"
 #include "loom/ops/test/ops.h"
 #include "loom/target/facts_builder.h"
 #include "loom/target/registers.h"
@@ -19,32 +20,117 @@
 namespace loom {
 namespace {
 
+struct CondBranchTestOp {
+  loom_op_t op = {};
+  loom_block_t* successors[2] = {};
+};
+
+TEST(CompileReportLowMixTest,
+     CountsConditionalTransfersAndGenericTerminatorClasses) {
+  loom_region_t region = {};
+  loom_block_t region_block_storage[4] = {};
+  loom_block_t* region_blocks[IREE_ARRAYSIZE(region_block_storage)] = {};
+  loom_low_schedule_block_t schedule_blocks[IREE_ARRAYSIZE(region_blocks)] = {};
+  for (uint16_t i = 0; i < IREE_ARRAYSIZE(region_blocks); ++i) {
+    region_blocks[i] = &region_block_storage[i];
+    region_blocks[i]->parent_region = &region;
+    region_blocks[i]->region_index = i;
+    schedule_blocks[i].block = region_blocks[i];
+  }
+  region.block_count = IREE_ARRAYSIZE(region_blocks);
+  region.block_capacity = IREE_ARRAYSIZE(region_blocks);
+  region.blocks = region_blocks;
+
+  CondBranchTestOp branch;
+  branch.op.kind = LOOM_OP_LOW_OP_COND_BR;
+  branch.op.successor_count = IREE_ARRAYSIZE(branch.successors);
+  branch.successors[0] = region_blocks[2];
+  branch.successors[1] = region_blocks[3];
+
+  loom_low_descriptor_t descriptor = {};
+  loom_low_descriptor_layout_t layout = {
+      .op_kind = LOOM_LOW_DESCRIPTOR_OP_KIND_COND_BR,
+  };
+  loom_low_descriptor_view_t descriptor_view = {
+      .instruction_class_flags = LOOM_LOW_INSTRUCTION_CLASS_FLAG_SCALAR_ALU |
+                                 LOOM_LOW_INSTRUCTION_CLASS_FLAG_BRANCH |
+                                 LOOM_LOW_INSTRUCTION_CLASS_FLAG_CONTROL,
+  };
+  loom_low_descriptor_set_t descriptor_set = {
+      .descriptors = &descriptor,
+      .descriptor_layouts = &layout,
+      .descriptor_layout_count = 1,
+      .descriptor_views = &descriptor_view,
+      .descriptor_count = 1,
+      .descriptor_ordinal_count = 1,
+  };
+  loom_low_schedule_table_t schedule = {
+      .blocks = schedule_blocks,
+      .block_count = IREE_ARRAYSIZE(schedule_blocks),
+  };
+  loom_low_schedule_node_t node = {
+      .op = &branch.op,
+      .descriptor = &descriptor,
+      .block_index = 0,
+      .kind = LOOM_LOW_SCHEDULE_NODE_TERMINATOR,
+  };
+  loom_low_allocation_table_t allocation = {};
+  loom_target_compile_report_static_instruction_mix_t mix = {};
+
+  loom_target_compile_report_accumulate_low_node_static_mix(
+      &schedule, &allocation, &descriptor_set, &node, &mix);
+
+  EXPECT_EQ(mix.descriptor_count, 1u);
+  EXPECT_EQ(mix.scalar_alu_count, 1u);
+  EXPECT_EQ(mix.branch_count, 2u);
+  EXPECT_EQ(mix.control_count, 2u);
+
+  loom_op_t generic_terminator = {
+      .kind = LOOM_OP_LOW_OP,
+  };
+  layout.op_kind = LOOM_LOW_DESCRIPTOR_OP_KIND_OP;
+  descriptor_view.instruction_class_flags =
+      LOOM_LOW_INSTRUCTION_CLASS_FLAG_CONTROL;
+  node.op = &generic_terminator;
+  loom_target_compile_report_accumulate_low_node_static_mix(
+      &schedule, &allocation, &descriptor_set, &node, &mix);
+
+  EXPECT_EQ(mix.descriptor_count, 2u);
+  EXPECT_EQ(mix.scalar_alu_count, 1u);
+  EXPECT_EQ(mix.branch_count, 2u);
+  EXPECT_EQ(mix.control_count, 3u);
+}
+
 TEST(CompileReportLowMixTest, CountsExecutionBarriersFromInstructionClasses) {
   // Both packets have ordering effects; only one is an execution rendezvous.
-  loom_low_effect_t effect = {};
-  effect.kind = LOOM_LOW_EFFECT_KIND_BARRIER;
+  loom_low_effect_t effect = {.kind = LOOM_LOW_EFFECT_KIND_BARRIER};
   loom_low_descriptor_t descriptors[2] = {};
+  const loom_low_descriptor_layout_t layout = {.effect_count = 1};
   loom_low_descriptor_view_t descriptor_views[2] = {};
   for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(descriptors); ++i) {
-    descriptors[i].effect_count = 1;
     descriptor_views[i].instruction_class_flags =
         LOOM_LOW_INSTRUCTION_CLASS_FLAG_CONTROL;
   }
   descriptor_views[1].instruction_class_flags |=
       LOOM_LOW_INSTRUCTION_CLASS_FLAG_EXECUTION_BARRIER;
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.descriptors = descriptors;
-  descriptor_set.descriptor_views = descriptor_views;
-  descriptor_set.descriptor_count = IREE_ARRAYSIZE(descriptors);
-  descriptor_set.effects = &effect;
-  descriptor_set.effect_count = 1;
+  loom_low_descriptor_set_t descriptor_set = {
+      .descriptors = descriptors,
+      .descriptor_layouts = &layout,
+      .descriptor_layout_count = 1,
+      .descriptor_views = descriptor_views,
+      .descriptor_count = IREE_ARRAYSIZE(descriptors),
+      .descriptor_ordinal_count = IREE_ARRAYSIZE(descriptors),
+      .effects = &effect,
+      .effect_count = 1,
+  };
   loom_low_schedule_table_t schedule = {};
   loom_low_allocation_table_t allocation = {};
   loom_target_compile_report_static_instruction_mix_t mix = {};
   for (const auto& descriptor : descriptors) {
-    loom_low_schedule_node_t node = {};
-    node.kind = LOOM_LOW_SCHEDULE_NODE_DESCRIPTOR;
-    node.descriptor = &descriptor;
+    loom_low_schedule_node_t node = {
+        .descriptor = &descriptor,
+        .kind = LOOM_LOW_SCHEDULE_NODE_DESCRIPTOR,
+    };
     loom_target_compile_report_accumulate_low_node_static_mix(
         &schedule, &allocation, &descriptor_set, &node, &mix);
   }
@@ -55,6 +141,60 @@ TEST(CompileReportLowMixTest, CountsExecutionBarriersFromInstructionClasses) {
   EXPECT_TRUE(
       loom_target_compile_report_accumulate_scaled_static_mix(&total, &mix, 3));
   EXPECT_EQ(total.execution_barrier_count, 4u);
+}
+
+TEST(CompileReportLowMixTest, CountsOnlyMemoryAttachedReadWriteEffects) {
+  loom_low_effect_t effects[6] = {};
+  effects[0].kind = LOOM_LOW_EFFECT_KIND_READ;
+  effects[1].kind = LOOM_LOW_EFFECT_KIND_WRITE;
+  effects[1].width_bits = 64;
+  effects[2].kind = LOOM_LOW_EFFECT_KIND_READ;
+  effects[2].memory_space = LOOM_LOW_MEMORY_SPACE_GENERIC;
+  effects[3].kind = LOOM_LOW_EFFECT_KIND_WRITE;
+  effects[3].memory_space = LOOM_LOW_MEMORY_SPACE_GLOBAL;
+  effects[3].width_bits = 7;
+  effects[4].kind = LOOM_LOW_EFFECT_KIND_READ;
+  effects[4].memory_space = LOOM_LOW_MEMORY_SPACE_GLOBAL;
+  effects[4].width_bits = 32;
+  effects[5].kind = LOOM_LOW_EFFECT_KIND_WRITE;
+  effects[5].memory_space = LOOM_LOW_MEMORY_SPACE_WORKGROUP;
+  effects[5].width_bits = 64;
+  loom_low_descriptor_t descriptors[IREE_ARRAYSIZE(effects)] = {};
+  loom_low_descriptor_layout_t layouts[IREE_ARRAYSIZE(effects)] = {};
+  loom_low_descriptor_view_t descriptor_views[IREE_ARRAYSIZE(effects)] = {};
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(descriptors); ++i) {
+    descriptors[i].layout_index = i;
+    layouts[i].effect_start = i;
+    layouts[i].effect_count = 1;
+  }
+  loom_low_descriptor_set_t descriptor_set = {
+      .descriptors = descriptors,
+      .descriptor_layouts = layouts,
+      .descriptor_layout_count = IREE_ARRAYSIZE(layouts),
+      .descriptor_views = descriptor_views,
+      .descriptor_count = IREE_ARRAYSIZE(descriptors),
+      .descriptor_ordinal_count = IREE_ARRAYSIZE(descriptors),
+      .effects = effects,
+      .effect_count = IREE_ARRAYSIZE(effects),
+  };
+  loom_low_schedule_table_t schedule = {};
+  loom_low_allocation_table_t allocation = {};
+  loom_target_compile_report_static_instruction_mix_t mix = {};
+
+  for (const auto& descriptor : descriptors) {
+    loom_low_schedule_node_t node = {
+        .descriptor = &descriptor,
+        .kind = LOOM_LOW_SCHEDULE_NODE_DESCRIPTOR,
+    };
+    loom_target_compile_report_accumulate_low_node_static_mix(
+        &schedule, &allocation, &descriptor_set, &node, &mix);
+  }
+
+  EXPECT_EQ(mix.descriptor_count, 6u);
+  EXPECT_EQ(mix.memory_read_unknown_width_count, 1u);
+  EXPECT_EQ(mix.memory_write_unknown_width_count, 1u);
+  EXPECT_EQ(mix.memory_read_byte_count, 4u);
+  EXPECT_EQ(mix.memory_write_byte_count, 8u);
 }
 
 template <typename T>
@@ -89,79 +229,99 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
       "matrix.wmma.f32"
       "matrix.swmmac.f32"
       "matrix.smfmac.f32"
-      "test.gpr";
-  constexpr loom_string_ref_t kRegisterCopyTag = LOOM_STRING_REF(0, 17);
-  constexpr loom_string_ref_t kMemoryGlobalTag = LOOM_STRING_REF(17, 22);
-  constexpr loom_string_ref_t kMemoryStackLoadTag = LOOM_STRING_REF(39, 21);
-  constexpr loom_string_ref_t kMemoryStackStoreTag = LOOM_STRING_REF(60, 23);
-  constexpr loom_string_ref_t kMatrixWmmaTag = LOOM_STRING_REF(83, 15);
-  constexpr loom_string_ref_t kMatrixSwmmacTag = LOOM_STRING_REF(98, 17);
-  constexpr loom_string_ref_t kMatrixSmfmacTag = LOOM_STRING_REF(115, 17);
-  constexpr loom_string_ref_t kRegisterClassGpr = LOOM_STRING_REF(132, 8);
+      "test.gpr"
+      "test.fpr";
+  constexpr loom_string_ref_t kRegisterCopyTag = LOOM_STRING_REF(0, 0, 17);
+  constexpr loom_string_ref_t kMemoryGlobalTag = LOOM_STRING_REF(0, 17, 22);
+  constexpr loom_string_ref_t kMemoryStackLoadTag = LOOM_STRING_REF(0, 39, 21);
+  constexpr loom_string_ref_t kMemoryStackStoreTag = LOOM_STRING_REF(0, 60, 23);
+  constexpr loom_string_ref_t kMatrixWmmaTag = LOOM_STRING_REF(0, 83, 15);
+  constexpr loom_string_ref_t kMatrixSwmmacTag = LOOM_STRING_REF(0, 98, 17);
+  constexpr loom_string_ref_t kMatrixSmfmacTag = LOOM_STRING_REF(0, 115, 17);
+  constexpr loom_string_ref_t kRegisterClassGpr = LOOM_STRING_REF(0, 132, 8);
+  constexpr loom_string_ref_t kRegisterClassFpr = LOOM_STRING_REF(0, 140, 8);
   loom_low_descriptor_t descriptors[8] = {};
+  const loom_low_descriptor_layout_t layouts[] = {
+      {},
+      {.effect_count = 1},
+      {.effect_start = 1, .effect_count = 1},
+  };
   loom_low_descriptor_view_t descriptor_views[8] = {};
   descriptors[0].semantic_tag_string_ref = kRegisterCopyTag;
   descriptors[1].semantic_tag_string_ref = kMemoryGlobalTag;
   descriptors[2].semantic_tag_string_ref = kMemoryStackLoadTag;
-  descriptors[2].effect_count = 1;
+  descriptors[2].layout_index = 1;
   descriptors[3].semantic_tag_string_ref = kMemoryStackStoreTag;
-  descriptors[3].effect_start = 1;
-  descriptors[3].effect_count = 1;
+  descriptors[3].layout_index = 2;
   descriptors[4].semantic_tag_string_ref = kMatrixWmmaTag;
   descriptors[5].semantic_tag_string_ref = kMemoryGlobalTag;
   descriptors[6].semantic_tag_string_ref = kMatrixSwmmacTag;
   descriptors[7].semantic_tag_string_ref = kMatrixSmfmacTag;
   const loom_low_effect_t effects[] = {
       {
-          /*.kind=*/LOOM_LOW_EFFECT_KIND_READ,
-          /*.memory_space=*/{},
-          /*.scope_id=*/{},
-          /*.flags=*/{},
-          /*.counter_id=*/{},
-          /*.width_bits=*/32,
+          .kind = LOOM_LOW_EFFECT_KIND_READ,
+          .memory_space = LOOM_LOW_MEMORY_SPACE_STACK,
+          .scope_id = {},
+          .flags = {},
+          .counter_id = {},
+          .width_bits = 32,
       },
       {
-          /*.kind=*/LOOM_LOW_EFFECT_KIND_WRITE,
-          /*.memory_space=*/{},
-          /*.scope_id=*/{},
-          /*.flags=*/{},
-          /*.counter_id=*/{},
-          /*.width_bits=*/128,
+          .kind = LOOM_LOW_EFFECT_KIND_WRITE,
+          .memory_space = LOOM_LOW_MEMORY_SPACE_STACK,
+          .scope_id = {},
+          .flags = {},
+          .counter_id = {},
+          .width_bits = 128,
       },
   };
   const loom_low_schedule_class_t schedule_classes[5] = {};
   const loom_low_reg_class_t reg_classes[] = {
       {
-          /*.name_string_ref=*/kRegisterClassGpr,
-          /*.target_bank_id=*/{},
-          /*.flags=*/LOOM_LOW_REG_CLASS_FLAG_PHYSICAL,
-          /*.alloc_unit_bits=*/32,
-          /*.allocatable_count=*/{},
-          /*.fixed_location_base=*/{},
-          /*.fixed_location_count=*/{},
-          /*.physical_register_candidate_start=*/{},
-          /*.candidate_lookup=*/{},
-          /*.alias_set_id=*/{},
-          /*.spill_class_id=*/LOOM_LOW_REG_CLASS_NONE,
-          /*.full_register_part_mask=*/1,
-          /*.spill_slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_STACK,
+          .name_string_ref = kRegisterClassGpr,
+          .target_bank_id = {},
+          .flags = LOOM_LOW_REG_CLASS_FLAG_PHYSICAL,
+          .alloc_unit_bits = 32,
+          .allocatable_count = {},
+          .physical_register_candidate_start = {},
+          .candidate_lookup = {},
+          .alias_set_id = {},
+          .spill_class_id = LOOM_LOW_REG_CLASS_NONE,
+          .full_register_part_mask = 1,
+          .spill_slot_space = LOOM_LOW_SPILL_SLOT_SPACE_STACK,
+      },
+      {
+          .name_string_ref = kRegisterClassFpr,
+          .target_bank_id = {},
+          .flags = LOOM_LOW_REG_CLASS_FLAG_PHYSICAL,
+          .alloc_unit_bits = 32,
+          .allocatable_count = {},
+          .physical_register_candidate_start = {},
+          .candidate_lookup = {},
+          .alias_set_id = {},
+          .spill_class_id = LOOM_LOW_REG_CLASS_NONE,
+          .full_register_part_mask = 1,
+          .spill_slot_space = LOOM_LOW_SPILL_SLOT_SPACE_STACK,
       },
   };
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.stable_id = 1;
-  descriptor_set.string_pool = {
-      /*.data=*/kDescriptorStringPool,
-      /*.data_length=*/sizeof(kDescriptorStringPool) - 1,
+  loom_low_descriptor_set_t descriptor_set = {
+      .stable_id = 1,
+      .descriptors = descriptors,
+      .descriptor_layouts = layouts,
+      .descriptor_layout_count = IREE_ARRAYSIZE(layouts),
+      .descriptor_views = descriptor_views,
+      .descriptor_count = IREE_ARRAYSIZE(descriptors),
+      .descriptor_ordinal_count = IREE_ARRAYSIZE(descriptors),
+      .effects = effects,
+      .effect_count = IREE_ARRAYSIZE(effects),
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+      .schedule_classes = schedule_classes,
+      .schedule_class_count = IREE_ARRAYSIZE(schedule_classes),
+      .schedule_class_row_count = IREE_ARRAYSIZE(schedule_classes),
+      .string_pool = {{kDescriptorStringPool},
+                      {sizeof(kDescriptorStringPool) - 1}},
   };
-  descriptor_set.descriptors = descriptors;
-  descriptor_set.descriptor_views = descriptor_views;
-  descriptor_set.descriptor_count = IREE_ARRAYSIZE(descriptors);
-  descriptor_set.effects = effects;
-  descriptor_set.effect_count = IREE_ARRAYSIZE(effects);
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
-  descriptor_set.schedule_classes = schedule_classes;
-  descriptor_set.schedule_class_count = IREE_ARRAYSIZE(schedule_classes);
   descriptor_views[0].schedule_class_id = 0;
   descriptor_views[1].schedule_class_id = 1;
   descriptor_views[2].schedule_class_id = 1;
@@ -217,7 +377,7 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   IREE_ASSERT_OK(loom_module_set_value_type(
       module, 5,
       loom_low_register_type(/*descriptor_set_stable_id=*/1,
-                             /*register_class_id=*/0, 2)));
+                             /*register_class_id=*/1, 2)));
   IREE_ASSERT_OK(loom_module_set_value_type(
       module, 6,
       loom_low_register_type(/*descriptor_set_stable_id=*/1,
@@ -236,68 +396,67 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   const loom_op_t peak_op = {};
   const loom_liveness_pressure_summary_t pressure_summaries[] = {
       {
-          /*.value_class=*/{
-              /*.type_kind=*/LOOM_TYPE_REGISTER,
-              /*.element_type=*/LOOM_SCALAR_TYPE_I32,
-              /*.register_class_id=*/0,
-              /*.register_descriptor_set_stable_id=*/1,
-          },
-          /*.peak_live_units=*/7,
-          /*.peak_live_values=*/5,
-          /*.peak_block=*/{},
-          /*.peak_op=*/{},
-          /*.peak_point=*/3,
+          .value_class =
+              {
+                  .type_kind = LOOM_TYPE_REGISTER,
+                  .element_type = {},
+                  .register_class_id = 0,
+                  .register_descriptor_set_stable_id = 1,
+              },
+          .peak_live_units = 7,
+          .peak_live_values = 5,
+          .peak_block = {},
+          .peak_op = {},
+          .peak_point = 3,
       },
       {
-          /*.value_class=*/{
-              /*.type_kind=*/LOOM_TYPE_REGISTER,
-              /*.element_type=*/LOOM_SCALAR_TYPE_F32,
-              /*.register_class_id=*/0,
-              /*.register_descriptor_set_stable_id=*/1,
-          },
-          /*.peak_live_units=*/11,
-          /*.peak_live_values=*/2,
-          /*.peak_block=*/{},
-          /*.peak_op=*/&peak_op,
-          /*.peak_point=*/9,
+          .value_class =
+              {
+                  .type_kind = LOOM_TYPE_REGISTER,
+                  .element_type = {},
+                  .register_class_id = 1,
+                  .register_descriptor_set_stable_id = 1,
+              },
+          .peak_live_units = 11,
+          .peak_live_values = 2,
+          .peak_block = {},
+          .peak_op = &peak_op,
+          .peak_point = 9,
       },
   };
   const loom_low_allocation_assignment_t assignments[] = {
       {
-          /*.value_id=*/4,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.descriptor_reg_class_id=*/0,
-          /*.flags=*/{},
-          /*.start_point=*/{},
-          /*.end_point=*/{},
-          /*.unit_count=*/{},
-          /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
-          /*.location_base=*/0,
-          /*.location_count=*/1,
+          .value_id = 4,
+          .descriptor_reg_class_id = 0,
+          .flags = {},
+          .start_point = {},
+          .end_point = {},
+          .unit_count = {},
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
+          .location_base = 0,
+          .location_count = 1,
       },
       {
-          /*.value_id=*/5,
-          /*.value_class=*/pressure_summaries[1].value_class,
-          /*.descriptor_reg_class_id=*/0,
-          /*.flags=*/{},
-          /*.start_point=*/{},
-          /*.end_point=*/{},
-          /*.unit_count=*/{},
-          /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
-          /*.location_base=*/1,
-          /*.location_count=*/1,
+          .value_id = 5,
+          .descriptor_reg_class_id = 1,
+          .flags = {},
+          .start_point = {},
+          .end_point = {},
+          .unit_count = {},
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
+          .location_base = 1,
+          .location_count = 1,
       },
       {
-          /*.value_id=*/6,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.descriptor_reg_class_id=*/0,
-          /*.flags=*/{},
-          /*.start_point=*/2,
-          /*.end_point=*/6,
-          /*.unit_count=*/2,
-          /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-          /*.location_base=*/7,
-          /*.location_count=*/2,
+          .value_id = 6,
+          .descriptor_reg_class_id = 0,
+          .flags = {},
+          .start_point = 2,
+          .end_point = 6,
+          .unit_count = 2,
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+          .location_base = 7,
+          .location_count = 2,
       },
   };
   const loom_value_id_t liveness_value_ids[] = {
@@ -312,25 +471,25 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   };
   const loom_liveness_interval_t liveness_intervals[] = {
       {
-          /*.value_id=*/4,
-          /*.start_point=*/0,
-          /*.end_point=*/8,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.unit_count=*/1,
+          .value_id = 4,
+          .start_point = 0,
+          .end_point = 8,
+          .value_class = pressure_summaries[0].value_class,
+          .unit_count = 1,
       },
       {
-          /*.value_id=*/5,
-          /*.start_point=*/1,
-          /*.end_point=*/12,
-          /*.value_class=*/pressure_summaries[1].value_class,
-          /*.unit_count=*/2,
+          .value_id = 5,
+          .start_point = 1,
+          .end_point = 12,
+          .value_class = pressure_summaries[1].value_class,
+          .unit_count = 2,
       },
       {
-          /*.value_id=*/6,
-          /*.start_point=*/2,
-          /*.end_point=*/6,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.unit_count=*/2,
+          .value_id = 6,
+          .start_point = 2,
+          .end_point = 6,
+          .value_class = pressure_summaries[0].value_class,
+          .unit_count = 2,
       },
   };
   const uint32_t assignment_indices_by_value_ordinal[] = {
@@ -340,155 +499,159 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   };
   const loom_low_allocation_copy_decision_t copy_decisions[] = {
       {
-          /*.source_value_id=*/4,
-          /*.result_value_id=*/5,
-          /*.source_assignment_index=*/kSourceAssignmentIndex,
-          /*.result_assignment_index=*/kResultAssignmentIndex,
-          /*.kind=*/LOOM_LOW_ALLOCATION_COPY_MATERIALIZED,
+          .source_value_id = 4,
+          .result_value_id = 5,
+          .source_assignment_index = kSourceAssignmentIndex,
+          .result_assignment_index = kResultAssignmentIndex,
+          .kind = LOOM_LOW_ALLOCATION_COPY_MATERIALIZED,
       },
   };
   const loom_low_move_t moves[] = {
       {
-          /*.destination=*/
-          {
-              /*.location_kind=*/
-              LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-              /*.descriptor_reg_class_id=*/0,
-              /*.location=*/1,
-          },
-          /*.source=*/
-          {
-              /*.location_kind=*/
-              LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-              /*.descriptor_reg_class_id=*/0,
-              /*.location=*/0,
-          },
+          .destination =
+              {
+                  .location_kind =
+                      LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+                  .descriptor_reg_class_id = 0,
+                  .location = 1,
+              },
+          .source =
+              {
+                  .location_kind =
+                      LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+                  .descriptor_reg_class_id = 0,
+                  .location = 0,
+              },
       },
       {
-          /*.destination=*/
-          {
-              /*.location_kind=*/
-              LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-              /*.descriptor_reg_class_id=*/0,
-              /*.location=*/2,
-          },
-          /*.source=*/
-          {
-              /*.location_kind=*/
-              LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-              /*.descriptor_reg_class_id=*/0,
-              /*.location=*/1,
-          },
+          .destination =
+              {
+                  .location_kind =
+                      LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+                  .descriptor_reg_class_id = 0,
+                  .location = 2,
+              },
+          .source =
+              {
+                  .location_kind =
+                      LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+                  .descriptor_reg_class_id = 0,
+                  .location = 1,
+              },
       },
   };
   const loom_low_allocation_packet_move_group_t packet_move_groups[] = {
       {
-          /*.source_ordinal=*/0,
-          /*.cause=*/LOOM_LOW_PLACEMENT_CAUSE_LOW_COPY,
-          /*.move_group=*/
-          {
-              /*.moves=*/
+          .source_ordinal = 0,
+          .transfer_start = 0,
+          .transfer_count = 0,
+          .cause = LOOM_LOW_PLACEMENT_CAUSE_LOW_COPY,
+          .transfer_flags =
+              LOOM_LOW_ALLOCATION_PACKET_TRANSFER_GROUP_FLAG_MATERIALIZED,
+          .move_group =
               {
-                  /*.start=*/0,
-                  /*.count=*/1,
+                  .moves =
+                      {
+                          .start = 0,
+                          .count = 1,
+                      },
               },
-          },
       },
   };
   const loom_low_allocation_edge_copy_t edge_copies[kEdgeCopyCount] = {
       {
-          /*.payload_index=*/0,
-          /*.source_ordinal=*/0,
-          /*.destination_ordinal=*/1,
-          /*.source_assignment_index=*/kSourceAssignmentIndex,
-          /*.destination_assignment_index=*/kResultAssignmentIndex,
-          /*.source_unit_offset=*/0,
-          /*.destination_unit_offset=*/0,
-          /*.unit_count=*/1,
+          .payload_index = 0,
+          .kind = LOOM_LOW_ALLOCATION_COPY_MATERIALIZED,
+          .source_ordinal = 0,
+          .destination_ordinal = 1,
+          .next_coalesced_incoming_copy_index =
+              LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE,
+          .destination_assignment_index = kResultAssignmentIndex,
+          .source_unit_offset = 0,
+          .destination_unit_offset = 0,
+          .unit_count = 1,
       },
   };
   const loom_low_allocation_edge_copy_group_t edge_copy_groups[] = {
       {
-          /*.terminator_op=*/{},
-          /*.source_ordinal=*/{},
-          /*.copy_start=*/0,
-          /*.copy_count=*/kEdgeCopyCount,
-          /*.move_group=*/
-          {
-              /*.moves=*/
+          .terminator_op = {},
+          .source_ordinal = {},
+          .copy_start = 0,
+          .copy_count = kEdgeCopyCount,
+          .move_group =
               {
-                  /*.start=*/1,
-                  /*.count=*/1,
+                  .moves =
+                      {
+                          .start = 1,
+                          .count = 1,
+                      },
               },
-          },
       },
   };
   const loom_low_allocation_spill_plan_t spill_plans[] = {
       {
-          /*.value_id=*/4,
-          /*.assignment_index=*/0,
-          /*.slot_index=*/0,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_STACK,
-          /*.byte_size=*/16,
-          /*.byte_alignment=*/8,
-          /*.store_count=*/1,
-          /*.reload_count=*/2,
+          .value_id = 4,
+          .assignment_index = 0,
+          .slot_index = 0,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_STACK,
+          .byte_size = 16,
+          .byte_alignment = 8,
+          .store_count = 1,
+          .reload_count = 2,
       },
       {
-          /*.value_id=*/5,
-          /*.assignment_index=*/1,
-          /*.slot_index=*/1,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_SCRATCH,
-          /*.byte_size=*/32,
-          /*.byte_alignment=*/16,
-          /*.store_count=*/3,
-          /*.reload_count=*/4,
+          .value_id = 5,
+          .assignment_index = 1,
+          .slot_index = 1,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_SCRATCH,
+          .byte_size = 32,
+          .byte_alignment = 16,
+          .store_count = 3,
+          .reload_count = 4,
       },
   };
   const loom_low_allocation_materialized_spill_t materialized_spills[] = {
       {
-          /*.value_id=*/6,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.flags=*/0,
-          /*.assignment_index=*/2,
-          /*.slot_index=*/7,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
-          /*.byte_size=*/64,
-          /*.byte_alignment=*/16,
-          /*.store_count=*/5,
-          /*.store_bytes=*/320,
-          /*.reload_count=*/6,
-          /*.reload_bytes=*/384,
+          .value_id = 6,
+          .descriptor_reg_class_id = 0,
+          .flags = 0,
+          .assignment_index = 2,
+          .slot_index = 7,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
+          .byte_size = 64,
+          .byte_alignment = 16,
+          .store_count = 5,
+          .store_bytes = 320,
+          .reload_count = 6,
+          .reload_bytes = 384,
       },
       {
-          /*.value_id=*/4,
-          /*.value_class=*/pressure_summaries[0].value_class,
-          /*.flags=*/
-          LOOM_LOW_ALLOCATION_MATERIALIZED_SPILL_FLAG_VALUE_WAS_BLOCK_ARGUMENT,
-          /*.assignment_index=*/0,
-          /*.slot_index=*/8,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
-          /*.byte_size=*/4,
-          /*.byte_alignment=*/4,
-          /*.store_count=*/2,
-          /*.store_bytes=*/8,
-          /*.reload_count=*/3,
-          /*.reload_bytes=*/12,
+          .value_id = 4,
+          .descriptor_reg_class_id = 0,
+          .flags =
+              LOOM_LOW_ALLOCATION_MATERIALIZED_SPILL_FLAG_VALUE_WAS_BLOCK_ARGUMENT,
+          .assignment_index = 0,
+          .slot_index = 8,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
+          .byte_size = 4,
+          .byte_alignment = 4,
+          .store_count = 2,
+          .store_bytes = 8,
+          .reload_count = 3,
+          .reload_bytes = 12,
       },
   };
   loom_low_allocation_materialized_spill_vec_t materialized_spill_vec = {
-      /*.records=*/materialized_spills,
-      /*.record_count=*/IREE_ARRAYSIZE(materialized_spills),
-      /*.next=*/{},
+      .records = materialized_spills,
+      .record_count = IREE_ARRAYSIZE(materialized_spills),
+      .next = {},
   };
   for (uint32_t i = 0; i < IREE_ARRAYSIZE(descriptors); ++i) {
     schedule_nodes[i].descriptor = &descriptors[i];
-    schedule_nodes[i].schedule_class =
-        &schedule_classes[descriptor_views[i].schedule_class_id];
+    schedule_nodes[i].schedule_class = loom_low_descriptor_set_schedule_class(
+        &descriptor_set, &descriptor_views[i]);
     schedule_nodes[i].source_ordinal = i;
     schedule_nodes[i].scheduled_ordinal = i;
-    schedule_nodes[i].memory_access_record_index =
-        LOOM_LOW_SCHEDULE_MEMORY_ACCESS_RECORD_NONE;
     schedule_nodes[i].kind = LOOM_LOW_SCHEDULE_NODE_DESCRIPTOR;
   }
   schedule_nodes[0].operand_count = 1;
@@ -499,11 +662,11 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   schedule_nodes[1].value_ordinals.inline_value_ordinals[0] = 2;
   const loom_low_schedule_block_t schedule_blocks[] = {
       {
-          /*.block=*/{},
-          /*.node_start=*/0,
-          /*.node_count=*/8,
-          /*.scheduled_node_start=*/0,
-          /*.scheduled_node_count=*/8,
+          .block = {},
+          .node_start = 0,
+          .node_count = 8,
+          .scheduled_node_start = 0,
+          .scheduled_node_count = 8,
       },
   };
   const uint32_t scheduled_node_indices[] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -514,34 +677,36 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   loom_target_facts_builder_initialize(&loom_test_target_fact_type,
                                        target_bundle, &target_facts);
   const loom_low_resolved_target_t target = {
-      /*.target_facts=*/GetParam() == TargetBinding::kFacts ? &target_facts
-                                                            : nullptr,
-      /*.target_name=*/GetParam() == TargetBinding::kFacts
-          ? target_bundle->name
-          : iree_string_view_empty(),
-      /*.descriptor_set_key=*/target_bundle->config->contract_set_key,
-      /*.feature_bits=*/GetParam() == TargetBinding::kFacts
-          ? target_bundle->config->contract_feature_bits
-          : 0,
-      /*.descriptor_set=*/&descriptor_set,
+      .target_facts =
+          GetParam() == TargetBinding::kFacts ? &target_facts : nullptr,
+      .target_name = GetParam() == TargetBinding::kFacts
+                         ? target_bundle->name
+                         : iree_string_view_empty(),
+      .descriptor_set_key = target_bundle->config->contract_set_key,
+      .feature_bits = GetParam() == TargetBinding::kFacts
+                          ? target_bundle->config->contract_feature_bits
+                          : 0,
+      .descriptor_set = &descriptor_set,
   };
-  loom_low_schedule_table_t schedule = {};
-  schedule.module = module;
-  schedule.target = target;
-  schedule.blocks = schedule_blocks;
-  schedule.block_count = IREE_ARRAYSIZE(schedule_blocks);
-  schedule.nodes = schedule_nodes;
-  schedule.node_count = 13;
-  schedule.dependencies.count = 6;
+  loom_low_schedule_table_t schedule = {
+      .module = module,
+      .target = target,
+      .blocks = schedule_blocks,
+      .block_count = IREE_ARRAYSIZE(schedule_blocks),
+      .nodes = schedule_nodes,
+      .node_count = 13,
+  };
+  schedule.dependency_count = 6;
   schedule.scheduled_node_indices = scheduled_node_indices;
   schedule.scheduled_node_count = IREE_ARRAYSIZE(scheduled_node_indices);
   schedule.resource_use_count = 4;
   schedule.hazard_gap_count = 2;
   schedule.model_summary_count = 1;
 
-  loom_low_emission_frame_t frame = {};
-  frame.target = target;
-  frame.schedule = schedule;
+  loom_low_emission_frame_t frame = {
+      .target = target,
+      .schedule = schedule,
+  };
   frame.allocation.module = module;
   frame.allocation.target = target;
   frame.allocation.liveness.intervals = liveness_intervals;
@@ -564,7 +729,7 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
       IREE_SVL("unspillable-register-exhausted");
   frame.allocation.failure.value_id = 5;
   frame.allocation.failure.value_class = pressure_summaries[1].value_class;
-  frame.allocation.failure.descriptor_reg_class_id = 0;
+  frame.allocation.failure.descriptor_reg_class_id = 1;
   frame.allocation.failure.start_point = 3;
   frame.allocation.failure.end_point = 8;
   frame.allocation.failure.required_unit_count = 2;
@@ -593,6 +758,7 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   frame.allocation.packet_move_groups = packet_move_groups;
   frame.allocation.packet_move_group_count = IREE_ARRAYSIZE(packet_move_groups);
   frame.allocation.moves = moves;
+  frame.allocation.move_count = IREE_ARRAYSIZE(moves);
   frame.allocation.packet_move_count = 1;
   frame.allocation.spill_count = IREE_ARRAYSIZE(spill_plans);
   frame.allocation.coalesced_copy_count = 3;
@@ -708,6 +874,10 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   EXPECT_TRUE(iree_string_view_equal(pressure_rows[0].peak_operation_name,
                                      IREE_SV("<block-boundary>")));
   EXPECT_EQ(pressure_rows[1].peak_live_units, 11u);
+  EXPECT_TRUE(iree_string_view_equal(pressure_rows[0].register_class,
+                                     IREE_SV("test.gpr")));
+  EXPECT_TRUE(iree_string_view_equal(pressure_rows[1].register_class,
+                                     IREE_SV("test.fpr")));
   EXPECT_EQ(report.pressure_origin_rows.count, 3u);
   ASSERT_NE(report.pressure_origin_rows.head, nullptr);
   const auto* pressure_origin_rows =
@@ -900,6 +1070,13 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
   const auto* spill_rows =
       static_cast<const loom_target_compile_report_spill_row_t*>(
           loom_target_compile_report_vec_const_rows(report.spill_rows.head));
+  for (iree_host_size_t i = 0; i < 4; ++i) {
+    EXPECT_EQ(spill_rows[i].type_kind, LOOM_TYPE_REGISTER);
+    EXPECT_EQ(spill_rows[i].element_type, LOOM_SCALAR_TYPE_NONE);
+    EXPECT_TRUE(iree_string_view_equal(
+        spill_rows[i].register_class,
+        i == 1 ? IREE_SV("test.fpr") : IREE_SV("test.gpr")));
+  }
   EXPECT_EQ(spill_rows[0].kind, LOOM_TARGET_COMPILE_REPORT_SPILL_ROW_PLANNED);
   EXPECT_TRUE(iree_string_view_equal(spill_rows[0].function_name,
                                      IREE_SV("<unnamed>")));
@@ -961,7 +1138,7 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
       iree_string_view_equal(allocation_failure_rows[0].failure_code,
                              IREE_SV("unspillable-register-exhausted")));
   EXPECT_TRUE(iree_string_view_equal(allocation_failure_rows[0].register_class,
-                                     IREE_SV("test.gpr")));
+                                     IREE_SV("test.fpr")));
   EXPECT_EQ(
       allocation_failure_rows[0].blocking_kind,
       LOOM_TARGET_COMPILE_REPORT_ALLOCATION_FAILURE_BLOCKING_ACTIVE_ASSIGNMENT);
@@ -1039,6 +1216,44 @@ TEST_P(CompileReportLowTest, RecordsPressureSpillAndAllocationFailureRows) {
       LOOM_TARGET_COMPILE_REPORT_DETAIL_SCHEDULE_BAND_SUMMARY_ROWS));
   EXPECT_EQ(summary_report.schedule_band_rows.count, 0u);
   EXPECT_EQ(summary_report.schedule_band_summary_rows.count, 7u);
+  loom_target_compile_report_deinitialize(&summary_report);
+
+  // The two global-load forms merged above share an origin, but must stay
+  // separate across blocks. Block order and each origin's first occurrence
+  // survive grouping, including an empty block and a larger subsequent block.
+  const loom_low_schedule_block_t split_blocks[] = {
+      {.node_count = 2, .scheduled_node_count = 2},
+      {.node_start = 2, .scheduled_node_start = 2},
+      {
+          .node_start = 2,
+          .node_count = 6,
+          .scheduled_node_start = 2,
+          .scheduled_node_count = 6,
+      },
+  };
+  loom_low_emission_frame_t split_frame = frame;
+  split_frame.schedule.blocks = split_blocks;
+  split_frame.schedule.block_count = IREE_ARRAYSIZE(split_blocks);
+  loom_target_compile_report_initialize(&summary_report,
+                                        iree_allocator_system());
+  summary_report.requested_detail_flags =
+      LOOM_TARGET_COMPILE_REPORT_DETAIL_SCHEDULE_BAND_SUMMARY_ROWS;
+  IREE_ASSERT_OK(loom_target_compile_report_record_low_emission_frame(
+      &summary_report, &split_frame));
+  ASSERT_EQ(summary_report.schedule_band_summary_rows.count, 8u);
+  for (iree_host_size_t i = 0; i < 8; ++i) {
+    const auto* row = CompileReportRowAt<
+        loom_target_compile_report_schedule_band_summary_row_t>(
+        summary_report.schedule_band_summary_rows, i);
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->block_index, i < 2 ? 0u : 2u);
+    EXPECT_EQ(row->first_packet_index, i);
+    EXPECT_EQ(row->band_count, 1u);
+    EXPECT_EQ(row->node_count, 1u);
+    EXPECT_TRUE(iree_string_view_equal(row->semantic_tag,
+                                       schedule_band_rows[i].semantic_tag));
+  }
+  EXPECT_EQ(summary_report.schedule_band_rows.count, 0u);
   loom_target_compile_report_deinitialize(&summary_report);
 
   loom_target_compile_report_t allocation_report = {};

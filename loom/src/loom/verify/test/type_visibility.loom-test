@@ -12,12 +12,12 @@ func.def @outer_shape(%count: index) {
 
 // ====
 
-// Pool extents follow the same visibility rule as shape dimensions.
-func.def @outer_pool_size(%byte_count: index) {
+// Group extents follow the same visibility rule as shape dimensions.
+func.def @outer_group_size(%count: index) {
   test.isolated_region {
     %seed = test.constant 7 : i32
-    // ERROR@+1: DOMINANCE/016 "byte_count"
-    %storage = test.convert %seed : i32 -> pool<[%byte_count]>
+    // ERROR@+1: DOMINANCE/016 "count"
+    %members = test.convert %seed : i32 -> group<[%count]>
     test.yield
   }
   func.return
@@ -214,7 +214,7 @@ func.def @coresult_encodings(%input: tensor<4xf32>) {
 // Ordinary nested regions retain enclosing type references, and an isolated
 // sibling does not change the enclosing visibility floor after it exits.
 func.def @shape_restoration(%count: index, %condition: i1) {
-  func.def @local_pool(%byte_count: index, %storage: pool<[%byte_count]>) {
+  func.def @local_group(%count: index, %members: group<[%count]>) {
     func.return
   }
   %seed = test.constant 7 : i32

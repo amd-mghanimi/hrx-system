@@ -209,13 +209,10 @@ func.def target(@target) @index_uniform_div_rem_magic_mul(%value: i32) -> (index
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @index_uniform_div_rem_magic_mul(%bounded_value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) asm {
   %divisor = s_mov_b32 5
-  %12 = s_mov_b32 3435973837
-  %13 = s_mul_hi_u32 %bounded_value, %12
-  %14 = s_mov_b32 2
-  %quotient = s_lshr_b32 %13, %14
-  %19 = s_lshr_b32 %13, %14
-  %20 = s_mul_i32 %19, %divisor
-  %remainder = s_sub_u32 %bounded_value, %20
+  %12 = s_mov_b32 858993460
+  %quotient = s_mul_hi_u32 %bounded_value, %12
+  %16 = s_mul_i32 %quotient, %divisor
+  %remainder = s_sub_u32 %bounded_value, %16
   return %quotient, %remainder
 }
 
@@ -257,22 +254,21 @@ low.kernel.def target<amdgpu.gfx11.generic.core>(@target) abi_layout({constant_c
   %block_begin = s_mov_b32 0
   %block_end = s_mov_b32 12
   %block_step = s_mov_b32 4
+  %lane_group = v_lshrrev_b32_src0_inline %lane, 4
+  %37 = s_mov_b32 15
+  %lane_offset = v_and_b32 %37, %lane
   low.br ^_bb1(%block_begin: reg<amdgpu.sgpr>)
 ^_bb1(%block_base: reg<amdgpu.sgpr>):
-  %36 = s_cmp_lt_i32 %block_base, %block_end
-  low.cond_br %36, ^_bb2, ^_bb3 : reg<amdgpu.scc>
+  %39 = s_cmp_lt_i32 %block_base, %block_end
+  low.cond_br %39, ^_bb2, ^_bb3 : reg<amdgpu.scc>
 ^_bb2:
-  %lane_group = v_lshrrev_b32_src0_inline %lane, 4
-  %38 = s_mov_b32 15
-  %lane_offset = v_and_b32 %38, %lane
-  %40 = v_mov_b32_copy %block_base
-  %41 = v_add_u32 %lane_group, %40
-  %42 = v_mad_u32_u24_src1_lit %41, %lane_offset, 105
-  %43 = v_lshlrev_b32_src0_inline %42, 2
-  %loaded = global_load_b32_saddr %43, %input_view
-  global_store_b32_saddr %43, %loaded, %output_view
-  %49 = s_add_u32 %block_base, %block_step
-  low.br ^_bb1(%49: reg<amdgpu.sgpr>)
+  %block = v_add_u32 %block_base, %lane_group
+  %linear = v_mad_u32_u24_src1_lit %block, %lane_offset, 105
+  %42 = v_lshlrev_b32_src0_inline %linear, 2
+  %loaded = global_load_b32_saddr %42, %input_view
+  global_store_b32_saddr %42, %loaded, %output_view
+  %45 = s_add_u32 %block_base, %block_step
+  low.br ^_bb1(%45: reg<amdgpu.sgpr>)
 ^_bb3:
   return
 }
@@ -387,10 +383,8 @@ func.def target(@target) @index_divergent_i1_bitwise_select(%values: vector<2xi3
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @index_divergent_i1_bitwise_select(%values: reg<amdgpu.vgpr x2>, %lower_index: reg<amdgpu.sgpr>, %upper_index: reg<amdgpu.sgpr>, %true_value: reg<amdgpu.vgpr>, %false_value: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %lane = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
-  %25 = v_mov_b32_copy %lower_index
-  %at_or_above_lower = v_cmp_ge_i32 %lane, %25
-  %27 = v_mov_b32_copy %upper_index
-  %below_upper = v_cmp_lt_i32 %lane, %27
+  %at_or_above_lower = v_cmp_ge_i32 %lane, %lower_index
+  %below_upper = v_cmp_lt_i32 %lane, %upper_index
   %inside_bounds = s_and_b64 %at_or_above_lower, %below_upper
   %touches_bound = s_or_b64 %at_or_above_lower, %below_upper
   %exclusive_bound = s_xor_b64 %inside_bounds, %touches_bound
@@ -421,15 +415,12 @@ low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @index_m
   %lane = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
   %empty_reference_count = s_mov_b32 0
   %has_reference = s_cmp_lg_i32 %reference_count, %empty_reference_count
-  %23 = v_mov_b32_copy %lower_index
-  %at_or_above_lower = v_cmp_ge_i32 %lane, %23
-  %25 = s_mov_b64_exec_read
-  %26 = slice %25[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %27 = slice %25[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %29 = s_cselect_b32 %26, %empty_reference_count, %has_reference
-  %30 = s_cselect_b32 %27, %empty_reference_count, %has_reference
-  %31 = concat(%29, %30) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
-  %inside_reference = s_and_b64 %31, %at_or_above_lower
+  %at_or_above_lower = v_cmp_ge_i32 %lane, %lower_index
+  %25 = slice %at_or_above_lower[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %26 = s_cselect_b32 %25, %empty_reference_count, %has_reference
+  %27 = slice %at_or_above_lower[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %28 = s_cselect_b32 %27, %empty_reference_count, %has_reference
+  %inside_reference = concat(%26, %28) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
   %selected = v_cndmask_b32 %false_value, %true_value, %inside_reference
   return %selected
 }
@@ -543,18 +534,89 @@ func.def target(@target) @offset_compare_uniform(%lhs: offset, %rhs: offset) -> 
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @offset_compare_uniform(%lhs: reg<amdgpu.sgpr x2>, %rhs: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.sgpr x2>) asm {
   %7 = slice %lhs[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %8 = v_mov_b32_copy %7
-  %9 = slice %lhs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %10 = v_mov_b32_copy %9
-  %11 = slice %rhs[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %12 = v_mov_b32_copy %11
-  %13 = slice %rhs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
-  %14 = v_mov_b32_copy %13
-  %15 = v_cmp_lt_u32 %10, %14
-  %16 = v_cmp_lt_u32 %8, %12
-  %17 = v_cmp_eq_i32 %10, %14
-  %18 = s_and_b64 %17, %16
-  %result = s_or_b64 %15, %18
+  %8 = slice %lhs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %9 = slice %rhs[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %10 = slice %rhs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %11 = v_cmp_lt_u32 %8, %10
+  %12 = v_cmp_lt_u32 %7, %9
+  %13 = v_cmp_eq_i32 %8, %10
+  %14 = s_and_b64 %13, %12
+  %result = s_or_b64 %11, %14
+  return %result
+}
+
+// ====
+
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @index_compare_mixed_width_uniform(%narrow: i32, %wide_input: i64) -> (i1) {
+  %bounded = scalar.assume %wide_input [range(%wide_input, 0, 8589934591)] : i64
+  %wide = index.cast %bounded : i64 to index
+  %signed = index.cast %narrow : i32 to index
+  %result = index.cmp slt, %signed, %wide : index
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @index_compare_mixed_width_uniform(%signed: reg<amdgpu.sgpr>, %wide: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.sgpr x2>) asm {
+  %10 = s_ashr_i32_rhs_inline %signed, 31
+  %14 = slice %wide[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %15 = slice %wide[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %16 = v_cmp_lt_i32 %10, %15
+  %17 = v_cmp_lt_u32 %signed, %14
+  %18 = v_cmp_eq_i32 %10, %15
+  %19 = s_and_b64 %18, %17
+  %result = s_or_b64 %16, %19
+  return %result
+}
+
+// ====
+
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @index_compare_mixed_width_divergent(%values: vector<2xi32>, %wide_input: i64) -> (i1) {
+  %narrow = vector.extract %values[0] : vector<2xi32> -> i32
+  %bounded = scalar.assume %wide_input [range(%wide_input, 0, 8589934591)] : i64
+  %wide = index.cast %bounded : i64 to index
+  %signed = index.cast %narrow : i32 to index
+  %result = index.cmp slt, %wide, %signed : index
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @index_compare_mixed_width_divergent(%values: reg<amdgpu.vgpr x2>, %wide: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.sgpr x2>) asm {
+  %signed = slice %values[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %12 = v_ashrrev_i32_src0_inline %signed, 31
+  %14 = slice %wide[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %15 = slice %wide[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %18 = v_cmp_lt_i32 %15, %12
+  %19 = v_cmp_lt_u32 %14, %signed
+  %20 = v_cmp_eq_i32 %15, %12
+  %21 = s_and_b64 %20, %19
+  %result = s_or_b64 %18, %21
+  return %result
+}
+
+// ====
+
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @offset_compare_mixed_width(%narrow: i32, %wide: offset) -> (i1) {
+  %unsigned = index.cast %narrow : i32 to offset
+  %result = index.cmp ult, %unsigned, %wide : offset
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @offset_compare_mixed_width(%unsigned: reg<amdgpu.sgpr>, %wide: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.sgpr x2>) asm {
+  %8 = s_mov_b32 0
+  %12 = slice %wide[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %13 = slice %wide[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %14 = v_cmp_lt_u32 %8, %13
+  %15 = v_cmp_lt_u32 %unsigned, %12
+  %16 = v_cmp_eq_i32 %8, %13
+  %17 = s_and_b64 %16, %15
+  %result = s_or_b64 %14, %17
   return %result
 }
 

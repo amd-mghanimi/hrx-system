@@ -16,6 +16,7 @@ from loom.target.arch.amdgpu.descriptor_overlay import (
     AmdgpuImplicitOperandOverlay,
     AmdgpuOperandOverlay,
     AmdgpuOperandPredefinedValueRef,
+    _materialize_operand_overlay,
     materialize_amdgpu_descriptor_overlay,
     materialize_amdgpu_descriptor_overlays,
 )
@@ -752,6 +753,106 @@ def test_materialize_rejects_repeated_overlay_xml_field() -> None:
         materialize_amdgpu_descriptor_overlay(spec, overlay)
 
 
+def _literal_subfield_overlay(
+    first: Immediate,
+    second: Immediate,
+) -> AmdgpuDescriptorOverlay:
+    return AmdgpuDescriptorOverlay(
+        descriptor_key="amdgpu.literal_subfields",
+        instruction_name="V_ADD_NC_U32",
+        encoding_name="VOP2_INST_LITERAL",
+        encoding_condition="has_lit",
+        semantic_tag="test.literal_subfields",
+        schedule_class="amdgpu.valu",
+        operands=(
+            AmdgpuOperandOverlay("VDST", _result("dst", _VGPR_ALT)),
+            AmdgpuOperandOverlay("VSRC1", _operand("rhs", _VGPR_ALT)),
+        ),
+        immediate_fields=("LITERAL", "LITERAL"),
+        immediates=(first, second),
+    )
+
+
+def test_materialize_accepts_disjoint_immediate_encoding_subfields() -> None:
+    spec = parse_amdgpu_isa_xml_text(SAMPLE_XML, source_name="sample.xml")
+    descriptor = materialize_amdgpu_descriptor_overlay(
+        spec,
+        _literal_subfield_overlay(
+            Immediate(
+                "low_flag",
+                ImmediateKind.UNSIGNED,
+                bit_width=1,
+                encoding_field_bit_offset=0,
+                unsigned_max=1,
+            ),
+            Immediate(
+                "high_flag",
+                ImmediateKind.UNSIGNED,
+                bit_width=1,
+                encoding_field_bit_offset=1,
+                unsigned_max=1,
+            ),
+        ),
+    )
+
+    low_flag, high_flag = descriptor.immediates
+    assert low_flag.encoding_field_id == high_flag.encoding_field_id
+    assert low_flag.encoding_field_bit_offset == 0
+    assert high_flag.encoding_field_bit_offset == 1
+
+
+def test_materialize_rejects_overlapping_immediate_encoding_subfields() -> None:
+    spec = parse_amdgpu_isa_xml_text(SAMPLE_XML, source_name="sample.xml")
+    overlay = _literal_subfield_overlay(
+        Immediate(
+            "low_bits",
+            ImmediateKind.UNSIGNED,
+            bit_width=2,
+            encoding_field_bit_offset=0,
+            unsigned_max=3,
+        ),
+        Immediate(
+            "overlapping_flag",
+            ImmediateKind.UNSIGNED,
+            bit_width=1,
+            encoding_field_bit_offset=1,
+            unsigned_max=1,
+        ),
+    )
+
+    with pytest.raises(
+        AmdgpuDescriptorOverlayError,
+        match="uses overlapping immediate subfields for XML field 'LITERAL'",
+    ):
+        materialize_amdgpu_descriptor_overlay(spec, overlay)
+
+
+def test_materialize_rejects_immediate_subfield_beyond_xml_field() -> None:
+    spec = parse_amdgpu_isa_xml_text(SAMPLE_XML, source_name="sample.xml")
+    overlay = _literal_subfield_overlay(
+        Immediate(
+            "low_flag",
+            ImmediateKind.UNSIGNED,
+            bit_width=1,
+            encoding_field_bit_offset=0,
+            unsigned_max=1,
+        ),
+        Immediate(
+            "out_of_range_flag",
+            ImmediateKind.UNSIGNED,
+            bit_width=1,
+            encoding_field_bit_offset=32,
+            unsigned_max=1,
+        ),
+    )
+
+    with pytest.raises(
+        AmdgpuDescriptorOverlayError,
+        match=r"subfield range \[32, 33\) exceeds 32-bit encoding field 'LITERAL'",
+    ):
+        materialize_amdgpu_descriptor_overlay(spec, overlay)
+
+
 def test_materialize_accepts_synthetic_literal_on_literal_encoding_format() -> None:
     spec = parse_amdgpu_isa_xml_text(SAMPLE_XML, source_name="sample.xml")
     descriptor = materialize_amdgpu_descriptor_overlay(
@@ -1208,3 +1309,55 @@ def test_materialize_rejects_implicit_mapping_without_implicit_flag() -> None:
         match="without implicit flag",
     ):
         materialize_amdgpu_descriptor_overlay(spec, overlay)
+
+
+@pytest.mark.parametrize(
+    ("field", "xml_type", "role"),
+    [
+        ("VDST", "OPR_ACCVGPR", OperandRole.RESULT),
+        ("SRC0", "OPR_SRC_ACCVGPR", OperandRole.OPERAND),
+    ],
+)
+def test_fixed_accumulator_bank_needs_no_selector(field, xml_type, role) -> None:
+    operand = Operand("value", role, (RegClassAlt("amdgpu.agpr"),))
+    result = _materialize_operand_overlay(
+        AmdgpuOperandOverlay(field, operand), "ENC_VOP1", xml_type
+    )
+    assert result.encoding_adapter_id == 0
+    assert result.reg_alts == operand.reg_alts
+
+
+@pytest.mark.parametrize("xml_type", ["OPR_ACCVGPR", "OPR_SRC_ACCVGPR"])
+def test_fixed_accumulator_bank_rejects_vector_alternatives(xml_type) -> None:
+    with pytest.raises(
+        AmdgpuDescriptorOverlayError, match="exposes another register bank"
+    ):
+        _materialize_operand_overlay(
+            AmdgpuOperandOverlay(
+                "VDST",
+                Operand(
+                    "value",
+                    OperandRole.RESULT,
+                    (RegClassAlt("amdgpu.agpr"), RegClassAlt("amdgpu.vgpr")),
+                ),
+            ),
+            "ENC_VOP1",
+            xml_type,
+        )
+
+
+def test_fixed_accumulator_bank_rejects_a_switchable_selector() -> None:
+    with pytest.raises(AmdgpuDescriptorOverlayError, match="has a bank selector"):
+        _materialize_operand_overlay(
+            AmdgpuOperandOverlay(
+                "VDST",
+                Operand(
+                    "value",
+                    OperandRole.RESULT,
+                    (RegClassAlt("amdgpu.agpr"),),
+                    encoding_adapter_id=1,
+                ),
+            ),
+            "ENC_VOP3P",
+            "OPR_ACCVGPR",
+        )

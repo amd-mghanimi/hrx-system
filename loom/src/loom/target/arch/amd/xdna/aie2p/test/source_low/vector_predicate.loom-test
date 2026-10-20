@@ -1,4 +1,4 @@
-// RUN: emit source-low output=low
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
 
 aie2p.target<core> @target
 
@@ -22,15 +22,16 @@ low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @cmp_i8_m
   %eq = veqz.8 %34
   %36 = vlt.u8x64 %lhs, %rhs
   %37 = vlt.u8x64 %rhs, %lhs
-  %38 = predicate.or.low32 %36, %37
-  %ne = predicate.or.high32 %36, %37, %38
+  %38 = predicate.or.low32.rhs_tied %36, %37
+  %ne = predicate.or.high32.rhs_tied %36, %38
   %slt = vlt.s8x64 %lhs, %rhs
   %sle = vge.s8x64 %rhs, %lhs
   %sgt = vlt.s8x64 %rhs, %lhs
   %sge = vge.s8x64 %lhs, %rhs
   %ule = vge.u8x64 %rhs, %lhs
+  %ugt = vlt.u8x64 %rhs, %lhs
   %uge = vge.u8x64 %lhs, %rhs
-  return %eq, %ne, %slt, %sle, %sgt, %sge, %36, %ule, %37, %uge
+  return %eq, %ne, %slt, %sle, %sgt, %sge, %36, %ule, %ugt, %uge
 }
 
 // ====
@@ -163,29 +164,29 @@ low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @predicat
   %byte_lt = vlt.s8x64 %word_lhs, %word_rhs
   %37 = vlt.u8x64 %word_lhs, %word_rhs
   %38 = vlt.u8x64 %word_rhs, %word_lhs
-  %39 = predicate.or.low32 %37, %38
-  %byte_ne = predicate.or.high32 %37, %38, %39
+  %39 = predicate.or.low32.rhs_tied %37, %38
+  %byte_ne = predicate.or.high32.rhs_tied %37, %39
   %41 = predicate.and.low32 %byte_lt, %byte_ne
   %byte_and = predicate.and.high32 %byte_lt, %byte_ne, %41
-  %43 = predicate.or.low32 %byte_lt, %byte_ne
-  %byte_or = predicate.or.high32 %byte_lt, %byte_ne, %43
-  %45 = predicate.xor.low32 %byte_and, %byte_or
-  %byte_mask = predicate.xor.high32 %byte_and, %byte_or, %45
+  %43 = predicate.or.low32.rhs_tied %byte_lt, %byte_ne
+  %byte_or = predicate.or.high32.rhs_tied %byte_lt, %43
+  %45 = predicate.xor.low32.rhs_tied %byte_and, %byte_or
+  %byte_mask = predicate.xor.high32.rhs_tied %byte_and, %45
   %byte_result = vsel.8 %word_false, %word_true, %byte_mask
   %48 = vsub.16 %word_lhs, %word_rhs
   %49 = veqz.16.el.low32 %48
   %half_eq = predicate.complete.zero.high32 %49, 0
   %51 = vge.u16x32.el.low32 %word_lhs, %word_rhs
   %half_uge = predicate.complete.zero.high32 %51, 0
-  %53 = predicate.or.low32 %half_eq, %half_uge
-  %half_mask = predicate.or.high32 %half_eq, %half_uge, %53
+  %53 = predicate.or.low32.rhs_tied %half_eq, %half_uge
+  %half_mask = predicate.or.high32.rhs_tied %half_eq, %53
   %half_result = vsel.16.mask64 %word_false, %word_true, %half_mask
   %56 = vge.s32x16.el.low32 %word_rhs, %word_lhs
   %word_sle = predicate.complete.zero.high32 %56, 0
   %58 = vlt.u32x16.el.low32 %word_rhs, %word_lhs
   %word_ugt = predicate.complete.zero.high32 %58, 0
-  %60 = predicate.xor.low32 %word_sle, %word_ugt
-  %word_mask = predicate.xor.high32 %word_sle, %word_ugt, %60
+  %60 = predicate.xor.low32.rhs_tied %word_sle, %word_ugt
+  %word_mask = predicate.xor.high32.rhs_tied %word_sle, %60
   %word_result = vsel.32.mask64 %word_false, %word_true, %word_mask
   return %byte_result, %half_result, %word_result
 }
@@ -210,4 +211,27 @@ low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @predicat
   %static = vextract.8.imm %14, 63
   %dynamic = vextract.8.reg %14, %lane
   return %static, %dynamic
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @predicate_constants() -> (vector<64xi1>, vector<17xi1>) {
+  %true_mask = vector.constant true : vector<64xi1>
+  %false_mask = vector.constant false : vector<17xi1>
+  func.return %true_mask, %false_mask : vector<64xi1>, vector<17xi1>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @predicate_constants() -> (reg<aie2p.elpredicate>, reg<aie2p.elpredicate>) asm {
+  %6 = mov.short 1
+  %7 = vbcst.8 %6
+  %8 = vsub.8 %7, %7
+  %true_mask = vlt.u8x64 %8, %7
+  %10 = mov.short 0
+  %11 = vbcst.8 %10
+  %12 = vsub.8 %11, %11
+  %false_mask = vlt.u8x64 %12, %11
+  return %true_mask, %false_mask
 }

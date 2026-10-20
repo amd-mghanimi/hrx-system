@@ -36,14 +36,15 @@ static iree_const_byte_span_t Record(iree_const_byte_span_t table,
 
 static loom_sanitizer_site_payload_t MakePayload(
     iree_const_byte_span_t extension_data = iree_const_byte_span_empty()) {
-  loom_sanitizer_site_payload_t payload = {};
-  payload.site_kind = LOOM_SANITIZER_SITE_KIND_ACCESS;
-  payload.check_kind = LOOM_SANITIZER_CHECK_KIND_ACCESS_RANGE;
-  payload.provenance_kind = LOOM_SANITIZER_PROVENANCE_KIND_ANALYSIS;
-  payload.lane_policy = LOOM_SANITIZER_LANE_POLICY_ANY_LANE;
-  payload.lineage_role = LOOM_SANITIZER_LINEAGE_ROLE_ORIGINAL;
-  payload.flags = 0x1234u;
-  payload.extension_data = extension_data;
+  loom_sanitizer_site_payload_t payload = {
+      .site_kind = LOOM_SANITIZER_SITE_KIND_ACCESS,
+      .check_kind = LOOM_SANITIZER_CHECK_KIND_ACCESS_RANGE,
+      .provenance_kind = LOOM_SANITIZER_PROVENANCE_KIND_ANALYSIS,
+      .lane_policy = LOOM_SANITIZER_LANE_POLICY_ANY_LANE,
+      .lineage_role = LOOM_SANITIZER_LINEAGE_ROLE_ORIGINAL,
+      .flags = 0x1234u,
+      .extension_data = extension_data,
+  };
   return payload;
 }
 
@@ -68,8 +69,8 @@ class SiteTableTest : public ::testing::Test {
   }
 
   loom_location_id_t AddFileLocation(iree_string_view_t source_name,
-                                     uint16_t start_line, uint16_t start_column,
-                                     uint16_t end_line, uint16_t end_column) {
+                                     uint32_t start_line, uint32_t start_column,
+                                     uint32_t end_line, uint32_t end_column) {
     loom_source_id_t source_id = LOOM_SOURCE_ID_INVALID;
     IREE_CHECK_OK(
         loom_module_register_source(module_, source_name, &source_id));
@@ -104,8 +105,7 @@ class SiteTableTest : public ::testing::Test {
         &module_->arena, 2, sizeof(*children), (void**)&children));
     children[0] = first_child;
     children[1] = second_child;
-    loom_location_entry_t entry = {};
-    entry.kind = LOOM_LOCATION_FUSED;
+    loom_location_entry_t entry = {.kind = LOOM_LOCATION_FUSED};
     entry.fused.count = 2;
     entry.fused.children = children;
     loom_location_id_t location_id = LOOM_LOCATION_UNKNOWN;
@@ -128,39 +128,39 @@ TEST_F(SiteTableTest, EncodesRecordsPayloadsSourcesAndUnknownLocations) {
       AddFileLocation(IREE_SV("model.loom"), 12, 3, 12, 19);
 
   loom_sanitizer_site_row_t rows[3] = {};
-  rows[0] = (loom_sanitizer_site_row_t){
-      /*.site_id=*/0,
-      /*.op=*/nullptr,
-      /*.op_kind=*/LOOM_OP_SANITIZER_ASSERT_ACCESS,
-      /*.location=*/source_location,
-      /*.payload_location=*/source_location,
-      /*.source_location=*/source_location,
-      /*.flags=*/LOOM_SANITIZER_SITE_ROW_HAS_PAYLOAD,
-      /*.payload=*/payload,
+  rows[0] = loom_sanitizer_site_row_t{
+      .site_id = 0,
+      .op = nullptr,
+      .op_kind = LOOM_OP_SANITIZER_ASSERT_ACCESS,
+      .location = source_location,
+      .payload_location = source_location,
+      .source_location = source_location,
+      .flags = LOOM_SANITIZER_SITE_ROW_HAS_PAYLOAD,
+      .payload = payload,
   };
-  rows[1] = (loom_sanitizer_site_row_t){
-      /*.site_id=*/1,
-      /*.op=*/nullptr,
-      /*.op_kind=*/LOOM_OP_SANITIZER_ASSERT_VALUE,
-      /*.location=*/source_location,
-      /*.payload_location=*/LOOM_LOCATION_UNKNOWN,
-      /*.source_location=*/source_location,
-      /*.flags=*/0,
-      /*.payload=*/{},
+  rows[1] = loom_sanitizer_site_row_t{
+      .site_id = 1,
+      .op = nullptr,
+      .op_kind = LOOM_OP_SANITIZER_ASSERT_VALUE,
+      .location = source_location,
+      .payload_location = LOOM_LOCATION_UNKNOWN,
+      .source_location = source_location,
+      .flags = 0,
+      .payload = {},
   };
-  rows[2] = (loom_sanitizer_site_row_t){
-      /*.site_id=*/2,
-      /*.op=*/nullptr,
-      /*.op_kind=*/LOOM_OP_SANITIZER_ASSERT_OP,
-      /*.location=*/LOOM_LOCATION_UNKNOWN,
-      /*.payload_location=*/LOOM_LOCATION_UNKNOWN,
-      /*.source_location=*/LOOM_LOCATION_UNKNOWN,
-      /*.flags=*/0,
-      /*.payload=*/{},
+  rows[2] = loom_sanitizer_site_row_t{
+      .site_id = 2,
+      .op = nullptr,
+      .op_kind = LOOM_OP_SANITIZER_ASSERT_OP,
+      .location = LOOM_LOCATION_UNKNOWN,
+      .payload_location = LOOM_LOCATION_UNKNOWN,
+      .source_location = LOOM_LOCATION_UNKNOWN,
+      .flags = 0,
+      .payload = {},
   };
   loom_sanitizer_site_collection_t collection = {
-      /*.rows=*/rows,
-      /*.row_count=*/IREE_ARRAYSIZE(rows),
+      .rows = rows,
+      .row_count = IREE_ARRAYSIZE(rows),
   };
 
   iree_const_byte_span_t table = iree_const_byte_span_empty();
@@ -292,25 +292,25 @@ TEST_F(SiteTableTest, EncodesRecordsPayloadsSourcesAndUnknownLocations) {
 TEST_F(SiteTableTest, ResolvesSourcesThroughTaggedAndFusedLocations) {
   constexpr iree_host_size_t kKernelSourceLength = sizeof("kernel.loom") - 1;
   loom_location_id_t file_location =
-      AddFileLocation(IREE_SV("kernel.loom"), 21, 5, 23, 7);
+      AddFileLocation(IREE_SV("kernel.loom"), 70021, 80005, 90023, 100007);
   loom_location_id_t tagged_location = AddTaggedLocation(
       LOOM_LOCATION_TAG_TEMPLATE_INSTANTIATION, file_location);
   loom_location_id_t fused_location =
       AddFusedLocation(LOOM_LOCATION_UNKNOWN, tagged_location);
 
   loom_sanitizer_site_row_t row = {
-      /*.site_id=*/0,
-      /*.op=*/nullptr,
-      /*.op_kind=*/LOOM_OP_SANITIZER_ASSERT_LAYOUT,
-      /*.location=*/fused_location,
-      /*.payload_location=*/LOOM_LOCATION_UNKNOWN,
-      /*.source_location=*/LOOM_LOCATION_UNKNOWN,
-      /*.flags=*/0,
-      /*.payload=*/{},
+      .site_id = 0,
+      .op = nullptr,
+      .op_kind = LOOM_OP_SANITIZER_ASSERT_LAYOUT,
+      .location = fused_location,
+      .payload_location = LOOM_LOCATION_UNKNOWN,
+      .source_location = LOOM_LOCATION_UNKNOWN,
+      .flags = 0,
+      .payload = {},
   };
   loom_sanitizer_site_collection_t collection = {
-      /*.rows=*/&row,
-      /*.row_count=*/1,
+      .rows = &row,
+      .row_count = 1,
   };
 
   iree_const_byte_span_t table = iree_const_byte_span_empty();
@@ -332,14 +332,14 @@ TEST_F(SiteTableTest, ResolvesSourcesThroughTaggedAndFusedLocations) {
                    kKernelSourceLength),
             0);
   EXPECT_EQ(ReadU32(record, LOOM_SANITIZER_SITE_TABLE_RECORD_START_LINE_OFFSET),
-            21u);
+            70021u);
   EXPECT_EQ(
       ReadU32(record, LOOM_SANITIZER_SITE_TABLE_RECORD_START_COLUMN_OFFSET),
-      5u);
+      80005u);
   EXPECT_EQ(ReadU32(record, LOOM_SANITIZER_SITE_TABLE_RECORD_END_LINE_OFFSET),
-            23u);
+            90023u);
   EXPECT_EQ(ReadU32(record, LOOM_SANITIZER_SITE_TABLE_RECORD_END_COLUMN_OFFSET),
-            7u);
+            100007u);
 }
 
 }  // namespace

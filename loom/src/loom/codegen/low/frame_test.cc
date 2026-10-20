@@ -9,6 +9,7 @@
 #include "iree/base/internal/arena.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+#include "loom/codegen/low/guarded_motion.h"
 #include "loom/codegen/low/packet.h"
 #include "loom/codegen/low/schedule/diagnostics.h"
 #include "loom/codegen/low/schedule/physical_issue.h"
@@ -18,8 +19,11 @@
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/low/ops.h"
+#include "loom/rewrite/rewriter.h"
+#include "loom/target/facts_builder.h"
 #include "loom/target/test/descriptors.h"
 #include "loom/target/test/low_registry.h"
+#include "loom/target/test/target_records.h"
 #include "loom/testing/module_ptr.h"
 
 namespace loom {
@@ -50,8 +54,9 @@ class LowEmissionFrameTest : public ::testing::Test {
   }
 
   ModulePtr ParseModule(const char* source) {
-    loom_text_parse_options_t options = {};
-    options.diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr};
+    loom_text_parse_options_t options = {
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr},
+    };
     loom_low_descriptor_text_asm_environment_initialize(
         &registry_.registry, &options.low_asm_environment);
     loom_module_t* module = nullptr;
@@ -77,15 +82,26 @@ low.func.def target<test.low.core> @structural_model() -> (reg<test.i32 x4>) asm
       loom_low_schedule_structural_model_list_t structural_models,
       loom_low_emission_frame_t* out_frame,
       loom_low_schedule_strategy_t schedule_strategy =
-          LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL) {
+          LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      loom_low_schedule_flags_t schedule_flags = 0) {
     loom_block_t* module_block = loom_module_block(module);
     IREE_ASSERT_EQ(module_block->op_count, 1);
-    loom_low_emission_frame_options_t options = {};
-    options.descriptor_registry = &registry_.registry;
-    options.schedule_structural_models = structural_models;
-    options.schedule_strategy = schedule_strategy;
-    return loom_low_emission_frame_build(module, loom_block_op(module_block, 0),
-                                         &options, &arena_, out_frame);
+    loom_low_emission_frame_options_t options = {
+        .descriptor_registry = &registry_.registry,
+        .schedule_structural_models = structural_models,
+        .schedule_strategy = schedule_strategy,
+        .schedule_flags = schedule_flags,
+    };
+    bool accepted = false;
+    iree_status_t status =
+        loom_low_emission_frame_build(module, loom_block_op(module_block, 0),
+                                      &options, &arena_, out_frame, &accepted);
+    if (iree_status_is_ok(status)) {
+      EXPECT_TRUE(accepted);
+      // Returned frames own their rows after scheduler and trial scratch dies.
+      iree_arena_block_pool_trim(&block_pool_);
+    }
+    return status;
   }
 
   const loom_low_schedule_node_t* FindNode(
@@ -103,6 +119,511 @@ low.func.def target<test.low.core> @structural_model() -> (reg<test.i32 x4>) asm
   loom_target_low_descriptor_registry_t registry_ = {};
   iree_arena_allocator_t arena_ = {};
 };
+
+constexpr const char kLoopPlacementSource[] = R"(
+low.func.def target<test.low.core> @loop_placement(%source: reg<test.i32>) asm {
+  %temporary = test.total.add.i32 %source, %source
+  %private = copy %source : reg<test.i32> -> reg<test.i32>
+  %candidate = test.total.tied.i32 %private
+  %dead = test.total.tied.i32 %temporary
+  %keep_source_live = test.total.add.i32 %source, %source
+  low.br ^loop
+^loop:
+  low.cond_br %candidate, ^loop, ^exit : reg<test.i32>
+^exit:
+  return
+}
+)";
+
+constexpr const char kNestedLoopPlacementSource[] = R"(
+low.func.def target<test.low.core> @nested_loop_placement(%source: reg<test.i32>, %condition: reg<test.i32>) asm {
+  %temporary = test.total.add.i32 %source, %source
+  %private = copy %source : reg<test.i32> -> reg<test.i32>
+  %candidate = test.total.tied.i32 %private
+  %dead = test.total.tied.i32 %temporary
+  %keep_source_live = test.total.add.i32 %source, %source
+  low.br ^outer
+^outer:
+  low.cond_br %condition, ^inner_entry, ^exit : reg<test.i32>
+^inner_entry:
+  low.br ^inner
+^inner:
+  low.cond_br %condition, ^body, ^outer_latch : reg<test.i32>
+^body:
+  %used = test.total.add.i32 %candidate, %source
+  low.br ^inner
+^outer_latch:
+  low.br ^outer
+^exit:
+  return
+}
+)";
+
+struct LoopPlacementCost {
+  uint64_t maximum_execution_multiplier;
+  uint32_t query_count;
+};
+
+bool QueryLoopPlacementCost(void* user_data,
+                            const loom_low_descriptor_t* descriptor,
+                            loom_low_loop_placement_cost_t* out_cost) {
+  auto* cost = static_cast<LoopPlacementCost*>(user_data);
+  EXPECT_EQ(descriptor, loom_low_descriptor_set_descriptor_at(
+                            loom_test_low_core_descriptor_set(),
+                            TEST_LOW_CORE_DESCRIPTOR_REF_TEST_TOTAL_TIED_I32));
+  ++cost->query_count;
+  *out_cost = {
+      .maximum_execution_multiplier = cost->maximum_execution_multiplier,
+      .maximum_schedule_cycle_count = 2,
+  };
+  return true;
+}
+
+TEST_F(LowEmissionFrameTest, LoopPlacementConsumesRetainedHeaderCount) {
+  ModulePtr module = ParseModule(kLoopPlacementSource);
+  loom_op_t* function = loom_block_op(loom_module_block(module.get()), 0);
+  loom_region_t* body = loom_low_func_def_body(function);
+  loom_block_t* entry = loom_region_block(body, 0);
+  loom_block_t* loop = loom_region_block(body, 1);
+  loom_op_t* copy = loom_block_op(entry, 1);
+  loom_op_t* candidate = loom_block_op(entry, 2);
+  loom_op_t* original_anchor = loom_block_op(entry, 3);
+
+  loom_low_loop_execution_map_t* loop_execution = nullptr;
+  IREE_ASSERT_OK(
+      loom_low_loop_execution_map_allocate(&arena_, &loop_execution));
+  IREE_ASSERT_OK(loom_low_loop_execution_map_insert(
+      loop_execution, loop->last_op,
+      {.trip_count = 7, .count_kind = LOOM_LOW_LOOP_EXECUTION_COUNT_BOUNDED}));
+  const loom_low_allocation_budget_t budget = {
+      .register_class = IREE_SV("test.i32"),
+      .max_units = 2,
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .loop_execution = loop_execution,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
+                                               &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_EQ(frame.allocation.spill_count, 2u);
+
+  LoopPlacementCost cost = {.maximum_execution_multiplier = 7};
+  loom_low_loop_placement_plan_t rejected_plan = {};
+  IREE_ASSERT_OK(loom_low_loop_placement_plan(
+      &frame.schedule, &frame.allocation, loop_execution,
+      QueryLoopPlacementCost, &cost, &arena_, &rejected_plan));
+  EXPECT_EQ(rejected_plan.candidate_count, 0u);
+
+  cost.maximum_execution_multiplier = 8;
+  loom_low_loop_placement_plan_t accepted_plan = {};
+  IREE_ASSERT_OK(loom_low_loop_placement_plan(
+      &frame.schedule, &frame.allocation, loop_execution,
+      QueryLoopPlacementCost, &cost, &arena_, &accepted_plan));
+  ASSERT_EQ(accepted_plan.candidate_count, 1u);
+  EXPECT_EQ(cost.query_count, 2u);
+
+  loom_rewriter_t rewriter = {};
+  loom_rewriter_initialize(&rewriter, module.get(), &arena_);
+  IREE_ASSERT_OK(loom_low_loop_placement_apply(&rewriter, &accepted_plan));
+  EXPECT_EQ(copy->parent_block, loop);
+  EXPECT_EQ(candidate->parent_block, loop);
+  EXPECT_EQ(copy->next_op, candidate);
+  EXPECT_EQ(candidate->next_op, loop->last_op);
+  IREE_ASSERT_OK(loom_low_loop_placement_rollback(&rewriter, &accepted_plan));
+  loom_rewriter_deinitialize(&rewriter);
+  EXPECT_EQ(copy->parent_block, entry);
+  EXPECT_EQ(candidate->parent_block, entry);
+  EXPECT_EQ(copy->next_op, candidate);
+  EXPECT_EQ(candidate->next_op, original_anchor);
+  EXPECT_EQ(original_anchor->parent_block, entry);
+}
+
+TEST_F(LowEmissionFrameTest, LoopPlacementMultipliesCrossedLoopCounts) {
+  ModulePtr module = ParseModule(kNestedLoopPlacementSource);
+  loom_op_t* function = loom_block_op(loom_module_block(module.get()), 0);
+  loom_region_t* body = loom_low_func_def_body(function);
+  loom_block_t* entry = loom_region_block(body, 0);
+  loom_op_t* outer_branch = loom_region_block(body, 1)->last_op;
+  loom_op_t* inner_branch = loom_region_block(body, 3)->last_op;
+  const loom_low_allocation_budget_t budget = {
+      .register_class = IREE_SV("test.i32"),
+      .max_units = 2,
+  };
+  const loom_low_allocation_fixed_value_t fixed_values[] = {
+      {entry->arg_ids[0], LOOM_LOW_ALLOCATION_LOCATION_TARGET_ID, 0, 1},
+      {entry->arg_ids[1], LOOM_LOW_ALLOCATION_LOCATION_TARGET_ID, 1, 1},
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+      .allocation_fixed_values = fixed_values,
+      .allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values),
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
+                                               &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_GT(frame.allocation.spill_count, 0u);
+
+  const auto expect_plan =
+      [&](bool has_outer_count, uint64_t outer_count, uint64_t inner_count,
+          iree_host_size_t expected_candidates, uint32_t expected_queries) {
+        loom_low_loop_execution_map_t* loop_execution = nullptr;
+        IREE_ASSERT_OK(
+            loom_low_loop_execution_map_allocate(&arena_, &loop_execution));
+        IREE_ASSERT_OK(loom_low_loop_execution_map_insert(
+            loop_execution, inner_branch,
+            {
+                .trip_count = inner_count,
+                .count_kind = LOOM_LOW_LOOP_EXECUTION_COUNT_EXACT,
+            }));
+        if (has_outer_count) {
+          IREE_ASSERT_OK(loom_low_loop_execution_map_insert(
+              loop_execution, outer_branch,
+              {
+                  .trip_count = outer_count,
+                  .count_kind = LOOM_LOW_LOOP_EXECUTION_COUNT_BOUNDED,
+              }));
+        }
+        LoopPlacementCost cost = {.maximum_execution_multiplier = 8};
+        loom_low_loop_placement_plan_t plan = {};
+        IREE_ASSERT_OK(loom_low_loop_placement_plan(
+            &frame.schedule, &frame.allocation, loop_execution,
+            QueryLoopPlacementCost, &cost, &arena_, &plan));
+        EXPECT_EQ(plan.candidate_count, expected_candidates);
+        EXPECT_EQ(cost.query_count, expected_queries);
+      };
+
+  expect_plan(false, 0, 4, 0, 1);
+  expect_plan(false, 0, 0, 1, 1);
+  expect_plan(true, 2, 4, 1, 1);
+  expect_plan(true, 3, 4, 0, 1);
+  expect_plan(true, UINT64_MAX, 0, 1, 1);
+}
+
+TEST_F(LowEmissionFrameTest, LoopPlacementRestoresRejectedTrial) {
+  ModulePtr module = ParseModule(kLoopPlacementSource);
+  loom_op_t* function = loom_block_op(loom_module_block(module.get()), 0);
+  loom_region_t* body = loom_low_func_def_body(function);
+  loom_block_t* entry = loom_region_block(body, 0);
+  loom_op_t* copy = loom_block_op(entry, 1);
+  loom_op_t* candidate = loom_block_op(entry, 2);
+  loom_op_t* original_anchor = loom_block_op(entry, 3);
+
+  loom_low_loop_execution_map_t* loop_execution = nullptr;
+  IREE_ASSERT_OK(
+      loom_low_loop_execution_map_allocate(&arena_, &loop_execution));
+  IREE_ASSERT_OK(loom_low_loop_execution_map_insert(
+      loop_execution, loom_region_block(body, 1)->last_op,
+      {.trip_count = 7, .count_kind = LOOM_LOW_LOOP_EXECUTION_COUNT_BOUNDED}));
+  const loom_low_allocation_budget_t budget = {
+      .register_class = IREE_SV("test.i32"),
+      .max_units = 2,
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .loop_execution = loop_execution,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+  };
+  loom_low_planning_statistics_t statistics = {};
+  options.statistics = &statistics;
+  LoopPlacementCost cost = {.maximum_execution_multiplier = 8};
+  loom_low_emission_frame_spill_free_options_t spill_free_options = {
+      .materialization_options =
+          {
+              .has_supported_storage_spaces = true,
+              .supported_storage_spaces = LOOM_LOW_STORAGE_SPACE_SET_NONE,
+          },
+      .loop_placement_cost_query = QueryLoopPlacementCost,
+      .loop_placement_cost_query_user_data = &cost,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = true;
+  IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
+      module.get(), function, &options, &spill_free_options, &arena_, &frame,
+      &accepted));
+
+  EXPECT_FALSE(accepted);
+  EXPECT_EQ(cost.query_count, 1u);
+  EXPECT_EQ(statistics.frame_build_count, 2u);
+  EXPECT_EQ(statistics.allocation_run_count, 2u);
+  EXPECT_EQ(copy->parent_block, entry);
+  EXPECT_EQ(candidate->parent_block, entry);
+  EXPECT_EQ(copy->next_op, candidate);
+  EXPECT_EQ(candidate->next_op, original_anchor);
+}
+
+TEST_F(LowEmissionFrameTest, ResidencyQueryConsumesRetainedFunctionFacts) {
+  ModulePtr module = ParseModule();
+  static const loom_target_residency_model_t model = {.best_tier = 4};
+  loom_target_facts_t target_facts = {};
+  loom_target_facts_builder_initialize(&loom_test_target_fact_type,
+                                       loom_test_target_bundles.values[1],
+                                       &target_facts);
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .function_target_facts = &target_facts,
+      .residency_query =
+          [](const loom_low_resolved_target_t* target,
+             const loom_low_storage_layout_space_sizes_t* storage_sizes) {
+            EXPECT_NE(target->target_facts, nullptr);
+            EXPECT_EQ(target->descriptor_set,
+                      loom_test_low_core_descriptor_set());
+            EXPECT_EQ(storage_sizes->workgroup_bytes, 64u);
+            return loom_target_residency_view(&model, 2);
+          },
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  // The function model has been released; the frame retains only the borrowed
+  // immutable policy and its value ceiling, not analysis-owned storage.
+  iree_arena_block_pool_trim(&block_pool_);
+  EXPECT_EQ(frame.residency.model, &model);
+  EXPECT_EQ(frame.residency.tier_limit, 2u);
+}
+
+TEST_F(LowEmissionFrameTest, StorageLeaseFrameRetainsValueProducers) {
+  ModulePtr module = ParseModule();
+  const loom_low_storage_lease_provider_t storage_lease_provider = {
+      .user_data = nullptr,
+      .query =
+          [](void* user_data, const loom_low_schedule_table_t* schedule,
+             const loom_low_schedule_node_t* node,
+             const loom_low_storage_lease_query_sink_t* sink) {
+            (void)user_data;
+            (void)schedule;
+            (void)node;
+            (void)sink;
+            return iree_ok_status();
+          },
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .storage_lease_provider = &storage_lease_provider,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+
+  // Allocation consumes this relation after scheduler scratch is released.
+  iree_arena_block_pool_trim(&block_pool_);
+  ASSERT_NE(frame.schedule.value_producer_nodes, nullptr);
+  const loom_low_schedule_node_t* load_node = FindNode(frame, LOOM_OP_LOW_OP);
+  ASSERT_NE(load_node, nullptr);
+  ASSERT_EQ(load_node->result_count, 1u);
+  const loom_value_ordinal_t result_ordinal =
+      loom_low_schedule_node_const_result_ordinals(load_node)[0];
+  EXPECT_EQ(
+      loom_low_schedule_value_producer_node(&frame.schedule, result_ordinal),
+      static_cast<uint32_t>(load_node - frame.schedule.nodes));
+}
+
+TEST_F(LowEmissionFrameTest, CallTransportRetainsLiveBoundaryRegisterClasses) {
+  ModulePtr module = ParseModule(R"(
+low.func.decl target<test.low.core> @callee(%value: reg<test.pressure.alias32>) -> (reg<test.pressure.alias32>, reg<test.pressure.alias32>)
+
+low.func.def target<test.low.core> @caller(%value: reg<test.pressure.alias32>) -> (reg<test.pressure.alias32>) asm {
+  %result, %unused = low.func.call @callee(%value) : (reg<test.pressure.alias32>) -> (reg<test.pressure.alias32>, reg<test.pressure.alias32>)
+  return %result
+}
+)");
+  const loom_low_descriptor_set_t* descriptors =
+      loom_test_low_core_descriptor_set();
+  uint16_t boundary_class = LOOM_LOW_REG_CLASS_NONE;
+  ASSERT_TRUE(loom_low_descriptor_set_lookup_register_class(
+      descriptors, IREE_SV("test.pressure.alias64"), &boundary_class, nullptr));
+  const loom_low_allocation_abi_location_t arguments[] = {{
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .descriptor_reg_class_id = boundary_class,
+      .location_base = 7,
+  }};
+  const loom_low_allocation_abi_location_t results[] = {
+      {
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+          .descriptor_reg_class_id = boundary_class,
+          .location_base = 6,
+      },
+      {
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+          .descriptor_reg_class_id = boundary_class,
+          .location_base = 5,
+      },
+  };
+  loom_low_call_contract_t contract = {
+      .arguments = arguments,
+      .argument_count = IREE_ARRAYSIZE(arguments),
+      .results = results,
+      .result_count = IREE_ARRAYSIZE(results),
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+  };
+  options.call_contracts.query = [](void* user_data, loom_symbol_ref_t callee) {
+    (void)callee;
+    return static_cast<const loom_low_call_contract_t*>(user_data);
+  };
+  options.call_contracts.user_data = &contract;
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 1), &options,
+      &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_EQ(frame.allocation.error_count, 0u);
+  ASSERT_EQ(frame.allocation.call_move_count, 1u);
+  const loom_low_allocation_call_moves_t& call = frame.allocation.call_moves[0];
+  EXPECT_EQ(call.result_count, 2u);
+  ASSERT_EQ(call.arguments.count, 1u);
+  ASSERT_EQ(call.results.count, 1u);
+  const loom_low_move_t& argument =
+      frame.allocation.moves[call.arguments.start];
+  EXPECT_EQ(argument.source.descriptor_reg_class_id,
+            TEST_LOW_CORE_REG_CLASS_ID_TEST_PRESSURE_ALIAS32);
+  EXPECT_EQ(argument.destination.descriptor_reg_class_id, boundary_class);
+  EXPECT_EQ(argument.destination.location, 7u);
+  const loom_low_move_t& result = frame.allocation.moves[call.results.start];
+  EXPECT_EQ(result.source.descriptor_reg_class_id, boundary_class);
+  EXPECT_EQ(result.source.location, 6u);
+  EXPECT_EQ(result.destination.descriptor_reg_class_id,
+            TEST_LOW_CORE_REG_CLASS_ID_TEST_PRESSURE_ALIAS32);
+}
+
+TEST_F(LowEmissionFrameTest, ExitTransportRetainsParallelBoundaryMoves) {
+  ModulePtr module = ParseModule(R"(
+low.func.def target<test.low.core> @pair(%first: reg<test.pressure.alias32>, %second: reg<test.pressure.alias32>) -> (reg<test.pressure.alias32>, reg<test.pressure.alias32>) asm {
+  return %first, %second
+}
+)");
+  const loom_low_descriptor_set_t* descriptors =
+      loom_test_low_core_descriptor_set();
+  uint16_t boundary_class = LOOM_LOW_REG_CLASS_NONE;
+  ASSERT_TRUE(loom_low_descriptor_set_lookup_register_class(
+      descriptors, IREE_SV("test.pressure.alias64"), &boundary_class, nullptr));
+  const loom_low_allocation_abi_location_t results[] = {
+      {LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, boundary_class, 7},
+      {LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, boundary_class, 6},
+  };
+  loom_op_t* function = loom_block_op(loom_module_block(module.get()), 0);
+  loom_block_t* body =
+      loom_region_entry_block(loom_low_func_def_body(function));
+  const loom_low_allocation_fixed_value_t fixed_values[] = {
+      {body->arg_ids[0], LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, 6, 1},
+      {body->arg_ids[1], LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, 7, 1},
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_fixed_values = fixed_values,
+      .allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values),
+      .allocation_exit_locations = results,
+      .allocation_exit_location_count = IREE_ARRAYSIZE(results),
+      .synchronous_storage_spaces = LOOM_LOW_STORAGE_SPACE_SET_STACK,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
+                                               &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_EQ(frame.allocation.error_count, 0u);
+  ASSERT_EQ(frame.allocation.exit_move_count, 1u);
+  const loom_low_allocation_exit_moves_t& exit = frame.allocation.exit_moves[0];
+  EXPECT_EQ(exit.result_count, 2u);
+  uint32_t registers[16] = {};
+  registers[6] = 0x11111111u;
+  registers[7] = 0x22222222u;
+  uint32_t move_storage[1] = {};
+  for (iree_host_size_t i = 0; i < exit.results.count; ++i) {
+    const loom_low_move_t& move =
+        frame.allocation.moves[exit.results.start + i];
+    const uint32_t value =
+        move.source.location_kind == LOOM_LOW_ALLOCATION_LOCATION_MOVE_STORAGE
+            ? move_storage[move.source.location]
+            : registers[move.source.location];
+    if (move.destination.location_kind ==
+        LOOM_LOW_ALLOCATION_LOCATION_MOVE_STORAGE) {
+      move_storage[move.destination.location] = value;
+    } else {
+      registers[move.destination.location] = value;
+    }
+  }
+  EXPECT_EQ(registers[7], 0x11111111u);
+  EXPECT_EQ(registers[6], 0x22222222u);
+}
+
+TEST_F(LowEmissionFrameTest, CommonCallClobbersProtectCallerValues) {
+  ModulePtr module = ParseModule(R"(
+low.func.decl target<test.low.core> @callee()
+
+low.func.def target<test.low.core> @caller(%value: reg<test.pressure.alias32>) -> (reg<test.pressure.alias32>) asm {
+  low.func.call @callee() : ()
+  return %value
+}
+)");
+  const loom_low_descriptor_set_t* descriptor_set =
+      loom_test_low_core_descriptor_set();
+  const loom_low_call_clobber_t common_clobber = {
+      .register_class = TEST_LOW_CORE_REG_CLASS_ID_TEST_PRESSURE_ALIAS32,
+      .location = 0,
+      .count =
+          descriptor_set
+              ->reg_classes[TEST_LOW_CORE_REG_CLASS_ID_TEST_PRESSURE_ALIAS32]
+              .allocatable_count,
+  };
+  struct CallContracts {
+    loom_low_call_contract_t contract;
+    loom_low_call_clobber_list_t common_clobbers;
+  } call_contracts = {
+      .contract = {},
+      .common_clobbers = {&common_clobber, 1},
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+  };
+  options.call_contracts.query =
+      [](void* user_data,
+         loom_symbol_ref_t callee) -> const loom_low_call_contract_t* {
+    (void)callee;
+    return &static_cast<CallContracts*>(user_data)->contract;
+  };
+  options.call_contracts.query_common_clobbers =
+      [](void* user_data, const loom_low_descriptor_set_t* descriptor_set) {
+        (void)descriptor_set;
+        return static_cast<CallContracts*>(user_data)->common_clobbers;
+      };
+  options.call_contracts.user_data = &call_contracts;
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 1), &options,
+      &arena_, &frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_EQ(frame.allocation.error_count, 0u);
+  ASSERT_EQ(frame.allocation.assignment_count, 1u);
+  EXPECT_EQ(frame.allocation.assignments[0].location_kind,
+            LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT);
+  EXPECT_EQ(frame.allocation.spill_count, 1u);
+}
 
 TEST_F(LowEmissionFrameTest, ReusedRegisterWaitsForPreviousPhysicalRead) {
   const auto strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
@@ -124,18 +645,23 @@ low.func.def target<test.low.core> @physical_reuse(%seed: reg<test.phys>) -> (re
       {loom_op_const_results(loom_block_op(body, 2))[0],
        LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, 0, 1},
   };
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = strategy;
-  options.schedule_flags = LOOM_LOW_SCHEDULE_FLAG_RETAIN_DEPENDENCY_INDEX;
-  options.allocation_fixed_values = fixed_values;
-  options.allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values);
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = strategy,
+      .schedule_flags = LOOM_LOW_SCHEDULE_FLAG_RETAIN_DEPENDENCY_INDEX,
+      .allocation_fixed_values = fixed_values,
+      .allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values),
+  };
   loom_low_emission_frame_t frame = {};
-  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
-                                               &arena_, &frame));
+  bool frame_accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), function, &options, &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.schedule.error_count, 0u);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   // Physical timing consumes the retained index after scheduler scratch dies.
+  EXPECT_EQ(frame.schedule.dependency_graph, nullptr);
+  ASSERT_NE(frame.schedule.dependency_index, nullptr);
   iree_arena_block_pool_trim(&block_pool_);
   loom_low_physical_issue_t issue = {};
   IREE_ASSERT_OK(
@@ -154,14 +680,16 @@ low.func.def target<test.low.core> @physical_reuse(%seed: reg<test.phys>) -> (re
                          &frame.allocation, &packet, j)
                          ->location_base;
     }
-    const loom_low_physical_instruction_t instruction = {
-        packet.descriptor_ordinal, registers};
-    uint32_t cycle = 0;
+    const loom_low_physical_instruction_t instruction =
+        loom_low_physical_instruction_make(
+            frame.target.descriptor_set, packet.descriptor_ordinal, registers);
     const uint32_t proposed_cycle =
         iree_max(iree_max(next_cycle, packet.node->issue_cycle),
                  loom_low_physical_issue_source_ready_cycle(&issue, i));
-    IREE_ASSERT_OK(loom_low_physical_issue_place(&issue, &instruction, 1,
-                                                 proposed_cycle, &cycle));
+    const uint32_t cycle = loom_low_physical_issue_find_earliest_issue_cycle(
+        &issue, &instruction, 1, proposed_cycle);
+    IREE_ASSERT_OK(
+        loom_low_physical_issue_commit(&issue, &instruction, 1, cycle));
     loom_low_physical_issue_commit_source(&issue, i, cycle);
     cycles[packet.node->source_ordinal] = cycle;
     next_cycle = cycle + 1;
@@ -173,14 +701,30 @@ low.func.def target<test.low.core> @physical_reuse(%seed: reg<test.phys>) -> (re
   const uint16_t read_registers[] = {0};
   uint16_t write_registers[] = {0, 1};
   const loom_low_physical_instruction_t pair[] = {
-      {read_packet.descriptor_ordinal, read_registers},
-      {write_packet.descriptor_ordinal, write_registers},
+      loom_low_physical_instruction_make(frame.target.descriptor_set,
+                                         read_packet.descriptor_ordinal,
+                                         read_registers),
+      loom_low_physical_instruction_make(frame.target.descriptor_set,
+                                         write_packet.descriptor_ordinal,
+                                         write_registers),
   };
   EXPECT_FALSE(
       loom_low_physical_issue_group_fits(frame.target.descriptor_set, pair, 2));
   write_registers[0] = 1;
   EXPECT_TRUE(
       loom_low_physical_issue_group_fits(frame.target.descriptor_set, pair, 2));
+
+  // A negative hardware RAW permits early native issue, but semantic source
+  // edges retain producer-before-consumer issue order in this admission model.
+  loom_low_physical_issue_t semantic_issue = {};
+  IREE_ASSERT_OK(loom_low_physical_issue_initialize(&frame.schedule, &arena_,
+                                                    &semantic_issue));
+  const auto producer_packet = loom_low_packet_at_node(&frame.schedule, 0);
+  loom_low_physical_issue_commit_source(
+      &semantic_issue, (uint32_t)producer_packet.packet_index, 10);
+  EXPECT_EQ(loom_low_physical_issue_source_ready_cycle(
+                &semantic_issue, (uint32_t)read_packet.packet_index),
+            10u);
 }
 
 TEST_F(LowEmissionFrameTest, EveryStrategyEnforcesIssueResourceCapacity) {
@@ -231,18 +775,22 @@ low.func.def target<test.low.core> @constant_pair(%input: reg<test.i32>) -> (reg
     const loom_low_descriptor_t* constant =
         loom_low_descriptor_set_descriptor_at(
             descriptor_set, TEST_LOW_CORE_DESCRIPTOR_REF_TEST_CONST_ISSUED_I32);
-    loom_low_schedule_pair_affinity_t affinity = {};
-    affinity.first_descriptor = constant;
-    affinity.second_descriptor = constant;
-    affinity.priority = 1;
-    loom_low_emission_frame_options_t options = {};
-    options.descriptor_registry = &registry_.registry;
-    options.schedule_pair_affinities = {&affinity, 1};
-    options.schedule_strategy = strategy;
+    loom_low_schedule_pair_affinity_t affinity = {
+        .first_descriptor = constant,
+        .second_descriptor = constant,
+        .priority = 1,
+    };
+    loom_low_emission_frame_options_t options = {
+        .descriptor_registry = &registry_.registry,
+        .schedule_pair_affinities = {&affinity, 1},
+        .schedule_strategy = strategy,
+    };
     loom_low_emission_frame_t frame = {};
+    bool frame_accepted = false;
     IREE_ASSERT_OK(loom_low_emission_frame_build(
         module.get(), loom_block_op(loom_module_block(module.get()), 0),
-        &options, &arena_, &frame));
+        &options, &arena_, &frame, &frame_accepted));
+    ASSERT_TRUE(frame_accepted);
     ASSERT_EQ(frame.schedule.error_count, 0u);
     EXPECT_EQ(frame.schedule.nodes[1].scheduled_ordinal,
               frame.schedule.nodes[0].scheduled_ordinal + 1);
@@ -264,23 +812,28 @@ low.func.def target<test.low.core> @bounded_pair(%address: reg<test.ptr>, %value
   const loom_low_descriptor_t* constant = loom_low_descriptor_set_descriptor_at(
       loom_test_low_core_descriptor_set(),
       TEST_LOW_CORE_DESCRIPTOR_REF_TEST_CONST_ISSUED_I32);
-  loom_low_schedule_pair_affinity_t affinity = {};
-  affinity.first_descriptor = constant;
-  affinity.second_descriptor = constant;
-  affinity.priority = 1;
-  loom_low_allocation_budget_t budget = {};
-  budget.register_class = IREE_SV("test.i32");
-  budget.max_units = 5;
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_pair_affinities = {&affinity, 1};
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL;
-  options.allocation_budgets = &budget;
-  options.allocation_budget_count = 1;
+  loom_low_schedule_pair_affinity_t affinity = {
+      .first_descriptor = constant,
+      .second_descriptor = constant,
+      .priority = 1,
+  };
+  loom_low_allocation_budget_t budget = {
+      .register_class = IREE_SV("test.i32"),
+      .max_units = 5,
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_pair_affinities = {&affinity, 1},
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+  };
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &arena_, &frame));
+      &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.schedule.error_count, 0u);
   EXPECT_LT(frame.schedule.nodes[2].scheduled_ordinal,
             frame.schedule.nodes[1].scheduled_ordinal);
@@ -294,18 +847,22 @@ low.func.def target<test.low.core> @spills(%first: reg<test.i32>, %second: reg<t
   return %first, %second, %third
 }
 )");
-  loom_low_allocation_budget_t budget = {};
-  budget.register_class = IREE_SV("test.i32");
-  budget.max_units = 1;
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
-  options.allocation_budgets = &budget;
-  options.allocation_budget_count = 1;
+  loom_low_allocation_budget_t budget = {
+      .register_class = IREE_SV("test.i32"),
+      .max_units = 1,
+  };
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+  };
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &arena_, &frame));
+      &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   iree_arena_block_pool_trim(&block_pool_);
   const loom_low_allocation_table_t& allocation = frame.allocation;
   ASSERT_EQ(allocation.error_count, 0u);
@@ -345,44 +902,49 @@ low.func.def target<test.low.core> @feedback(%lhs: reg<test.i32>, %rhs: reg<test
     // Number of allocation copy decisions observed.
     uint32_t copy_count = 0;
   } captured;
-  iree_diagnostic_emitter_t emitter = {};
-  emitter.fn = [](void* user_data, const loom_diagnostic_emission_t* emission) {
-    auto* captured = static_cast<CapturedDiagnostics*>(user_data);
-    ++captured->count;
-    if (emission->error == LOOM_ERR_BACKEND_003) {
-      captured->pressure_budget = emission->params[5].u32;
-    } else if (emission->error == LOOM_ERR_BACKEND_006) {
-      ++captured->copy_count;
-    }
-    return iree_ok_status();
+  iree_diagnostic_emitter_t emitter = {
+      .fn =
+          [](void* user_data, const loom_diagnostic_emission_t* emission) {
+            auto* captured = static_cast<CapturedDiagnostics*>(user_data);
+            ++captured->count;
+            if (emission->error == LOOM_ERR_BACKEND_003) {
+              captured->pressure_budget = emission->params[5].u32;
+            } else if (emission->error == LOOM_ERR_BACKEND_006) {
+              ++captured->copy_count;
+            }
+            return iree_ok_status();
+          },
+      .user_data = &captured,
   };
-  emitter.user_data = &captured;
   loom_low_allocation_budget_t budget = {IREE_SV("test.i32"), 8};
   loom_low_planning_statistics_t statistics = {};
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL;
-  options.schedule_diagnostic_flags =
-      LOOM_LOW_SCHEDULE_DIAGNOSTIC_PRESSURE_PEAKS |
-      LOOM_LOW_SCHEDULE_DIAGNOSTIC_RESOURCE_BOTTLENECKS |
-      LOOM_LOW_SCHEDULE_DIAGNOSTIC_HAZARD_GAPS |
-      LOOM_LOW_SCHEDULE_DIAGNOSTIC_CANDIDATE_DECISIONS |
-      LOOM_LOW_SCHEDULE_DIAGNOSTIC_MODEL_QUALITY;
-  options.allocation_budgets = &budget;
-  options.allocation_budget_count = 1;
-  options.allocation_diagnostic_flags =
-      LOOM_LOW_ALLOCATION_DIAGNOSTIC_COPY_DECISIONS;
-  options.emitter = emitter;
-  options.statistics = &statistics;
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      .schedule_diagnostic_flags =
+          LOOM_LOW_SCHEDULE_DIAGNOSTIC_PRESSURE_PEAKS |
+          LOOM_LOW_SCHEDULE_DIAGNOSTIC_RESOURCE_BOTTLENECKS |
+          LOOM_LOW_SCHEDULE_DIAGNOSTIC_HAZARD_GAPS |
+          LOOM_LOW_SCHEDULE_DIAGNOSTIC_CANDIDATE_DECISIONS |
+          LOOM_LOW_SCHEDULE_DIAGNOSTIC_MODEL_QUALITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+      .allocation_diagnostic_flags =
+          LOOM_LOW_ALLOCATION_DIAGNOSTIC_COPY_DECISIONS,
+      .emitter = emitter,
+      .statistics = &statistics,
+  };
   loom_low_emission_frame_spill_free_options_t spill_free_options = {};
   spill_free_options.materialization_options.has_supported_storage_spaces =
       true;
   spill_free_options.materialization_options.supported_storage_spaces =
       LOOM_LOW_STORAGE_SPACE_SET_NONE;
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &spill_free_options, &arena_, &frame));
+      &spill_free_options, &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.schedule.error_count, 0u);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   EXPECT_EQ(statistics.frame_build_count, 1u);
@@ -396,9 +958,12 @@ low.func.def target<test.low.core> @feedback(%lhs: reg<test.i32>, %rhs: reg<test
   quiet_options.allocation_diagnostic_flags = 0;
   quiet_options.statistics = nullptr;
   loom_low_emission_frame_t quiet_frame = {};
+  bool quiet_frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
       module.get(), loom_block_op(loom_module_block(module.get()), 0),
-      &quiet_options, &spill_free_options, &arena_, &quiet_frame));
+      &quiet_options, &spill_free_options, &arena_, &quiet_frame,
+      &quiet_frame_accepted));
+  ASSERT_TRUE(quiet_frame_accepted);
   // Release pooled scratch before comparing schedules and formatting retained
   // diagnostics. ASAN catches any accidental result borrowing from that state.
   iree_arena_block_pool_trim(&block_pool_);
@@ -447,11 +1012,12 @@ low.func.def target<test.low.core> @too_wide(%wide: reg<test.special x2>) -> (re
   } captured;
   loom_low_allocation_budget_t budget = {IREE_SV("test.special"), 1};
   loom_low_planning_statistics_t statistics = {};
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
-  options.allocation_budgets = &budget;
-  options.allocation_budget_count = 1;
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = &budget,
+      .allocation_budget_count = 1,
+  };
   options.emitter.fn = [](void* user_data,
                           const loom_diagnostic_emission_t* emission) {
     auto* captured = static_cast<CapturedFailure*>(user_data);
@@ -470,9 +1036,11 @@ low.func.def target<test.low.core> @too_wide(%wide: reg<test.special x2>) -> (re
   spill_free_options.materialization_options.supported_storage_spaces =
       LOOM_LOW_STORAGE_SPACE_SET_NONE;
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = true;
   IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &spill_free_options, &arena_, &frame));
+      &spill_free_options, &arena_, &frame, &frame_accepted));
+  EXPECT_FALSE(frame_accepted);
   ASSERT_EQ(frame.allocation.error_count, 1u);
   EXPECT_EQ(captured.count, 1u);
   EXPECT_EQ(captured.op, frame.allocation.failure.op);
@@ -484,6 +1052,40 @@ low.func.def target<test.low.core> @too_wide(%wide: reg<test.special x2>) -> (re
       &frame.allocation, /*flags=*/0, options.emitter));
   EXPECT_EQ(captured.count, 2u);
   EXPECT_EQ(arena_.used_allocation_size, used_bytes);
+}
+
+TEST_F(LowEmissionFrameTest, FinalValidatorRejectsWithoutDiagnosticSink) {
+  ModulePtr module = ParseModule();
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+  };
+  loom_low_emission_frame_spill_free_options_t spill_free_options = {};
+  spill_free_options.materialization_options.has_supported_storage_spaces =
+      true;
+  spill_free_options.materialization_options.supported_storage_spaces =
+      LOOM_LOW_STORAGE_SPACE_SET_NONE;
+  bool validator_invoked = false;
+  spill_free_options.validate_frame =
+      [](void* user_data, const loom_low_emission_frame_t* frame,
+         iree_arena_allocator_t* arena, bool* out_accepted) {
+        bool* invoked = static_cast<bool*>(user_data);
+        EXPECT_FALSE(*invoked);
+        *invoked = true;
+        EXPECT_EQ(frame->schedule.error_count, 0u);
+        EXPECT_EQ(frame->allocation.error_count, 0u);
+        (void)arena;
+        *out_accepted = false;
+        return iree_ok_status();
+      };
+  spill_free_options.validate_frame_user_data = &validator_invoked;
+  loom_low_emission_frame_t frame = {};
+  bool frame_accepted = true;
+  IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &spill_free_options, &arena_, &frame, &frame_accepted));
+  EXPECT_TRUE(validator_invoked);
+  EXPECT_FALSE(frame_accepted);
 }
 
 TEST_F(LowEmissionFrameTest, InputErrorsAreNotDeferredOrReplayed) {
@@ -498,11 +1100,12 @@ low.func.def target<test.low.core> @invalid_budget(%value: reg<test.i32>) -> (re
       {IREE_SV("test.i32"), 2},
   };
   loom_low_planning_statistics_t statistics = {};
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
-  options.allocation_budgets = budgets;
-  options.allocation_budget_count = IREE_ARRAYSIZE(budgets);
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_budgets = budgets,
+      .allocation_budget_count = IREE_ARRAYSIZE(budgets),
+  };
   options.emitter.fn = [](void* user_data,
                           const loom_diagnostic_emission_t* emission) {
     EXPECT_EQ(emission->error, LOOM_ERR_BACKEND_024);
@@ -517,9 +1120,11 @@ low.func.def target<test.low.core> @invalid_budget(%value: reg<test.i32>) -> (re
   spill_free_options.materialization_options.supported_storage_spaces =
       LOOM_LOW_STORAGE_SPACE_SET_NONE;
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = true;
   IREE_ASSERT_OK(loom_low_emission_frame_build_spill_free(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &spill_free_options, &arena_, &frame));
+      &spill_free_options, &arena_, &frame, &frame_accepted));
+  EXPECT_FALSE(frame_accepted);
   ASSERT_EQ(frame.allocation.error_count, 1u);
   EXPECT_FALSE(
       loom_low_allocation_failure_is_present(&frame.allocation.failure));
@@ -584,6 +1189,8 @@ low.func.def target<test.low.core> @fixed_loop(%initial: reg<test.fixed.r0>, %co
   ASSERT_EQ(frame.allocation.error_count, 0u);
   EXPECT_EQ(frame.allocation.spill_count, 0u);
   EXPECT_EQ(frame.allocation.materialized_copy_count, 0u);
+  EXPECT_EQ(frame.allocation.first_coalesced_incoming_copy_by_value_ordinal,
+            nullptr);
   for (iree_host_size_t i = 0; i < frame.allocation.assignment_count; ++i) {
     const auto& assignment = frame.allocation.assignments[i];
     if (assignment.descriptor_reg_class_id ==
@@ -591,6 +1198,60 @@ low.func.def target<test.low.core> @fixed_loop(%initial: reg<test.fixed.r0>, %co
       EXPECT_EQ(assignment.location_base, 0u);
     }
   }
+
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      .allocation_flags =
+          LOOM_LOW_ALLOCATION_FLAG_RETAIN_COALESCED_INCOMING_INDEX,
+  };
+  loom_low_emission_frame_t indexed_frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &arena_, &indexed_frame, &accepted));
+  ASSERT_TRUE(accepted);
+  ASSERT_EQ(indexed_frame.allocation.error_count, 0u);
+  ASSERT_NE(
+      indexed_frame.allocation.first_coalesced_incoming_copy_by_value_ordinal,
+      nullptr);
+
+  const loom_region_t* body =
+      loom_low_func_def_body(loom_block_op(loom_module_block(module.get()), 0));
+  const loom_block_t* entry = loom_region_const_block(body, 0);
+  const loom_block_t* loop = loom_region_const_block(body, 1);
+  const loom_block_t* loop_body = loom_region_const_block(body, 2);
+  const loom_value_id_t destination_value_id = loom_block_arg_id(loop, 0);
+  const loom_value_id_t expected_source_value_ids[] = {
+      loom_low_br_args(loop_body->last_op).values[0],
+      loom_low_br_args(entry->last_op).values[0],
+  };
+  loom_value_ordinal_t destination_ordinal = LOOM_VALUE_ORDINAL_INVALID;
+  for (loom_value_ordinal_t i = 0;
+       i < indexed_frame.allocation.liveness.value_count; ++i) {
+    if (indexed_frame.allocation.liveness.value_ids[i] ==
+        destination_value_id) {
+      destination_ordinal = i;
+      break;
+    }
+  }
+  ASSERT_NE(destination_ordinal, LOOM_VALUE_ORDINAL_INVALID);
+
+  uint32_t copy_index =
+      indexed_frame.allocation
+          .first_coalesced_incoming_copy_by_value_ordinal[destination_ordinal];
+  for (const loom_value_id_t expected_source_value_id :
+       expected_source_value_ids) {
+    ASSERT_NE(copy_index, LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE);
+    ASSERT_LT(copy_index, indexed_frame.allocation.edge_copy_count);
+    const auto& copy = indexed_frame.allocation.edge_copies[copy_index];
+    EXPECT_EQ(copy.kind, LOOM_LOW_ALLOCATION_COPY_COALESCED);
+    EXPECT_EQ(copy.destination_ordinal, destination_ordinal);
+    EXPECT_EQ(indexed_frame.allocation.liveness.value_ids[copy.source_ordinal],
+              expected_source_value_id);
+    copy_index = copy.next_coalesced_incoming_copy_index;
+  }
+  EXPECT_EQ(copy_index, LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE);
 }
 
 TEST_F(LowEmissionFrameTest, StateOnlyScheduleLivenessIsTransient) {
@@ -609,6 +1270,158 @@ low.func.def target<test.low.core> @state_live_out(%state: reg<test.schedule_sta
   ASSERT_EQ(frame.schedule.error_count, 0u);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   EXPECT_EQ(frame.schedule.liveness.region, nullptr);
+}
+
+TEST_F(LowEmissionFrameTest, FailedScheduleDoesNotPublishSourceSuffixBounds) {
+  ModulePtr module = ParseModule(R"(
+low.func.def target<test.low.core> @dependency_cycle(%lhs: reg<test.schedule_state>, %rhs: reg<test.schedule_state>) asm {
+  low.br ^cycle
+^cycle:
+  %old = test.add.schedule_state %lhs, %rhs
+  %writer = test.state.add.schedule_state %lhs, %rhs
+  %cycle = test.explicit.state.add.schedule_state %writer, %old
+  return
+}
+)");
+  uint32_t diagnostic_count = 0;
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+  };
+  options.emitter.fn = [](void* user_data,
+                          const loom_diagnostic_emission_t* emission) {
+    EXPECT_EQ(emission->error, LOOM_ERR_BACKEND_044);
+    ++*static_cast<uint32_t*>(user_data);
+    return iree_ok_status();
+  };
+  options.emitter.user_data = &diagnostic_count;
+  loom_low_emission_frame_t frame = {};
+  bool accepted = true;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &arena_, &frame, &accepted));
+
+  EXPECT_FALSE(accepted);
+  EXPECT_EQ(frame.schedule.error_count, 1u);
+  EXPECT_EQ(frame.schedule.source_suffix_issue_cycle_lower_bounds, nullptr);
+  EXPECT_EQ(diagnostic_count, 1u);
+}
+
+TEST_F(LowEmissionFrameTest, GuardedMotionReplaysRetainedLocations) {
+  ModulePtr module = ParseModule(R"(
+low.func.def target<test.low.core> @guarded_store(%base: reg<test.ptr>, %origin: reg<test.i32>, %pixel: reg<test.i32>, %color: reg<test.i32 x4>) asm {
+  test.store.index.v4i32 %base, %origin, %color
+  %loaded = test.counter_load.v4i32 %base
+  %condition = test.event.fast.i32 %origin, %pixel
+  low.cond_br %condition, ^store, ^done : reg<test.i32>
+^store:
+  %index = test.total.add.i32 %origin, %pixel
+  test.store.index.v4i32 %base, %index, %color
+  low.br ^done
+^done:
+  return
+}
+)");
+  loom_op_t* function = loom_block_op(loom_module_block(module.get()), 0);
+  loom_region_t* body = loom_low_func_def_body(function);
+  loom_block_t* entry_block = loom_region_block(body, 0);
+  loom_block_t* guarded_block = loom_region_block(body, 1);
+  loom_op_t* initial_store = entry_block->first_op;
+  loom_op_t* load = loom_block_op(entry_block, 1);
+  loom_op_t* branch = entry_block->last_op;
+  loom_op_t* index = loom_block_op(guarded_block, 0);
+
+  loom_low_planning_statistics_t statistics = {};
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      .statistics = &statistics,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
+                                               &arena_, &frame, &accepted));
+
+  EXPECT_TRUE(accepted);
+  EXPECT_EQ(index->parent_block, entry_block);
+  EXPECT_EQ(index->next_op, branch);
+  EXPECT_EQ(statistics.frame_build_count, 2u);
+  EXPECT_EQ(statistics.allocation_run_count, 2u);
+  EXPECT_EQ(statistics.retained_location_replay_count, 1u);
+
+  // Accepted motion retires the original frame. Its replacement owns the
+  // effect and hazard rows consumed after trial and scheduling scratch expire.
+  iree_arena_block_pool_trim(&block_pool_);
+  ASSERT_EQ(frame.schedule.effect_dependencies.count, 2u);
+  const auto* dependency = loom_low_schedule_dependency_slice_at(
+      &frame.schedule.effect_dependencies, 0);
+  EXPECT_EQ(frame.schedule.nodes[dependency->producer_node].op, initial_store);
+  EXPECT_EQ(frame.schedule.nodes[dependency->consumer_node].op, load);
+  dependency = loom_low_schedule_dependency_slice_at(
+      &frame.schedule.effect_dependencies, 1);
+  EXPECT_EQ(frame.schedule.nodes[dependency->producer_node].op, initial_store);
+  // Cross-block effect timing is enforced at the source terminator.
+  EXPECT_EQ(frame.schedule.nodes[dependency->consumer_node].op, branch);
+  ASSERT_EQ(frame.schedule.hazard_use_count, 1u);
+  const auto& hazard_use = frame.schedule.hazard_uses[0];
+  EXPECT_EQ(frame.schedule.nodes[hazard_use.node_index].op, load);
+  const auto& hazard =
+      frame.schedule.target.descriptor_set->hazards[hazard_use.hazard_index];
+  EXPECT_EQ(hazard.kind, LOOM_LOW_HAZARD_KIND_WAIT_COUNTER);
+  EXPECT_EQ(hazard.reference_id, 0u);
+}
+
+TEST_F(LowEmissionFrameTest, ProvenNoOpGuardedMotionSkipsTrialFrame) {
+  ModulePtr module = ParseModule(R"(
+low.func.def target<test.low.core> @guarded_tail(%base: reg<test.ptr>, %origin: reg<test.i32>, %pixel: reg<test.i32>, %color: reg<test.i32 x4>) -> (reg<test.i32>) asm {
+  %condition = test.event.fast.i32 %origin, %pixel
+  low.cond_br %condition, ^store, ^done : reg<test.i32>
+^store:
+  %index = test.total.add.i32 %origin, %pixel
+  test.store.index.v4i32 %base, %index, %color
+  %tail = test.event.fast.i32 %origin, %pixel
+  %result = test.add.i32 %tail, %pixel
+  return %result
+^done:
+  return %condition
+}
+)");
+  loom_low_planning_statistics_t statistics = {};
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+      .statistics = &statistics,
+  };
+  loom_low_emission_frame_t frame = {};
+  bool accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
+      &arena_, &frame, &accepted));
+
+  EXPECT_TRUE(accepted);
+  EXPECT_NE(frame.schedule.source_suffix_issue_cycle_lower_bounds, nullptr);
+  EXPECT_EQ(statistics.frame_build_count, 1u);
+  EXPECT_EQ(statistics.allocation_run_count, 1u);
+
+  loom_low_schedule_table_t unproven_schedule = frame.schedule;
+  unproven_schedule.source_suffix_issue_cycle_lower_bounds = nullptr;
+  loom_low_guarded_motion_plan_t unproven_plan = {};
+  IREE_ASSERT_OK(loom_low_guarded_motion_plan(&unproven_schedule, &arena_,
+                                              &unproven_plan));
+  ASSERT_EQ(unproven_plan.region_count, 1u);
+  const loom_low_guarded_motion_region_t& region = unproven_plan.regions[0];
+  const uint32_t source_suffix = region.node_start + region.node_count;
+  const uint32_t source_block =
+      frame.schedule.nodes[region.node_start].block_index;
+  const loom_low_schedule_block_t& block = frame.schedule.blocks[source_block];
+  ASSERT_NE(block.issue_group_count, 0u);
+  const uint32_t source_extent =
+      frame.schedule
+          .issue_groups[block.issue_group_start + block.issue_group_count - 1]
+          .issue_cycle;
+  EXPECT_EQ(
+      frame.schedule.source_suffix_issue_cycle_lower_bounds[source_suffix],
+      source_extent);
 }
 
 TEST_F(LowEmissionFrameTest, OrderedEffectUsesDirectionalTimingEndpoints) {
@@ -631,12 +1444,13 @@ low.func.def target<test.low.core> @directional_effect(%address: reg<test.ptr>, 
 
   const loom_low_schedule_dependency_t* store_to_barrier = nullptr;
   const loom_low_schedule_dependency_t* barrier_to_load = nullptr;
-  for (iree_host_size_t i = 0; i < frame.schedule.dependencies.count; ++i) {
+  for (uint32_t i = 0; i < frame.schedule.effect_dependencies.count; ++i) {
     const loom_low_schedule_dependency_t* dependency =
-        loom_low_schedule_dependency_graph_at(&frame.schedule.dependencies, i);
-    if (dependency->kind != LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT ||
-        dependency->separation_source !=
-            LOOM_LOW_SCHEDULE_SEPARATION_SOURCE_EVENT_PAIR) {
+        loom_low_schedule_dependency_slice_at(
+            &frame.schedule.effect_dependencies, i);
+    EXPECT_EQ(dependency->kind, LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT);
+    if (dependency->separation_source !=
+        LOOM_LOW_SCHEDULE_SEPARATION_SOURCE_EVENT_PAIR) {
       continue;
     }
     if (dependency->producer_node == 0 && dependency->consumer_node == 1) {
@@ -652,6 +1466,21 @@ low.func.def target<test.low.core> @directional_effect(%address: reg<test.ptr>, 
   EXPECT_EQ(barrier_to_load->minimum_issue_separation_cycles, 2);
   EXPECT_NE(store_to_barrier->consumer_event_id,
             barrier_to_load->producer_event_id);
+  EXPECT_EQ(frame.schedule.dependency_graph, nullptr);
+  EXPECT_GT(frame.schedule.dependency_count,
+            frame.schedule.effect_dependencies.count);
+
+  const auto dependency_count = frame.schedule.dependency_count;
+  const auto effect_dependency_count = frame.schedule.effect_dependencies.count;
+  loom_low_emission_frame_t inspected_frame = {};
+  IREE_ASSERT_OK(BuildFrame(module.get(), {}, &inspected_frame,
+                            LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+                            LOOM_LOW_SCHEDULE_FLAG_RETAIN_DEPENDENCIES));
+  ASSERT_NE(inspected_frame.schedule.dependency_graph, nullptr);
+  EXPECT_EQ(inspected_frame.schedule.dependency_count, dependency_count);
+  EXPECT_EQ(inspected_frame.schedule.dependency_graph->count, dependency_count);
+  EXPECT_EQ(inspected_frame.schedule.effect_dependencies.count,
+            effect_dependency_count);
 }
 
 TEST_F(LowEmissionFrameTest, EffectTimingCrossesDirectCfgEdge) {
@@ -675,11 +1504,12 @@ low.func.def target<test.low.core> @direct_effect_edge(%address: reg<test.ptr>, 
   EXPECT_EQ(frame.schedule.nodes[2].issue_cycle, 0u);
 
   const loom_low_schedule_dependency_t* boundary_dependency = nullptr;
-  for (iree_host_size_t i = 0; i < frame.schedule.dependencies.count; ++i) {
+  for (uint32_t i = 0; i < frame.schedule.effect_dependencies.count; ++i) {
     const loom_low_schedule_dependency_t* dependency =
-        loom_low_schedule_dependency_graph_at(&frame.schedule.dependencies, i);
+        loom_low_schedule_dependency_slice_at(
+            &frame.schedule.effect_dependencies, i);
+    EXPECT_EQ(dependency->kind, LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT);
     if (dependency->producer_node == 0 && dependency->consumer_node == 1 &&
-        dependency->kind == LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT &&
         dependency->separation_source ==
             LOOM_LOW_SCHEDULE_SEPARATION_SOURCE_EVENT_PAIR) {
       boundary_dependency = dependency;
@@ -720,11 +1550,12 @@ low.func.def target<test.low.core> @diamond_effect_edge(%condition: reg<test.i32
 
   bool found_read_requirement = false;
   bool found_write_requirement = false;
-  for (iree_host_size_t i = 0; i < frame.schedule.dependencies.count; ++i) {
+  for (uint32_t i = 0; i < frame.schedule.effect_dependencies.count; ++i) {
     const loom_low_schedule_dependency_t* dependency =
-        loom_low_schedule_dependency_graph_at(&frame.schedule.dependencies, i);
+        loom_low_schedule_dependency_slice_at(
+            &frame.schedule.effect_dependencies, i);
+    EXPECT_EQ(dependency->kind, LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT);
     if (dependency->producer_node != 0 || dependency->consumer_node != 1 ||
-        dependency->kind != LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT ||
         dependency->separation_source !=
             LOOM_LOW_SCHEDULE_SEPARATION_SOURCE_EVENT_PAIR) {
       continue;
@@ -758,11 +1589,12 @@ low.func.def target<test.low.core> @loop_effect_edge(%condition: reg<test.i32>, 
             frame.schedule.nodes[2].issue_cycle + 2u);
 
   const loom_low_schedule_dependency_t* backedge_dependency = nullptr;
-  for (iree_host_size_t i = 0; i < frame.schedule.dependencies.count; ++i) {
+  for (uint32_t i = 0; i < frame.schedule.effect_dependencies.count; ++i) {
     const loom_low_schedule_dependency_t* dependency =
-        loom_low_schedule_dependency_graph_at(&frame.schedule.dependencies, i);
+        loom_low_schedule_dependency_slice_at(
+            &frame.schedule.effect_dependencies, i);
+    EXPECT_EQ(dependency->kind, LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT);
     if (dependency->producer_node == 2 && dependency->consumer_node == 3 &&
-        dependency->kind == LOOM_LOW_SCHEDULE_DEPENDENCY_EFFECT &&
         dependency->separation_source ==
             LOOM_LOW_SCHEDULE_SEPARATION_SOURCE_EVENT_PAIR) {
       backedge_dependency = dependency;
@@ -777,10 +1609,10 @@ TEST_F(LowEmissionFrameTest, StructuralModelCarriesNativePacketTiming) {
   ModulePtr module = ParseModule();
   const loom_low_schedule_structural_model_t models[] = {
       {
-          /*.op_kind=*/LOOM_OP_LOW_STORAGE_ADDRESS,
-          /*.result_reg_class_id=*/TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
-          /*.schedule_descriptor_ordinal=*/
-          TEST_LOW_CORE_DESCRIPTOR_REF_TEST_ADD_I32,
+          .op_kind = LOOM_OP_LOW_STORAGE_ADDRESS,
+          .result_reg_class_id = TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
+          .schedule_descriptor_ordinal =
+              TEST_LOW_CORE_DESCRIPTOR_REF_TEST_ADD_I32,
       },
   };
   loom_low_emission_frame_t frame = {};
@@ -792,9 +1624,11 @@ TEST_F(LowEmissionFrameTest, StructuralModelCarriesNativePacketTiming) {
   const loom_low_descriptor_view_t* schedule_descriptor_view =
       loom_low_descriptor_set_descriptor_view_at(
           descriptor_set, TEST_LOW_CORE_DESCRIPTOR_REF_TEST_ADD_I32);
+  const uint16_t expected_schedule_class_id =
+      schedule_descriptor_view->schedule_class_id;
   const loom_low_schedule_class_t* expected_schedule_class =
-      &descriptor_set
-           ->schedule_classes[schedule_descriptor_view->schedule_class_id];
+      loom_low_descriptor_set_schedule_class(descriptor_set,
+                                             schedule_descriptor_view);
   ASSERT_EQ(expected_schedule_class->latency_cycles, 1u);
   ASSERT_EQ(expected_schedule_class->minimum_issue_separation_cycles, 1);
   ASSERT_EQ(expected_schedule_class->issue_use_count, 1u);
@@ -808,8 +1642,7 @@ TEST_F(LowEmissionFrameTest, StructuralModelCarriesNativePacketTiming) {
   EXPECT_EQ(address_node->descriptor, nullptr);
   EXPECT_EQ(address_node->source_descriptor_ordinal,
             LOOM_LOW_DESCRIPTOR_ORDINAL_NONE);
-  EXPECT_EQ(address_node->schedule_class_id,
-            schedule_descriptor_view->schedule_class_id);
+  EXPECT_EQ(address_node->schedule_class_id, expected_schedule_class_id);
   EXPECT_EQ(address_node->schedule_class, expected_schedule_class);
   EXPECT_GE(load_node->issue_cycle,
             address_node->issue_cycle +
@@ -818,7 +1651,7 @@ TEST_F(LowEmissionFrameTest, StructuralModelCarriesNativePacketTiming) {
   const loom_low_schedule_model_summary_t* model_summary = nullptr;
   for (iree_host_size_t i = 0; i < frame.schedule.model_summary_count; ++i) {
     if (frame.schedule.model_summaries[i].schedule_class_id ==
-        schedule_descriptor_view->schedule_class_id) {
+        expected_schedule_class_id) {
       model_summary = &frame.schedule.model_summaries[i];
       break;
     }
@@ -846,9 +1679,10 @@ TEST_F(LowEmissionFrameTest, RejectsInvalidStructuralModelDescriptor) {
       loom_test_low_core_descriptor_set();
   const loom_low_schedule_structural_model_t models[] = {
       {
-          /*.op_kind=*/LOOM_OP_LOW_STORAGE_ADDRESS,
-          /*.result_reg_class_id=*/TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
-          /*.schedule_descriptor_ordinal=*/descriptor_set->descriptor_count,
+          .op_kind = LOOM_OP_LOW_STORAGE_ADDRESS,
+          .result_reg_class_id = TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
+          .schedule_descriptor_ordinal =
+              descriptor_set->descriptor_ordinal_count,
       },
   };
   loom_low_emission_frame_t frame = {};
@@ -861,16 +1695,16 @@ TEST_F(LowEmissionFrameTest, RejectsOverlappingStructuralModels) {
   ModulePtr module = ParseModule();
   const loom_low_schedule_structural_model_t models[] = {
       {
-          /*.op_kind=*/LOOM_OP_LOW_STORAGE_ADDRESS,
-          /*.result_reg_class_id=*/LOOM_LOW_REG_CLASS_NONE,
-          /*.schedule_descriptor_ordinal=*/
-          TEST_LOW_CORE_DESCRIPTOR_REF_TEST_ADD_I32,
+          .op_kind = LOOM_OP_LOW_STORAGE_ADDRESS,
+          .result_reg_class_id = LOOM_LOW_REG_CLASS_NONE,
+          .schedule_descriptor_ordinal =
+              TEST_LOW_CORE_DESCRIPTOR_REF_TEST_ADD_I32,
       },
       {
-          /*.op_kind=*/LOOM_OP_LOW_STORAGE_ADDRESS,
-          /*.result_reg_class_id=*/TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
-          /*.schedule_descriptor_ordinal=*/
-          TEST_LOW_CORE_DESCRIPTOR_REF_TEST_CONST_I32,
+          .op_kind = LOOM_OP_LOW_STORAGE_ADDRESS,
+          .result_reg_class_id = TEST_LOW_CORE_REG_CLASS_ID_TEST_PTR,
+          .schedule_descriptor_ordinal =
+              TEST_LOW_CORE_DESCRIPTOR_REF_TEST_CONST_I32,
       },
   };
   loom_low_emission_frame_t frame = {};

@@ -15,26 +15,43 @@
 extern "C" {
 #endif
 
-enum loom_low_schedule_alias_pressure_flag_bits_e {
-  LOOM_LOW_SCHEDULE_ALIAS_PRESSURE_FLAG_BLOCK_TOUCHED = 1u << 0,
-  LOOM_LOW_SCHEDULE_ALIAS_PRESSURE_FLAG_CANDIDATE_TOUCHED = 1u << 1,
+enum loom_low_schedule_pressure_set_flag_bits_e {
+  LOOM_LOW_SCHEDULE_PRESSURE_SET_FLAG_BLOCK_TOUCHED = 1u << 0,
+  LOOM_LOW_SCHEDULE_PRESSURE_SET_FLAG_CANDIDATE_TOUCHED = 1u << 1,
 };
 
 enum loom_low_schedule_resource_pressure_flag_bits_e {
   LOOM_LOW_SCHEDULE_RESOURCE_PRESSURE_FLAG_CANDIDATE_TOUCHED = 1u << 0,
 };
 
-// Mutable pressure state for one shared register-class namespace.
-struct loom_low_schedule_alias_pressure_record_t {
-  // Current live units in the shared alias namespace.
+// Resolves function-local packing-resource capacities and leaves resources
+// inactive when direct register pressure already carries the same signal.
+iree_status_t loom_low_schedule_target_pressure_initialize_packing_resources(
+    loom_low_schedule_build_state_t* state, const uint8_t* active_reg_classes);
+
+// Returns the function-local capacity of |resource_id|, or UINT32_MAX when the
+// resource is redundant for this function.
+uint32_t loom_low_schedule_register_packing_resource_capacity(
+    const loom_low_schedule_build_state_t* state, uint16_t resource_id);
+
+// Mutable pressure state for one shared register-class allocation domain.
+struct loom_low_schedule_pressure_set_record_t {
+  // Current live units in the shared pressure set.
   uint64_t current_live_units;
   // Live-unit delta projected for the candidate being scored.
   int64_t candidate_delta_units;
-  // Units created during the candidate's Early phase.
-  uint64_t candidate_early_added_units;
+  // Candidate operand deaths in the shared pressure set.
+  uint64_t candidate_killed_units;
+  // Candidate instruction-phase overlap in the shared register namespace.
+  struct {
+    // Result storage created before ordinary input reads complete.
+    uint64_t early_added_units;
+    // Dying input units retained through result writes.
+    uint64_t late_released_units;
+  } candidate_lifetime;
   // Block-local headroom required by aligned contiguous values.
   uint32_t packing_reserve_units;
-  // Mutable loom_low_schedule_alias_pressure_flag_bits_e bits.
+  // Mutable loom_low_schedule_pressure_set_flag_bits_e bits.
   uint8_t flags;
 };
 
@@ -57,16 +74,24 @@ uint64_t loom_low_schedule_register_packing_contribution(
     uint64_t register_units,
     const loom_low_register_packing_resource_member_t* member);
 
-// Returns the packing-resource units read by unique node operands.
-uint64_t loom_low_schedule_node_register_packing_operand_units(
-    const loom_low_schedule_build_state_t* state,
-    const loom_low_schedule_node_t* node,
-    const loom_low_register_packing_resource_t* resource);
+// Projects available register units through a capacity-source member. Unlike
+// live contributions this rounds down because an incomplete group cannot
+// provide another resource unit.
+uint32_t loom_low_schedule_register_packing_member_capacity(
+    uint32_t register_unit_capacity,
+    const loom_low_register_packing_resource_t* resource,
+    const loom_low_register_packing_resource_member_t* member);
 
 // Returns the retained packing-resource footprint of the node results.
 uint64_t loom_low_schedule_node_register_packing_result_units(
     const loom_low_schedule_build_state_t* state, uint32_t node_index,
     uint16_t resource_id);
+
+// Returns whether |node_index| carries storage from |reg_class_id| into a
+// result class sharing the same indivisible register-packing resource.
+bool loom_low_schedule_node_retains_aggregate_packing_from_class(
+    const loom_low_schedule_build_state_t* state, uint32_t node_index,
+    uint16_t reg_class_id);
 
 // Resets live packing-resource completion state for |block_record|.
 void loom_low_schedule_target_pressure_reset_packing_completions(
@@ -89,21 +114,12 @@ void loom_low_schedule_target_pressure_repair_packing_completions(
     const loom_low_schedule_build_state_t* state,
     loom_low_schedule_pressure_state_t* pressure_state, uint32_t node_index);
 
-// Returns the smallest register-packing capacity whose selected live
-// completion is reached by |candidate_node|, or UINT32_MAX when none is.
-uint32_t loom_low_schedule_target_pressure_active_packing_completion_capacity(
+// Returns the capacity of |completion_domain_id| when its live pressure is at
+// or above that hard limit, or UINT32_MAX while it still has headroom.
+uint32_t loom_low_schedule_target_pressure_full_unspillable_completion_capacity(
     const loom_low_schedule_build_state_t* state,
     const loom_low_schedule_pressure_state_t* pressure_state,
-    uint32_t candidate_node);
-
-// Returns the smallest full hard capacity whose selected live-value
-// completion path includes |candidate_node|. Smaller capacities represent
-// fewer legal interleavings and therefore stronger completion urgency.
-uint32_t
-loom_low_schedule_target_pressure_active_unspillable_completion_capacity(
-    const loom_low_schedule_build_state_t* state,
-    loom_low_schedule_pressure_state_t* pressure_state,
-    uint32_t candidate_node);
+    uint16_t completion_domain_id);
 
 // Scores all target-authored pressure cliffs, limits, and derived resources
 // against the candidate deltas already present in |pressure_state|.

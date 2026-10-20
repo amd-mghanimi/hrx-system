@@ -12,7 +12,7 @@
 #include "iree/base/alignment.h"
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/function.h"
-#include "loom/codegen/low/target_binding.h"
+#include "loom/codegen/low/representation_binding.h"
 #include "loom/ir/context.h"
 #include "loom/ir/local_value_domain.h"
 #include "loom/ir/module.h"

@@ -51,8 +51,9 @@ loom_cc_library(
         "config_bindings.c",
         "config_bindings.h",
         "loop_pipeline.c",
+        "memory_interval.c",
+        "memory_interval.h",
         "memory_summary.c",
-        "memory_summary.h",
         "pipeline_plan.c",
         "report.c",
         "residency.c",
@@ -62,6 +63,7 @@ loom_cc_library(
     ],
     hdrs = [
         "loop_pipeline.h",
+        "memory_summary.h",
         "pipeline_plan.h",
         "report.h",
         "residency.h",
@@ -75,8 +77,11 @@ loom_cc_library(
         "//loom/src/loom/target:function_version",
         "//loom/src/loom/target:residency",
         "//loom/src/loom/target:types",
+        "//loom/src/loom/util:adaptive_sort",
+        "//loom/src/loom/util:segmented_storage",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/internal:arena",
     ],
 )
 
@@ -153,11 +158,14 @@ loom_cc_library(
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/low",
         "//loom/src/loom/target:registers",
+        "//loom/src/loom/util:adaptive_sort",
+        "//loom/src/loom/util:cfg_execution",
         "//loom/src/loom/util:cfg_graph",
         "//loom/src/loom/util:cfg_loop",
         "//loom/src/loom/util:fact_table",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/internal:arena",
     ],
 )
 
@@ -202,6 +210,7 @@ loom_cc_test(
     deps = [
         ":low",
         "//loom/src/loom/ir",
+        "//loom/src/loom/ops/low",
         "//loom/src/loom/ops/test",
         "//loom/src/loom/target:facts_builder",
         "//loom/src/loom/target:registers",
@@ -221,9 +230,12 @@ loom_cc_test(
         "format_planning_test.cc",
         "format_test.cc",
         "memory_summary_test.cc",
+        "memory_summary_test_util.h",
+        "selection_summary_test.cc",
     ],
     deps = [
         ":format",
+        ":report",
         "//loom/src/loom/ir",
         "//loom/src/loom/target:math_policy",
         "//runtime/src/iree/base/internal:arena",

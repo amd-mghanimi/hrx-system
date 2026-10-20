@@ -1,0 +1,95 @@
+// RUN: emit aie2p-xdna output=pipeline-report
+
+// One compiled worker links at two placements with different resident data.
+// Reservations overlap, straddle banks, and include a memory-only tile.
+// Report occupied bytes once, keep gaps in the high-water extent, and count
+// one compiled image separately from its two loaded copies.
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @retained_weights() asm {
+  %columns = constant 2 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %first_column = constant 0 : reg<aie2p.config.scalar : i64>
+  %second_column = constant 1 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %channels = constant 32776 : reg<aie2p.config.scalar : i64>
+  %large_channels = constant 65472 : reg<aie2p.config.scalar : i64>
+  program.load %first_column, %row, @reduce
+  program.load %second_column, %row, @reduce
+  data.reserve %first_column, %row, %origin, %channels
+  data.reserve %second_column, %row, %origin, %large_channels
+  %memory_row = constant 1 : reg<aie2p.config.scalar : i64>
+  %memory_offset = constant 65520 : reg<aie2p.config.scalar : i64>
+  %overlap_offset = constant 65528 : reg<aie2p.config.scalar : i64>
+  %range_length = constant 32 : reg<aie2p.config.scalar : i64>
+  %island_offset = constant 131072 : reg<aie2p.config.scalar : i64>
+  %empty_extent = constant 0 : reg<aie2p.config.scalar : i64>
+  data.reserve %first_column, %memory_row, %memory_offset, %range_length
+  data.reserve %first_column, %memory_row, %overlap_offset, %range_length
+  data.reserve %first_column, %memory_row, %island_offset, %range_length
+  data.reserve %first_column, %memory_row, %island_offset, %empty_extent
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @reduce() asm {
+  %scratch = storage {byte_alignment = 64, byte_length = 64} : low.storage<private>
+  %address = storage_address %scratch : low.storage<private> -> reg<aie2p.ep>
+  %identity = mov.short 0
+  st %identity, %address, 0
+  return
+}
+
+// ----
+COMPILE-REPORT: pipeline root=retained_weights realization=resident-configuration workers=2 binding_count=0 program_count=1 program_code_byte_count=22 memory_count=3 reserved_storage_byte_count=98320 worker_code_byte_count=44 maximum_worker_code_byte_count=22 minimum_worker_code_headroom_byte_count=16362 worker_storage_byte_count=128 maximum_tile_local_memory_byte_count=131104 minimum_tile_local_memory_headroom_byte_count=0 maximum_bank_storage_byte_count=16384 bank_storage_capacity_byte_count=16384
+COMPILE-REPORT: pipeline.worker[0] entry=reduce placement=0,3 code_byte_count=22 code_capacity_byte_count=16384 worker_storage_byte_count=64 local_memory_byte_count=32896 local_memory_capacity_byte_count=65536 maximum_bank_storage_byte_count=16384 bank_storage_capacity_byte_count=16384
+COMPILE-REPORT: pipeline.worker[1] entry=reduce placement=1,3 code_byte_count=22 code_capacity_byte_count=16384 worker_storage_byte_count=64 local_memory_byte_count=65536 local_memory_capacity_byte_count=65536 maximum_bank_storage_byte_count=16384 bank_storage_capacity_byte_count=16384
+COMPILE-REPORT: pipeline.memory[0] placement=0,1 memory_index=0 reserved_byte_count=72 program_data_byte_count=0 occupied_byte_count=72 high_water_byte_count=131104 capacity_byte_count=524288 maximum_bank_storage_byte_count=32 bank_storage_capacity_byte_count=65536
+COMPILE-REPORT: pipeline.memory[1] placement=0,3 memory_index=1 reserved_byte_count=32776 program_data_byte_count=64 occupied_byte_count=32840 high_water_byte_count=32896 capacity_byte_count=65536 maximum_bank_storage_byte_count=16384 bank_storage_capacity_byte_count=16384
+COMPILE-REPORT: pipeline.memory[2] placement=1,3 memory_index=2 reserved_byte_count=65472 program_data_byte_count=64 occupied_byte_count=65536 high_water_byte_count=65536 capacity_byte_count=65536 maximum_bank_storage_byte_count=16384 bank_storage_capacity_byte_count=16384
+
+// ====
+// RUN: emit aie2p-xdna input=source-low output=pipeline-report
+
+// A complete input-to-output transfer needs channel storage but no program
+// image or compute worker. Native emission and reporting preserve that cut.
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @dma_copy() run(%input: buffer, %output: buffer) {
+  %source, %destination = buffer.assume.alignment %input, %output {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 8 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<2x1xi32>
+  %channel = channel.bind<fifo> %records, %slots : view<2x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %external_input = buffer.view %source[%origin] : buffer -> view<1xi32>
+    %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %ingress = kernel.async.copy %external_input to %record {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<1xi32> to view<1xi32> -> kernel.async.token
+    %incoming = kernel.async.group %ingress : kernel.async.token -> kernel.async.group
+    kernel.async.wait %incoming {newer_groups = 0} : kernel.async.group
+    channel.publish %write : write<tile<1xi32>>
+    %read, %ready = channel.acquire %channel : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    %external_output = buffer.view %destination[%origin] : buffer -> view<1xi32>
+    %egress = kernel.async.copy %ready to %external_output {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<1xi32> to view<1xi32> -> kernel.async.token
+    %outgoing = kernel.async.group %egress : kernel.async.token -> kernel.async.group
+    kernel.async.wait %outgoing {newer_groups = 0} : kernel.async.group
+    channel.release %read : read<tile<1xi32>>
+  }
+}
+
+// ----
+COMPILE-REPORT: pipeline root=dma_copy realization=resident-configuration workers=0 binding_count=2 program_count=0 program_code_byte_count=0 memory_count=1 reserved_storage_byte_count=8 worker_code_byte_count=0 maximum_worker_code_byte_count=0 minimum_worker_code_headroom_byte_count=0 worker_storage_byte_count=0 maximum_tile_local_memory_byte_count=8 minimum_tile_local_memory_headroom_byte_count=65528 maximum_bank_storage_byte_count=8 bank_storage_capacity_byte_count=16384
+COMPILE-REPORT: pipeline.memory[0] placement=0,2 memory_index=0 reserved_byte_count=8 program_data_byte_count=0 occupied_byte_count=8 high_water_byte_count=8 capacity_byte_count=65536 maximum_bank_storage_byte_count=8 bank_storage_capacity_byte_count=16384

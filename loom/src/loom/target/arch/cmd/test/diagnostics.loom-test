@@ -1,7 +1,7 @@
 // RUN: emit command-program @entry
 
-// ERROR@+1: LOWERING/049 {program_name="recursive"}
 command.program.def @recursive() launch() {
+  // ERROR@+1: LOWERING/044 {op_name="command.program.launch", phase_name="inline-callables", callee_name="recursive", failure_code="required_cycle"}
   command.program.launch @recursive() : ()
   command.return
 }
@@ -123,5 +123,34 @@ command.program.def public @unplaced_indirect_dispatch(%byte_offset: offset) lau
   %counts = buffer.view %count_storage[%byte_offset] : buffer -> view<3xi32>
   // ERROR@+1: LOWERING/054 {kernel_name="unplaced_counts", requirement="an exact aligned buffer range"}
   kernel.dispatch @unplaced_counts[%counts]() : [view<3xi32>]()
+  command.return
+}
+
+// ====
+
+// RUN: emit command-program @unbounded_scratch
+
+kernel.entry.decl @consume_scratch(%scratch: buffer)
+
+command.program.def public @unbounded_scratch(%byte_length: offset) launch() {
+  %workgroups = index.constant 1 : index
+  // ERROR@+1: LOWERING/065 {requirement="a finite positive byte-length maximum"}
+  %scratch = buffer.alloca<global> align(64) %byte_length : buffer
+  kernel.dispatch @consume_scratch[%workgroups](%scratch) : [index](buffer)
+  command.return
+}
+
+// ====
+
+// RUN: emit command-program @local_scratch
+
+kernel.entry.decl @consume_scratch(%scratch: buffer)
+
+command.program.def public @local_scratch() launch() {
+  %workgroups = index.constant 1 : index
+  %byte_length = index.constant 64 : offset
+  // ERROR@+1: LOWERING/065 {requirement="global memory"}
+  %scratch = buffer.alloca<workgroup> align(64) %byte_length : buffer
+  kernel.dispatch @consume_scratch[%workgroups](%scratch) : [index](buffer)
   command.return
 }

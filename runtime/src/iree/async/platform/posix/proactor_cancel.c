@@ -17,6 +17,23 @@ iree_status_t iree_async_proactor_posix_drain_cancel_requests(
     iree_async_cancel_request_t* request =
         (iree_async_cancel_request_t*)proactor->base.cancellations.list.head;
     iree_async_operation_t* target = request->target;
+    if (target->type == IREE_ASYNC_OPERATION_TYPE_TIMER) {
+      iree_async_timer_operation_t* timer =
+          (iree_async_timer_operation_t*)target;
+      if (!iree_async_posix_timer_list_contains(&proactor->timers, timer)) {
+        // Registration or an already-queued expiry still owns the target.
+        // The latter withdraws this request from its terminal callback.
+        break;
+      }
+      iree_async_posix_timer_list_remove(&proactor->timers, timer);
+      iree_async_proactor_issue_cancel_request(&proactor->base, request);
+      ++*inout_completed_count;
+      iree_async_cancel_request_complete(request);
+      *inout_completed_count += iree_async_proactor_posix_complete_direct(
+          proactor, target, iree_status_from_code(IREE_STATUS_CANCELLED),
+          IREE_ASYNC_COMPLETION_FLAG_NONE);
+      continue;
+    }
     int fd = iree_async_proactor_posix_operation_fd(target);
     iree_async_posix_fd_handler_type_t handler_type;
     void* handler = NULL;

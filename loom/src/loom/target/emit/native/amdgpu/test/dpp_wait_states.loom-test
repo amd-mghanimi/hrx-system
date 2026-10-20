@@ -13,10 +13,10 @@ low.func.def target<amdgpu.cdna3.core>(@target) @dpp_arithmetic_chain(%lhs: reg<
 
 // ----
 amdgpu.wait_state_plan states=4 progress=6 hazards=4
-state[0] reason=dpp_vgpr_read action=amdgpu.s_nop at=b0:n1/o1 producer=n0 consumer=n1 required=2 observed=0 residual=2
-state[1] reason=dpp_vgpr_read action=amdgpu.s_nop at=b0:n2/o2 producer=n1 consumer=n2 required=2 observed=0 residual=2
-state[2] reason=dpp_vgpr_read action=amdgpu.s_nop at=b0:n3/o3 producer=n2 consumer=n3 required=2 observed=0 residual=2
-state[3] reason=dpp_vgpr_read action=amdgpu.s_nop at=b0:n4/o4 producer=n3 consumer=n4 required=2 observed=0 residual=2
+state[0] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n1/o1 producer=n0 consumer=n1 required=2 observed=0 residual=2
+state[1] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n2/o2 producer=n1 consumer=n2 required=2 observed=0 residual=2
+state[2] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n3/o3 producer=n2 consumer=n3 required=2 observed=0 residual=2
+state[3] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n4/o4 producer=n3 consumer=n4 required=2 observed=0 residual=2
 
 // ====
 
@@ -61,7 +61,7 @@ low.func.def target<amdgpu.cdna3.core>(@target) @dpp_observed_progress(%lhs: reg
 
 // ----
 amdgpu.wait_state_plan states=1 progress=5 hazards=1
-state[0] reason=dpp_vgpr_read action=amdgpu.s_nop at=b0:n2/o2 producer=n0 consumer=n2 required=2 observed=1 residual=1
+state[0] reason=lane_permute_vgpr_read action=amdgpu.s_nop at=b0:n2/o2 producer=n0 consumer=n2 required=2 observed=1 residual=1
 
 // ====
 

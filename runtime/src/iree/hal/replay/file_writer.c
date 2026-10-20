@@ -46,10 +46,35 @@ static iree_status_t iree_hal_replay_file_record_metadata_validate(
                             "replay record metadata is required");
   }
   const iree_hal_replay_file_record_flags_t valid_flags =
-      IREE_HAL_REPLAY_FILE_RECORD_FLAG_OPTIONAL;
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_OPTIONAL |
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_QUEUE_BARRIERS |
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES;
   if (IREE_UNLIKELY((metadata->record_flags & ~valid_flags) != 0)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "replay record reserved flags must be zero");
+  }
+  const bool has_queue_barriers = iree_any_bit_set(
+      metadata->record_flags, IREE_HAL_REPLAY_FILE_RECORD_FLAG_QUEUE_BARRIERS);
+  if (IREE_UNLIKELY(has_queue_barriers &&
+                    (metadata->record_type !=
+                         IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION ||
+                     !iree_hal_replay_operation_has_queue_barriers(
+                         metadata->operation_code)))) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "replay operation cannot carry queue barriers");
+  }
+  const bool is_command_buffer_barrier =
+      metadata->record_type == IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION &&
+      metadata->operation_code ==
+          IREE_HAL_REPLAY_OPERATION_CODE_COMMAND_BUFFER_EXECUTION_BARRIER;
+  if (IREE_UNLIKELY(
+          iree_any_bit_set(
+              metadata->record_flags,
+              IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES) &&
+          !has_queue_barriers && !is_command_buffer_barrier)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "replay transition recipes require a barrier-bearing operation");
   }
   if (IREE_UNLIKELY(
           !iree_hal_replay_file_record_type_is_known(metadata->record_type))) {
@@ -146,6 +171,9 @@ iree_hal_replay_file_writer_close(iree_hal_replay_file_writer_t* writer) {
   if (iree_status_is_ok(status)) {
     status = iree_io_stream_seek(writer->stream, IREE_IO_STREAM_SEEK_SET,
                                  file_length);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_io_stream_flush(writer->stream);
   }
   if (iree_status_is_ok(status)) {
     writer->closed = true;

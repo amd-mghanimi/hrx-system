@@ -21,9 +21,9 @@ TEST(AmdgpuDriverOptionsTest, DriverParamsAreRejectedUntilDefined) {
 
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_INVALID_ARGUMENT,
-      iree_hal_amdgpu_driver_options_parse(&options, (iree_string_pair_list_t){
-                                                         /*.count=*/1,
-                                                         /*.pairs=*/&pair,
+      iree_hal_amdgpu_driver_options_parse(&options, iree_string_pair_list_t{
+                                                         .count = 1,
+                                                         .pairs = &pair,
                                                      }));
 }
 
@@ -34,9 +34,9 @@ TEST(AmdgpuDriverOptionsTest, LogicalDeviceParamsAreRejectedUntilDefined) {
 
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         iree_hal_amdgpu_logical_device_options_parse(
-                            &options, (iree_string_pair_list_t){
-                                          /*.count=*/1,
-                                          /*.pairs=*/&pair,
+                            &options, iree_string_pair_list_t{
+                                          .count = 1,
+                                          .pairs = &pair,
                                       }));
 }
 
@@ -65,6 +65,8 @@ TEST(AmdgpuDriverOptionsTest, LogicalDeviceDefaultsDisableAsan) {
             IREE_HAL_AMDGPU_ASAN_DEFAULT_OWNED_APPLICATION_SIZE);
   EXPECT_EQ(options.asan.shadow_slab_size,
             IREE_HAL_AMDGPU_ASAN_DEFAULT_SHADOW_SLAB_SIZE);
+  EXPECT_EQ(options.asan.redzone_size,
+            IREE_HAL_AMDGPU_ASAN_DEFAULT_REDZONE_SIZE);
   EXPECT_EQ(options.asan.quarantine_size,
             IREE_HAL_AMDGPU_ASAN_DEFAULT_QUARANTINE_SIZE);
 }
@@ -76,14 +78,7 @@ TEST(AmdgpuDriverOptionsTest, LogicalDeviceDefaultsDisableTsan) {
   EXPECT_FALSE(options.tsan.enabled);
   EXPECT_EQ(options.tsan.report_policy,
             IREE_HAL_AMDGPU_TSAN_REPORT_POLICY_FAIL_DEVICE);
-  EXPECT_EQ(options.tsan.memory_granule_shift,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_MEMORY_GRANULE_SHIFT);
-  EXPECT_EQ(options.tsan.workgroup_local_memory_size,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_LOCAL_MEMORY_SIZE);
-  EXPECT_EQ(options.tsan.workgroup_capacity,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_CAPACITY);
-  EXPECT_EQ(options.tsan.shadow_slot_count,
-            IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SLOT_COUNT);
+  EXPECT_EQ(options.tsan.shadow_size, IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SIZE);
 }
 
 #if defined(IREE_SANITIZER_THREAD)
@@ -103,9 +98,9 @@ TEST(AmdgpuDriverOptionsTest, HostTsanRejectsAsanBeforeLoadingHsa) {
 TEST(AmdgpuDriverOptionsTest, RejectsMissingSearchPathStorageBeforeLoadingHsa) {
   iree_hal_amdgpu_driver_options_t options;
   iree_hal_amdgpu_driver_options_initialize(&options);
-  options.libhsa_search_paths = (iree_string_view_list_t){
-      /*.count=*/1,
-      /*.values=*/NULL,
+  options.libhsa_search_paths = iree_string_view_list_t{
+      .count = 1,
+      .values = NULL,
   };
 
   iree_hal_driver_t* driver = NULL;
@@ -120,9 +115,9 @@ TEST(AmdgpuDriverOptionsTest, RejectsMissingSearchPathDataBeforeLoadingHsa) {
   iree_hal_amdgpu_driver_options_t options;
   iree_hal_amdgpu_driver_options_initialize(&options);
   const iree_string_view_t search_path = iree_make_string_view(NULL, 1);
-  options.libhsa_search_paths = (iree_string_view_list_t){
-      /*.count=*/1,
-      /*.values=*/&search_path,
+  options.libhsa_search_paths = iree_string_view_list_t{
+      .count = 1,
+      .values = &search_path,
   };
 
   iree_hal_driver_t* driver = NULL;
@@ -293,19 +288,22 @@ TEST(AmdgpuDriverOptionsTest, RejectsInvalidAsanGeometryBeforeLoadingHsa) {
                         CreateDriverWithDefaultDeviceOptions(&options));
 }
 
-TEST(AmdgpuDriverOptionsTest, ValidatesTsanMemoryGranuleBeforeLoadingHsa) {
+TEST(AmdgpuDriverOptionsTest, ValidatesTsanShadowSizeBeforeLoadingHsa) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);
   options.tsan.enabled = 1;
-  options.tsan.memory_granule_shift =
-      IREE_HAL_AMDGPU_TSAN_MAX_MEMORY_GRANULE_SHIFT;
+  options.tsan.shadow_size = 0;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_amdgpu_logical_device_options_verify_supported_features(
+          &options));
 
+  options.tsan.shadow_size = IREE_HAL_AMDGPU_TSAN_MAX_SHADOW_SIZE;
   IREE_EXPECT_OK(
       iree_hal_amdgpu_logical_device_options_verify_supported_features(
           &options));
 
-  options.tsan.memory_granule_shift =
-      IREE_HAL_AMDGPU_TSAN_MAX_MEMORY_GRANULE_SHIFT + 1;
+  options.tsan.shadow_size = IREE_HAL_AMDGPU_TSAN_MAX_SHADOW_SIZE + 1;
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
       iree_hal_amdgpu_logical_device_options_verify_supported_features(

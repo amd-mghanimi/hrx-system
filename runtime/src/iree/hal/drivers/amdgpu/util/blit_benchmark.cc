@@ -17,6 +17,7 @@
 #include "iree/base/threading/numa.h"
 #include "iree/base/tooling/flags.h"
 #include "iree/hal/api.h"
+#include "iree/hal/drivers/amdgpu/allocator.h"
 #include "iree/hal/drivers/amdgpu/registration/driver_module.h"
 #include "iree/hal/drivers/amdgpu/util/benchmark_flags.h"
 
@@ -44,9 +45,9 @@ class BlitBenchmark : public benchmark::Fixture {
     }
 
     if (iree_status_is_ok(status)) {
-      status = iree_hal_driver_registry_try_create(
+      status = iree_hal_driver_registry_acquire_driver(
           iree_hal_driver_registry_default(), iree_make_cstring_view("amdgpu"),
-          host_allocator_, &driver_);
+          &driver_);
     }
 
     iree_async_proactor_pool_t* proactor_pool = nullptr;
@@ -218,7 +219,7 @@ class BlitBenchmark : public benchmark::Fixture {
     IREE_RETURN_IF_ERROR(iree_hal_queue_copy(
         queue_, iree_hal_semaphore_list_empty(), signal_semaphore_list,
         source_buffer_, source_offset_, target_buffer_, target_offset_, length_,
-        IREE_HAL_COPY_FLAG_NONE));
+        /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
     return WaitForCompletion(payload_value);
   }
 
@@ -251,7 +252,7 @@ class BlitBenchmark : public benchmark::Fixture {
       IREE_RETURN_IF_ERROR(iree_hal_queue_copy(
           queue_, wait_semaphore_list, signal_semaphore_list, source_buffer_,
           source_offset_, target_buffer_, target_offset_, length_,
-          IREE_HAL_COPY_FLAG_NONE));
+          /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
       payload_value = signal_payload_value;
     }
     completion_payload_value_ = payload_value;
@@ -273,7 +274,7 @@ class BlitBenchmark : public benchmark::Fixture {
     IREE_RETURN_IF_ERROR(iree_hal_queue_fill(
         queue_, iree_hal_semaphore_list_empty(), signal_semaphore_list,
         target_buffer, target_offset, length, pattern, pattern_length,
-        IREE_HAL_FILL_FLAG_NONE));
+        /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
     return WaitForCompletion(payload_value);
   }
 
@@ -311,7 +312,7 @@ class BlitBenchmark : public benchmark::Fixture {
       IREE_RETURN_IF_ERROR(iree_hal_queue_fill(
           queue_, wait_semaphore_list, signal_semaphore_list, target_buffer_,
           target_offset_, length_, &fill_pattern_, pattern_length_,
-          IREE_HAL_FILL_FLAG_NONE));
+          /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
       payload_value = signal_payload_value;
     }
     completion_payload_value_ = payload_value;
@@ -330,7 +331,7 @@ class BlitBenchmark : public benchmark::Fixture {
     IREE_RETURN_IF_ERROR(iree_hal_queue_update(
         queue_, iree_hal_semaphore_list_empty(), signal_semaphore_list,
         update_source_.data(), (iree_host_size_t)source_offset_, target_buffer_,
-        target_offset_, length_, IREE_HAL_UPDATE_FLAG_NONE));
+        target_offset_, length_, /*barriers=*/NULL, IREE_HAL_UPDATE_FLAG_NONE));
     return WaitForCompletion(payload_value);
   }
 
@@ -363,7 +364,8 @@ class BlitBenchmark : public benchmark::Fixture {
       IREE_RETURN_IF_ERROR(iree_hal_queue_update(
           queue_, wait_semaphore_list, signal_semaphore_list,
           update_source_.data(), (iree_host_size_t)source_offset_,
-          target_buffer_, target_offset_, length_, IREE_HAL_UPDATE_FLAG_NONE));
+          target_buffer_, target_offset_, length_, /*barriers=*/NULL,
+          IREE_HAL_UPDATE_FLAG_NONE));
       payload_value = signal_payload_value;
     }
     completion_payload_value_ = payload_value;
@@ -397,9 +399,11 @@ class BlitBenchmark : public benchmark::Fixture {
  private:
   bool AllocateBenchmarkBuffers(benchmark::State& state, bool needs_source) {
     iree_hal_allocator_t* allocator = iree_hal_device_allocator(device_);
-    iree_hal_buffer_params_t params = {0};
+    iree_hal_amdgpu_buffer_spec_t params = {0};
     params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER;
     params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
+    params.access = IREE_HAL_MEMORY_ACCESS_ALL;
+    params.queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
     params.min_alignment = kBenchmarkBufferAlignment;
 
     if (!HandleStatus(state,
@@ -414,14 +418,14 @@ class BlitBenchmark : public benchmark::Fixture {
     if (needs_source) {
       if (!HandleStatus(
               state,
-              iree_hal_allocator_allocate_buffer(
+              iree_hal_amdgpu_allocator_allocate_direct_buffer(
                   allocator, params, allocation_size_, &source_buffer_),
               "failed to allocate source buffer")) {
         return false;
       }
     }
     if (!HandleStatus(state,
-                      iree_hal_allocator_allocate_buffer(
+                      iree_hal_amdgpu_allocator_allocate_direct_buffer(
                           allocator, params, allocation_size_, &target_buffer_),
                       "failed to allocate target buffer")) {
       return false;

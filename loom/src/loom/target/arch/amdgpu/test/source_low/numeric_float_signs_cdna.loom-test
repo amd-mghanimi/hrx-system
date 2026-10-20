@@ -1,0 +1,54 @@
+// RUN: emit source-low target=amdgpu:gfx9-4-generic output=low
+
+func.def @scalar_f32_signs(%magnitude: f32, %sign: f32) -> (f32, f32, f32) {
+  %absolute = scalar.absf %magnitude : f32
+  %negated = scalar.negf %magnitude : f32
+  %copied = scalar.copysignf %magnitude, %sign : f32
+  func.return %absolute, %negated, %copied : f32, f32, f32
+}
+
+// ----
+low.func.def target<amdgpu.gfx9_4.generic.core> abi(hal_kernel) @scalar_f32_signs(%magnitude: reg<amdgpu.vgpr>, %sign: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %absolute = v_and_b32_lit %magnitude, 2147483647
+  %negated = v_xor_b32_lit %magnitude, 2147483648
+  %15 = s_mov_b32 2147483647
+  %copied = v_bfi_b32 %15, %magnitude, %sign
+  return %absolute, %negated, %copied
+}
+// ====
+
+func.def @vector_f32_4_signs(%magnitude: vector<4xf32>, %sign: vector<4xf32>) -> (vector<4xf32>, vector<4xf32>, vector<4xf32>) {
+  %absolute = vector.absf %magnitude : vector<4xf32>
+  %negated = vector.negf %magnitude : vector<4xf32>
+  %copied = vector.copysignf %magnitude, %sign : vector<4xf32>
+  func.return %absolute, %negated, %copied : vector<4xf32>, vector<4xf32>, vector<4xf32>
+}
+
+// ----
+low.func.def target<amdgpu.gfx9_4.generic.core> abi(hal_kernel) @vector_f32_4_signs(%magnitude: reg<amdgpu.vgpr x4>, %sign: reg<amdgpu.vgpr x4>) -> (reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>, reg<amdgpu.vgpr x4>) asm {
+  %13 = slice %magnitude[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %14 = v_and_b32_lit %13, 2147483647
+  %15 = slice %magnitude[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %16 = v_and_b32_lit %15, 2147483647
+  %17 = slice %magnitude[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %18 = v_and_b32_lit %17, 2147483647
+  %19 = slice %magnitude[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %20 = v_and_b32_lit %19, 2147483647
+  %absolute = concat(%14, %16, %18, %20) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  %23 = v_xor_b32_lit %13, 2147483648
+  %25 = v_xor_b32_lit %15, 2147483648
+  %27 = v_xor_b32_lit %17, 2147483648
+  %29 = v_xor_b32_lit %19, 2147483648
+  %negated = concat(%23, %25, %27, %29) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  %31 = s_mov_b32 2147483647
+  %33 = slice %sign[0] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %34 = v_bfi_b32 %31, %13, %33
+  %36 = slice %sign[1] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %37 = v_bfi_b32 %31, %15, %36
+  %39 = slice %sign[2] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %40 = v_bfi_b32 %31, %17, %39
+  %42 = slice %sign[3] : reg<amdgpu.vgpr x4> -> reg<amdgpu.vgpr>
+  %43 = v_bfi_b32 %31, %19, %42
+  %copied = concat(%34, %37, %40, %43) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x4>
+  return %absolute, %negated, %copied
+}

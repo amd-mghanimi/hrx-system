@@ -88,8 +88,36 @@ typedef enum loom_spirv_feature_atom_e {
   LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM = 31,
   // F32 DenormPreserve independent of other floating-point widths.
   LOOM_SPIRV_FEATURE_ATOM_FLOAT32_DENORM_PRESERVE = 32,
+  // Subgroup ballot operations.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_BALLOT = 33,
+  // F16/F64 DenormPreserve modes selectable together without changing F32.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT16_64_DENORM_PRESERVE = 34,
+  // F16/F64 RoundingModeRTE modes selectable together without changing F32.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT16_64_ROUNDING_RTE = 35,
+  // F32 RoundingModeRTE independent of other floating-point widths.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT32_ROUNDING_RTE = 36,
+  // F16 SignedZeroInfNanPreserve execution-mode support.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE = 37,
+  // F32 SignedZeroInfNanPreserve execution-mode support.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE = 38,
+  // F64 SignedZeroInfNanPreserve execution-mode support.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE = 39,
+  // Native F64-to-F16 conversion satisfies the scalar.fptrunc contract.
+  LOOM_SPIRV_FEATURE_ATOM_FLOAT64_TO_FLOAT16_CONVERSION = 40,
+  // Boolean votes over active subgroup invocations.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_VOTE = 41,
+  // Arithmetic reductions over active subgroup invocations.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_ARITHMETIC = 42,
+  // Arithmetic reductions over contiguous power-of-two subgroup clusters.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_CLUSTERED = 43,
+  // Vulkan subgroup operations admit I8/I16/I64 and F16 values.
+  LOOM_SPIRV_FEATURE_ATOM_SUBGROUP_EXTENDED_TYPES = 44,
+  // Subgroup indexed and XOR shuffle operations.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_SHUFFLE = 45,
+  // Subgroup up and down shuffle operations.
+  LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE = 46,
   // Number of feature atom enum slots.
-  LOOM_SPIRV_FEATURE_ATOM_COUNT = 33,
+  LOOM_SPIRV_FEATURE_ATOM_COUNT = 47,
 } loom_spirv_feature_atom_t;
 
 // Bitset of loom_spirv_feature_atom_t values.
@@ -196,6 +224,63 @@ typedef enum loom_spirv_feature_bit_e {
 #define LOOM_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE \
   (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT32_DENORM_PRESERVE)
 
+// Target enables subgroup ballot operations.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_BALLOT)
+
+// Target can select F16/F64 DenormPreserve modes together without changing F32.
+#define LOOM_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT16_64_DENORM_PRESERVE)
+
+// Target can select F16/F64 RoundingModeRTE modes together without changing
+// F32.
+#define LOOM_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT16_64_ROUNDING_RTE)
+
+// Target enables independent F32 RoundingModeRTE execution mode.
+#define LOOM_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT32_ROUNDING_RTE)
+
+// Target enables F16 SignedZeroInfNanPreserve execution mode.
+#define LOOM_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE)
+
+// Target enables F32 SignedZeroInfNanPreserve execution mode.
+#define LOOM_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE)
+
+// Target enables F64 SignedZeroInfNanPreserve execution mode.
+#define LOOM_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE)
+
+// Target native F64-to-F16 conversion satisfies the scalar.fptrunc contract.
+#define LOOM_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_FLOAT64_TO_FLOAT16_CONVERSION)
+
+// Target enables boolean votes over active subgroup invocations.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_VOTE)
+
+// Target enables arithmetic reductions over active subgroup invocations.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_ARITHMETIC \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_ARITHMETIC)
+
+// Target enables contiguous power-of-two subgroup arithmetic clusters.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_CLUSTERED \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_CLUSTERED)
+
+// Logical Vulkan device enables shaderSubgroupExtendedTypes.
+#define LOOM_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_SUBGROUP_EXTENDED_TYPES)
+
+// Target enables subgroup indexed and XOR shuffle operations.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_SHUFFLE)
+
+// Target enables subgroup up and down shuffle operations.
+#define LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE \
+  (UINT64_C(1) << LOOM_SPIRV_FEATURE_ATOM_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE)
+
 // Feature bits known by the SPIR-V target package.
 #define LOOM_SPIRV_FEATURE_KNOWN_BITS                                         \
   (LOOM_SPIRV_FEATURE_VULKAN_SHADER |                                         \
@@ -226,7 +311,21 @@ typedef enum loom_spirv_feature_bit_e {
    LOOM_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMIC_ADD |                     \
    LOOM_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMIC_ADD |                          \
    LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM |                                     \
-   LOOM_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE)
+   LOOM_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE |                               \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT |                              \
+   LOOM_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE |                            \
+   LOOM_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE |                               \
+   LOOM_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE |                                  \
+   LOOM_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE |                  \
+   LOOM_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE |                  \
+   LOOM_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE |                  \
+   LOOM_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION |                         \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE |                                \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_ARITHMETIC |                          \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_CLUSTERED |                           \
+   LOOM_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES |                               \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE |                             \
+   LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE)
 
 // Feature bits unconditionally required by Vulkan 1.3 BDA HAL modules.
 #define LOOM_SPIRV_FEATURE_MODULE_VULKAN_1_3_BDA_BASELINE \
@@ -241,9 +340,9 @@ typedef enum loom_spirv_feature_bit_e {
 // Maximum number of OpExtension rows emitted by all modeled atoms.
 #define LOOM_SPIRV_FEATURE_MAX_EXTENSION_COUNT 10
 // Maximum number of OpCapability rows emitted by all modeled atoms.
-#define LOOM_SPIRV_FEATURE_MAX_CAPABILITY_COUNT 25
+#define LOOM_SPIRV_FEATURE_MAX_CAPABILITY_COUNT 31
 // Maximum number of opcode rows exposed by all modeled atoms.
-#define LOOM_SPIRV_FEATURE_MAX_OPCODE_COUNT 13
+#define LOOM_SPIRV_FEATURE_MAX_OPCODE_COUNT 34
 // Maximum number of storage-class rows exposed by all modeled atoms.
 #define LOOM_SPIRV_FEATURE_MAX_STORAGE_CLASS_COUNT 1
 // Maximum number of decoration rows exposed by all modeled atoms.
@@ -254,7 +353,7 @@ typedef struct loom_spirv_feature_atom_descriptor_t {
   loom_spirv_feature_atom_t atom;
   // Stable feature atom name for diagnostics.
   iree_string_view_t name;
-  // Atom bits that must also be selected.
+  // Transitive atom dependencies that must also be selected.
   loom_spirv_feature_bits_t required_atom_bits;
   // Minimum SPIR-V binary version required by this atom.
   uint32_t minimum_spirv_version;
@@ -328,6 +427,12 @@ iree_string_view_t loom_spirv_feature_atom_name(loom_spirv_feature_atom_t atom);
 
 // Returns the feature atoms currently modeled by this target package.
 loom_spirv_feature_bits_t loom_spirv_known_feature_bits(void);
+
+// Includes the generated transitive dependencies of every selected atom.
+// Unknown bits are preserved for validation by
+// |loom_spirv_feature_set_prepare|.
+loom_spirv_feature_bits_t loom_spirv_feature_bits_with_dependencies(
+    loom_spirv_feature_bits_t atom_bits);
 
 // Returns true when |feature_set| contains |atom|.
 bool loom_spirv_feature_set_has_atom(

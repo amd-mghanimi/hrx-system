@@ -24,23 +24,22 @@ python dev.py bazel run //loom/src/loom/tools/loom-link:loom-link -- \
 | --- | --- |
 | `root.loom` | Targetless public kernel for artifact packaging. The kernel asks for `authoring.link.scale_i32` with `template.apply`. |
 | `checks.loom` | Correctness case and benchmark rows for the root workload. It declares the callable surface so checks can be linked during authoring without being part of the artifact root file. |
-| `providers.loom` | Reusable provider library with AMDGPU target records, gfx-specific `template.def` implementations, a generic fallback, and an unused provider. |
+| `providers.loom` | Reusable provider library with subgroup-specialized `template.def` implementations, a generic fallback, and an unused provider. |
 | `linking.test.json` | Production CLI proof for source linking, bytecode-library linking, and AMDGPU artifact compilation from linked bytecode. |
 
 The kernel deliberately has no authored `target(@...)`. It is portable source
 until a compile or JIT invocation specializes it. Both the root and provider
 modules carry the same `template.decl`; the linker merges that family contract
-and never uses a provider path as a matching rule. The provider library carries
-`amdgpu.target<gfx1100> @gfx1100` and `amdgpu.target<gfx1200> @gfx1200` records
-so target-specialized definitions can state their exact applicability.
+and never uses a provider path as a matching rule. The provider library states
+the normalized subgroup-size facts each specialized definition requires, so it
+remains independent of the backend that supplies those facts.
 
 A closed link resolves ordinary symbol dependencies while preserving template
 choices that need later facts. With this targetless root, it retains both
-target-specific implementations and `@scale_i32_fallback`. Compiling the linked
-module with `--target=amdgpu:gfx1100`
-then specializes the requested kernel to a materialized or reused `@gfx1100`
-target record and resolves `template.apply<@authoring.link.scale_i32>` against
-that durable target.
+subgroup-specialized implementations and `@scale_i32_fallback`. Compiling the
+linked module with `--target=amdgpu:gfx1100` projects that profile's normalized
+facts onto the requested kernel and resolves
+`template.apply<@authoring.link.scale_i32>` against them.
 
 ## Inspecting a Library
 
@@ -58,8 +57,8 @@ loom-link root.loom --library=providers.loom \
   --print-plan
 ```
 
-The plan keeps the root kernel, its family declaration, all three still-viable
-implementations, and their target records. It omits the unrelated provider.
+The plan keeps the root kernel, its family declaration, and all three
+still-viable implementations. It omits the unrelated provider.
 When a link supplies sufficient target or value facts, it can retain only the
 proven choice instead.
 
@@ -149,8 +148,7 @@ Compile the linked bytecode with a function specialization target:
 loom-compile linked.loombc \
   --format=amdgpu-hsaco \
   --target=amdgpu:gfx1100 \
-  --output=scale_i32.hal \
-  --emit-target-artifact=scale_i32.hsaco \
+  --output=scale_i32.hsaco \
   --artifact-manifest=summary \
   --compile-report=summary
 ```
@@ -188,8 +186,7 @@ specialized function:
 loom-compile portable.loombc \
   --format=amdgpu-hsaco \
   --target=amdgpu:gfx1100 \
-  --output=scale_i32.hal \
-  --emit-target-artifact=scale_i32.hsaco \
+  --output=scale_i32.hsaco \
   --dump-ir-after=select-templates \
   --dump-ir-after=inline-callables \
   --dump-ir-format=jsonl \
@@ -205,7 +202,9 @@ For a smaller provider-selection query, run `select-templates` through
 `loom-opt --pass-report=json` before artifact compilation. Each
 `template-selection` detail row names the enclosing function, contract,
 selected provider, effective target when known, candidate counts, and the
-selection outcome:
+selection outcome. Each following `template-provider` row records one ranked
+candidate as accepted, rejected, or unresolved, whether it won, and the
+decisive target condition or value predicate when applicable:
 
 ```bash
 loom-opt linked.loom \
@@ -217,7 +216,8 @@ loom-opt linked.loom \
 jq '.invocations[]
   | select(.pass == "select-templates")
   | .details[]
-  | select(.category == "template-selection")' /tmp/pass-report.json
+  | select(.category == "template-selection"
+           or .category == "template-provider")' /tmp/pass-report.json
 ```
 
 ## Authoring Pressure Points

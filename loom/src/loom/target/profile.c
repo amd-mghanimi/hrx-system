@@ -16,6 +16,14 @@ static bool loom_target_profile_bundle_is_complete(
          bundle->export_plan != NULL && bundle->config != NULL;
 }
 
+void loom_target_profile_selection_release(
+    loom_target_profile_selection_t* selection, iree_allocator_t allocator) {
+  if (selection->profile != NULL && selection->destroy != NULL) {
+    selection->destroy(selection->profile, allocator);
+  }
+  *selection = (loom_target_profile_selection_t){0};
+}
+
 iree_status_t loom_target_profile_project_facts(
     const loom_target_profile_t* profile, iree_arena_allocator_t* arena,
     loom_target_facts_t** out_facts) {

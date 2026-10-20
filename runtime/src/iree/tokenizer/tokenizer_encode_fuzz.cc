@@ -110,7 +110,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         iree_make_byte_span(reinterpret_cast<uint8_t*>(transform_buffer),
                             buffer_size),
         iree_tokenizer_offset_run_list_empty(),
-        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state);
+        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+        &state);
 
     if (iree_status_is_ok(status)) {
       iree_tokenizer_token_id_t tokens[1024];
@@ -137,7 +138,6 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         status = iree_tokenizer_encode_state_feed(
             state, chunk, output, &bytes_consumed, &token_count);
         if (!iree_status_is_ok(status)) {
-          iree_status_ignore(status);
           break;
         }
         offset += bytes_consumed;
@@ -146,10 +146,16 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         }
       }
 
-      // Finalize.
-      iree_host_size_t final_count = 0;
-      status =
-          iree_tokenizer_encode_state_finalize(state, output, &final_count);
+      // Only accepted input belongs to completion. An invalid terminal UTF-8
+      // prefix or processing error cancels this stream instead.
+      if (iree_status_is_ok(status) && offset == size) {
+        do {
+          iree_host_size_t final_count = 0;
+          status =
+              iree_tokenizer_encode_state_finalize(state, output, &final_count);
+        } while (iree_status_is_ok(status) &&
+                 iree_tokenizer_encode_state_has_pending(state));
+      }
       iree_status_ignore(status);
 
       iree_tokenizer_encode_state_deinitialize(state);

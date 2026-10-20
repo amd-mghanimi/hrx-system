@@ -29,7 +29,7 @@ static constexpr To convert(From value) {
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void scale_float8(const Float8x4* input, Float8x4* output,
                   Float8E5x4* other_format) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   Float4 wide = convert<Float4>(input[lane]);
   output[lane] = convert<Float8x4>(wide * 1.0625f);
   other_format[lane] = convert<Float8E5x4>(input[lane]);
@@ -39,7 +39,7 @@ void scale_float8(const Float8x4* input, Float8x4* output,
 void convert_integer_vectors(const Byte4* input, Int4* unsigned_widened,
                              Int4* signed_widened, Float4* unsigned_float,
                              Float4* signed_float) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   auto bytes = input[lane];
   auto signed_bytes = (SignedByte4)bytes;
   unsigned_widened[lane] = convert<Int4>(bytes);
@@ -51,7 +51,7 @@ void convert_integer_vectors(const Byte4* input, Int4* unsigned_widened,
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void truncate_float_vectors(const Float4* input, Int4* signed_integer,
                             UInt4* unsigned_integer, Byte4* bytes) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   signed_integer[lane] = convert<Int4>(input[lane]);
   unsigned_integer[lane] = convert<UInt4>(input[lane]);
   bytes[lane] = convert<Byte4>(convert<Int4>(input[lane]));
@@ -59,6 +59,6 @@ void truncate_float_vectors(const Float4* input, Int4* signed_integer,
 
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void convert_half_vectors(const Half2* input, BFloat2* output) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   output[lane] = convert<BFloat2>(input[lane]);
 }

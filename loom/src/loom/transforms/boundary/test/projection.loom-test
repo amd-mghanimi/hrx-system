@@ -177,4 +177,612 @@ func.def public target(@carrier_target) @reports_composed_rules(%first: buffer, 
 
 // ----
 CHECK: *"changed":true,*
-CHECK: *"cfg-edges-rewritten":2,"loops-rewritten":0,"layout-projections":1,"layout-components":1,"view-projections":1,"view-components":2}*
+CHECK: *"cfg-edges-rewritten":2,"loops-rewritten":0,"loop-predicate-projections":0,"loop-predicate-components":0,"layout-projections":1,"layout-components":1,"view-projections":1,"view-components":2,"vector-packet-projections":0,"vector-packet-components":0}*
+
+// ====
+
+// Condition loops project their independent header and body/result tuples. The
+// condition creates an extra candidate descriptor for the body and results;
+// the body chooses that candidate as the next header descriptor.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @condition_loop_layout(%input: buffer, %base: offset, %initial_stride_input: index, %next_stride_input: index, %iterate: i1) -> (i32) {
+  %initial_stride = index.assume %initial_stride_input [range(%initial_stride_input, 4, 1024)] : index
+  %next_stride = index.assume %next_stride_input [range(%next_stride_input, 4, 1024)] : index
+  %initial_layout = encoding.layout.strided [%initial_stride, 1] : encoding<layout>
+  %terminal_layout, %candidate_layout = scf.while(%header_layout = %initial_layout : encoding<layout>) -> (encoding<layout>, encoding<layout>) {
+    %next_layout = encoding.layout.strided [%next_stride, 1] : encoding<layout>
+    scf.condition %iterate, %header_layout, %next_layout : i1, encoding<layout>, encoding<layout>
+  } do(%body_layout: encoding<layout>, %body_candidate: encoding<layout>) {
+    scf.yield %body_candidate : encoding<layout>
+  }
+  %view = buffer.view %input[%base] : buffer -> view<2x4xi32, %candidate_layout>
+  %value = view.load %view[1, 0] : view<2x4xi32, %candidate_layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @condition_loop_layout(%input: buffer, %base: offset, %initial_stride_input: index, %next_stride_input: index, %iterate: i1) -> (i32) {
+  %initial_stride = index.assume %initial_stride_input [range(%initial_stride_input, 4, 1024)] : index
+  %next_stride = index.assume %next_stride_input [range(%next_stride_input, 4, 1024)] : index
+  %initial_layout = encoding.layout.strided [%initial_stride, 1] : encoding<layout>
+  %terminal_layout_stride_0, %candidate_layout_stride_0 = scf.while(%header_layout_stride_0 = %initial_stride : index) -> (index, index) {
+    %header_layout = encoding.layout.strided [%header_layout_stride_0, 1] : encoding<layout>
+    %next_layout = encoding.layout.strided [%next_stride, 1] : encoding<layout>
+    scf.condition %iterate, %header_layout_stride_0, %next_stride : i1, index, index
+  } do(%body_layout_stride_0: index, %body_candidate_stride_0: index) {
+    %body_layout = encoding.layout.strided [%body_layout_stride_0, 1] : encoding<layout>
+    %body_candidate = encoding.layout.strided [%body_candidate_stride_0, 1] : encoding<layout>
+    scf.yield %body_candidate_stride_0 : index
+  }
+  %candidate_layout = encoding.layout.strided [%candidate_layout_stride_0, 1] : encoding<layout>
+  %terminal_layout = encoding.layout.strided [%terminal_layout_stride_0, 1] : encoding<layout>
+  %view = buffer.view %input[%base] : buffer -> view<2x4xi32, %candidate_layout>
+  %value = view.load %view[1, 0] : view<2x4xi32, %candidate_layout> -> i32
+  func.return %value : i32
+}
+
+// ====
+// RUN: with-checks pass-report specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @reports_condition_loop_layout(%input: buffer, %base: offset, %initial_stride_input: index, %iterate: i1) -> (i32) {
+  %initial_stride = index.assume %initial_stride_input [range(%initial_stride_input, 4, 1024)] : index
+  %initial_layout = encoding.layout.strided [%initial_stride, 1] : encoding<layout>
+  %layout = scf.while(%header_layout = %initial_layout : encoding<layout>) -> (encoding<layout>) {
+    scf.condition %iterate, %header_layout : i1, encoding<layout>
+  } do(%body_layout: encoding<layout>) {
+    scf.yield %body_layout : encoding<layout>
+  }
+  %view = buffer.view %input[%base] : buffer -> view<2x4xi32, %layout>
+  %value = view.load %view[1, 0] : view<2x4xi32, %layout> -> i32
+  func.return %value : i32
+}
+
+// ----
+CHECK: *"changed":true,*
+CHECK: *"cfg-edges-rewritten":0,"loops-rewritten":1,"loop-predicate-projections":0,"loop-predicate-components":0,"layout-projections":3,"layout-components":3,"view-projections":0,"view-components":0,"vector-packet-projections":0,"vector-packet-components":0}*
+
+// ====
+// Callable-signature projection does not own multi-region kernel signatures,
+// but independent projections inside the launch body must still run.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @kernel_local_loop_layout() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %lane = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %stride = index.add %lane, %c1 : index
+  %initial_layout = encoding.layout.strided [%stride, 1] : encoding<layout>
+  %result_layout = scf.for %i = [%c0 to %c1 step %c1](%layout = %initial_layout : encoding<layout>) -> (encoding<layout>) {
+    scf.yield %layout : encoding<layout>
+  }
+  test.use %result_layout : encoding<layout>
+  kernel.return
+}
+
+// ----
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @kernel_local_loop_layout() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %lane = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %stride = index.add %lane, %c1 : index
+  %initial_layout = encoding.layout.strided [%stride, 1] : encoding<layout>
+  %result_layout_stride_0 = scf.for %i = [%c0 to %c1 step %c1](%layout_stride_0 = %stride : index) -> (index) {
+    %layout = encoding.layout.strided [%layout_stride_0, 1] : encoding<layout>
+    scf.yield %layout_stride_0 : index
+  }
+  %result_layout = encoding.layout.strided [%result_layout_stride_0, 1] : encoding<layout>
+  test.use %result_layout : encoding<layout>
+  kernel.return
+}
+
+// ====
+// RUN: pass specialize-target-callgraph,project-loop-boundary-representations
+
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @condition_predicate_payload() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %terminal, %at_limit = scf.while(%i = %c0 : index) -> (index, i1) {
+    %continue = index.cmp ult, %i, %limit : index
+    %at = index.cmp eq, %i, %limit : index
+    scf.condition %continue, %i, %at : i1, index, i1
+  } do(%body_i: index, %body_at: i1) {
+    %next = index.add %body_i, %c1 : index
+    scf.yield %next : index
+  }
+  test.use %terminal, %at_limit : index, i1
+  kernel.return
+}
+
+// ----
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @condition_predicate_payload() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %terminal, %at_limit_word = scf.while(%i = %c0 : index) -> (index, i32) {
+    %continue = index.cmp ult, %i, %limit : index
+    %at = index.cmp eq, %i, %limit : index
+    %22 = scalar.constant 1 : i32
+    %23 = scalar.constant 0 : i32
+    %24 = scf.select %at, %22, %23 : i32
+    scf.condition %continue, %i, %24 : i1, index, i32
+  } do(%body_i: index, %body_at_word: i32) {
+    %18 = scalar.constant 0 : i32
+    %body_at = scalar.cmpi ne, %body_at_word, %18 : i32
+    %next = index.add %body_i, %c1 : index
+    scf.yield %next : index
+  }
+  %20 = scalar.constant 0 : i32
+  %at_limit = scalar.cmpi ne, %at_limit_word, %20 : i32
+  test.use %terminal, %at_limit : index, i1
+  kernel.return
+}
+
+// ====
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @recurring_predicate() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = scalar.constant false : i1
+  %terminal, %last = scf.while(%i = %c0 : index, %flag = %disabled : i1) -> (index, i1) {
+    %continue = index.cmp ult, %i, %limit : index
+    scf.condition %continue, %i, %flag : i1, index, i1
+  } do(%body_i: index, %body_flag: i1) {
+    %next = index.add %body_i, %c1 : index
+    %at_limit = index.cmp eq, %next, %limit : index
+    scf.yield %next, %at_limit : index, i1
+  }
+  test.use %terminal, %last : index, i1
+  kernel.return
+}
+
+// ----
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @recurring_predicate() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = scalar.constant false : i1
+  %15 = scalar.constant 1 : i32
+  %16 = scalar.constant 0 : i32
+  %17 = scf.select %disabled, %15, %16 : i32
+  %terminal, %last_word = scf.while(%i = %c0 : index, %flag_word = %17 : i32) -> (index, i32) {
+    %24 = scalar.constant 0 : i32
+    %flag = scalar.cmpi ne, %flag_word, %24 : i32
+    %continue = index.cmp ult, %i, %limit : index
+    scf.condition %continue, %i, %flag_word : i1, index, i32
+  } do(%body_i: index, %body_flag_word: i32) {
+    %26 = scalar.constant 0 : i32
+    %body_flag = scalar.cmpi ne, %body_flag_word, %26 : i32
+    %next = index.add %body_i, %c1 : index
+    %at_limit = index.cmp eq, %next, %limit : index
+    %30 = scalar.constant 1 : i32
+    %31 = scalar.constant 0 : i32
+    %32 = scf.select %at_limit, %30, %31 : i32
+    scf.yield %next, %32 : index, i32
+  }
+  %28 = scalar.constant 0 : i32
+  %last = scalar.cmpi ne, %last_word, %28 : i32
+  test.use %terminal, %last : index, i1
+  kernel.return
+}
+
+// ====
+// A static multi-rank predicate vector uses the same-shaped word carrier. The
+// target's existing mask select and payload comparison perform the two
+// representation conversions without flattening the vector shape.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @recurring_predicate_vector() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = vector.constant false : vector<1x2xi1>
+  %terminal, %last = scf.while(%i = %c0 : index, %flags = %disabled : vector<1x2xi1>) -> (index, vector<1x2xi1>) {
+    %continue = index.cmp ult, %i, %limit : index
+    scf.condition %continue, %i, %flags : i1, index, vector<1x2xi1>
+  } do(%body_i: index, %body_flags: vector<1x2xi1>) {
+    %next = index.add %body_i, %c1 : index
+    %at_limit = index.cmp eq, %next, %limit : index
+    %before_limit = index.cmp ult, %next, %limit : index
+    %next_flags = vector.from_elements %at_limit, %before_limit : vector<1x2xi1>
+    scf.yield %next, %next_flags : index, vector<1x2xi1>
+  }
+  test.use %terminal, %last : index, vector<1x2xi1>
+  kernel.return
+}
+
+// ----
+test.target<low_core> @carrier_target {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@carrier_target) @recurring_predicate_vector() {
+  %c1 = index.constant 1 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch() {
+  %limit = kernel.subgroup.lane.id : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = vector.constant false : vector<1x2xi1>
+  %17 = vector.constant 1 : vector<1x2xi32>
+  %18 = vector.constant 0 : vector<1x2xi32>
+  %19 = vector.select %disabled, %17, %18 : vector<1x2xi32>
+  %terminal, %last_word = scf.while(%i = %c0 : index, %flags_word = %19 : vector<1x2xi32>) -> (index, vector<1x2xi32>) {
+    %26 = vector.constant 0 : vector<1x2xi32>
+    %flags = vector.cmpi ne, %flags_word, %26 : vector<1x2xi32> -> vector<1x2xi1>
+    %continue = index.cmp ult, %i, %limit : index
+    scf.condition %continue, %i, %flags_word : i1, index, vector<1x2xi32>
+  } do(%body_i: index, %body_flags_word: vector<1x2xi32>) {
+    %28 = vector.constant 0 : vector<1x2xi32>
+    %body_flags = vector.cmpi ne, %body_flags_word, %28 : vector<1x2xi32> -> vector<1x2xi1>
+    %next = index.add %body_i, %c1 : index
+    %at_limit = index.cmp eq, %next, %limit : index
+    %before_limit = index.cmp ult, %next, %limit : index
+    %next_flags = vector.from_elements %at_limit, %before_limit : vector<1x2xi1>
+    %32 = vector.constant 1 : vector<1x2xi32>
+    %33 = vector.constant 0 : vector<1x2xi32>
+    %34 = vector.select %next_flags, %32, %33 : vector<1x2xi32>
+    scf.yield %next, %34 : index, vector<1x2xi32>
+  }
+  %30 = vector.constant 0 : vector<1x2xi32>
+  %last = vector.cmpi ne, %last_word, %30 : vector<1x2xi32> -> vector<1x2xi1>
+  test.use %terminal, %last : index, vector<1x2xi1>
+  kernel.return
+}
+
+// ====
+// The target carrier bound is inclusive: the largest supported vector is
+// projected while the first larger vector remains in its logical form.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @predicate_vector_carrier_bound() {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %within_bound = vector.constant false : vector<4x8xi1>
+  %above_bound = vector.constant false : vector<3x11xi1>
+  %within_result, %above_result = scf.for %i = [%c0 to %c1 step %c1](%within = %within_bound : vector<4x8xi1>, %above = %above_bound : vector<3x11xi1>) -> (vector<4x8xi1>, vector<3x11xi1>) {
+    scf.yield %within, %above : vector<4x8xi1>, vector<3x11xi1>
+  }
+  test.use %within_result, %above_result : vector<4x8xi1>, vector<3x11xi1>
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @predicate_vector_carrier_bound() {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %within_bound = vector.constant false : vector<4x8xi1>
+  %above_bound = vector.constant false : vector<3x11xi1>
+  %9 = vector.constant 1 : vector<4x8xi32>
+  %10 = vector.constant 0 : vector<4x8xi32>
+  %11 = vector.select %within_bound, %9, %10 : vector<4x8xi32>
+  %within_result_word, %above_result = scf.for %i = [%c0 to %c1 step %c1](%within_word = %11 : vector<4x8xi32>, %above = %above_bound : vector<3x11xi1>) -> (vector<4x8xi32>, vector<3x11xi1>) {
+    %17 = vector.constant 0 : vector<4x8xi32>
+    %within = vector.cmpi ne, %within_word, %17 : vector<4x8xi32> -> vector<4x8xi1>
+    scf.yield %within_word, %above : vector<4x8xi32>, vector<3x11xi1>
+  }
+  %19 = vector.constant 0 : vector<4x8xi32>
+  %within_result = vector.cmpi ne, %within_result_word, %19 : vector<4x8xi32> -> vector<4x8xi1>
+  test.use %within_result, %above_result : vector<4x8xi1>, vector<3x11xi1>
+  func.return
+}
+
+// ====
+// Unknown distribution is not a uniformity proof. A loop block argument may
+// need native lane-mask storage and therefore uses the durable carrier.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @unknown_predicate_uses_word(%limit: index, %seed: i1) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %last = scf.for %i = [%c0 to %limit step %c1](%flag = %seed : i1) -> (i1) {
+    scf.yield %flag : i1
+  }
+  func.return %last : i1
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @unknown_predicate_uses_word(%limit: index, %seed: i1) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %8 = scalar.constant 1 : i32
+  %9 = scalar.constant 0 : i32
+  %10 = scf.select %seed, %8, %9 : i32
+  %last_word = scf.for %i = [%c0 to %limit step %c1](%flag_word = %10 : i32) -> (i32) {
+    %14 = scalar.constant 0 : i32
+    %flag = scalar.cmpi ne, %flag_word, %14 : i32
+    scf.yield %flag_word : i32
+  }
+  %16 = scalar.constant 0 : i32
+  %last = scalar.cmpi ne, %last_word, %16 : i32
+  func.return %last : i1
+}
+
+// ====
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @uniform_predicate_untouched() -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = scalar.constant false : i1
+  %last = scf.for %i = [%c0 to %c1 step %c1](%flag = %disabled : i1) -> (i1) {
+    scf.yield %flag : i1
+  }
+  func.return %last : i1
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @uniform_predicate_untouched() -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %disabled = scalar.constant false : i1
+  %last = scf.for %i = [%c0 to %c1 step %c1](%flag = %disabled : i1) -> (i1) {
+    scf.yield %flag : i1
+  }
+  func.return %last : i1
+}
+
+// ====
+// RUN: with-checks pass-report specialize-target-callgraph,project-loop-boundary-representations
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @reports_predicate_loop(%limit: index, %seed: i1) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %last = scf.for %i = [%c0 to %limit step %c1](%flag = %seed : i1) -> (i1) {
+    scf.yield %flag : i1
+  }
+  func.return %last : i1
+}
+
+// ----
+CHECK: *"loops-rewritten":1,*
+CHECK: *"loop-predicate-projections":2,"loop-predicate-components":2,*
+
+// ====
+
+// Nested LoopLike shapes exchange projected predicate state through the outer
+// body argument and the inner result.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @nested_predicate_transport(%limit: index, %seed: i1) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %last = scf.for %i = [%c0 to %limit step %c1](%outer_flag = %seed : i1) -> (i1) {
+    %inner_result = scf.while(%inner_flag = %outer_flag : i1) -> (i1) {
+      scf.condition %inner_flag, %inner_flag : i1, i1
+    } do(%inner_body_flag: i1) {
+      scf.yield %inner_body_flag : i1
+    }
+    scf.yield %inner_result : i1
+  }
+  func.return %last : i1
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @nested_predicate_transport(%limit: index, %seed: i1) -> (i1) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %11 = scalar.constant 1 : i32
+  %12 = scalar.constant 0 : i32
+  %13 = scf.select %seed, %11, %12 : i32
+  %last_word = scf.for %i = [%c0 to %limit step %c1](%outer_flag_word = %13 : i32) -> (i32) {
+    %17 = scalar.constant 0 : i32
+    %outer_flag = scalar.cmpi ne, %outer_flag_word, %17 : i32
+    %inner_result_word = scf.while(%inner_flag_word = %outer_flag_word : i32) -> (i32) {
+      %24 = scalar.constant 0 : i32
+      %inner_flag = scalar.cmpi ne, %inner_flag_word, %24 : i32
+      scf.condition %inner_flag, %inner_flag_word : i1, i32
+    } do(%inner_body_flag_word: i32) {
+      %26 = scalar.constant 0 : i32
+      %inner_body_flag = scalar.cmpi ne, %inner_body_flag_word, %26 : i32
+      scf.yield %inner_body_flag_word : i32
+    }
+    %28 = scalar.constant 0 : i32
+    %inner_result = scalar.cmpi ne, %inner_result_word, %28 : i32
+    scf.yield %inner_result_word : i32
+  }
+  %19 = scalar.constant 0 : i32
+  %last = scalar.cmpi ne, %last_word, %19 : i32
+  func.return %last : i1
+}
+
+// ====
+
+// A later projected loop resolves an unprojected result of an earlier rebuilt
+// loop before using it as a retained source recipe.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @sibling_replacement_source(%seed: i1) -> (i1) {
+  %enter = scalar.constant true : i1
+  %stop = scalar.constant false : i1
+  %lane_flag, %uniform_flag = scf.while(%first_lane = %seed : i1, %first_uniform = %enter : i1) -> (i1, i1) {
+    scf.condition %first_uniform, %first_lane, %first_uniform : i1, i1, i1
+  } do(%body_lane: i1, %body_uniform: i1) {
+    scf.yield %body_lane, %stop : i1, i1
+  }
+  %second_result = scf.while(%second_flag = %uniform_flag : i1) -> (i1) {
+    scf.condition %second_flag, %second_flag : i1, i1
+  } do(%second_body_flag: i1) {
+    scf.yield %seed : i1
+  }
+  func.return %second_result : i1
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @sibling_replacement_source(%seed: i1) -> (i1) {
+  %enter = scalar.constant true : i1
+  %stop = scalar.constant false : i1
+  %13 = scalar.constant 1 : i32
+  %14 = scalar.constant 0 : i32
+  %15 = scf.select %seed, %13, %14 : i32
+  %lane_flag_word, %uniform_flag = scf.while(%first_lane_word = %15 : i32, %first_uniform = %enter : i1) -> (i32, i1) {
+    %22 = scalar.constant 0 : i32
+    %first_lane = scalar.cmpi ne, %first_lane_word, %22 : i32
+    scf.condition %first_uniform, %first_lane_word, %first_uniform : i1, i32, i1
+  } do(%body_lane_word: i32, %body_uniform: i1) {
+    %24 = scalar.constant 0 : i32
+    %body_lane = scalar.cmpi ne, %body_lane_word, %24 : i32
+    scf.yield %body_lane_word, %stop : i32, i1
+  }
+  %26 = scalar.constant 0 : i32
+  %lane_flag = scalar.cmpi ne, %lane_flag_word, %26 : i32
+  %28 = scalar.constant 1 : i32
+  %29 = scalar.constant 0 : i32
+  %30 = scf.select %uniform_flag, %28, %29 : i32
+  %second_result_word = scf.while(%second_flag_word = %30 : i32) -> (i32) {
+    %34 = scalar.constant 0 : i32
+    %second_flag = scalar.cmpi ne, %second_flag_word, %34 : i32
+    scf.condition %second_flag, %second_flag_word : i1, i32
+  } do(%second_body_flag_word: i32) {
+    %36 = scalar.constant 0 : i32
+    %second_body_flag = scalar.cmpi ne, %second_body_flag_word, %36 : i32
+    %40 = scalar.constant 1 : i32
+    %41 = scalar.constant 0 : i32
+    %42 = scf.select %seed, %40, %41 : i32
+    scf.yield %42 : i32
+  }
+  %38 = scalar.constant 0 : i32
+  %second_result = scalar.cmpi ne, %second_result_word, %38 : i32
+  func.return %second_result : i1
+}
+
+// ====
+
+// Dynamic layouts cross both sides of a nested counted-loop recurrence.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @nested_layout_transport(%limit: index, %stride_input: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %stride = index.assume %stride_input [range(%stride_input, 4, 1024)] : index
+  %initial = encoding.layout.strided [%stride, 1] : encoding<layout>
+  %outer_result = scf.for %outer = [%c0 to %limit step %c1](%outer_layout = %initial : encoding<layout>) -> (encoding<layout>) {
+    %inner_result = scf.for %inner = [%c0 to %limit step %c1](%inner_layout = %outer_layout : encoding<layout>) -> (encoding<layout>) {
+      scf.yield %inner_layout : encoding<layout>
+    }
+    scf.yield %inner_result : encoding<layout>
+  }
+  test.use %outer_result : encoding<layout>
+  func.return
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @nested_layout_transport(%limit: index, %stride_input: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %stride = index.assume %stride_input [range(%stride_input, 4, 1024)] : index
+  %initial = encoding.layout.strided [%stride, 1] : encoding<layout>
+  %outer_result_stride_0 = scf.for %outer = [%c0 to %limit step %c1](%outer_layout_stride_0 = %stride : index) -> (index) {
+    %outer_layout = encoding.layout.strided [%outer_layout_stride_0, 1] : encoding<layout>
+    %inner_result_stride_0 = scf.for %inner = [%c0 to %limit step %c1](%inner_layout_stride_0 = %outer_layout_stride_0 : index) -> (index) {
+      %inner_layout = encoding.layout.strided [%inner_layout_stride_0, 1] : encoding<layout>
+      scf.yield %inner_layout_stride_0 : index
+    }
+    %inner_result = encoding.layout.strided [%inner_result_stride_0, 1] : encoding<layout>
+    scf.yield %inner_result_stride_0 : index
+  }
+  %outer_result = encoding.layout.strided [%outer_result_stride_0, 1] : encoding<layout>
+  test.use %outer_result : encoding<layout>
+  func.return
+}
+
+// ====
+
+// Projecting a structured function's view argument and result preserves its
+// single-entry body, including guarded effects and retained scalar arguments.
+// RUN: pass specialize-target-callgraph,project-boundary-representations
+
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @structured_view_identity(%input: view<4xi32>, %condition: i1, %value: i32) -> (view<4xi32>) {
+  scf.if %condition {
+    view.store %value, %input[0] : i32, view<4xi32>
+  }
+  func.return %input : view<4xi32>
+}
+
+// ----
+test.target<low_core> @carrier_target
+
+func.def public target(@carrier_target) @structured_view_identity(%input_root: buffer, %input_offset: offset, %condition: i1, %value: i32) -> (buffer, offset) {
+  %input = buffer.view %input_root[%input_offset] : buffer -> view<4xi32>
+  scf.if %condition {
+    view.store %value, %input[0] : i32, view<4xi32>
+  }
+  func.return %input_root, %input_offset : buffer, offset
+}

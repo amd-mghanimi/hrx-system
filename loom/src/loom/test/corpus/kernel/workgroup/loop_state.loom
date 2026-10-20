@@ -1,0 +1,413 @@
+// Carry uniform and lane-dependent collective results through nested control.
+// Every published state must retain its value across register banks. A row guard
+// and nested repetition loop preserve participation; no inactive row is read.
+// The guarded load and carried collective update stay in one source conditional;
+// fixed outer bounds let the pipeline retain its producer and consumer parts.
+// The subgroup reduction uses 16-lane clusters so its oracle is independent
+// of the target subgroup width. The workgroup reduction communicates across waves.
+template.decl @collective_rows(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index, %end: index, %depth: index, %factor: index)
+
+template.def<@collective_rows> @collective_rows_impl(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index, %end: index, %depth: index, %factor: index) {
+  %limit = index.assume %limit_input [range(%limit_input, 0, 16)] : index
+  %repeat = index.assume %repeat_input [range(%repeat_input, 0, 2)] : index
+  %lane = kernel.workitem.id<x> : index
+  %c0 = index.constant 0 : index
+  %unit = index.constant 1 : index
+  %cluster_size = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %initial = scalar.constant 37 : i32
+  %multiplier = scalar.constant 2 : i32
+  %source_aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
+  %cluster_aligned = buffer.assume.alignment %cluster_output {minimum_alignment = 4} : buffer
+  %group_aligned = buffer.assume.alignment %group_output {minimum_alignment = 4} : buffer
+  %source, %cluster_destination, %group_destination = buffer.assume.noalias %source_aligned, %cluster_aligned, %group_aligned : buffer, buffer, buffer
+  %values = buffer.view %source[%base] : buffer -> view<16x128xi32>
+  %cluster_results = buffer.view %cluster_destination[%base] : buffer -> view<8xi32>
+  %group_results = buffer.view %group_destination[%base] : buffer -> view<8xi32>
+  %cluster_result, %group_result = scf.for %row = [%c0 to %end step %unit](%cluster_sum = %initial : i32, %group_sum = %initial : i32) -> (i32, i32) pipeline(%depth) unroll(%factor) {
+    %valid = index.cmp slt, %row, %limit : index
+    %next_cluster, %next_group = scf.if %valid -> (i32, i32) {
+      %value = view.load %values[%row, %lane] : view<16x128xi32> -> i32
+      %repeated_cluster, %repeated_group = scf.for %iteration = [%c0 to %repeat step %unit](%cluster_partial = %cluster_sum : i32, %group_partial = %group_sum : i32) -> (i32, i32) {
+        %cluster_reduced = kernel.subgroup.reduce<addi> %value {cluster_size = 16} : i32
+        %group_reduced = kernel.workgroup.reduce<addi> %value : i32
+        %cluster_scaled = scalar.muli %cluster_partial, %multiplier : i32
+        %group_scaled = scalar.muli %group_partial, %multiplier : i32
+        %cluster_added = scalar.addi %cluster_scaled, %cluster_reduced : i32
+        %group_added = scalar.addi %group_scaled, %group_reduced : i32
+        scf.yield %cluster_added, %group_added : i32, i32
+      }
+      scf.yield %repeated_cluster, %repeated_group : i32, i32
+    } else {
+      scf.yield %cluster_sum, %group_sum : i32, i32
+    }
+    scf.yield %next_cluster, %next_group : i32, i32
+  }
+  %cluster_lane = index.rem %lane, %cluster_size : index
+  %leader = index.cmp eq, %cluster_lane, %c0 : index
+  scf.if %leader {
+    %cluster = index.div %lane, %cluster_size : index
+    view.store %cluster_result, %cluster_results[%cluster] : i32, view<8xi32>
+    view.store %group_result, %group_results[%cluster] : i32, view<8xi32>
+  }
+  template.return
+}
+
+kernel.def @collective_loop_state() {
+  %unit = index.constant 1 : index
+  %size = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index) {
+  %end = index.constant 7 : index
+  %depth = index.constant 1 : index
+  %factor = index.constant 1 : index
+  template.apply<@collective_rows>(%input, %cluster_output, %group_output, %limit_input, %repeat_input, %end, %depth, %factor) : (buffer, buffer, buffer, index, index, index, index, index)
+  kernel.return
+}
+
+kernel.def @pipelined_collective_loop_state() {
+  %unit = index.constant 1 : index
+  %size = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index) {
+  %end = index.constant 7 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  template.apply<@collective_rows>(%input, %cluster_output, %group_output, %limit_input, %repeat_input, %end, %depth, %factor) : (buffer, buffer, buffer, index, index, index, index, index)
+  kernel.return
+}
+
+kernel.def @short_collective_loop_state() {
+  %unit = index.constant 1 : index
+  %size = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index) {
+  %end = index.constant 1 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  template.apply<@collective_rows>(%input, %cluster_output, %group_output, %limit_input, %repeat_input, %end, %depth, %factor) : (buffer, buffer, buffer, index, index, index, index, index)
+  kernel.return
+}
+
+kernel.def @empty_collective_loop_state() {
+  %unit = index.constant 1 : index
+  %size = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index) {
+  %end = index.constant 0 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  template.apply<@collective_rows>(%input, %cluster_output, %group_output, %limit_input, %repeat_input, %end, %depth, %factor) : (buffer, buffer, buffer, index, index, index, index, index)
+  kernel.return
+}
+
+// Computes the target recurrence with serial scalar reductions. The fixed end
+// is supplied by a signature-matching wrapper for each target kernel.
+func.def @collective_loop_state_oracle_impl(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit_input: index, %repeat_input: index, %end: index) {
+  %limit = index.assume %limit_input [range(%limit_input, 0, 16)] : index
+  %repeat = index.assume %repeat_input [range(%repeat_input, 0, 2)] : index
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %cluster_count = index.constant 8 : index
+  %cluster_size = index.constant 16 : index
+  %workgroup_size = index.constant 128 : index
+  %initial = scalar.constant 37 : i32
+  %c0 = scalar.constant 0 : i32
+  %multiplier = scalar.constant 2 : i32
+  %values = buffer.view %input[%base] : buffer -> view<16x128xi32>
+  %cluster_results = buffer.view %cluster_output[%base] : buffer -> view<8xi32>
+  %group_results = buffer.view %group_output[%base] : buffer -> view<8xi32>
+  %group_result = scf.for %row = [%begin to %end step %step](%group_sum = %initial : i32) -> (i32) {
+    %valid = index.cmp slt, %row, %limit : index
+    %next_group = scf.if %valid -> (i32) {
+      %group_reduced = scf.for %lane = [%begin to %workgroup_size step %step](%reduction = %c0 : i32) -> (i32) {
+        %value = view.load %values[%row, %lane] : view<16x128xi32> -> i32
+        %next_reduction = scalar.addi %reduction, %value : i32
+        scf.yield %next_reduction : i32
+      }
+      %repeated_group = scf.for %iteration = [%begin to %repeat step %step](%partial = %group_sum : i32) -> (i32) {
+        %scaled = scalar.muli %partial, %multiplier : i32
+        %added = scalar.addi %scaled, %group_reduced : i32
+        scf.yield %added : i32
+      }
+      scf.yield %repeated_group : i32
+    } else {
+      scf.yield %group_sum : i32
+    }
+    scf.yield %next_group : i32
+  }
+  scf.for %cluster = [%begin to %cluster_count step %step] {
+    %lane_begin = index.mul %cluster, %cluster_size : index
+    %lane_end = index.add %lane_begin, %cluster_size : index
+    %cluster_result = scf.for %row = [%begin to %end step %step](%cluster_sum = %initial : i32) -> (i32) {
+      %valid = index.cmp slt, %row, %limit : index
+      %next_cluster = scf.if %valid -> (i32) {
+        %cluster_reduced = scf.for %lane = [%lane_begin to %lane_end step %step](%reduction = %c0 : i32) -> (i32) {
+          %value = view.load %values[%row, %lane] : view<16x128xi32> -> i32
+          %next_reduction = scalar.addi %reduction, %value : i32
+          scf.yield %next_reduction : i32
+        }
+        %repeated_cluster = scf.for %iteration = [%begin to %repeat step %step](%partial = %cluster_sum : i32) -> (i32) {
+          %scaled = scalar.muli %partial, %multiplier : i32
+          %added = scalar.addi %scaled, %cluster_reduced : i32
+          scf.yield %added : i32
+        }
+        scf.yield %repeated_cluster : i32
+      } else {
+        scf.yield %cluster_sum : i32
+      }
+      scf.yield %next_cluster : i32
+    }
+    view.store %cluster_result, %cluster_results[%cluster] : i32, view<8xi32>
+    view.store %group_result, %group_results[%cluster] : i32, view<8xi32>
+  }
+  func.return
+}
+
+func.def @collective_loop_state_oracle(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit: index, %repeat: index) {
+  %end = index.constant 7 : index
+  func.call @collective_loop_state_oracle_impl(%input, %cluster_output, %group_output, %limit, %repeat, %end) : (buffer, buffer, buffer, index, index, index)
+  func.return
+}
+
+func.def @short_collective_loop_state_oracle(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit: index, %repeat: index) {
+  %end = index.constant 1 : index
+  func.call @collective_loop_state_oracle_impl(%input, %cluster_output, %group_output, %limit, %repeat, %end) : (buffer, buffer, buffer, index, index, index)
+  func.return
+}
+
+func.def @empty_collective_loop_state_oracle(%input: buffer, %cluster_output: buffer, %group_output: buffer, %limit: index, %repeat: index) {
+  %end = index.constant 0 : index
+  func.call @collective_loop_state_oracle_impl(%input, %cluster_output, %group_output, %limit, %repeat, %end) : (buffer, buffer, buffer, index, index, index)
+  func.return
+}
+
+check.scenario @collective_loop_state_values {
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(0) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-10000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-20000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(1) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-10000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-20000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(2) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-10000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-20000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @pipelined_collective_loop_state_values {
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(0) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-30000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-40000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@pipelined_collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(1) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-30000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-40000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@pipelined_collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[8](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(2) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<7x128xi32>
+    %cluster_storage = check.generate.fill value(-30000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-40000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@pipelined_collective_loop_state, @collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<7x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<7x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @short_collective_loop_state_values {
+  check.trial[2](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(0) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<1x128xi32>
+    %cluster_storage = check.generate.fill value(-50000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-60000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@short_collective_loop_state, @short_collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<1x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[2](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(1) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<1x128xi32>
+    %cluster_storage = check.generate.fill value(-50000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-60000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@short_collective_loop_state, @short_collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<1x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.trial[2](%limit: index, %entropy: check.entropy) {
+    %repeat = check.literal value(2) : index
+    %seed = check.entropy.read %entropy[%limit] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<1x128xi32>
+    %cluster_storage = check.generate.fill value(-50000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-60000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@short_collective_loop_state, @short_collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<1x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @empty_collective_loop_state_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %limit = check.literal value(7) : index
+    %repeat = check.literal value(2) : index
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-16 to 16) : tensor<1x128xi32>
+    %cluster_storage = check.generate.fill value(-70000) : tensor<16xi32>
+    %cluster_output = check.tensor.view %cluster_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    %group_storage = check.generate.fill value(-80000) : tensor<16xi32>
+    %group_output = check.tensor.view %group_storage offset(16) : tensor<16xi32> -> tensor<8xi32>
+    check.compare<@empty_collective_loop_state, @empty_collective_loop_state_oracle>(%input, %cluster_output, %group_output, %limit, %repeat) : (tensor<1x128xi32>, tensor<8xi32>, tensor<8xi32>, index, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1x128xi32>
+      check.expect.bitwise actual(%cluster_storage) expected(%cluster_storage) : tensor<16xi32>
+      check.expect.bitwise actual(%group_storage) expected(%group_storage) : tensor<16xi32>
+    }
+  }
+  check.return
+}
+
+// The same uniform transport must preserve both halves of a wide recurrence.
+kernel.def @collective_loop_wide_state() {
+  %unit = index.constant 1 : index
+  %size = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %iterations_input: index) {
+  %iterations = index.assume %iterations_input [range(%iterations_input, 0, 2)] : index
+  %lane = kernel.workitem.id<x> : index
+  %base = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %unit = index.constant 1 : index
+  %initial = scalar.constant 4294967301 : i64
+  %multiplier = scalar.constant 2 : i64
+  %input_aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
+  %output_aligned = buffer.assume.alignment %output {minimum_alignment = 8} : buffer
+  %source, %destination = buffer.assume.noalias %input_aligned, %output_aligned : buffer, buffer
+  %values = buffer.view %source[%base] : buffer -> view<128xi32>
+  %results = buffer.view %destination[%base] : buffer -> view<128xi64>
+  %value = view.load %values[%lane] : view<128xi32> -> i32
+  %result = scf.for %iteration = [%c0 to %iterations step %unit](%sum = %initial : i64) -> (i64) {
+    %reduced = kernel.workgroup.reduce<addi> %value : i32
+    %wide = scalar.extui %reduced : i32 to i64
+    %scaled = scalar.muli %sum, %multiplier : i64
+    %next = scalar.addi %scaled, %wide : i64
+    scf.yield %next : i64
+  }
+  view.store %result, %results[%lane] : i64, view<128xi64>
+  kernel.return
+}
+
+func.def @collective_loop_wide_state_oracle(%input: buffer, %output: buffer, %iterations_input: index) {
+  %iterations = index.assume %iterations_input [range(%iterations_input, 0, 2)] : index
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 128 : index
+  %step = index.constant 1 : index
+  %c0 = scalar.constant 0 : i32
+  %initial = scalar.constant 4294967301 : i64
+  %multiplier = scalar.constant 2 : i64
+  %values = buffer.view %input[%base] : buffer -> view<128xi32>
+  %results = buffer.view %output[%base] : buffer -> view<128xi64>
+  %reduced = scf.for %position = [%begin to %end step %step](%sum = %c0 : i32) -> (i32) {
+    %value = view.load %values[%position] : view<128xi32> -> i32
+    %next = scalar.addi %sum, %value : i32
+    scf.yield %next : i32
+  }
+  %wide = scalar.extui %reduced : i32 to i64
+  %result = scf.for %iteration = [%begin to %iterations step %step](%sum = %initial : i64) -> (i64) {
+    %scaled = scalar.muli %sum, %multiplier : i64
+    %next = scalar.addi %scaled, %wide : i64
+    scf.yield %next : i64
+  }
+  scf.for %position = [%begin to %end step %step] {
+    view.store %result, %results[%position] : i64, view<128xi64>
+  }
+  func.return
+}
+
+check.scenario @collective_loop_wide_state_values {
+  check.trial[3](%iterations: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%iterations] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(0 to 1024) : tensor<128xi32>
+    %storage = check.generate.fill value(-1) : tensor<136xi64>
+    %output = check.tensor.view %storage offset(32) : tensor<136xi64> -> tensor<128xi64>
+    check.compare<@collective_loop_wide_state, @collective_loop_wide_state_oracle>(%input, %output, %iterations) : (tensor<128xi32>, tensor<128xi64>, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<128xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<136xi64>
+    }
+  }
+  check.return
+}

@@ -8,7 +8,6 @@ kernel.def @device_kernel() {
 check.case @device_case {
   check.requires<hal.amdgpu.descriptor_set> {descriptor_set = "amdgpu.rdna3_5.core"}
   kernel.launch @device_kernel() : ()
-  check.expect.event<device> {count = 0, type = "asan_report"}
   check.return
 }
 
@@ -19,3 +18,11 @@ check.case @scalar_case {
 }
 
 check.benchmark<@device_case> @device_benchmark
+
+check.case @target_case {
+  check.requires<hal.amdgpu.target> {targets = ["gfx12-generic", "gfx942:xnack-"]}
+  kernel.launch @device_kernel() : ()
+  check.return
+}
+
+check.benchmark<@target_case> @target_benchmark

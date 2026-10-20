@@ -1,0 +1,337 @@
+// RUN: pass kernel-synchronization-legality
+
+func.def @async_copy_rejects_unknown_source_memory(%buffer: buffer, %offset: offset) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 1024 : offset
+  %layout = encoding.layout.dense : encoding<layout>
+  %source = buffer.view %buffer[%offset] : buffer -> view<16xi8, %layout>
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %dest = buffer.view %scratch[%base] : buffer -> view<16xi8, %layout>
+  // ERROR@+1: TYPE/003 "source" "global, constant, or descriptor memory-space fact"
+  %copy = kernel.async.copy %source to %dest {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi8, %layout> to view<16xi8, %layout> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+func.def @async_copy_rejects_direction_memory_mismatch(%buffer: buffer, %offset: offset) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 1024 : offset
+  %layout = encoding.layout.dense : encoding<layout>
+  %global = buffer.assume.memory_space<global> %buffer : buffer
+  %source = buffer.view %global[%offset] : buffer -> view<16xi8, %layout>
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %dest = buffer.view %scratch[%base] : buffer -> view<16xi8, %layout>
+  // ERROR@+1: TYPE/003 "source" "workgroup memory-space fact"
+  %copy = kernel.async.copy %source to %dest {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<16xi8, %layout> to view<16xi8, %layout> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+func.def @async_gather_rejects_workgroup_source(%bytes: offset) {
+  %base = index.constant 0 : offset
+  %layout = encoding.layout.dense : encoding<layout>
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %source = buffer.view %scratch[%base] : buffer -> view<4xi8, %layout>
+  %dest = buffer.view %scratch[%base] : buffer -> view<64x4xi8, %layout>
+  // ERROR@+1: TYPE/003 "source" "global, constant, or descriptor memory-space fact"
+  %copy = kernel.async.gather %source to %dest {cache_scope = workgroup, cache_temporal = regular} : view<4xi8, %layout> to view<64x4xi8, %layout> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+func.def @async_cluster_gather_rejects_workgroup_source(%bytes: offset) {
+  %base = index.constant 0 : offset
+  %layout = encoding.layout.dense : encoding<layout>
+  %cluster_mask = scalar.constant 15 : i32
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %source = buffer.view %scratch[%base] : buffer -> view<4xi8, %layout>
+  %dest = buffer.view %scratch[%base] : buffer -> view<4xi8, %layout>
+  // ERROR@+1: TYPE/003 "source" "global, constant, or descriptor memory-space fact"
+  %copy = kernel.async.cluster.gather %source to %dest using %cluster_mask {cache_scope = workgroup, cache_temporal = regular} : view<4xi8, %layout> to view<4xi8, %layout>, i32 -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+func.def @async_cluster_gather_rejects_global_dest(%buffer: buffer, %offset: offset) {
+  %layout = encoding.layout.dense : encoding<layout>
+  %cluster_mask = scalar.constant 15 : i32
+  %global = buffer.assume.memory_space<global> %buffer : buffer
+  %source = buffer.view %global[%offset] : buffer -> view<4xi8, %layout>
+  %dest = buffer.view %global[%offset] : buffer -> view<4xi8, %layout>
+  // ERROR@+1: TYPE/003 "dest" "workgroup memory-space fact"
+  %copy = kernel.async.cluster.gather %source to %dest using %cluster_mask {cache_scope = workgroup, cache_temporal = regular} : view<4xi8, %layout> to view<4xi8, %layout>, i32 -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+func.def @async_tensor_store_rejects_constant_dest(%buffer: buffer, %offset: offset) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 16384 : offset
+  %layout = encoding.layout.dense : encoding<layout>
+  %descriptor_fill_value = scalar.constant 0 : i32
+  %d0 = vector.splat %descriptor_fill_value : vector<4xi32>
+  %d1 = vector.splat %descriptor_fill_value : vector<8xi32>
+  %desc = kernel.tensor.lds.descriptor dgroups(%d0, %d1) : vector<4xi32>, vector<8xi32> -> kernel.tensor.lds.descriptor
+  %scratch = buffer.alloca<workgroup> align(256) %bytes : buffer
+  %source = buffer.view %scratch[%base] : buffer -> view<64x64xf32, %layout>
+  %constant = buffer.assume.memory_space<constant> %buffer : buffer
+  %dest = buffer.view %constant[%offset] : buffer -> view<64x64xf32, %layout>
+  // ERROR@+1: TYPE/003 "dest" "global or descriptor memory-space fact"
+  %copy = kernel.async.tensor.store.from.lds %source to %dest using %desc {cache_scope = device, cache_temporal = non_temporal_writeback} : view<64x64xf32, %layout> to view<64x64xf32, %layout>, kernel.tensor.lds.descriptor -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// RUN: pass inline-callables,symbol-dce,kernel-synchronization-legality,ownership-lifetime
+
+func.def inline @copy_page(%catalog: view<1024xi32>, %page: index, %packet: view<128xi32>) {
+  %source = view.subview %catalog[%page] : view<1024xi32> -> view<64xi32>
+  %destination = view.subview %packet[64] : view<128xi32> -> view<64xi32>
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<64xi32> to view<64xi32> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+func.def public @copy_retained_page(%input: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %catalog_slot = buffer.view %global[%base] : buffer -> view<1x1024xi32>
+  %catalog = channel.bind<fifo> %catalog_slot, %capacity : view<1x1024xi32>, index -> channel<tile<1024xi32>>
+  %bytes = index.constant 512 : offset
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %packet_slot = buffer.view %scratch[%base] : buffer -> view<1x128xi32>
+  %packets = channel.bind<fifo> %packet_slot, %capacity : view<1x128xi32>, index -> channel<tile<128xi32>>
+  %read, %catalog_view = channel.acquire %catalog : channel<tile<1024xi32>> -> (read<tile<1024xi32>>, view<1024xi32>)
+  %write, %packet = channel.reserve %packets : channel<tile<128xi32>> -> (write<tile<128xi32>>, view<128xi32>)
+  %first_page = index.constant 0 : index
+  %second_page = index.constant 64 : index
+  func.call @copy_page(%catalog_view, %first_page, %packet) : (view<1024xi32>, index, view<128xi32>)
+  func.call @copy_page(%catalog_view, %second_page, %packet) : (view<1024xi32>, index, view<128xi32>)
+  channel.publish %write : write<tile<128xi32>>
+  channel.release %read : read<tile<1024xi32>>
+  func.return
+}
+
+// ----
+func.def public @copy_retained_page(%input: buffer) {
+  %base = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %catalog_slot = buffer.view %global[%base] : buffer -> view<1x1024xi32>
+  %catalog = channel.bind<fifo> %catalog_slot, %capacity : view<1x1024xi32>, index -> channel<tile<1024xi32>>
+  %bytes = index.constant 512 : offset
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %packet_slot = buffer.view %scratch[%base] : buffer -> view<1x128xi32>
+  %packets = channel.bind<fifo> %packet_slot, %capacity : view<1x128xi32>, index -> channel<tile<128xi32>>
+  %read, %catalog_view = channel.acquire %catalog : channel<tile<1024xi32>> -> (read<tile<1024xi32>>, view<1024xi32>)
+  %write, %packet = channel.reserve %packets : channel<tile<128xi32>> -> (write<tile<128xi32>>, view<128xi32>)
+  %first_page = index.constant 0 : index
+  %second_page = index.constant 64 : index
+  %source$23 = view.subview %catalog_view[%first_page] : view<1024xi32> -> view<64xi32>
+  %destination$24 = view.subview %packet[64] : view<128xi32> -> view<64xi32>
+  %copy$25 = kernel.async.copy %source$23 to %destination$24 {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<64xi32> to view<64xi32> -> kernel.async.token
+  %group$26 = kernel.async.group %copy$25 : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group$26 {newer_groups = 0} : kernel.async.group
+  %source$3 = view.subview %catalog_view[%second_page] : view<1024xi32> -> view<64xi32>
+  %destination$4 = view.subview %packet[64] : view<128xi32> -> view<64xi32>
+  %copy$5 = kernel.async.copy %source$3 to %destination$4 {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<64xi32> to view<64xi32> -> kernel.async.token
+  %group$6 = kernel.async.group %copy$5 : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group$6 {newer_groups = 0} : kernel.async.group
+  channel.publish %write : write<tile<128xi32>>
+  channel.release %read : read<tile<1024xi32>>
+  func.return
+}
+
+// ====
+
+func.def @copy_cfg_carried_views(%input: buffer) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 256 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %source = buffer.view %global[%base] : buffer -> view<64xi32>
+  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %destination = buffer.view %scratch[%base] : buffer -> view<64xi32>
+  cfg.br ^copy(%source: view<64xi32>, %destination: view<64xi32>)
+^copy(%from: view<64xi32>, %to: view<64xi32>):
+  %copy = kernel.async.copy %from to %to {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<64xi32> to view<64xi32> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// RUN: pass inline-callables,symbol-dce,kernel-synchronization-legality
+
+func.def inline @copy_page(%source: view<64xi32>, %destination: view<64xi32>) {
+  // ERROR@+1: TYPE/003 "dest" "workgroup memory-space fact"
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<64xi32> to view<64xi32> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+func.def public @caller_rejects_global_destination(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global_input = buffer.assume.memory_space<global> %input : buffer
+  %global_output = buffer.assume.memory_space<global> %output : buffer
+  %source = buffer.view %global_input[%base] : buffer -> view<64xi32>
+  %destination = buffer.view %global_output[%base] : buffer -> view<64xi32>
+  func.call @copy_page(%source, %destination) : (view<64xi32>, view<64xi32>)
+  func.return
+}
+
+// ====
+
+// RUN: pass inline-callables,symbol-dce,canonicalize,kernel-synchronization-legality
+
+// The helper's shapes are symbolic while authored, then specialize at its
+// caller. Both transfer directions must retain the resolved footprint.
+func.def inline @copy_rows(%elements: index, %bytes: index, %source: view<[%elements]xbf16>, %scratch: view<[%bytes]xi8>, %output: view<[%elements]xbf16>, %enabled: i1) {
+  %load = kernel.async.copy %source to %scratch {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<[%elements]xbf16> to view<[%bytes]xi8> -> kernel.async.token
+  %loaded = kernel.async.group %load : kernel.async.token -> kernel.async.group
+  kernel.async.wait %loaded {newer_groups = 0} : kernel.async.group
+  %store = kernel.async.copy.mask %scratch to %output, %enabled {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<[%bytes]xi8> to view<[%elements]xbf16>, i1 -> kernel.async.token
+  %stored = kernel.async.group %store : kernel.async.token -> kernel.async.group
+  kernel.async.wait %stored {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+func.def public @specialized_rows(%input: buffer, %output: buffer, %enabled: i1) {
+  %origin = index.constant 0 : offset
+  %elements = index.constant 32 : index
+  %bytes = index.constant 64 : index
+  %allocation_size = index.constant 64 : offset
+  %global_input = buffer.assume.memory_space<global> %input : buffer
+  %global_output = buffer.assume.memory_space<global> %output : buffer
+  %source = buffer.view %global_input[%origin] : buffer -> view<[%elements]xbf16>
+  %destination = buffer.view %global_output[%origin] : buffer -> view<[%elements]xbf16>
+  %storage = buffer.alloca<workgroup> align(64) %allocation_size : buffer
+  %scratch = buffer.view %storage[%origin] : buffer -> view<[%bytes]xi8>
+  func.call @copy_rows(%elements, %bytes, %source, %scratch, %destination, %enabled) : (index, index, view<[%elements]xbf16>, view<[%bytes]xi8>, view<[%elements]xbf16>, i1)
+  func.return
+}
+
+// ----
+func.def public @specialized_rows(%input: buffer, %output: buffer, %enabled: i1) {
+  %origin = index.constant 0 : offset
+  %allocation_size = index.constant 64 : offset
+  %global_input = buffer.assume.memory_space<global> %input : buffer
+  %global_output = buffer.assume.memory_space<global> %output : buffer
+  %source = buffer.view %global_input[%origin] : buffer -> view<32xbf16>
+  %destination = buffer.view %global_output[%origin] : buffer -> view<32xbf16>
+  %storage = buffer.alloca<workgroup> align(64) %allocation_size : buffer
+  %scratch = buffer.view %storage[%origin] : buffer -> view<64xi8>
+  %load = kernel.async.copy %source to %scratch {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<32xbf16> to view<64xi8> -> kernel.async.token
+  %loaded = kernel.async.group %load : kernel.async.token -> kernel.async.group
+  kernel.async.wait %loaded {newer_groups = 0} : kernel.async.group
+  %store = kernel.async.copy.mask %scratch to %destination, %enabled {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<64xi8> to view<32xbf16>, i1 -> kernel.async.token
+  %stored = kernel.async.group %store : kernel.async.token -> kernel.async.group
+  kernel.async.wait %stored {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// RUN: pass kernel-synchronization-legality
+
+// Deferring source shape verification does not authorize an unresolved copy
+// length at the target boundary.
+func.def @copy_requires_concrete_extent_at_lowering(%input: buffer, %extent: index) {
+  %origin = index.constant 0 : offset
+  %allocation_size = index.constant 64 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %source = buffer.view %global[%origin] : buffer -> view<[%extent]xi8>
+  %storage = buffer.alloca<workgroup> align(64) %allocation_size : buffer
+  %destination = buffer.view %storage[%origin] : buffer -> view<[%extent]xi8>
+  // ERROR@+1: LOWERING/024 {op_name="kernel.async.copy", phase_name="kernel-synchronization-legality", rejection_bits="64"}
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<[%extent]xi8> to view<[%extent]xi8> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// Mismatches visible only in value facts are rejected even without a preceding
+// canonicalization of the symbolic view types.
+func.def @copy_rejects_specialized_extent_mismatch(%input: buffer, %enabled: i1) {
+  %origin = index.constant 0 : offset
+  %extent = index.constant 32 : index
+  %allocation_size = index.constant 64 : offset
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %source = buffer.view %global[%origin] : buffer -> view<[%extent]xbf16>
+  %storage = buffer.alloca<workgroup> align(64) %allocation_size : buffer
+  %destination = buffer.view %storage[%origin] : buffer -> view<[%extent]xi8>
+  // ERROR@+1: LOWERING/024 {op_name="kernel.async.copy.mask", phase_name="kernel-synchronization-legality", rejection_bits="64"}
+  %copy = kernel.async.copy.mask %source to %destination, %enabled {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<[%extent]xbf16> to view<[%extent]xi8>, i1 -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// Symbolic payload sizes resolve without canonicalizing the view types. The
+// padding belongs to each endpoint's storage, not the bytes being transferred.
+func.def @copy_padded_rows_with_resolved_extents(%input: buffer, %output: buffer, %enabled: i1) {
+  %origin = index.constant 0 : offset
+  %rows = index.constant 2 : index
+  %allocation_size = index.constant 32 : offset
+  %input_layout = encoding.layout.strided [8, 1] : encoding<layout>
+  %output_layout = encoding.layout.strided [6, 1] : encoding<layout>
+  %global_input = buffer.assume.memory_space<global> %input : buffer
+  %global_output = buffer.assume.memory_space<global> %output : buffer
+  %source = buffer.view %global_input[%origin] : buffer -> view<[%rows]x4xi32, %input_layout>
+  %destination = buffer.view %global_output[%origin] : buffer -> view<[%rows]x4xi32, %output_layout>
+  %storage = buffer.alloca<workgroup> align(32) %allocation_size : buffer
+  %scratch = buffer.view %storage[%origin] : buffer -> view<[%rows]x4xi32>
+  %load = kernel.async.copy %source to %scratch {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<[%rows]x4xi32, %input_layout> to view<[%rows]x4xi32> -> kernel.async.token
+  %loaded = kernel.async.group %load : kernel.async.token -> kernel.async.group
+  kernel.async.wait %loaded {newer_groups = 0} : kernel.async.group
+  %store = kernel.async.copy.mask %scratch to %destination, %enabled {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<[%rows]x4xi32> to view<[%rows]x4xi32, %output_layout>, i1 -> kernel.async.token
+  %stored = kernel.async.group %store : kernel.async.token -> kernel.async.group
+  kernel.async.wait %stored {newer_groups = 0} : kernel.async.group
+  func.return
+}
+
+// ====
+
+// The last row lives beyond the 32-byte payload's contiguous extent. Its read
+// still conflicts with the transfer until completion covers the storage span.
+func.def @copy_padded_destination_requires_wait(%input: buffer) {
+  %origin = index.constant 0 : offset
+  %allocation_size = index.constant 48 : offset
+  %layout = encoding.layout.strided [8, 1] : encoding<layout>
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %source = buffer.view %global[%origin] : buffer -> view<2x4xi32>
+  %storage = buffer.alloca<workgroup> align(16) %allocation_size : buffer
+  %destination = buffer.view %storage[%origin] : buffer -> view<2x4xi32, %layout>
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x4xi32> to view<2x4xi32, %layout> -> kernel.async.token
+  %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  // ERROR@+1: LOWERING/028 {op_name="view.load", phase_name="kernel-synchronization-legality"}
+  %value = view.load %destination[1, 3] : view<2x4xi32, %layout> -> i32
+  test.use %value : i32
+  kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+  func.return
+}

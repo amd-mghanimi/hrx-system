@@ -58,21 +58,20 @@ func.def target(@target) @vector_fptrunc_f16x3_to_bf8(%input: vector<3xf16>) -> 
 low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @vector_fptrunc_f16x3_to_bf8(%input: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr>) asm {
   %5 = slice %input[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
   %6 = v_cvt_f32_f16 %5
-  %8 = v_lshrrev_b32_src0_inline %5, 16
-  %9 = v_cvt_f32_f16 %8
-  %10 = slice %input[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
-  %11 = v_cvt_f32_f16 %10
-  %12 = v_cvt_pk_bf8_f32_low %6, %9
-  %13 = v_cvt_pk_bf8_f32_high %12, %11, %11
-  %14 = v_and_b32_lit %13, 2139062143
-  %15 = v_add_u32_lit %14, 50529027
-  %16 = v_and_b32_lit %15, 2155905152
-  %17 = v_lshrrev_b32_src0_inline %16, 7
-  %18 = v_or_b32 %14, %17
-  %19 = v_perm_b32_src2_lit %6, %9, 775
-  %20 = v_bfi_b32_src0_lit %19, %18, 32896
-  %21 = v_perm_b32_src2_lit %11, %11, 50790400
-  %converted = v_bfi_b32_src0_lit %21, %20, 2155872256
+  %8 = v_cvt_f32_f16_input_high %5
+  %9 = slice %input[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %10 = v_cvt_f32_f16 %9
+  %11 = v_cvt_pk_bf8_f32_low %6, %8
+  %12 = v_cvt_pk_bf8_f32_high %11, %10, %10
+  %13 = v_and_b32_lit %12, 2139062143
+  %14 = v_add_u32_lit %13, 50529027
+  %15 = v_and_b32_lit %14, 2155905152
+  %16 = v_lshrrev_b32_src0_inline %15, 7
+  %17 = v_or_b32 %13, %16
+  %18 = v_perm_b32_src2_lit %6, %8, 775
+  %19 = v_bfi_b32_src0_lit %18, %17, 32896
+  %20 = v_perm_b32_src2_lit %10, %10, 50790400
+  %converted = v_bfi_b32_src0_lit %20, %19, 2155872256
   return %converted
 }
 
@@ -129,7 +128,7 @@ low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @scalar_fptrunc_
   %8 = v_cmp_u_f32 %input, %input
   %9 = v_cndmask_b32 %7, %input, %8
   %13 = v_cvt_pk_fp8_f32_low %9, %9
-  %14 = v_bfe_u32_offset_0_width_16_low16 %13
+  %14 = v_bfe_u32_offset_0_width_inline_low16 %13
   %15 = v_perm_b32_src2_lit %input, %input, 775
   %converted = v_bfi_b32_src0_lit %15, %14, 32896
   return %converted
@@ -148,7 +147,7 @@ func.def target(@target) @scalar_fptrunc_f16_to_bf8(%input: f16) -> (f8E5M2) {
 low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @scalar_fptrunc_f16_to_bf8(%input: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %5 = v_cvt_f32_f16 %input
   %6 = v_cvt_pk_bf8_f32_low %5, %5
-  %7 = v_bfe_u32_offset_0_width_16_low16 %6
+  %7 = v_bfe_u32_offset_0_width_inline_low16 %6
   %8 = v_and_b32_lit %7, 2139062143
   %9 = v_add_u32_lit %8, 50529027
   %10 = v_and_b32_lit %9, 2155905152
@@ -172,7 +171,7 @@ func.def target(@target) @scalar_fptrunc_bf16_to_bf8(%input: bf16) -> (f8E5M2) {
 low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @scalar_fptrunc_bf16_to_bf8(%input: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %5 = v_lshlrev_b32_src0_inline %input, 16
   %6 = v_cvt_pk_bf8_f32_low %5, %5
-  %7 = v_bfe_u32_offset_0_width_16_low16 %6
+  %7 = v_bfe_u32_offset_0_width_inline_low16 %6
   %8 = v_and_b32_lit %7, 2139062143
   %9 = v_add_u32_lit %8, 50529027
   %10 = v_and_b32_lit %9, 2155905152
@@ -180,5 +179,30 @@ low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @scalar_fptrunc_
   %12 = v_or_b32 %8, %11
   %13 = v_perm_b32_src2_lit %5, %5, 775
   %converted = v_bfi_b32_src0_lit %13, %12, 32896
+  return %converted
+}
+
+// ====
+
+amdgpu.target<gfx1200> @target
+
+func.def target(@target) @vector_sitofp_i8x4_to_fp8(%input: vector<4xi8>) -> (vector<4xf8E4M3>) {
+  %floats = vector.sitofp %input : vector<4xi8> to vector<4xf32>
+  %converted = vector.fptrunc %floats : vector<4xf32> to vector<4xf8E4M3>
+  func.return %converted : vector<4xf8E4M3>
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.core>(@target) abi(hal_kernel) @vector_sitofp_i8x4_to_fp8(%input: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
+  %6 = v_bfe_i32_offset_width_inline %input {offset = 0, width = 8}
+  %7 = v_cvt_f32_i32 %6
+  %8 = v_bfe_i32_offset_width_inline %input {offset = 8, width = 8}
+  %9 = v_cvt_f32_i32 %8
+  %10 = v_bfe_i32_offset_width_inline %input {offset = 16, width = 8}
+  %11 = v_cvt_f32_i32 %10
+  %12 = v_ashrrev_i32_src0_inline %input, 24
+  %13 = v_cvt_f32_i32 %12
+  %19 = v_cvt_pk_fp8_f32_low %7, %9
+  %converted = v_cvt_pk_fp8_f32_high %19, %11, %13
   return %converted
 }

@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library")
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -39,6 +39,8 @@ loom_cc_library(
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/cfg",
         "//loom/src/loom/pass:types",
+        "//loom/src/loom/rewrite:materialize",
+        "//loom/src/loom/rewrite:remap",
         "//loom/src/loom/rewrite:rewriter",
         "//runtime/src/iree/base",
     ],
@@ -63,6 +65,7 @@ loom_cc_library(
         ":block_arguments",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/low",
         "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/util:cfg_graph",
         "//loom/src/loom/util:dominance",
@@ -117,6 +120,7 @@ loom_cc_library(
         "//loom/src/loom/analysis:condition_facts",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/low",
         "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/util:fact_table",
         "//runtime/src/iree/base",
@@ -150,5 +154,23 @@ loom_cc_library(
         "//loom/src/loom/util:dominance",
         "//loom/src/loom/util:fact_table",
         "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_simplify_test",
+    srcs = ["cfg_simplify_test.cc"],
+    deps = [
+        ":cfg_simplify",
+        "//loom/src/loom/format/text:parser",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/pass:value_facts",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )

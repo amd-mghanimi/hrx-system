@@ -1,0 +1,107 @@
+// Predicates computed before divergence retain bits for inactive lanes. Votes
+// and ballots must intersect those predicates with the active set at the use.
+kernel.def @subgroup_active_predicate() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %any_output: buffer, %all_output: buffer, %ballot_output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<64xi32>
+  %any_view = buffer.view %any_output[%base] : buffer -> view<32xi32>
+  %all_view = buffer.view %all_output[%base] : buffer -> view<32xi32>
+  %ballot_view = buffer.view %ballot_output[%base] : buffer -> view<32xi32>
+  %value = view.load %source[%lane] : view<64xi32> -> i32
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %odd = scalar.andi %value, %c1 : i32
+  %inactive_predicate = scalar.cmpi ne, %odd, %c0 : i32
+  %true_predicate = scalar.cmpi sge, %value, %c0 : i32
+  %c2 = scalar.constant 2 : i32
+  %pair_bit = scalar.andi %value, %c2 : i32
+  %mixed_predicate = scalar.cmpi ne, %pair_bit, %c0 : i32
+  %index_unit = index.constant 1 : index
+  %c0_index = index.constant 0 : index
+  %parity = index.andi %lane, %index_unit : index
+  %active = index.cmp eq, %parity, %c0_index : index
+  scf.if %active {
+    %pair_width = index.constant 2 : index
+    %position = index.div %lane, %pair_width : index
+    %any = kernel.subgroup.vote.any %inactive_predicate : i1
+    %all = kernel.subgroup.vote.all %true_predicate : i1
+    %mixed_any = kernel.subgroup.vote.any %mixed_predicate : i1
+    %mixed_all = kernel.subgroup.vote.all %mixed_predicate : i1
+    %mixed_ballot = kernel.subgroup.vote.ballot %mixed_predicate : i1 -> i64
+    %inactive_ballot = kernel.subgroup.vote.ballot %inactive_predicate : i1 -> i64
+    %active_ballot = kernel.subgroup.vote.ballot %true_predicate : i1 -> i64
+    %active_mask = kernel.subgroup.active.mask : i64
+    %c0_wide = scalar.constant 0 : i64
+    %empty = scalar.cmpi eq, %inactive_ballot, %c0_wide : i64
+    %complete = scalar.cmpi eq, %active_ballot, %active_mask : i64
+    %ballots_match = scalar.andi %empty, %complete : i1
+    // A mixed predicate distinguishes any from all without assuming a fixed
+    // subgroup size. The independently qualified ballot is the lane mask.
+    %expected_any = scalar.cmpi ne, %mixed_ballot, %c0_wide : i64
+    %expected_all = scalar.cmpi eq, %mixed_ballot, %active_mask : i64
+    %any_matches = scalar.cmpi eq, %mixed_any, %expected_any : i1
+    %all_matches = scalar.cmpi eq, %mixed_all, %expected_all : i1
+    %mixed_matches = scalar.andi %any_matches, %all_matches : i1
+    %predicates_match = scalar.andi %ballots_match, %mixed_matches : i1
+    %any_value = scalar.extui %any : i1 to i32
+    %all_value = scalar.extui %all : i1 to i32
+    %ballot_value = scalar.extui %predicates_match : i1 to i32
+    view.store %any_value, %any_view[%position] : i32, view<32xi32>
+    view.store %all_value, %all_view[%position] : i32, view<32xi32>
+    view.store %ballot_value, %ballot_view[%position] : i32, view<32xi32>
+  }
+  kernel.return
+}
+
+func.def @subgroup_active_predicate_oracle(%input: buffer, %any_output: buffer, %all_output: buffer, %ballot_output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %false = scalar.constant 0 : i32
+  %true = scalar.constant 1 : i32
+  %any_view = buffer.view %any_output[%base] : buffer -> view<32xi32>
+  %all_view = buffer.view %all_output[%base] : buffer -> view<32xi32>
+  %ballot_view = buffer.view %ballot_output[%base] : buffer -> view<32xi32>
+  scf.for %position = [%begin to %end step %step] {
+    view.store %false, %any_view[%position] : i32, view<32xi32>
+    view.store %true, %all_view[%position] : i32, view<32xi32>
+    view.store %true, %ballot_view[%position] : i32, view<32xi32>
+  }
+  func.return
+}
+
+check.scenario @votes_ignore_inactive_lanes {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(0) step(1) : tensor<64xi32>
+    %any_storage = check.generate.fill value(99) : tensor<40xi32>
+    %any_prefix = check.tensor.view %any_storage offset(0) : tensor<40xi32> -> tensor<4xi32>
+    %any = check.tensor.view %any_storage offset(16) : tensor<40xi32> -> tensor<32xi32>
+    %any_suffix = check.tensor.view %any_storage offset(144) : tensor<40xi32> -> tensor<4xi32>
+    %all_storage = check.generate.fill value(98) : tensor<40xi32>
+    %all_prefix = check.tensor.view %all_storage offset(0) : tensor<40xi32> -> tensor<4xi32>
+    %all = check.tensor.view %all_storage offset(16) : tensor<40xi32> -> tensor<32xi32>
+    %all_suffix = check.tensor.view %all_storage offset(144) : tensor<40xi32> -> tensor<4xi32>
+    %ballot_storage = check.generate.fill value(97) : tensor<40xi32>
+    %ballot_prefix = check.tensor.view %ballot_storage offset(0) : tensor<40xi32> -> tensor<4xi32>
+    %ballot = check.tensor.view %ballot_storage offset(16) : tensor<40xi32> -> tensor<32xi32>
+    %ballot_suffix = check.tensor.view %ballot_storage offset(144) : tensor<40xi32> -> tensor<4xi32>
+    check.compare<@subgroup_active_predicate, @subgroup_active_predicate_oracle>(%input, %any, %all, %ballot) : (tensor<64xi32>, tensor<32xi32>, tensor<32xi32>, tensor<32xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%any) expected(%any) : tensor<32xi32>
+      check.expect.bitwise actual(%all) expected(%all) : tensor<32xi32>
+      check.expect.bitwise actual(%ballot) expected(%ballot) : tensor<32xi32>
+      check.expect.bitwise actual(%any_prefix) expected(%any_prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%any_suffix) expected(%any_suffix) : tensor<4xi32>
+      check.expect.bitwise actual(%all_prefix) expected(%all_prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%all_suffix) expected(%all_suffix) : tensor<4xi32>
+      check.expect.bitwise actual(%ballot_prefix) expected(%ballot_prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%ballot_suffix) expected(%ballot_suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}

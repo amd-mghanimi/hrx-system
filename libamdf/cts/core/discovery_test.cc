@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "amdf/amdf.h"
@@ -24,24 +25,27 @@ const amdf_api_t* QueryApi() {
 }
 
 amdf_instance_create_info_t MakeInstanceCreateInfo() {
-  amdf_instance_create_info_t create_info = {};
-  create_info.type = AMDF_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-  create_info.structure_size = sizeof(create_info);
-  create_info.native_lifetime = GetCtsDeviceCache().native_lifetime();
+  amdf_instance_create_info_t create_info = {
+      .type = AMDF_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+      .structure_size = sizeof(create_info),
+      .native_lifetime = GetCtsDeviceCache().native_lifetime(),
+  };
   return create_info;
 }
 
 amdf_endpoint_info_t MakeEndpointInfo() {
-  amdf_endpoint_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_ENDPOINT_INFO;
-  info.structure_size = sizeof(info);
+  amdf_endpoint_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_ENDPOINT_INFO,
+      .structure_size = sizeof(info),
+  };
   return info;
 }
 
 amdf_queue_family_info_t MakeQueueFamilyInfo() {
-  amdf_queue_family_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_QUEUE_FAMILY_INFO;
-  info.structure_size = sizeof(info);
+  amdf_queue_family_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_QUEUE_FAMILY_INFO,
+      .structure_size = sizeof(info),
+  };
   return info;
 }
 
@@ -55,8 +59,9 @@ TEST(InstanceTest, ValidatesCreateInfoBeforePlatformInitialization) {
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
   EXPECT_EQ(instance, sentinel);
 
-  amdf_instance_create_info_t create_info = {};
-  create_info.structure_size = sizeof(create_info);
+  amdf_instance_create_info_t create_info = {
+      .structure_size = sizeof(create_info),
+  };
   EXPECT_EQ(amdf_status_code(api->instance_create(&create_info, &instance)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
   EXPECT_EQ(instance, sentinel);
@@ -282,6 +287,83 @@ TEST_F(DiscoveryTest, QueriesImmutableQueueFamilies) {
   EXPECT_EQ(std::memcmp(&family_info, &original_info, sizeof(family_info)), 0);
 }
 
+TEST_F(DiscoveryTest, QueriesCachedHostCpuLocalityWithoutActivation) {
+  std::vector<amdf_endpoint_summary_t> summaries;
+  ASSERT_TRUE(amdf_status_is_ok(Enumerate(&summaries)));
+  if (summaries.empty()) {
+    GTEST_SKIP() << "no AMD endpoints present";
+  }
+  for (size_t index = 0; index < summaries.size(); ++index) {
+    const auto& summary = summaries[index];
+    SCOPED_TRACE(summary.name);
+    ASSERT_EQ(api_->endpoint_open(instance_, &summary.id, &endpoint_),
+              AMDF_STATUS_OK);
+    struct {
+      // Supported output prefix with caller-supplied trailing storage.
+      amdf_endpoint_host_locality_t locality;
+      // Bytes outside the provider's output extent must remain untouched.
+      uint64_t canary;
+    } extended = {
+        .locality =
+            {
+                .type = AMDF_STRUCTURE_TYPE_ENDPOINT_HOST_LOCALITY,
+                .structure_size = sizeof(extended),
+                .numa_node = UINT32_MAX - 1,
+            },
+        .canary = UINT64_C(0x472febc536a00819),
+    };
+    auto& locality = extended.locality;
+    auto info = MakeEndpointInfo();
+    info.next = &locality;
+    ASSERT_EQ(api_->endpoint_query_info(endpoint_, &info), AMDF_STATUS_OK);
+    EXPECT_EQ(info.next, &locality);
+    EXPECT_EQ(locality.type, AMDF_STRUCTURE_TYPE_ENDPOINT_HOST_LOCALITY);
+    EXPECT_EQ(locality.structure_size, sizeof(extended));
+    EXPECT_EQ(locality.next, nullptr);
+    const auto expected_locality = locality;
+    const auto expected_info = info;
+    ASSERT_EQ(api_->endpoint_query_info(endpoint_, &info), AMDF_STATUS_OK);
+    EXPECT_EQ(std::memcmp(&info, &expected_info, sizeof(info)), 0);
+    EXPECT_EQ(locality.numa_node, expected_locality.numa_node);
+    EXPECT_EQ(extended.canary, UINT64_C(0x472febc536a00819));
+    RecordProperty("endpoint_" + std::to_string(index), info.name);
+    RecordProperty("host_numa_node_" + std::to_string(index),
+                   std::to_string(locality.numa_node));
+    ASSERT_EQ(api_->endpoint_close(endpoint_), AMDF_STATUS_OK);
+    endpoint_ = nullptr;
+  }
+}
+
+TEST_F(DiscoveryTest, RejectsLocalityExtensionBeforeMutatingEitherOutput) {
+  std::vector<amdf_endpoint_summary_t> summaries;
+  ASSERT_TRUE(amdf_status_is_ok(Enumerate(&summaries)));
+  if (summaries.empty()) {
+    GTEST_SKIP() << "no AMD endpoints present";
+  }
+  ASSERT_EQ(api_->endpoint_open(instance_, &summaries[0].id, &endpoint_),
+            AMDF_STATUS_OK);
+  amdf_endpoint_host_locality_t locality = {
+      .type = AMDF_STRUCTURE_TYPE_ENDPOINT_HOST_LOCALITY,
+      .structure_size = sizeof(locality) - 1,
+      .numa_node = 123,
+  };
+  auto info = MakeEndpointInfo();
+  info.next = &locality;
+  const auto original_info = info;
+  const auto original_locality = locality;
+  EXPECT_EQ(amdf_status_code(api_->endpoint_query_info(endpoint_, &info)),
+            AMDF_STATUS_CODE_INVALID_ARGUMENT);
+  EXPECT_EQ(std::memcmp(&info, &original_info, sizeof(info)), 0);
+  EXPECT_EQ(std::memcmp(&locality, &original_locality, sizeof(locality)), 0);
+  locality.structure_size = sizeof(locality);
+  locality.next = &locality;
+  EXPECT_EQ(amdf_status_code(api_->endpoint_query_info(endpoint_, &info)),
+            AMDF_STATUS_CODE_UNSUPPORTED);
+  EXPECT_EQ(std::memcmp(&info, &original_info, sizeof(info)), 0);
+  EXPECT_EQ(locality.numa_node, original_locality.numa_node);
+  EXPECT_EQ(locality.next, &locality);
+}
+
 TEST_F(DiscoveryTest, RejectsMalformedQueueFamilyQueryWithoutMutation) {
   std::vector<amdf_endpoint_summary_t> summaries;
   ASSERT_TRUE(amdf_status_is_ok(Enumerate(&summaries)));
@@ -295,9 +377,10 @@ TEST_F(DiscoveryTest, RejectsMalformedQueueFamilyQueryWithoutMutation) {
                 api_->endpoint_query_queue_family_info(endpoint_, 0, nullptr)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
 
-  amdf_queue_family_info_t family_info = {};
-  family_info.structure_size = sizeof(family_info);
-  family_info.ordinal = UINT32_MAX;
+  amdf_queue_family_info_t family_info = {
+      .structure_size = sizeof(family_info),
+      .ordinal = UINT32_MAX,
+  };
   EXPECT_EQ(amdf_status_code(api_->endpoint_query_queue_family_info(
                 endpoint_, 0, &family_info)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
@@ -323,9 +406,10 @@ TEST_F(DiscoveryTest, RejectsMalformedInfoWithoutMutation) {
   EXPECT_EQ(amdf_status_code(api_->endpoint_query_info(endpoint_, nullptr)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
 
-  amdf_endpoint_info_t info = {};
-  info.structure_size = sizeof(info);
-  info.engine_kind = UINT32_MAX;
+  amdf_endpoint_info_t info = {
+      .structure_size = sizeof(info),
+      .engine_kind = UINT32_MAX,
+  };
   EXPECT_EQ(amdf_status_code(api_->endpoint_query_info(endpoint_, &info)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
   EXPECT_EQ(info.engine_kind, UINT32_MAX);

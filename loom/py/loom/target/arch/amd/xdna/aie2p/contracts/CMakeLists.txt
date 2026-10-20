@@ -14,29 +14,44 @@ iree_py_library(
     contracts
   SRCS
     "__init__.py"
+    "accumulator_structural.py"
+    "bfp.py"
+    "carrier.py"
     "conversion.py"
     "core.py"
     "core_contract.py"
     "data_path.py"
+    "dynamic_slice.py"
     "f32.py"
+    "f32_accumulator.py"
     "f32_compare.py"
     "floating.py"
     "floating_sign.py"
     "i64.py"
     "index_conversion.py"
+    "integer_count.py"
     "integer_division.py"
+    "integer_shift.py"
     "memory.py"
     "nonlinear.py"
     "packed_dot.py"
     "packet_conversion.py"
     "packet_memory.py"
+    "packet_program.py"
+    "power_of_two_scale.py"
+    "predicate_concat.py"
+    "predicate_slice.py"
+    "predicate_words.py"
     "reduction.py"
     "scalar_program.py"
+    "selection.py"
     "structural.py"
     "table.py"
   DEPS
     loom::py::loom::core
     loom::py::loom::dialect::buffer::buffer
+    loom::py::loom::dialect::encoding::encoding
+    loom::py::loom::dialect::globals::globals
     loom::py::loom::dialect::index::index
     loom::py::loom::dialect::scalar::scalar
     loom::py::loom::dialect::scf::scf
@@ -44,6 +59,74 @@ iree_py_library(
     loom::py::loom::dialect::view::view
     loom::py::loom::target::arch::amd::xdna::aie2p::descriptors
     loom::py::loom::target::contracts::contracts
+)
+
+iree_py_test(
+  NAME
+    integer_shift_test
+  MAIN
+    "../../../../../../tools/pytest_style_runner.py"
+  SRCS
+    "integer_shift_test.py"
+    "../../../../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.amd.xdna.aie2p.contracts.integer_shift_test"
+  DEPS
+    loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
+    loom::py::loom::dialect::vector::vector
+    loom::py::loom::target::contracts::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
+)
+
+iree_py_test(
+  NAME
+    integer_count_test
+  MAIN
+    "../../../../../../tools/pytest_style_runner.py"
+  SRCS
+    "integer_count_test.py"
+    "../../../../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.amd.xdna.aie2p.contracts.integer_count_test"
+  DEPS
+    loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
+    loom::py::loom::target::contracts::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
+)
+
+iree_py_test(
+  NAME
+    integer_count_exhaustive_test
+  MAIN
+    "../../../../../../tools/pytest_style_runner.py"
+  SRCS
+    "integer_count_test.py"
+    "../../../../../../tools/pytest_style_runner.py"
+  ARGS
+    "--include-exhaustive"
+    "loom.target.arch.amd.xdna.aie2p.contracts.integer_count_test"
+  DEPS
+    loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
+    loom::py::loom::target::contracts::contracts
+  LABELS
+    "manual"
+    "stress"
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
 )
 
 iree_py_test(
@@ -97,19 +180,29 @@ iree_py_test(
   MAIN
     "../../../../../../tools/pytest_style_runner.py"
   SRCS
+    "accumulator_structural_test.py"
     "core_test.py"
+    "dynamic_slice_test.py"
     "floating_test.py"
     "i64_test.py"
     "integer_division_test.py"
     "nonlinear_test.py"
+    "predicate_concat_test.py"
+    "predicate_slice_test.py"
+    "reduction_test.py"
     "structural_test.py"
     "../../../../../../tools/pytest_style_runner.py"
   ARGS
+    "loom.target.arch.amd.xdna.aie2p.contracts.accumulator_structural_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.core_test"
+    "loom.target.arch.amd.xdna.aie2p.contracts.dynamic_slice_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.floating_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.i64_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.integer_division_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.nonlinear_test"
+    "loom.target.arch.amd.xdna.aie2p.contracts.predicate_concat_test"
+    "loom.target.arch.amd.xdna.aie2p.contracts.predicate_slice_test"
+    "loom.target.arch.amd.xdna.aie2p.contracts.reduction_test"
     "loom.target.arch.amd.xdna.aie2p.contracts.structural_test"
   DEPS
     loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
@@ -119,6 +212,52 @@ iree_py_test(
     loom::py::loom::dialect::scf::scf
     loom::py::loom::dialect::vector::vector
     loom::py::loom::dialect::view::view
+    loom::py::loom::target::contracts::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
+)
+
+iree_py_test(
+  NAME
+    dynamic_slice_exhaustive_test
+  MAIN
+    "../../../../../../tools/pytest_style_runner.py"
+  SRCS
+    "dynamic_slice_test.py"
+    "../../../../../../tools/pytest_style_runner.py"
+  ARGS
+    "--include-exhaustive"
+    "loom.target.arch.amd.xdna.aie2p.contracts.dynamic_slice_test"
+  DEPS
+    loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
+    loom::py::loom::target::contracts::contracts
+  LABELS
+    "manual"
+    "stress"
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    300
+)
+
+iree_py_test(
+  NAME
+    power_of_two_scale_test
+  MAIN
+    "../../../../../../tools/pytest_style_runner.py"
+  SRCS
+    "power_of_two_scale_test.py"
+    "../../../../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.amd.xdna.aie2p.contracts.power_of_two_scale_test"
+  DEPS
+    loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
     loom::py::loom::target::contracts::contracts
   PACKAGE_DIRS
     "${PROJECT_SOURCE_DIR}/loom/py"
@@ -164,6 +303,8 @@ iree_py_test(
     "loom.target.arch.amd.xdna.aie2p.contracts.packet_memory_test"
   DEPS
     loom::py::loom::target::arch::amd::xdna::aie2p::contracts::contracts
+    loom::py::loom::core
+    loom::py::loom::dialect::encoding::encoding
     loom::py::loom::dialect::vector::vector
     loom::py::loom::dialect::view::view
     loom::py::loom::target::contracts::contracts

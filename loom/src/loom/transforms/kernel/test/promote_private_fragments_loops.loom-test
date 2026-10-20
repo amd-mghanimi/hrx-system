@@ -1,0 +1,227 @@
+// RUN: pass promote-private-fragments,dce
+
+// The store at the end of the body reaches the load on the next iteration.
+func.def @retains_counted_cursor(%output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 4 : offset
+  %storage = buffer.alloca<private> align(4) %bytes : buffer
+  %cursor = buffer.view %storage[%base] : buffer -> view<1xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  view.store %initial, %cursor[0] : i32, view<1xi32>
+  scf.for %record = [%begin to %count step %step] {
+    %current = view.load %cursor[0] : view<1xi32> -> i32
+    view.store %current, %records[%record] : i32, view<64xi32>
+    %next = scalar.addi %current, %increment : i32
+    view.store %next, %cursor[0] : i32, view<1xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @retains_counted_cursor(%output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %15 = scf.for %record = [%begin to %count step %step](%14 = %initial : i32) -> (i32) {
+    view.store %14, %records[%record] : i32, view<64xi32>
+    %next = scalar.addi %14, %increment : i32
+    scf.yield %next : i32
+  }
+  func.return
+}
+
+// ====
+
+// A while condition observes state updated by the previous body execution.
+func.def @retains_condition_cursor(%output: buffer, %limit: i32) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 4 : offset
+  %storage = buffer.alloca<private> align(4) %bytes : buffer
+  %cursor = buffer.view %storage[%base] : buffer -> view<1xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  view.store %initial, %cursor[0] : i32, view<1xi32>
+  %final = scf.while(%previous = %initial : i32) -> (i32) {
+    %current = view.load %cursor[0] : view<1xi32> -> i32
+    %more = scalar.cmpi slt, %current, %limit : i32
+    scf.condition %more, %current : i1, i32
+  } do(%current: i32) {
+    %record = index.cast %current : i32 to index
+    view.store %current, %records[%record] : i32, view<64xi32>
+    %next = scalar.addi %current, %increment : i32
+    view.store %next, %cursor[0] : i32, view<1xi32>
+    scf.yield %next : i32
+  }
+  func.return
+}
+
+// ----
+func.def @retains_condition_cursor(%output: buffer, %limit: i32) {
+  %base = index.constant 0 : offset
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %final, %18 = scf.while(%previous = %initial : i32, %16 = %initial : i32) -> (i32, i32) {
+    %more = scalar.cmpi slt, %16, %limit : i32
+    scf.condition %more, %16, %16 : i1, i32, i32
+  } do(%current: i32, %17: i32) {
+    %record = index.cast %current : i32 to index
+    view.store %current, %records[%record] : i32, view<64xi32>
+    %next = scalar.addi %current, %increment : i32
+    scf.yield %next, %next : i32, i32
+  }
+  func.return
+}
+
+// ====
+
+// The raw cursor advances per input, while the packet cursor persists across
+// an input-dependent inner loop and across outer records.
+func.def @retains_nested_cursors(%counts: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 8 : offset
+  %storage = buffer.alloca<private> align(4) %bytes : buffer
+  %cursors = buffer.view %storage[%base] : buffer -> view<2xi32>
+  %packet_counts = buffer.view %counts[%base] : buffer -> view<64xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  view.store %initial, %cursors[0] : i32, view<2xi32>
+  view.store %initial, %cursors[1] : i32, view<2xi32>
+  scf.for %record = [%begin to %count step %step] {
+    %raw = view.load %cursors[0] : view<2xi32> -> i32
+    %packet_count = view.load %packet_counts[%record] : view<64xi32> -> i32
+    %end = index.cast %packet_count : i32 to index
+    scf.for %packet = [%begin to %end step %step] {
+      %current = view.load %cursors[1] : view<2xi32> -> i32
+      %slot = index.cast %current : i32 to index
+      view.store %raw, %records[%slot] : i32, view<64xi32>
+      %next_packet = scalar.addi %current, %increment : i32
+      view.store %next_packet, %cursors[1] : i32, view<2xi32>
+    }
+    %next_raw = scalar.addi %raw, %increment : i32
+    view.store %next_raw, %cursors[0] : i32, view<2xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @retains_nested_cursors(%counts: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %packet_counts = buffer.view %counts[%base] : buffer -> view<64xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %25, %27 = scf.for %record = [%begin to %count step %step](%24 = %initial : i32, %26 = %initial : i32) -> (i32, i32) {
+    %packet_count = view.load %packet_counts[%record] : view<64xi32> -> i32
+    %end = index.cast %packet_count : i32 to index
+    %23 = scf.for %packet = [%begin to %end step %step](%22 = %26 : i32) -> (i32) {
+      %slot = index.cast %22 : i32 to index
+      view.store %24, %records[%slot] : i32, view<64xi32>
+      %next_packet = scalar.addi %22, %increment : i32
+      scf.yield %next_packet : i32
+    }
+    %next_raw = scalar.addi %24, %increment : i32
+    scf.yield %next_raw, %23 : i32, i32
+  }
+  func.return
+}
+
+// ====
+
+// A CFG backedge has the same memory dependence as a structured loop.
+func.def @retains_cfg_cursor(%output: buffer, %limit: i32) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 4 : offset
+  %storage = buffer.alloca<private> align(4) %bytes : buffer
+  %cursor = buffer.view %storage[%base] : buffer -> view<1xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  view.store %initial, %cursor[0] : i32, view<1xi32>
+  cfg.br ^header
+^header:
+  %current = view.load %cursor[0] : view<1xi32> -> i32
+  %more = scalar.cmpi slt, %current, %limit : i32
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  %record = index.cast %current : i32 to index
+  view.store %current, %records[%record] : i32, view<64xi32>
+  %next = scalar.addi %current, %increment : i32
+  view.store %next, %cursor[0] : i32, view<1xi32>
+  cfg.br ^header
+^exit:
+  func.return
+}
+
+// ----
+func.def @retains_cfg_cursor(%output: buffer, %limit: i32) {
+  %base = index.constant 0 : offset
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %initial = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  cfg.br ^header(%initial: i32)
+^header(%13: i32):
+  %more = scalar.cmpi slt, %13, %limit : i32
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  %record = index.cast %13 : i32 to index
+  view.store %13, %records[%record] : i32, view<64xi32>
+  %next = scalar.addi %13, %increment : i32
+  cfg.br ^header(%next: i32)
+^exit:
+  func.return
+}
+
+// ====
+
+// An unconditional reset in the loop body kills the previous iteration's store.
+// A branch nested below that reset does not introduce another iteration.
+func.def @forwards_iteration_local_state(%output: buffer, %count: index, %seed: i32, %enabled: i1) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 4 : offset
+  %storage = buffer.alloca<private> align(4) %bytes : buffer
+  %cursor = buffer.view %storage[%base] : buffer -> view<1xi32>
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  scf.for %record = [%begin to %count step %step] {
+    view.store %seed, %cursor[0] : i32, view<1xi32>
+    scf.if %enabled {
+      %current = view.load %cursor[0] : view<1xi32> -> i32
+      %next = scalar.addi %current, %increment : i32
+      view.store %next, %cursor[0] : i32, view<1xi32>
+      view.store %next, %records[%record] : i32, view<64xi32>
+    }
+  }
+  func.return
+}
+
+// ----
+func.def @forwards_iteration_local_state(%output: buffer, %count: index, %seed: i32, %enabled: i1) {
+  %base = index.constant 0 : offset
+  %records = buffer.view %output[%base] : buffer -> view<64xi32>
+  %increment = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  scf.for %record = [%begin to %count step %step] {
+    scf.if %enabled {
+      %next = scalar.addi %seed, %increment : i32
+      view.store %next, %records[%record] : i32, view<64xi32>
+    }
+  }
+  func.return
+}

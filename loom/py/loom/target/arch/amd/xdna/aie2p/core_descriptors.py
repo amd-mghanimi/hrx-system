@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from itertools import combinations
+from math import gcd
 from pathlib import Path
 
 from loom.target.arch.amd.xdna.aie.machine import (
@@ -38,6 +39,9 @@ from loom.target.arch.amd.xdna.aie2p.core_descriptor_constraints import (
 from loom.target.arch.amd.xdna.aie2p.core_encoding_data import CORE_ENCODING_TABLE
 from loom.target.arch.amd.xdna.aie2p.core_machine_data import CORE_MACHINE_TABLE
 from loom.target.arch.amd.xdna.aie2p.core_schedule_data import CORE_SCHEDULE_TABLE
+from loom.target.arch.amd.xdna.aie2p.core_stream_descriptors import (
+    _SCALAR_STREAM_ISSUE_EVENT,
+)
 from loom.target.low_descriptors import (
     AsmForm,
     AsmImmediate,
@@ -93,6 +97,37 @@ _MACHINE_ADAPTERS = {
 _MACHINE_IMMEDIATES = {
     immediate.name: immediate for immediate in CORE_MACHINE_TABLE.immediates
 }
+
+# Wide predicate vectors use ordered pairs of eL registers between structural
+# concat and slice operations. No native instruction encodes such a pair, so
+# the imported machine table has no aggregate register names for this storage.
+# These allocation-only aggregates give Low the physical tuple topology while
+# native instruction operands continue to consume the individual eL units.
+_PREDICATE_PAIR_VIEWS = tuple(
+    PhysicalRegisterView(
+        physical_register=f"predicate_pair{pair_index}",
+        reg_class="aie2p.elpredicate",
+        units=(f"l{register_index}", f"l{register_index + 1}"),
+    )
+    for pair_index, register_index in enumerate(range(8, 16, 2))
+)
+
+# Reserved sticky status registers from AIE2PRegisterInfo::isReservedStickyReg.
+# Native implicit definitions accumulate status; explicit definitions replace
+# it and must not acquire the commutative-update contract.
+_STICKY_STATUS_REGISTERS = frozenset(
+    (
+        "srSparse_of",
+        "srF2FFlags",
+        "srF2BFlags",
+        "srF2IFlags",
+        "srFPFlags",
+        "srSRS_of",
+        "srUPS_of",
+        "srFifo_of",
+        "srFifo_uf",
+    )
+)
 
 # LLVM's mW*/mX* names describe instruction-operand encoding roles, not
 # distinct storage domains. W registers are the architectural 256-bit storage
@@ -619,14 +654,30 @@ def _reg_classes() -> tuple[RegClass, ...]:
 
 
 def _physical_registers() -> tuple[PhysicalRegister, ...]:
-    return tuple(
+    machine_registers = tuple(
         PhysicalRegister(register.name, register.atomic_units)
         for register in CORE_MACHINE_TABLE.physical_registers
     )
+    predicate_pairs = tuple(
+        PhysicalRegister(
+            view.physical_register,
+            tuple(
+                sorted(
+                    atomic_unit
+                    for unit in view.units
+                    for atomic_unit in _MACHINE_REGISTERS[unit].atomic_units
+                )
+            ),
+        )
+        for view in _PREDICATE_PAIR_VIEWS
+    )
+    return (*machine_registers, *predicate_pairs)
 
 
 def _physical_register_views() -> tuple[PhysicalRegisterView, ...]:
-    views: dict[tuple[str, str], PhysicalRegisterView] = {}
+    views = {
+        (view.physical_register, view.reg_class): view for view in _PREDICATE_PAIR_VIEWS
+    }
     for spec in descriptor_specs._DESCRIPTOR_SPECS:
         form = descriptor_specs._MACHINE_FORMS[spec.form_name]
         for operand in (*form.outputs, *form.inputs):
@@ -657,58 +708,79 @@ def _physical_register_views() -> tuple[PhysicalRegisterView, ...]:
     return tuple(views[key] for key in sorted(views))
 
 
+def _register_packing_members(
+    atomic_units: frozenset[int], *, resource_unit_atom_count: int
+) -> tuple[RegisterPackingResourceMember, ...]:
+    """Projects selected storage classes onto one shared physical resource."""
+
+    members: list[RegisterPackingResourceMember] = []
+    for machine_class_name in _EXPLICIT_STORAGE_MACHINE_CLASS_NAMES:
+        machine_class = _MACHINE_CLASSES[machine_class_name]
+        candidate_overlap_counts = {
+            len(atomic_units.intersection(_MACHINE_REGISTERS[name].atomic_units))
+            for name in machine_class.candidates
+        }
+        if candidate_overlap_counts == {0}:
+            continue
+        if len(candidate_overlap_counts) != 1:
+            raise ValueError(
+                f"{machine_class_name}: register packing resource overlap "
+                "must be uniform across physical candidates"
+            )
+        overlap_count = next(iter(candidate_overlap_counts))
+        divisor = gcd(overlap_count, resource_unit_atom_count)
+        members.append(
+            RegisterPackingResourceMember(
+                _low_register_class_name(machine_class_name),
+                register_unit_count=resource_unit_atom_count // divisor,
+                resource_unit_count=overlap_count // divisor,
+            )
+        )
+    return tuple(members)
+
+
 def _register_packing_resources() -> tuple[RegisterPackingResource, ...]:
     """Describes instantaneous capacity shared across register classes."""
 
     x_register_count = len(_MACHINE_CLASSES["mXm"].candidates)
-    if len(_MACHINE_CLASSES["VEC256"].candidates) != x_register_count * 2:
+    x_atomic_units = frozenset(
+        atomic_unit
+        for register_name in _MACHINE_CLASSES["mXm"].candidates
+        for atomic_unit in _MACHINE_REGISTERS[register_name].atomic_units
+    )
+    vector_atomic_units = frozenset(
+        atomic_unit
+        for register_name in _MACHINE_CLASSES["VEC256"].candidates
+        for atomic_unit in _MACHINE_REGISTERS[register_name].atomic_units
+    )
+    if (
+        vector_atomic_units != x_atomic_units
+        or len(vector_atomic_units) != x_register_count * 2
+    ):
         raise ValueError(
             "AIE2P VEC256 does not cover both W halves of every X register"
         )
-
-    physical_registers = {
-        register.name: register for register in CORE_MACHINE_TABLE.physical_registers
-    }
     scalar_atomic_units = frozenset(
         atomic_unit
         for register_name in _MACHINE_CLASSES["eR"].candidates
-        for atomic_unit in physical_registers[register_name].atomic_units
+        for atomic_unit in _MACHINE_REGISTERS[register_name].atomic_units
     )
-    scalar_members: list[RegisterPackingResourceMember] = []
-    for machine_class_name in _EXPLICIT_STORAGE_MACHINE_CLASS_NAMES:
-        machine_class = _MACHINE_CLASSES[machine_class_name]
-        candidate_atomic_unit_counts = {
-            len(physical_registers[register_name].atomic_units)
-            for register_name in machine_class.candidates
-        }
-        if len(candidate_atomic_unit_counts) != 1 or not all(
-            set(physical_registers[register_name].atomic_units) <= scalar_atomic_units
-            for register_name in machine_class.candidates
-        ):
-            continue
-        scalar_members.append(
-            RegisterPackingResourceMember(
-                _low_register_class_name(machine_class_name),
-                resource_unit_count=next(iter(candidate_atomic_unit_counts)),
-            )
-        )
-    if not scalar_members:
-        raise ValueError("AIE2P scalar register packing resource has no members")
     return (
         RegisterPackingResource(
             name=f"{descriptor_specs._TARGET_KEY}.register.x.pairs",
-            capacity=x_register_count,
-            members=(
-                RegisterPackingResourceMember(
-                    "aie2p.vec256",
-                    register_unit_count=2,
-                ),
+            capacity_register_class=_low_register_class_name("VEC256"),
+            # EX/EY BFP operands own the same W halves as X/Y vectors, plus
+            # exponent storage. Intersection retains their shared footprint.
+            members=_register_packing_members(
+                vector_atomic_units, resource_unit_atom_count=2
             ),
         ),
         RegisterPackingResource(
             name=f"{descriptor_specs._TARGET_KEY}.register.scalar.units",
-            capacity=len(scalar_atomic_units),
-            members=tuple(scalar_members),
+            capacity_register_class=_low_register_class_name("eR"),
+            members=_register_packing_members(
+                scalar_atomic_units, resource_unit_atom_count=1
+            ),
         ),
     )
 
@@ -838,11 +910,15 @@ def _low_operand(
     return Operand(
         field_name=operand.name,
         role=role,
-        reg_alts=(RegClassAlt(_operand_register_class(spec, operand)),),
+        reg_alts=(
+            RegClassAlt(
+                _operand_register_class(spec, operand),
+                register_part=register_parts.get(operand.name),
+            ),
+        ),
         unit_count=_operand_unit_count(spec, operand),
         encoding_field_id=encoding_field_id,
         encoding_adapter_id=encoding_adapter_id,
-        register_part=register_parts.get(operand.name),
         read_stage=read_stage,
         ready_stage=ready_stage,
         read_event=read_event,
@@ -882,9 +958,8 @@ def _storage_continuation_operand(
     return Operand(
         field_name="storage",
         role=OperandRole.OPERAND,
-        reg_alts=(RegClassAlt(part.reg_class),),
+        reg_alts=(RegClassAlt(part.reg_class, register_part=part.name),),
         flags=(OperandFlag.IMPLICIT, OperandFlag.STORAGE_CONTINUATION),
-        register_part=part.name,
     )
 
 
@@ -991,6 +1066,9 @@ def _implicit_operands(spec: descriptor_specs._DescriptorSpec) -> tuple[Operand,
         read_stage, ready_stage = _implicit_operand_stage(
             spec, register_name, is_definition=True
         )
+        flags = (OperandFlag.IMPLICIT, OperandFlag.STATE_WRITE)
+        if register_name in _STICKY_STATUS_REGISTERS:
+            flags += (OperandFlag.COMMUTATIVE_STATE_UPDATE,)
         result.append(
             Operand(
                 field_name=(
@@ -1005,7 +1083,7 @@ def _implicit_operands(spec: descriptor_specs._DescriptorSpec) -> tuple[Operand,
                         flags=(RegClassAltFlag.PHYSICAL_ONLY,),
                     ),
                 ),
-                flags=(OperandFlag.IMPLICIT, OperandFlag.STATE_WRITE),
+                flags=flags,
                 read_stage=read_stage,
                 ready_stage=ready_stage,
                 write_event=_register_timing_event(spec, operand_ordinal, "write"),
@@ -1045,9 +1123,11 @@ def _implicit_operands(spec: descriptor_specs._DescriptorSpec) -> tuple[Operand,
     return tuple(result)
 
 
-def _immediate(form_name: str, operand: MachineOperand) -> Immediate:
+def _immediate(
+    spec: descriptor_specs._DescriptorSpec, operand: MachineOperand
+) -> Immediate:
     immediate = _MACHINE_IMMEDIATES[operand.type_name]
-    if immediate.allows_symbol_reference:
+    if immediate.allows_symbol_reference or operand.name in spec.symbolic_immediates:
         kind = ImmediateKind.ORDINAL
         flags = (ImmediateFlag.SYMBOLIC,)
     elif immediate.is_signed:
@@ -1078,7 +1158,7 @@ def _immediate(form_name: str, operand: MachineOperand) -> Immediate:
         encoding_field_id=(
             _ENCODING_FIELD_IDS[operand.name]
             if operand.name
-            in {field.name for field in _INSTRUCTION_ENCODINGS[form_name].fields}
+            in {field.name for field in _INSTRUCTION_ENCODINGS[spec.form_name].fields}
             else 0
         ),
         encoding_id=_IMMEDIATE_IDS[operand.type_name],
@@ -1292,6 +1372,21 @@ def _descriptor(spec: descriptor_specs._DescriptorSpec) -> Descriptor:
             f"{form.name}: implicit inputs name unknown machine inputs "
             f"{sorted(unknown_implicit_inputs)}"
         )
+    if len(set(spec.symbolic_immediates)) != len(spec.symbolic_immediates):
+        raise ValueError(f"{form.name}: symbolic immediate names must be unique")
+    machine_immediate_names = {
+        operand.name
+        for operand in form.inputs
+        if operand.kind is MachineOperandKind.IMMEDIATE
+    }
+    unknown_symbolic_immediates = (
+        set(spec.symbolic_immediates) - machine_immediate_names
+    )
+    if unknown_symbolic_immediates:
+        raise ValueError(
+            f"{form.name}: symbolic immediates name unknown machine immediates "
+            f"{sorted(unknown_symbolic_immediates)}"
+        )
     implicit_inputs = tuple(
         operand for operand in form.inputs if operand.name in spec.implicit_inputs
     )
@@ -1352,7 +1447,7 @@ def _descriptor(spec: descriptor_specs._DescriptorSpec) -> Descriptor:
     # retains the machine operand order through its independent field mapping.
     immediates = tuple(
         sorted(
-            (_immediate(spec.form_name, operand) for operand in immediate_inputs),
+            (_immediate(spec, operand) for operand in immediate_inputs),
             key=lambda immediate: immediate.field_name,
         )
     )
@@ -1660,6 +1755,17 @@ def _event_separations() -> tuple[EventSeparation, ...]:
                 for producer_access in ("read", "write")
                 for consumer_access in ("read", "write")
             )
+    # Scalar stream order is an issue constraint, not a wait for the status
+    # result. Other protocols retain their own timing: cascade instructions
+    # consume data at different stages, and locks order memory retirement.
+    result.append(
+        EventSeparation(
+            _SCALAR_STREAM_ISSUE_EVENT,
+            _SCALAR_STREAM_ISSUE_EVENT,
+            1,
+            ModelQuality.EXACT,
+        )
+    )
     lock_producer_event = descriptor_specs._LOCK_EFFECT.producer_event
     lock_consumer_event = descriptor_specs._LOCK_EFFECT.consumer_event
     if lock_producer_event is None or lock_consumer_event is None:
@@ -1886,8 +1992,11 @@ def _validate_control_issue_timing(descriptor_set: DescriptorSet) -> None:
             maximum_separations.get(separation.producer_event, 0),
             separation.minimum_issue_separation_cycles,
         )
-    for suffix in ("return", "branch.direct", "branch.zero", "branch.nonzero"):
-        descriptor = descriptors[f"{descriptor_specs._TARGET_KEY}.{suffix}"]
+    controls = tuple(
+        descriptors[f"{descriptor_specs._TARGET_KEY}.{suffix}"]
+        for suffix in ("return", "branch.direct", "branch.zero", "branch.nonzero")
+    )
+    for descriptor in controls:
         control_cycles = encodings[descriptor.encoding_id].delay_slot_count + 1
         schedule = classes[descriptor.schedule_class]
         events = [
@@ -1908,32 +2017,32 @@ def _validate_control_issue_timing(descriptor_set: DescriptorSet) -> None:
             raise ValueError(
                 f"{descriptor.key}: control window does not cover its resource stages"
             )
-    returned = descriptors[f"{descriptor_specs._TARGET_KEY}.return"]
-    return_resources = {
-        use.resource for use in classes[returned.schedule_class].issue_uses
+        if any(
+            effect.kind is not EffectKind.CONTROL for effect in descriptor.effects
+        ) or any(operand.write_event is not None for operand in descriptor.operands):
+            raise ValueError(
+                f"{descriptor.key}: control tail placement requires read-only "
+                "registers and control effects"
+            )
+    control_resources = {
+        use.resource
+        for descriptor in controls
+        for use in classes[descriptor.schedule_class].issue_uses
     }
     resources = {row.name: row for row in descriptor_set.resources}
-    return_groups = {
-        resources[name].contention_group_id for name in return_resources
+    control_groups = {
+        resources[name].contention_group_id for name in control_resources
     } - {0}
     for schedule in descriptor_set.schedule_classes:
         for use in schedule.issue_uses:
             if (
-                use.resource in return_resources
-                or resources[use.resource].contention_group_id in return_groups
+                use.resource in control_resources
+                or resources[use.resource].contention_group_id in control_groups
             ) and (use.stage != 0 or use.cycles != 1):
                 raise ValueError(
-                    f"{schedule.name}: RET sharing requires issue-stage-only resources"
+                    f"{schedule.name}: control sharing requires "
+                    "issue-stage-only resources"
                 )
-    if any(effect.kind is not EffectKind.CONTROL for effect in returned.effects) or any(
-        operand.write_event is not None
-        or any(
-            alternative.reg_class != "aie2p.state.lr"
-            for alternative in operand.reg_alts
-        )
-        for operand in returned.operands
-    ):
-        raise ValueError("RET tail placement requires only a link-register read")
     nop = encodings[descriptors[f"{descriptor_specs._TARGET_KEY}.nop"].encoding_id]
     nop_format = next(
         row for row in CORE_ENCODING_TABLE.bundle_formats if row.name == "I16_NOP"

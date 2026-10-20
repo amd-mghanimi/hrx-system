@@ -1,0 +1,58 @@
+// RUN: with-checks pass scf-to-cfg,ownership-lifetime,cse
+
+// Frame storage has automatic lifetime, independently of the channel's owned
+// accesses. Two equal-sized allocations still name distinct storage roots.
+func.def @worker_scratch(%input: channel<tile<16xi32>>, %count: index) {
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %record_size = index.constant 16 : index
+  %first = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %second = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %first_slots = buffer.view %first[%origin] : buffer -> view<2x16xi32>
+  %second_slots = buffer.view %second[%origin] : buffer -> view<2x16xi32>
+  %first_channel = channel.bind<fifo> %first_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %second_channel = channel.bind<fifo> %second_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  scf.for %record = [%begin to %count step %step] {
+    %read, %source = channel.acquire %input : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %first_write, %first_view = channel.reserve %first_channel : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    %second_write, %second_view = channel.reserve %second_channel : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    scf.for %element = [%begin to %record_size step %step] {
+      %value = view.load %source[%element] : view<16xi32> -> i32
+      view.store %value, %first_view[%element] : i32, view<16xi32>
+      view.store %value, %second_view[%element] : i32, view<16xi32>
+    }
+    channel.publish %first_write : write<tile<16xi32>>
+    channel.publish %second_write : write<tile<16xi32>>
+    channel.release %read : read<tile<16xi32>>
+    %first_read = channel.accept %first_channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    %second_read = channel.accept %second_channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    channel.release %first_read : read<tile<16xi32>>
+    channel.release %second_read : read<tile<16xi32>>
+  }
+  func.return
+}
+
+// ----
+CHECK: %first = buffer.alloca<workgroup> align(64) %bytes : buffer
+CHECK: %second = buffer.alloca<workgroup> align(64) %bytes : buffer
+CHECK: channel.publish %first_write : write<tile<16xi32>>
+CHECK: channel.publish %second_write : write<tile<16xi32>>
+CHECK: channel.release %read : read<tile<16xi32>>
+
+// ====
+
+// RUN: pass ownership-lifetime
+
+low.func.def target<test.low.core> @physical_frame() asm {
+  %storage = storage {byte_alignment = 64, byte_length = 128} : low.storage<private>
+  return
+}
+
+// ----
+low.func.def target<test.low.core> @physical_frame() asm {
+  %storage = storage {byte_alignment = 64, byte_length = 128} : low.storage<private>
+  return
+}

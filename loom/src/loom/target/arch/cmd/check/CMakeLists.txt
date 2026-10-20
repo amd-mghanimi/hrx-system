@@ -29,7 +29,6 @@ loom_cc_library(
     loom::target::arch::cmd::lower::program_plan
     loom::target::arch::cmd::lower::program_plan_index
     loom::target::arch::cmd::program
-    loom::tooling::compile::pipeline
     loom::tools::loom-check::execute
   PUBLIC
 )

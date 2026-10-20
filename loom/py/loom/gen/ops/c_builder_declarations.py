@@ -97,6 +97,12 @@ def generate_builder_header_lines(op: Op, shared_enums: SharedEnumMap) -> list[s
         lines.append("    loom_builder_t* builder, loom_value_id_t input,")
         lines.append("    loom_type_t input_type, loom_type_t result_type,")
         lines.append("    loom_location_id_t location, loom_op_t** out_op);")
+    elif pattern == "CAST_WITH_FLAGS":
+        lines.append(f"iree_status_t {prefix}_build(")
+        lines.append("    loom_builder_t* builder, uint8_t instance_flags,")
+        lines.append("    loom_value_id_t input, loom_type_t input_type,")
+        lines.append("    loom_type_t result_type, loom_location_id_t location,")
+        lines.append("    loom_op_t** out_op);")
     elif pattern == "COMPARISON":
         lines.append(f"iree_status_t {prefix}_build(")
         lines.append("    loom_builder_t* builder, uint8_t predicate,")

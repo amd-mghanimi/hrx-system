@@ -1,0 +1,319 @@
+// One runtime ordinal covers one bit position and one truth-table row. The
+// complete scenario reaches every bit of all four lanes without generated
+// arrays.
+func.def @vector_i32_bitwise(%trial: index, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 127)] : index
+  %c4 = index.constant 4 : index
+  %bit_index = index.div %ordinal, %c4 : index
+  %truth_index = index.rem %ordinal, %c4 : index
+  %bit = index.cast %bit_index : index to i32
+  %truth = index.cast %truth_index : index to i32
+
+  %unit = scalar.constant 1 : i32
+  %all_bits = scalar.constant -1 : i32
+  %mask = scalar.shli %unit, %bit : i32
+  %inverse_mask = scalar.xori %mask, %all_bits : i32
+
+  %lhs_base = scalar.constant -1393753996 : i32
+  %lhs_cleared = scalar.andi %lhs_base, %inverse_mask : i32
+  %lhs_truth = scalar.andi %truth, %unit : i32
+  %lhs_bit = scalar.shli %lhs_truth, %bit : i32
+  %lhs_value = scalar.ori %lhs_cleared, %lhs_bit : i32
+  %lhs_inverse = scalar.xori %lhs_value, %all_bits : i32
+  %lhs = vector.from_elements %lhs_value, %lhs_inverse, %lhs_base, %inverse_mask : vector<4xi32>
+
+  %rhs_base = scalar.constant 970750639 : i32
+  %rhs_cleared = scalar.andi %rhs_base, %inverse_mask : i32
+  %rhs_shifted_truth = scalar.shrui %truth, %unit : i32
+  %rhs_truth = scalar.andi %rhs_shifted_truth, %unit : i32
+  %rhs_bit = scalar.shli %rhs_truth, %bit : i32
+  %rhs_value = scalar.ori %rhs_cleared, %rhs_bit : i32
+  %rhs_inverse = scalar.xori %rhs_value, %all_bits : i32
+  %rhs = vector.from_elements %rhs_value, %rhs_inverse, %mask, %rhs_base : vector<4xi32>
+
+  %and_result = vector.andi %lhs, %rhs : vector<4xi32>
+  %or_result = vector.ori %lhs, %rhs : vector<4xi32>
+  %xor_result = vector.xori %lhs, %rhs : vector<4xi32>
+
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
+  vector.store %and_result, %output_view[0] : vector<4xi32>, view<16xi32>
+  vector.store %or_result, %output_view[4] : vector<4xi32>, view<16xi32>
+  vector.store %xor_result, %output_view[8] : vector<4xi32>, view<16xi32>
+  %first = vector.extract %xor_result[0] : vector<4xi32> -> i32
+  %last = vector.extract %or_result[3] : vector<4xi32> -> i32
+  view.store %first, %output_view[12] : i32, view<16xi32>
+  view.store %last, %output_view[13] : i32, view<16xi32>
+  func.return
+}
+
+check.scenario @vector_i32_bitwise_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-123) : tensor<24xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<24xi32> -> tensor<16xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<24xi32> -> tensor<4xi32>
+    %suffix = check.tensor.view %storage offset(80) : tensor<24xi32> -> tensor<4xi32>
+    %guard = check.generate.fill value(-123) : tensor<4xi32>
+    check.compare<@vector_i32_bitwise>(%trial, %output) : (index, tensor<16xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// The 64-bit variant reaches every bit of both lanes.
+func.def @vector_i64_bitwise(%trial: index, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 255)] : index
+  %c4 = index.constant 4 : index
+  %bit_index = index.div %ordinal, %c4 : index
+  %truth_index = index.rem %ordinal, %c4 : index
+  %bit = index.cast %bit_index : index to i64
+  %truth = index.cast %truth_index : index to i64
+
+  %unit = scalar.constant 1 : i64
+  %all_bits = scalar.constant -1 : i64
+  %mask = scalar.shli %unit, %bit : i64
+  %inverse_mask = scalar.xori %mask, %all_bits : i64
+
+  %lhs_base = scalar.constant -6521746883317985356 : i64
+  %lhs_cleared = scalar.andi %lhs_base, %inverse_mask : i64
+  %lhs_truth = scalar.andi %truth, %unit : i64
+  %lhs_bit = scalar.shli %lhs_truth, %bit : i64
+  %lhs_value = scalar.ori %lhs_cleared, %lhs_bit : i64
+  %lhs_inverse = scalar.xori %lhs_value, %all_bits : i64
+  %lhs = vector.from_elements %lhs_value, %lhs_inverse : vector<2xi64>
+
+  %rhs_base = scalar.constant 4163261975864267055 : i64
+  %rhs_cleared = scalar.andi %rhs_base, %inverse_mask : i64
+  %rhs_shifted_truth = scalar.shrui %truth, %unit : i64
+  %rhs_truth = scalar.andi %rhs_shifted_truth, %unit : i64
+  %rhs_bit = scalar.shli %rhs_truth, %bit : i64
+  %rhs_value = scalar.ori %rhs_cleared, %rhs_bit : i64
+  %rhs_inverse = scalar.xori %rhs_value, %all_bits : i64
+  %rhs = vector.from_elements %rhs_value, %rhs_inverse : vector<2xi64>
+
+  %and_result = vector.andi %lhs, %rhs : vector<2xi64>
+  %or_result = vector.ori %lhs, %rhs : vector<2xi64>
+  %xor_result = vector.xori %lhs, %rhs : vector<2xi64>
+  %low_mask = vector.constant 4294967295 : vector<2xi64>
+  %sign_tag = vector.constant -9223372036854775807 : vector<2xi64>
+  %upper_toggle = vector.constant -4294967296 : vector<2xi64>
+  %masked = vector.andi %lhs, %low_mask : vector<2xi64>
+  %tagged = vector.ori %sign_tag, %rhs : vector<2xi64>
+  %toggled = vector.xori %lhs, %upper_toggle : vector<2xi64>
+
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<16xi64>
+  vector.store %and_result, %output_view[0] : vector<2xi64>, view<16xi64>
+  vector.store %or_result, %output_view[2] : vector<2xi64>, view<16xi64>
+  vector.store %xor_result, %output_view[4] : vector<2xi64>, view<16xi64>
+  vector.store %masked, %output_view[6] : vector<2xi64>, view<16xi64>
+  vector.store %tagged, %output_view[8] : vector<2xi64>, view<16xi64>
+  vector.store %toggled, %output_view[10] : vector<2xi64>, view<16xi64>
+  %first = vector.extract %xor_result[0] : vector<2xi64> -> i64
+  %last = vector.extract %or_result[1] : vector<2xi64> -> i64
+  view.store %first, %output_view[12] : i64, view<16xi64>
+  view.store %last, %output_view[13] : i64, view<16xi64>
+  func.return
+}
+
+check.scenario @vector_i64_bitwise_values {
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-123) : tensor<24xi64>
+    %output = check.tensor.view %storage offset(32) : tensor<24xi64> -> tensor<16xi64>
+    %prefix = check.tensor.view %storage offset(0) : tensor<24xi64> -> tensor<4xi64>
+    %suffix = check.tensor.view %storage offset(160) : tensor<24xi64> -> tensor<4xi64>
+    %guard = check.generate.fill value(-123) : tensor<4xi64>
+    check.compare<@vector_i64_bitwise>(%trial, %output) : (index, tensor<16xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16xi64>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<4xi64>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<4xi64>
+    }
+  }
+  check.return
+}
+
+// Uniform shifts exercise every valid runtime count and a constant count.
+// The VM oracle evaluates the source lane operations independently of the
+// target's packed instruction and scalar-count selection.
+func.def @uniform_byte_shifts(%trial: index, %input: buffer, %count_storage: buffer, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 7)] : index
+  %base = index.constant 0 : offset
+  %count_source = buffer.view %count_storage[%base] : buffer -> view<8xi8>
+  %loaded_count = view.load %count_source[%ordinal] : view<8xi8> -> i8
+  %mask = scalar.constant 7 : i8
+  %count = scalar.andi %loaded_count, %mask : i8
+  %counts = vector.splat %count : vector<16xi8>
+  %fixed_counts = vector.constant 4 : vector<16xi8>
+  %replacement = scalar.xori %count, %mask : i8
+  view.store %replacement, %count_source[%ordinal] : i8, view<8xi8>
+  %source = buffer.view %input[%base] : buffer -> view<16xi8>
+  %destination = buffer.view %output[%base] : buffer -> view<96xi8>
+  %values = vector.load %source[0] : view<16xi8> -> vector<16xi8>
+  %left = vector.shli %values, %counts : vector<16xi8>
+  %signed = vector.shrsi %values, %counts : vector<16xi8>
+  %unsigned = vector.shrui %values, %counts : vector<16xi8>
+  %fixed_left = vector.shli %values, %fixed_counts : vector<16xi8>
+  %fixed_signed = vector.shrsi %values, %fixed_counts : vector<16xi8>
+  %fixed_unsigned = vector.shrui %values, %fixed_counts : vector<16xi8>
+  vector.store %left, %destination[0] : vector<16xi8>, view<96xi8>
+  vector.store %signed, %destination[16] : vector<16xi8>, view<96xi8>
+  vector.store %unsigned, %destination[32] : vector<16xi8>, view<96xi8>
+  vector.store %fixed_left, %destination[48] : vector<16xi8>, view<96xi8>
+  vector.store %fixed_signed, %destination[64] : vector<16xi8>, view<96xi8>
+  vector.store %fixed_unsigned, %destination[80] : vector<16xi8>, view<96xi8>
+  func.return
+}
+
+func.def @uniform_word_shifts(%trial: index, %input: buffer, %count_storage: buffer, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 15)] : index
+  %base = index.constant 0 : offset
+  %count_source = buffer.view %count_storage[%base] : buffer -> view<16xi32>
+  %loaded_count = view.load %count_source[%ordinal] : view<16xi32> -> i32
+  // Truncation may retain unrelated upper bits in a wider physical carrier.
+  %narrow_count = scalar.trunci %loaded_count : i32 to i16
+  %count = scalar.assume %narrow_count [range(%narrow_count, 0, 15)] : i16
+  %counts = vector.splat %count : vector<8xi16>
+  %fixed_counts = vector.constant 4 : vector<8xi16>
+  %mask = scalar.constant 15 : i32
+  %replacement = scalar.xori %loaded_count, %mask : i32
+  view.store %replacement, %count_source[%ordinal] : i32, view<16xi32>
+  %source = buffer.view %input[%base] : buffer -> view<8xi16>
+  %destination = buffer.view %output[%base] : buffer -> view<48xi16>
+  %values = vector.load %source[0] : view<8xi16> -> vector<8xi16>
+  %left = vector.shli %values, %counts : vector<8xi16>
+  %signed = vector.shrsi %values, %counts : vector<8xi16>
+  %unsigned = vector.shrui %values, %counts : vector<8xi16>
+  %fixed_left = vector.shli %values, %fixed_counts : vector<8xi16>
+  %fixed_signed = vector.shrsi %values, %fixed_counts : vector<8xi16>
+  %fixed_unsigned = vector.shrui %values, %fixed_counts : vector<8xi16>
+  vector.store %left, %destination[0] : vector<8xi16>, view<48xi16>
+  vector.store %signed, %destination[8] : vector<8xi16>, view<48xi16>
+  vector.store %unsigned, %destination[16] : vector<8xi16>, view<48xi16>
+  vector.store %fixed_left, %destination[24] : vector<8xi16>, view<48xi16>
+  vector.store %fixed_signed, %destination[32] : vector<8xi16>, view<48xi16>
+  vector.store %fixed_unsigned, %destination[40] : vector<8xi16>, view<48xi16>
+  func.return
+}
+
+func.def @uniform_dword_shifts(%trial: index, %input: buffer, %count_storage: buffer, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 31)] : index
+  %base = index.constant 0 : offset
+  %count_source = buffer.view %count_storage[%base] : buffer -> view<32xi32>
+  %loaded_count = view.load %count_source[%ordinal] : view<32xi32> -> i32
+  %mask = scalar.constant 31 : i32
+  %count = scalar.andi %loaded_count, %mask : i32
+  %counts = vector.splat %count : vector<4xi32>
+  %fixed_counts = vector.constant 4 : vector<4xi32>
+  %replacement = scalar.xori %count, %mask : i32
+  view.store %replacement, %count_source[%ordinal] : i32, view<32xi32>
+  %source = buffer.view %input[%base] : buffer -> view<4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<24xi32>
+  %values = vector.load %source[0] : view<4xi32> -> vector<4xi32>
+  %left = vector.shli %values, %counts : vector<4xi32>
+  %signed = vector.shrsi %values, %counts : vector<4xi32>
+  %unsigned = vector.shrui %values, %counts : vector<4xi32>
+  %fixed_left = vector.shli %values, %fixed_counts : vector<4xi32>
+  %fixed_signed = vector.shrsi %values, %fixed_counts : vector<4xi32>
+  %fixed_unsigned = vector.shrui %values, %fixed_counts : vector<4xi32>
+  vector.store %left, %destination[0] : vector<4xi32>, view<24xi32>
+  vector.store %signed, %destination[4] : vector<4xi32>, view<24xi32>
+  vector.store %unsigned, %destination[8] : vector<4xi32>, view<24xi32>
+  vector.store %fixed_left, %destination[12] : vector<4xi32>, view<24xi32>
+  vector.store %fixed_signed, %destination[16] : vector<4xi32>, view<24xi32>
+  vector.store %fixed_unsigned, %destination[20] : vector<4xi32>, view<24xi32>
+  func.return
+}
+
+func.def @uniform_qword_shifts(%trial: index, %input: buffer, %count_storage: buffer, %output: buffer) {
+  %ordinal = index.assume %trial [range(%trial, 0, 63)] : index
+  %base = index.constant 0 : offset
+  %count_source = buffer.view %count_storage[%base] : buffer -> view<64xi64>
+  %loaded_count = view.load %count_source[%ordinal] : view<64xi64> -> i64
+  %mask = scalar.constant 63 : i64
+  %count = scalar.andi %loaded_count, %mask : i64
+  %counts = vector.splat %count : vector<2xi64>
+  %fixed_counts = vector.constant 4 : vector<2xi64>
+  %replacement = scalar.xori %count, %mask : i64
+  view.store %replacement, %count_source[%ordinal] : i64, view<64xi64>
+  %source = buffer.view %input[%base] : buffer -> view<2xi64>
+  %destination = buffer.view %output[%base] : buffer -> view<12xi64>
+  %values = vector.load %source[0] : view<2xi64> -> vector<2xi64>
+  %left = vector.shli %values, %counts : vector<2xi64>
+  %signed = vector.shrsi %values, %counts : vector<2xi64>
+  %unsigned = vector.shrui %values, %counts : vector<2xi64>
+  %fixed_left = vector.shli %values, %fixed_counts : vector<2xi64>
+  %fixed_signed = vector.shrsi %values, %fixed_counts : vector<2xi64>
+  %fixed_unsigned = vector.shrui %values, %fixed_counts : vector<2xi64>
+  vector.store %left, %destination[0] : vector<2xi64>, view<12xi64>
+  vector.store %signed, %destination[2] : vector<2xi64>, view<12xi64>
+  vector.store %unsigned, %destination[4] : vector<2xi64>, view<12xi64>
+  vector.store %fixed_left, %destination[6] : vector<2xi64>, view<12xi64>
+  vector.store %fixed_signed, %destination[8] : vector<2xi64>, view<12xi64>
+  vector.store %fixed_unsigned, %destination[10] : vector<2xi64>, view<12xi64>
+  func.return
+}
+
+check.scenario @uniform_byte_shift_values {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) : tensor<16xi8>
+    %counts = check.generate.iota offset(0) step(1) : tensor<8xi8>
+    %storage = check.generate.fill value(-123) : tensor<128xi8>
+    %output = check.tensor.view %storage offset(16) : tensor<128xi8> -> tensor<96xi8>
+    check.compare<@uniform_byte_shifts>(%trial, %input, %counts, %output) : (index, tensor<16xi8>, tensor<8xi8>, tensor<96xi8>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<16xi8>
+      check.expect.bitwise actual(%counts) expected(%counts) : tensor<8xi8>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<128xi8>
+    }
+  }
+  check.return
+}
+
+check.scenario @uniform_word_shift_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32768 to 32767) : tensor<8xi16>
+    %counts = check.generate.iota offset(65536) step(1) : tensor<16xi32>
+    %storage = check.generate.fill value(-123) : tensor<64xi16>
+    %output = check.tensor.view %storage offset(16) : tensor<64xi16> -> tensor<48xi16>
+    check.compare<@uniform_word_shifts>(%trial, %input, %counts, %output) : (index, tensor<8xi16>, tensor<16xi32>, tensor<48xi16>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<8xi16>
+      check.expect.bitwise actual(%counts) expected(%counts) : tensor<16xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<64xi16>
+    }
+  }
+  check.return
+}
+
+check.scenario @uniform_dword_shift_values {
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-2147483648) step(1431655765) : tensor<4xi32>
+    %counts = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<32xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<32xi32> -> tensor<24xi32>
+    check.compare<@uniform_dword_shifts>(%trial, %input, %counts, %output) : (index, tensor<4xi32>, tensor<32xi32>, tensor<24xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<4xi32>
+      check.expect.bitwise actual(%counts) expected(%counts) : tensor<32xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<32xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @uniform_qword_shift_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<2xi64>
+    %counts = check.generate.iota offset(0) step(1) : tensor<64xi64>
+    %storage = check.generate.fill value(-123) : tensor<16xi64>
+    %output = check.tensor.view %storage offset(16) : tensor<16xi64> -> tensor<12xi64>
+    check.compare<@uniform_qword_shifts>(%trial, %input, %counts, %output) : (index, tensor<2xi64>, tensor<64xi64>, tensor<12xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<2xi64>
+      check.expect.bitwise actual(%counts) expected(%counts) : tensor<64xi64>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<16xi64>
+    }
+  }
+  check.return
+}

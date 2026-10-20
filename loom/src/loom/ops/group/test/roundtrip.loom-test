@@ -1,6 +1,6 @@
 // RUN: roundtrip
 
 func.def @group_roundtrip(%lanes: index) {
-  %workers = group.create %lanes : index -> group
+  %workers = group.create %lanes : index -> group<[%lanes]>
   func.return
 }

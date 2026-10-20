@@ -14,12 +14,14 @@ class ContractSystem(Enum):
     """Shared interpreter system used by a contract fragment case."""
 
     DESCRIPTOR_RULE = "descriptor_rule"
+    DESCRIPTOR_RULE_LOWERING_ONLY = "descriptor_rule_lowering_only"
     VALUE_ALIAS = "value_alias"
     VALUE_ELIDE = "value_elide"
     SOURCE_MEMORY = "source_memory"
     ENVIRONMENT = "environment"
     DESCRIPTOR_MATRIX = "descriptor_matrix"
     RECIPE_RULE = "recipe_rule"
+    UNSUPPORTED = "unsupported"
 
 
 @unique
@@ -31,5 +33,10 @@ class SourceValueKind(Enum):
     TEMPORARY = "temporary"
     SOURCE_MEMORY_DYNAMIC_TERM = "source_memory_dynamic_term"
     SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET = "source_memory_dynamic_byte_offset"
+    SOURCE_MEMORY_BYTE_OFFSET = "source_memory_byte_offset"
     SOURCE_MEMORY_ADDRESS = "source_memory_address"
     SOURCE_MEMORY_ROOT = "source_memory_root"
+    SOURCE_MEMORY_ELEMENT_STRIDE = "source_memory_element_stride"
+    EXACT_LANE_ORIGIN_OPERAND = "exact_lane_origin_operand"
+    EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND = "exact_uniform_element_origin_operand"
+    UNIFORM_ELEMENT_ORIGIN_OPERAND = "uniform_element_origin_operand"

@@ -1,0 +1,86 @@
+// RUN: emit source-low target=spirv:vulkan1.3+bda+extended-types output=low control-flow=structured-low
+
+// Read-only global storage retains ordinary device addressing through scalar,
+// vector, and subview accesses.
+func.def @constant_reads(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %readonly = buffer.assume.memory_space<constant> %input : buffer
+  %aligned = buffer.assume.alignment %readonly {minimum_alignment = 16} : buffer
+  %words = buffer.view %aligned[%base] : buffer -> view<8xi32>
+  %part = view.subview %words[2] : view<8xi32> -> view<4xi32>
+  %word = view.load %part[1] : view<4xi32> -> i32
+  %floats = buffer.view %aligned[%base] : buffer -> view<4xf32>
+  %values = vector.load %floats[0] : view<4xf32> -> vector<4xf32>
+  %halves = buffer.view %aligned[%base] : buffer -> view<8xbf16>
+  %half = view.load %halves[0] : view<8xbf16> -> bf16
+  %output_aligned = buffer.assume.alignment %output {minimum_alignment = 16} : buffer
+  %output_words = buffer.view %output_aligned[%base] : buffer -> view<8xi32>
+  view.store %word, %output_words[7] : i32, view<8xi32>
+  %output_floats = buffer.view %output_aligned[%base] : buffer -> view<4xf32>
+  vector.store %values, %output_floats[0] : vector<4xf32>, view<4xf32>
+  %output_halves = buffer.view %output_aligned[%base] : buffer -> view<12xbf16>
+  view.store %half, %output_halves[11] : bf16, view<12xbf16>
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @constant_reads(%aligned: reg<spirv.ptr.storage_buffer>, %output_aligned: reg<spirv.ptr.storage_buffer>) asm {
+  %27 = OpConstant.offset64 12
+  %28 = OpPtrAccessChain.storage_buffer.i32.byte_offset %aligned, %27
+  %word = OpLoad.storage_buffer.i32 %28
+  %30 = OpConstant.offset64 0
+  %31 = OpPtrAccessChain.storage_buffer.f32.byte_offset %aligned, %30
+  %32 = OpLoad.storage_buffer.f32 %31
+  %33 = OpConstant.offset64 4
+  %34 = OpPtrAccessChain.storage_buffer.f32.byte_offset %aligned, %33
+  %35 = OpLoad.storage_buffer.f32 %34
+  %36 = OpConstant.offset64 8
+  %37 = OpPtrAccessChain.storage_buffer.f32.byte_offset %aligned, %36
+  %38 = OpLoad.storage_buffer.f32 %37
+  %40 = OpPtrAccessChain.storage_buffer.f32.byte_offset %aligned, %27
+  %41 = OpLoad.storage_buffer.f32 %40
+  %43 = OpPtrAccessChain.storage_buffer.bf16.byte_offset %aligned, %30
+  %half = OpLoad.storage_buffer.bf16 %43
+  %45 = OpConstant.offset64 28
+  %46 = OpPtrAccessChain.storage_buffer.i32.byte_offset %output_aligned, %45
+  OpStore.storage_buffer.i32 %46, %word
+  %48 = OpPtrAccessChain.storage_buffer.f32.byte_offset %output_aligned, %30
+  OpStore.storage_buffer.f32 %48, %32
+  %50 = OpPtrAccessChain.storage_buffer.f32.byte_offset %output_aligned, %33
+  OpStore.storage_buffer.f32 %50, %35
+  %52 = OpPtrAccessChain.storage_buffer.f32.byte_offset %output_aligned, %36
+  OpStore.storage_buffer.f32 %52, %38
+  %54 = OpPtrAccessChain.storage_buffer.f32.byte_offset %output_aligned, %27
+  OpStore.storage_buffer.f32 %54, %41
+  %55 = OpConstant.offset64 22
+  %56 = OpPtrAccessChain.storage_buffer.bf16.byte_offset %output_aligned, %55
+  OpStore.storage_buffer.bf16 %56, %half
+  return
+}
+
+// ====
+
+func.def @constant_i32_rejects_store(%output: buffer, %value: i32) {
+  %base = index.constant 0 : offset
+  %readonly = buffer.assume.memory_space<constant> %output : buffer
+  %aligned = buffer.assume.alignment %readonly {minimum_alignment = 4} : buffer
+  %view = buffer.view %aligned[%base] : buffer -> view<1xi32>
+  // ERROR@+1: TARGET/003 {subject_role="source-memory", subject_name="access", constraint_key="source_memory.memory_space"}
+  view.store %value, %view[0] : i32, view<1xi32>
+  func.return
+}
+
+// ====
+
+func.def @constant_i32_rejects_atomic(%output: buffer, %value: i32) -> (i32) {
+  %base = index.constant 0 : offset
+  %position = index.constant 0 : index
+  %readonly = buffer.assume.memory_space<constant> %output : buffer
+  %aligned = buffer.assume.alignment %readonly {minimum_alignment = 4} : buffer
+  %view = buffer.view %aligned[%base] : buffer -> view<1xi32>
+  // The storage atomic candidate excludes constant memory. Its workgroup
+  // alternative also cannot accept the storage-buffer address representation.
+  // ERROR@+1: TARGET/003 {op_name="view.atomic.cmpxchg", subject_role="field", subject_name="view", constraint_key="low_register_class.spirv.ptr.workgroup.array.i32"}
+  %old = view.atomic.rmw<addi> %value, %view[%position] {ordering = relaxed, scope = device} : i32, view<1xi32> -> i32
+  func.return %old : i32
+}

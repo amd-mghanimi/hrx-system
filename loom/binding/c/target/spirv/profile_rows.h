@@ -35,6 +35,16 @@ typedef struct loomc_spirv_cooperative_row_fact_set_t {
   loomc_host_size_t vector_row_count;
 } loomc_spirv_cooperative_row_fact_set_t;
 
+// Maps a public SPIR-V feature identifier to its compiler feature atom.
+loom_spirv_feature_atom_t loomc_spirv_feature_atom_from_public(
+    loomc_spirv_feature_t feature);
+
+// Projects a prepared compiler property into a borrowed public row, without
+// searching explicit fact provenance.
+void loomc_spirv_cooperative_matrix_row_from_loom(
+    const loom_spirv_cooperative_matrix_property_t* property,
+    loomc_spirv_cooperative_matrix_row_t* out_row);
+
 // Validates cooperative row slices in profile options.
 loomc_status_t loomc_spirv_profile_validate_cooperative_row_options(
     const loomc_spirv_profile_options_t* options);

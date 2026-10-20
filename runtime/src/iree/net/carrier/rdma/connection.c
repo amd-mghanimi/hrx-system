@@ -139,6 +139,7 @@ iree_net_rdma_connection_options_t iree_net_rdma_connection_options_default(
     void) {
   iree_net_rdma_connection_options_t options = {0};
   options.max_endpoint_count = 4;
+  options.completion_mode = IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS;
   options.control.send_count = 16;
   options.control.receive_count = 16;
   options.control.service_batch_size = 32;
@@ -169,6 +170,8 @@ iree_status_t iree_net_rdma_connection_options_validate(
     const iree_net_rdma_connection_options_t* options) {
   if (!options || !options->max_endpoint_count ||
       options->max_endpoint_count >= (UINT32_C(1) << 30) ||
+      options->completion_mode >
+          IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL ||
       !options->control.send_count || !options->control.receive_count ||
       !options->control.service_batch_size ||
       !options->control.resolution_timeout_ms ||
@@ -284,8 +287,13 @@ static void iree_net_rdma_connection_try_finish(
   }
 }
 
-static void iree_net_rdma_connection_control_drained(void* user_data) {
+static void iree_net_rdma_connection_control_drained(void* user_data,
+                                                     iree_status_t status) {
   iree_net_rdma_connection_t* connection = user_data;
+  if (!iree_status_is_ok(status)) {
+    iree_net_rdma_connection_fail(connection, status);
+    return;
+  }
   iree_slim_mutex_lock(&connection->mutex);
   connection->flags |= IREE_NET_RDMA_CONNECTION_CONTROL_DRAINED;
   iree_slim_mutex_unlock(&connection->mutex);
@@ -412,7 +420,7 @@ static void iree_net_rdma_connection_retire(
           (iree_async_event_source_unregistered_callback_t){
               iree_net_rdma_connection_control_drained, connection});
     } else {
-      iree_net_rdma_connection_control_drained(connection);
+      iree_net_rdma_connection_control_drained(connection, iree_ok_status());
     }
   }
 }
@@ -476,7 +484,7 @@ static iree_status_t iree_net_rdma_connection_create_endpoint(
   iree_net_rdma_direct_endpoint_callbacks_t callbacks = {
       iree_net_rdma_connection_credit, slot};
   if (slot->kind == IREE_NET_RDMA_ENDPOINT_DIRECT) {
-    return iree_net_rdma_direct_endpoint_create(
+    return iree_net_rdma_direct_endpoint_allocate(
         connection->context, connection->proactor, connection->control, ordinal,
         sequence_number, options, callbacks, &connection->endpoint_barrier,
         connection->base.host_allocator, &slot->native);
@@ -739,10 +747,10 @@ static void iree_net_rdma_connection_destroy(iree_net_connection_t* base) {
     if (slot->framed) {
       iree_net_framed_endpoint_free(slot->framed);
     } else {
-      iree_net_rdma_direct_endpoint_destroy(slot->native);
+      iree_net_rdma_direct_endpoint_free(slot->native);
     }
   }
-  iree_net_rdma_connection_control_destroy(connection->control);
+  iree_net_rdma_connection_control_free(connection->control);
   iree_status_free(connection->failure);
   iree_slim_mutex_deinitialize(&connection->mutex);
   iree_async_proactor_release(connection->proactor);
@@ -867,6 +875,7 @@ iree_status_t iree_net_rdma_connection_create(
       .receive_count = options->control.receive_count,
       .data_work_capacity = data_work_capacity,
       .service_batch_size = options->control.service_batch_size,
+      .completion_mode = options->completion_mode,
       .resolution_timeout_ms = options->control.resolution_timeout_ms,
       .minimum_rnr_timer = options->control.minimum_rnr_timer,
   };
@@ -876,7 +885,7 @@ iree_status_t iree_net_rdma_connection_create(
   iree_unaligned_store_le_u32(hello + 8, options->max_endpoint_count);
   iree_unaligned_store_le_u32(
       hello + 12, iree_net_rdma_context_port_attributes(context)->max_msg_sz);
-  iree_status_t status = iree_net_rdma_connection_control_create(
+  iree_status_t status = iree_net_rdma_connection_control_allocate(
       context, proactor, control_options,
       iree_make_const_byte_span(hello, sizeof(hello)),
       (iree_net_rdma_connection_control_callbacks_t){

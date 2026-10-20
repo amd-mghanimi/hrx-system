@@ -111,24 +111,24 @@ TEST_F(OwnershipTest, DescriptorSizesStayInExistingClass) {
 TEST_F(OwnershipTest, TestResourceOpsExposeOwnershipEffects) {
   ModulePtr module = ParseAndVerify(R"(
 func.def @ownership(%size: index) {
-  %fresh = test.resource.alloc %size : index -> pool<16>
-  test.resource.borrow %fresh : pool<16>
-  test.resource.borrow_ref %fresh : pool<16>
-  %retained = test.resource.retain %fresh : pool<16> -> pool<16>
-  %alias = test.resource.alias %retained : pool<16> -> pool<16>
-  %borrowed = test.resource.borrowed %alias : pool<16> -> pool<16>
-  %moved = test.resource.move %borrowed : pool<16> -> pool<16>
-  test.resource.release %retained : pool<16>
-  test.resource.discard %alias : pool<16>
-  test.resource.escape %moved : pool<16>
-  test.resource.consume %fresh : pool<16>
+  %fresh = test.resource.alloc %size : index -> pool
+  test.resource.borrow %fresh : pool
+  test.resource.borrow_ref %fresh : pool
+  %retained = test.resource.retain %fresh : pool -> pool
+  %alias = test.resource.alias %retained : pool -> pool
+  %borrowed = test.resource.borrowed %alias : pool -> pool
+  %moved = test.resource.move %borrowed : pool -> pool
+  test.resource.release %retained : pool
+  test.resource.discard %alias : pool
+  test.resource.escape %moved : pool
+  test.resource.consume %fresh : pool
   func.return
 }
 )");
 
   loom_ownership_resource_family_t pool_family = {
-      /*.name=*/IREE_SV("pool"),
-      /*.type_matches=*/PoolTypeMatches,
+      .name = IREE_SV("pool"),
+      .type_matches = PoolTypeMatches,
   };
 
   loom_ownership_result_effect_t result_effect = {};
@@ -213,7 +213,7 @@ func.def @ownership(%size: index) {
 TEST_F(OwnershipTest, AllocatingResultsDeriveFreshOwnership) {
   ModulePtr module = ParseAndVerify(R"(
 func.def @alloc(%size: index) {
-  %resource = test.alloc %size : index -> pool<16>
+  %resource = test.alloc %size : index -> pool
   func.return
 }
 )");

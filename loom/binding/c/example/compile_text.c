@@ -11,7 +11,7 @@
 
 static const char kSourceText[] =
     "config.decl @model.hidden_size : %value: index where [range(%value, 0, "
-    "8192), mul(%value, 16)]\n"
+    "8192), multiple_of(%value, 16)]\n"
     "func.def public @entry() -> (index) {\n"
     "  %hidden = config.get @model.hidden_size : index\n"
     "  func.return %hidden : index\n"

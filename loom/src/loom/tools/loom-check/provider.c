@@ -10,24 +10,23 @@
 
 #include "loom/tooling/context/context.h"
 #include "loom/tools/loom-check/main.h"
+#include "loom/tools/loom-check/source_low.h"
 #include "loom/transforms/cleanup/configured.h"
+#include "loomc/interop.h"
+#include "loomc/iree.h"
 
 enum {
-  LOOM_CHECK_PROVIDER_TARGET_PROVIDER_CAPACITY = 64,
   LOOM_CHECK_PROVIDER_EMIT_PROVIDER_CAPACITY = 64,
   LOOM_CHECK_PROVIDER_REQUIREMENT_PROVIDER_CAPACITY = 64,
 };
 
 typedef struct loom_check_provider_environment_state_t {
-  // Core target provider table assembled once for the environment.
-  const loom_target_provider_t*
-      target_providers[LOOM_CHECK_PROVIDER_TARGET_PROVIDER_CAPACITY];
-  // Number of entries in |target_providers|.
-  iree_host_size_t target_provider_count;
-  // Provider-set view over |target_providers|.
-  loom_target_provider_set_t target_provider_set;
-  // Core target environment composed from |target_providers|.
-  loom_target_environment_t target_environment;
+  // Core target provider set assembled once for the environment.
+  loom_target_provider_set_storage_t target_provider_storage;
+  // Public target environment owning the composed compiler capabilities.
+  loomc_target_environment_t* public_target_environment;
+  // Native view borrowed from |public_target_environment|.
+  const loom_target_environment_t* native_target_environment;
   // Emit provider table assembled once for the environment.
   const loom_check_emit_provider_t*
       emit_providers[LOOM_CHECK_PROVIDER_EMIT_PROVIDER_CAPACITY];
@@ -39,21 +38,6 @@ typedef struct loom_check_provider_environment_state_t {
   // Number of entries in |requirement_providers|.
   iree_host_size_t requirement_provider_count;
 } loom_check_provider_environment_state_t;
-
-static iree_status_t loom_check_provider_append_target_provider(
-    loom_check_provider_environment_state_t* state,
-    const loom_check_provider_t* provider) {
-  if (provider->target_provider == NULL) {
-    return iree_ok_status();
-  }
-  if (state->target_provider_count >= IREE_ARRAYSIZE(state->target_providers)) {
-    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "loom-check target provider capacity exceeded");
-  }
-  state->target_providers[state->target_provider_count++] =
-      provider->target_provider;
-  return iree_ok_status();
-}
 
 static iree_status_t loom_check_provider_append_emit_providers(
     loom_check_provider_environment_state_t* state,
@@ -90,20 +74,32 @@ static iree_status_t loom_check_provider_environment_state_initialize(
     const loom_check_provider_set_t* provider_set,
     loom_check_provider_environment_state_t* out_state) {
   *out_state = (loom_check_provider_environment_state_t){0};
+  loom_target_provider_set_storage_initialize(
+      &out_state->target_provider_storage);
+  out_state->emit_providers[out_state->emit_provider_count++] =
+      &loom_check_source_low_emit_provider;
 
   for (iree_host_size_t i = 0; i < provider_set->provider_count; ++i) {
     const loom_check_provider_t* provider = provider_set->providers[i];
-    IREE_RETURN_IF_ERROR(
-        loom_check_provider_append_target_provider(out_state, provider));
+    IREE_RETURN_IF_ERROR(loom_target_provider_set_storage_append(
+        &out_state->target_provider_storage, provider->target_provider));
     IREE_RETURN_IF_ERROR(
         loom_check_provider_append_emit_providers(out_state, provider));
     IREE_RETURN_IF_ERROR(
         loom_check_provider_append_requirement_providers(out_state, provider));
   }
-  out_state->target_provider_set = loom_target_provider_set_make(
-      out_state->target_providers, out_state->target_provider_count);
-  IREE_RETURN_IF_ERROR(loom_target_environment_initialize(
-      &out_state->target_provider_set, &out_state->target_environment));
+  if (provider_set->target_provider_set != NULL) {
+    IREE_RETURN_IF_ERROR(loom_target_provider_set_storage_append_set(
+        &out_state->target_provider_storage,
+        provider_set->target_provider_set));
+  }
+  IREE_RETURN_IF_ERROR(
+      iree_status_from_loomc(loomc_target_environment_create_from_provider_set(
+          &out_state->target_provider_storage.provider_set,
+          loomc_allocator_system(), &out_state->public_target_environment)));
+  out_state->native_target_environment =
+      loomc_target_environment_get_interop_view(
+          out_state->public_target_environment);
   return iree_ok_status();
 }
 
@@ -112,31 +108,7 @@ static iree_status_t loom_check_provider_register_context(
   loom_check_provider_environment_state_t* state =
       (loom_check_provider_environment_state_t*)user_data;
   return loom_tooling_context_register_tool_dialects_with_target_environment(
-      &state->target_environment, context);
-}
-
-static iree_status_t loom_check_provider_initialize_low_descriptor_registry(
-    void* user_data, loom_target_low_descriptor_registry_t* out_registry) {
-  loom_check_provider_environment_state_t* state =
-      (loom_check_provider_environment_state_t*)user_data;
-  return loom_target_environment_initialize_low_descriptor_registry(
-      &state->target_environment, out_registry);
-}
-
-static iree_status_t loom_check_provider_initialize_low_lower_policy_registry(
-    void* user_data, loom_low_lower_policy_registry_t* out_registry) {
-  loom_check_provider_environment_state_t* state =
-      (loom_check_provider_environment_state_t*)user_data;
-  return loom_target_environment_initialize_low_lower_policy_registry(
-      &state->target_environment, out_registry);
-}
-
-static iree_status_t loom_check_provider_initialize_math_policy_registry(
-    void* user_data, loom_target_math_policy_registry_t* out_registry) {
-  loom_check_provider_environment_state_t* state =
-      (loom_check_provider_environment_state_t*)user_data;
-  return loom_target_environment_initialize_math_policy_registry(
-      &state->target_environment, out_registry);
+      state->native_target_environment, context);
 }
 
 int loom_check_provider_main(int argc, char** argv,
@@ -158,41 +130,9 @@ int loom_check_provider_main(int argc, char** argv,
               .fn = loom_check_provider_register_context,
               .user_data = &state,
           },
-      .target_environment = &state.target_environment,
+      .target_environment = state.native_target_environment,
       .cleanup_pattern_provider_set =
           loom_cleanup_configured_pattern_provider_set(),
-      .initialize_low_descriptor_registry =
-          {
-              .fn = loom_check_provider_initialize_low_descriptor_registry,
-              .user_data = &state,
-          },
-      .initialize_low_lower_policy_registry =
-          {
-              .fn = loom_check_provider_initialize_low_lower_policy_registry,
-              .user_data = &state,
-          },
-      .initialize_math_policy_registry =
-          {
-              .fn = loom_check_provider_initialize_math_policy_registry,
-              .user_data = &state,
-          },
-      .pass_registry =
-          loom_target_environment_pass_registry(&state.target_environment),
-      .low_legality_provider_list =
-          loom_target_environment_low_legality_provider_list(
-              &state.target_environment),
-      .legalizer_provider_list =
-          loom_target_environment_legalizer_provider_list(
-              &state.target_environment),
-      .low_packet_diagnostic_provider_list =
-          loom_target_environment_low_packet_diagnostic_provider_list(
-              &state.target_environment),
-      .low_asm_diagnostic_provider_list =
-          loom_target_environment_low_asm_diagnostic_provider_list(
-              &state.target_environment),
-      .low_verify_provider_list =
-          loom_target_environment_low_verify_provider_list(
-              &state.target_environment),
       .emit_providers =
           {
               .providers = state.emit_providers,
@@ -204,5 +144,9 @@ int loom_check_provider_main(int argc, char** argv,
               .provider_count = state.requirement_provider_count,
           },
   };
-  return loom_check_main(argc, argv, &environment);
+  const int exit_code =
+      loom_check_main(argc, argv, &environment, state.public_target_environment,
+                      provider_set->compile_provider);
+  loomc_target_environment_release(state.public_target_environment);
+  return exit_code;
 }

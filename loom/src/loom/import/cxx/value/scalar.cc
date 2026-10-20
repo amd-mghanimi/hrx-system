@@ -9,7 +9,9 @@
 #include <cxx/ast_interpreter.h>
 #include <cxx/control.h>
 #include <cxx/memory_layout.h>
+#include <cxx/symbols.h>
 #include <cxx/token.h>
+#include <cxx/types.h>
 
 #include <bit>
 
@@ -30,12 +32,41 @@ loom_attribute_t integer_attribute(uint64_t bits, unsigned bytes) {
   return loom_attr_i64(stored);
 }
 
+const cxx::ConstValue& address_constant_payload(cxx::TranslationUnit& unit,
+                                                Diagnostics& diagnostics,
+                                                const cxx::ConstValue& value,
+                                                loom_scalar_type_t domain,
+                                                cxx::AST* owner) {
+  auto* object = std::get_if<std::shared_ptr<cxx::ConstObject>>(&value);
+  if (!object || !*object || (*object)->members().size() != 1) {
+    diagnostics.reject(unit, owner,
+                       "address constants require one carrier storage member");
+  }
+  const auto& member = (*object)->members().front();
+  auto* field =
+      member.symbol && member.symbol->kind() == cxx::SymbolKind::kField
+          ? static_cast<const cxx::FieldSymbol*>(member.symbol)
+          : nullptr;
+  const cxx::Type* expected =
+      domain == LOOM_SCALAR_TYPE_INDEX
+          ? static_cast<const cxx::Type*>(unit.control()->getLongLongIntType())
+          : static_cast<const cxx::Type*>(
+                unit.control()->getUnsignedLongLongIntType());
+  if (!field || field->isStatic() ||
+      !unit.typeTraits().is_same(unit.typeTraits().remove_cv(field->type()),
+                                 expected)) {
+    diagnostics.reject(
+        unit, owner, "address constant storage does not match its signedness");
+  }
+  return member.value;
+}
+
 }  // namespace
 
 loom_value_id_t Scalars::convert(loom_value_id_t value,
                                  const cxx::Type* input_type,
-                                 const cxx::Type* output_type,
-                                 cxx::AST* owner) {
+                                 const cxx::Type* output_type, cxx::AST* owner,
+                                 uint8_t fastmath) {
   auto input = types_.get(input_type, owner);
   auto output = types_.get(output_type, owner);
   if (loom_type_kind(input) != LOOM_TYPE_SCALAR ||
@@ -54,9 +85,9 @@ loom_value_id_t Scalars::convert(loom_value_id_t value,
         types_.is_float(input_type) ? loom_attr_f64(0.0) : loom_attr_i64(0),
         input, locations_.get(owner), &zero));
     if (types_.is_float(input_type)) {
-      check(loom_scalar_cmpf_build(&builder_, 0, LOOM_SCALAR_CMPF_PREDICATE_UNE,
-                                   value, loom_op_results(zero)[0],
-                                   locations_.get(owner), &op));
+      check(loom_scalar_cmpf_build(
+          &builder_, fastmath, LOOM_SCALAR_CMPF_PREDICATE_UNE, value,
+          loom_op_results(zero)[0], locations_.get(owner), &op));
     } else {
       check(loom_scalar_cmpi_build(&builder_, LOOM_SCALAR_CMPI_PREDICATE_NE,
                                    value, loom_op_results(zero)[0],
@@ -72,21 +103,23 @@ loom_value_id_t Scalars::convert(loom_value_id_t value,
     // Distinct narrow formats can have equal storage widths. F32 represents
     // each exactly, so only the final cast rounds.
     auto widened = loom_type_scalar(LOOM_SCALAR_TYPE_F32);
-    check(loom_scalar_extf_build(&builder_, value, input, widened,
+    check(loom_scalar_extf_build(&builder_, 0, value, input, widened,
                                  locations_.get(owner), &op));
     value = loom_op_results(op)[0];
-    check(loom_scalar_fptrunc_build(&builder_, value, widened, output,
+    check(loom_scalar_fptrunc_build(&builder_, 0, value, widened, output,
                                     locations_.get(owner), &op));
     return loom_op_results(op)[0];
   }
   bool narrows = layout->sizeOf(input_type) > layout->sizeOf(output_type);
+  if (types_.is_float(input_type) && types_.is_float(output_type)) {
+    check((narrows ? loom_scalar_fptrunc_build : loom_scalar_extf_build)(
+        &builder_, 0, value, input, output, locations_.get(owner), &op));
+    return loom_op_results(op)[0];
+  }
   auto build =
       types_.is_float(output_type)
-          ? (types_.is_float(input_type)
-                 ? (narrows ? loom_scalar_fptrunc_build
-                            : loom_scalar_extf_build)
-                 : (unsigned_input ? loom_scalar_uitofp_build
-                                   : loom_scalar_sitofp_build))
+          ? (unsigned_input ? loom_scalar_uitofp_build
+                            : loom_scalar_sitofp_build)
           : (types_.is_float(input_type)
                  ? (types_.is_unsigned(output_type) ? loom_scalar_fptoui_build
                                                     : loom_scalar_fptosi_build)
@@ -100,7 +133,8 @@ loom_value_id_t Scalars::convert(loom_value_id_t value,
 loom_value_id_t Scalars::binary(cxx::TokenKind token, loom_value_id_t left,
                                 loom_value_id_t right,
                                 const cxx::Type* input_type,
-                                const cxx::Type* output_type, cxx::AST* ast) {
+                                const cxx::Type* output_type, cxx::AST* ast,
+                                uint8_t fastmath) {
   auto source = locations_.get(ast);
   bool floating = types_.is_float(input_type);
   bool unsigned_input = types_.is_unsigned(input_type);
@@ -134,8 +168,8 @@ loom_value_id_t Scalars::binary(cxx::TokenKind token, loom_value_id_t left,
           LOOM_SCALAR_CMPF_PREDICATE_OEQ, LOOM_SCALAR_CMPF_PREDICATE_UNE,
           LOOM_SCALAR_CMPF_PREDICATE_OLT, LOOM_SCALAR_CMPF_PREDICATE_OLE,
           LOOM_SCALAR_CMPF_PREDICATE_OGT, LOOM_SCALAR_CMPF_PREDICATE_OGE};
-      check(loom_scalar_cmpf_build(&builder_, 0, predicates[predicate], left,
-                                   right, source, &op));
+      check(loom_scalar_cmpf_build(&builder_, fastmath, predicates[predicate],
+                                   left, right, source, &op));
     } else {
       auto selected = static_cast<loom_scalar_cmpi_predicate_t>(
           predicate >= 2 && unsigned_input ? predicate + 4 : predicate);
@@ -178,20 +212,26 @@ loom_value_id_t Scalars::binary(cxx::TokenKind token, loom_value_id_t left,
   if (!build) {
     diagnostics_.reject(unit_, ast, "unsupported binary operator");
   }
-  check(build(&builder_, 0, left, right, types_.get(output_type, ast), source,
-              &op));
+  const uint8_t flags = floating ? fastmath : 0;
+  check(build(&builder_, flags, left, right, types_.get(output_type, ast),
+              source, &op));
   return loom_op_results(op)[0];
 }
 
 loom_value_id_t Scalars::integer(int64_t value, loom_scalar_type_t scalar,
                                  loom_location_id_t source) {
+  return materialize(loom_attr_i64(value), loom_type_scalar(scalar), source);
+}
+
+loom_value_id_t Scalars::materialize(loom_attribute_t value, loom_type_t type,
+                                     loom_location_id_t source) {
   loom_op_t* op;
+  const auto scalar = loom_type_element_type(type);
   auto* build =
       scalar == LOOM_SCALAR_TYPE_INDEX || scalar == LOOM_SCALAR_TYPE_OFFSET
           ? loom_index_constant_build
           : loom_scalar_constant_build;
-  check(build(&builder_, loom_attr_i64(value), loom_type_scalar(scalar), source,
-              &op));
+  check(build(&builder_, value, type, source, &op));
   return loom_op_results(op)[0];
 }
 
@@ -203,28 +243,43 @@ loom_attribute_t Scalars::constant_attribute(const cxx::ConstValue& value,
   if (loom_type_kind(target) != LOOM_TYPE_SCALAR) {
     diagnostics_.reject(unit_, ast, "constants require a numeric scalar type");
   }
+  const auto element_type = loom_type_element_type(target);
+  const bool is_address = element_type == LOOM_SCALAR_TYPE_INDEX ||
+                          element_type == LOOM_SCALAR_TYPE_OFFSET;
+  const cxx::ConstValue& payload =
+      is_address ? address_constant_payload(unit_, diagnostics_, value,
+                                            element_type, ast)
+                 : value;
   loom_attribute_t attribute;
   if (types_.is_float(source_type)) {
-    if (auto* floating = std::get_if<cxx::ConstFloat>(&value);
+    if (auto* floating = std::get_if<cxx::ConstFloat>(&payload);
         floating && floating->isNaN()) {
       diagnostics_.reject(
           unit_, ast,
           "numeric metadata cannot preserve NaN representation bits; "
           "use an integer encoding and bit-cast it in the function body");
     }
-    auto number = interpreter.toDouble(value);
+    auto number = interpreter.toDouble(payload);
     if (!number) {
       diagnostics_.reject(unit_, ast, "invalid floating literal");
     }
     attribute = loom_attr_f64(*number);
   } else {
-    auto number = interpreter.toInt(value);
+    auto number = interpreter.toInt(payload);
     if (!number) {
       diagnostics_.reject(unit_, ast, "invalid integer literal");
     }
     // Literals are represented in the signed storage width of their IR
     // scalar type; signedness remains a source fact at each operation.
-    auto bytes = *unit_.control()->memoryLayout()->sizeOf(source_type);
+    const cxx::Type* storage_type = source_type;
+    if (is_address) {
+      storage_type = element_type == LOOM_SCALAR_TYPE_INDEX
+                         ? static_cast<const cxx::Type*>(
+                               unit_.control()->getLongLongIntType())
+                         : static_cast<const cxx::Type*>(
+                               unit_.control()->getUnsignedLongLongIntType());
+    }
+    auto bytes = *unit_.control()->memoryLayout()->sizeOf(storage_type);
     attribute = integer_attribute(std::bit_cast<uint64_t>(*number), bytes);
   }
   return attribute;
@@ -248,10 +303,8 @@ loom_value_id_t Scalars::constant(const cxx::ConstValue& value,
                                     locations_.get(ast), &op));
     return loom_op_results(op)[0];
   }
-  check(loom_scalar_constant_build(
-      &builder_, constant_attribute(value, source_type, ast),
-      types_.get(source_type, ast), locations_.get(ast), &op));
-  return loom_op_results(op)[0];
+  return materialize(constant_attribute(value, source_type, ast),
+                     types_.get(source_type, ast), locations_.get(ast));
 }
 
 }  // namespace loom::cxx_import

@@ -19,6 +19,6 @@ low.func.def target<wasm.core.simd128>(@target) @identity(%value: reg<wasm.i32>)
 }
 
 low.func.def target<wasm.core.simd128>(@target) abi(wasm_function) @caller(%value: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
-  %result = low.func.call noinline @identity(%value) : (reg<wasm.i32>) -> (reg<wasm.i32>)
+  %result = low.func.call pure noinline @identity(%value) : (reg<wasm.i32>) -> (reg<wasm.i32>)
   return %result
 }

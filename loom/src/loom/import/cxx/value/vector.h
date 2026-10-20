@@ -32,21 +32,30 @@ class Vectors {
   // Numeric lane conversion is a different source operation and is not inferred
   // here.
   loom_value_id_t convert(loom_value_id_t value, const cxx::Type* input_type,
-                          const cxx::Type* output_type, cxx::AST* owner);
+                          const cxx::Type* output_type, cxx::AST* owner,
+                          uint8_t fastmath = 0);
   // Applies an explicit numeric conversion to each lane. Frontend semantics
   // have established vector operands with the same number of elements.
   loom_value_id_t convert_elements(loom_value_id_t value,
                                    const cxx::Type* input_type,
                                    const cxx::Type* output_type,
                                    cxx::AST* owner);
+  // Applies the same numeric lane conversion to a rank-generic vector while
+  // retaining the source value's dynamic extent identities in the result.
+  // Admission has established identical source/result logical shapes.
+  Value convert_elements(Value value, const VectorPartition& input,
+                         const VectorPartition& output, ValueArena& arena,
+                         cxx::AST* owner);
   // Operands already have the source operation's common vector type.
   loom_value_id_t binary(cxx::TokenKind token, loom_value_id_t left,
                          loom_value_id_t right, const cxx::Type* input_type,
-                         const cxx::Type* output_type, cxx::AST* owner);
+                         const cxx::Type* output_type, cxx::AST* owner,
+                         uint8_t fastmath = 0);
   // Preserves vector lane width for sign, complement and logical negation.
   loom_value_id_t unary(cxx::TokenKind token, loom_value_id_t value,
                         const cxx::Type* input_type,
-                        const cxx::Type* output_type, cxx::AST* owner);
+                        const cxx::Type* output_type, cxx::AST* owner,
+                        uint8_t fastmath = 0);
   // Constructs an initialized vector from source-order scalar lanes. Omitted
   // trailing lanes are zero, as in a C/C++ aggregate initializer.
   loom_value_id_t construct(std::span<const loom_value_id_t> elements,
@@ -59,8 +68,25 @@ class Vectors {
   loom_value_id_t extract(loom_value_id_t value, loom_value_id_t index,
                           const cxx::Type* source_type,
                           const cxx::Type* index_type, cxx::AST* owner);
+  // Replaces one lane and returns the updated vector. Source-defined indices
+  // are nonnegative and below the lane count; the index carrier does not
+  // change that source bounds contract.
+  loom_value_id_t insert(loom_value_id_t destination, loom_value_id_t lane,
+                         loom_value_id_t index, const cxx::Type* source_type,
+                         const cxx::Type* index_type, cxx::AST* owner);
 
  private:
+  // Emits one numeric lane conversion after its concrete High source/result
+  // vector types and C++ lane interpretations have been resolved.
+  loom_value_id_t convert_elements(loom_value_id_t value, loom_type_t input,
+                                   const cxx::Type* input_element,
+                                   loom_type_t output,
+                                   const cxx::Type* output_element,
+                                   cxx::AST* owner);
+  // Projects a source integral lane selector to Loom's index domain.
+  loom_value_id_t cast_index(loom_value_id_t index, const cxx::Type* index_type,
+                             cxx::AST* owner);
+
   // Resolved frontend types and object layout.
   cxx::TranslationUnit& unit_;
   // Source admission boundary.

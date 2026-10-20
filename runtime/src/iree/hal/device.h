@@ -21,7 +21,7 @@
 #include "iree/hal/device_spec.h"
 #include "iree/hal/fence.h"
 #include "iree/hal/file.h"
-#include "iree/hal/memory/asan.h"
+#include "iree/hal/memory/asan_pool.h"
 #include "iree/hal/pool.h"
 #include "iree/hal/profile_options.h"
 #include "iree/hal/queue.h"
@@ -77,7 +77,8 @@ typedef uint64_t iree_hal_device_runtime_feature_flags_t;
 enum iree_hal_device_runtime_feature_flag_bits_e {
   // No optional runtime services are requested.
   IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_NONE = 0ull,
-  // Device-originated feedback events may be emitted by executables.
+  // Device-to-host diagnostics such as authored assertions and UBSAN reports
+  // may be emitted by executables.
   IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK = 1ull << 0,
   // Address sanitizer support may be required by executables.
   IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_ASAN = 1ull << 1,
@@ -104,6 +105,7 @@ typedef struct iree_async_proactor_pool_t iree_async_proactor_pool_t;
 typedef struct iree_async_frontier_tracker_t iree_async_frontier_tracker_t;
 typedef struct iree_async_notification_t iree_async_notification_t;
 typedef struct iree_hal_slab_provider_t iree_hal_slab_provider_t;
+typedef struct iree_hal_memory_backend_t iree_hal_memory_backend_t;
 
 // Device creation parameter extension types.
 //
@@ -295,32 +297,13 @@ iree_hal_device_create_params_default(void) {
 IREE_API_EXPORT iree_status_t iree_hal_device_create_params_verify(
     const iree_hal_device_create_params_t* params);
 
-// Backend-native ingredients required to create queue-allocation pools for a
-// device memory domain.
-//
-// |slab_provider| and |notification| are borrowed from the device. Pool
-// constructors retain those objects, but the objects themselves,
-// |epoch_query|, and |asan| may still read or describe backend-owned state. The
-// device must therefore outlive all pools created from this bundle.
-//
-// |notification| may be shared by multiple pools in the same physical-memory
-// domain and can wake callers whose own pool state did not change. Callers
-// should always retry reservations after wakeup instead of assuming precise
-// notification routing.
-typedef struct iree_hal_queue_pool_backend_t {
-  // Slab provider for the selected queue memory domain.
-  iree_hal_slab_provider_t* slab_provider;
-
-  // Notification shared by pools over the selected queue memory domain.
-  iree_async_notification_t* notification;
-
-  // Optional host-side epoch query for zero-sync block reuse.
-  iree_hal_pool_epoch_query_t epoch_query;
-
-  // Active ASAN allocation-shaping policy for custom pools over this backend.
-  // Disabled when the device does not support or has not enabled ASAN pools.
-  iree_hal_asan_pool_options_t asan;
-} iree_hal_queue_pool_backend_t;
+// Verifies common device-creation inputs and that every requested runtime
+// feature is implemented by the backend. |supported_runtime_features| is the
+// complete feature set implemented by the concrete device constructor.
+IREE_API_EXPORT iree_status_t
+iree_hal_device_create_params_verify_runtime_features(
+    const iree_hal_device_create_params_t* params,
+    iree_hal_device_runtime_feature_flags_t supported_runtime_features);
 
 // Device's cached view of topology for fast compatibility checks.
 //
@@ -451,9 +434,10 @@ typedef enum iree_hal_device_asan_observation_flag_bits_e {
 typedef struct iree_hal_device_asan_observation_t {
   // ASAN fields populated by the device.
   iree_hal_device_asan_observation_flags_t flags;
-  // Current total bytes retained by the ASAN quarantine FIFO.
+  // Current total bytes retained by the device's ASAN quarantines.
   iree_device_size_t quarantine_size;
-  // Cumulative count of mappings released due to ASAN quarantine pressure.
+  // Cumulative count of ranges released from the device's ASAN quarantines.
+  // Counts logical pool ranges and native mappings at their respective layers.
   uint64_t quarantine_eviction_count;
   // Number of precise physical shadow slabs currently mapped.
   uint64_t shadow_mapped_slab_count;
@@ -625,22 +609,11 @@ IREE_API_EXPORT iree_hal_semaphore_compatibility_t
 iree_hal_device_query_semaphore_compatibility(iree_hal_device_t* device,
                                               iree_hal_semaphore_t* semaphore);
 
-// Queries the slab provider, notification, and epoch-query callback to use when
-// constructing custom pools backed by the memory domain of |queue_family|.
-//
-// |queue_family| must be the exact family identity borrowed from |device|. It
-// selects one backing memory domain and does not constrain which queue families
-// may access allocations made from the pool. Allocation accessibility remains
-// specified by iree_hal_buffer_params_t::queue_family_affinity and advertised
-// by iree_hal_pool_capabilities_t::queue_family_affinity.
-//
-// The returned pointers are borrowed from |device| and remain valid until the
-// device is destroyed.
-//
-// Requires that |device| has been assigned to a device group.
-IREE_API_EXPORT iree_status_t iree_hal_device_query_queue_pool_backend(
-    iree_hal_device_t* device, const iree_hal_queue_family_t* queue_family,
-    iree_hal_queue_pool_backend_t* out_backend);
+// Borrows immutable native memory owners established before device publication.
+// NULL means the device supplies no slab construction backend. This performs no
+// allocation, registration, or capability discovery.
+IREE_API_EXPORT const iree_hal_memory_backend_t* iree_hal_device_memory_backend(
+    iree_hal_device_t* device);
 
 // Blocks the caller until the semaphores reach or exceed the specified payload
 // values or the |timeout| elapses. All semaphores in |semaphore_list| must be
@@ -814,7 +787,7 @@ typedef struct iree_hal_device_vtable_t {
       iree_hal_executable_t** out_executable);
 
   iree_status_t(IREE_API_PTR* import_file)(
-      iree_hal_device_t* device,
+      iree_hal_device_t* device, iree_hal_pool_t* storage_pool,
       iree_hal_queue_family_affinity_t queue_family_affinity,
       iree_hal_memory_access_t access, iree_io_file_handle_t* handle,
       iree_hal_external_file_flags_t flags, iree_hal_file_t** out_file);
@@ -829,15 +802,15 @@ typedef struct iree_hal_device_vtable_t {
       IREE_API_PTR* query_semaphore_compatibility)(
       iree_hal_device_t* device, iree_hal_semaphore_t* semaphore);
 
-  iree_status_t(IREE_API_PTR* query_queue_pool_backend)(
-      iree_hal_device_t* device, const iree_hal_queue_family_t* queue_family,
-      iree_hal_queue_pool_backend_t* out_backend);
-
   iree_status_t(IREE_API_PTR* profiling_begin)(
       iree_hal_device_t* device,
       const iree_hal_device_profiling_options_t* options);
   iree_status_t(IREE_API_PTR* profiling_flush)(iree_hal_device_t* device);
   iree_status_t(IREE_API_PTR* profiling_end)(iree_hal_device_t* device);
+
+  // Optional infallible view of already-created native memory resources.
+  const iree_hal_memory_backend_t*(IREE_API_PTR* memory_backend)(
+      iree_hal_device_t* device);
 } iree_hal_device_vtable_t;
 IREE_HAL_ASSERT_VTABLE_LAYOUT(iree_hal_device_vtable_t);
 

@@ -288,6 +288,16 @@ typedef enum loom_amdgpu_processor_scheduling_bit_e {
   // Flat requests retire in issue order within each memory counter domain.
   // Without this property, either domain can report early completion.
   LOOM_AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER = 1u << 7,
+  // Consecutive tensor issues require an intervening tensorcnt bound <=10.
+  LOOM_AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN = 1u << 8,
+  // Wave64 VALU mask storage requires depctr waits after ALU overwrites.
+  LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR = 1u << 9,
+  // CDNA data dependencies require fixed native instruction-slot separation.
+  LOOM_AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES = 1u << 10,
+  // Intervening DGEMM disables the VALU-to-VMEM/DS hardware interlock.
+  LOOM_AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK = 1u << 11,
+  // XNACK-enabled VMEM clauses require software register replay protection.
+  LOOM_AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES = 1u << 12,
   // Processor scheduling bits known by the AMDGPU target package.
   LOOM_AMDGPU_PROCESSOR_SCHEDULING_KNOWN_BITS =
       LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR |
@@ -297,7 +307,12 @@ typedef enum loom_amdgpu_processor_scheduling_bit_e {
       LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_DEPCTR |
       LOOM_AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU |
       LOOM_AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER |
-      LOOM_AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER,
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER |
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN |
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR |
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES |
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK |
+      LOOM_AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES,
 } loom_amdgpu_processor_scheduling_bit_t;
 
 // Bitset of loom_amdgpu_processor_scheduling_bit_t values.
@@ -398,9 +413,9 @@ typedef enum loom_amdgpu_descriptor_set_info_flag_bits_e {
   // A dual v_mov_b32 pair routes the Y source through the SRC2 cache.
   LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE = UINT64_C(1)
                                                                   << 9,
-  // F32 memory min/max prefer a number over either quiet or signaling NaNs.
-  LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA = UINT64_C(1)
-                                                                   << 10,
+  // F32/F64 memory min/max prefer a number over either quiet or signaling NaNs.
+  LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA = UINT64_C(1)
+                                                               << 10,
   // Floating atomics work on fine-grained host and peer memory at device scope.
   LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY = UINT64_C(1)
                                                                    << 11,
@@ -413,6 +428,17 @@ typedef enum loom_amdgpu_descriptor_set_info_flag_bits_e {
   // Wide VMEM payloads remain readable during a short issue-slot window.
   LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES = UINT64_C(1)
                                                                 << 14,
+  // Ordinary system-scope stores must first drain prior asynchronous memory
+  // work.
+  LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES =
+      UINT64_C(1) << 15,
+  // Memory packets retain source operands in independently drained XCNT
+  // translation groups.
+  LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION = UINT64_C(1)
+                                                               << 16,
+  // Equal-parity SRC0/SRC1 reads can lose the VOPD forwarding interlock.
+  LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD = UINT64_C(1)
+                                                               << 17,
   // Descriptor-set info flags known by the AMDGPU target package.
   LOOM_AMDGPU_DESCRIPTOR_SET_INFO_KNOWN_FLAGS =
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING |
@@ -425,11 +451,14 @@ typedef enum loom_amdgpu_descriptor_set_info_flag_bits_e {
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION |
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_COMPARE |
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE |
-      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA |
+      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA |
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY |
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY |
       LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS |
-      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES,
+      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES |
+      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES |
+      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION |
+      LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
 } loom_amdgpu_descriptor_set_info_flag_bits_t;
 
 // Bitset of loom_amdgpu_descriptor_set_info_flag_bits_t values.
@@ -448,13 +477,17 @@ typedef enum loom_amdgpu_kernel_descriptor_abi_flag_bits_e {
                                                                     << 3,
   // Workitem IDs are packed into v0 instead of separate VGPRs.
   LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID = UINT64_C(1) << 4,
+  // Flat scratch is an absolute address initialized from launch SGPRs.
+  LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT = UINT64_C(1)
+                                                                  << 5,
   // Kernel descriptor ABI flags known by the AMDGPU target package.
   LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_KNOWN_FLAGS =
       LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ARCHITECTED_FLAT_SCRATCH |
       LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_GFX10_SGPR_ENCODING |
       LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ACCUM_OFFSET |
       LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_DX10_CLAMP_AND_IEEE_MODE |
-      LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID,
+      LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID |
+      LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT,
 } loom_amdgpu_kernel_descriptor_abi_flag_bits_t;
 
 // Bitset of loom_amdgpu_kernel_descriptor_abi_flag_bits_t values.
@@ -491,6 +524,8 @@ typedef enum loom_amdgpu_vector_memory_cache_policy_encoding_e {
   LOOM_AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX12_NV_SCOPE_TH = 2,
   // Vector memory descriptors expose NT/SC0/SC1 cache controls.
   LOOM_AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX950_NT_SC0_SC1 = 3,
+  // CDNA2 vector memory descriptors expose GLC/SLC cache controls.
+  LOOM_AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_CDNA2_GLC_SLC = 4,
 } loom_amdgpu_vector_memory_cache_policy_encoding_t;
 
 // Memory ordering is independent of the packet's cache-field encoding. In
@@ -507,6 +542,8 @@ typedef enum loom_amdgpu_memory_ordering_model_e {
   LOOM_AMDGPU_MEMORY_ORDERING_MODEL_GFX125 = 3,
   // CDNA3/4 scoped cache controls with unified vector completion.
   LOOM_AMDGPU_MEMORY_ORDERING_MODEL_CDNA = 4,
+  // CDNA2 write-through L1 and system-scope L2 writeback/invalidation.
+  LOOM_AMDGPU_MEMORY_ORDERING_MODEL_CDNA2 = 5,
 } loom_amdgpu_memory_ordering_model_t;
 
 typedef struct loom_amdgpu_descriptor_set_sopp_opcodes_t {

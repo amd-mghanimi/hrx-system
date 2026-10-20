@@ -35,7 +35,6 @@ iree_status_t loom_amdgpu_emit_fragment_memory_f16_to_f32_packet(
 // Loads and converts one selected FP8 packet into packed 16-bit registers.
 iree_status_t loom_amdgpu_emit_fragment_memory_fp8_to_packed_16bit_load_packet(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
-    const loom_amdgpu_matrix_fragment_layout_t* layout,
     const loom_amdgpu_fragment_memory_plan_t* plan,
     const loom_amdgpu_fragment_memory_packet_plan_t* packet,
     loom_amdgpu_fragment_memory_address_state_t* address_state,

@@ -101,3 +101,14 @@ def test_external_flags_use_the_owning_header() -> None:
     assert '#include "test/flags.h"' in header
     assert "#define LOOM_TEST_FLAGS_PRESERVE" not in header
     assert "LOOM_DEFINE_INSTANCE_FLAGS(loom_test_update_flags)" in header
+
+
+def test_effective_traits_declaration_receives_module() -> None:
+    op = Op(
+        "test.dynamic_traits",
+        group=Dialect("test"),
+        effective_traits="loom_test_dynamic_traits_effective_traits",
+    )
+
+    header = generate_ops_h("test", 0, [op])
+    assert ("loom_trait_flags_t loom_test_dynamic_traits_effective_traits(\n    const loom_module_t* module, const loom_op_t* op);") in header

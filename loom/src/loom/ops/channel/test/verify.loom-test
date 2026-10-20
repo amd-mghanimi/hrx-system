@@ -1,0 +1,103 @@
+// RUN: verify
+
+func.def @payload_mismatch(%channel: channel<tile<144xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="read", actual_type="read<tile<128xi32>>", expected_constraint="owned access matching the channel payload"}
+  %read, %view = channel.acquire %channel : channel<tile<144xi32>> -> (read<tile<128xi32>>, view<144xi32>)
+  func.return
+}
+
+// ====
+
+func.def @view_mismatch(%channel: channel<tile<144xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="view", actual_type="view<128xi32>", expected_constraint="view matching the channel payload shape"}
+  %write, %view = channel.reserve %channel : channel<tile<144xi32>> -> (write<tile<144xi32>>, view<128xi32>)
+  func.return
+}
+
+// ====
+
+func.def @mutable_requires_request(%channel: channel<tile<144xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="read", actual_type="read<tile<144xi32>, mutable>", expected_constraint="read permission matching the operation's access mode"}
+  %read = channel.accept %channel : channel<tile<144xi32>> -> read<tile<144xi32>, mutable>
+  func.return
+}
+
+// ====
+
+func.def @mutable_request_requires_mutable_read(%channel: channel<tile<144xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="read", actual_type="read<tile<144xi32>>", expected_constraint="read permission matching the operation's access mode"}
+  %read, %view = channel.acquire<mutable> %channel : channel<tile<144xi32>> -> (read<tile<144xi32>>, view<144xi32>)
+  func.return
+}
+
+// ====
+
+func.def @mutable_is_exclusive(%read: read<tile<144xi32>, mutable>) {
+  // ERROR@+1: TYPE/003 {operand_name="read", actual_type="read<tile<144xi32>, mutable>", expected_constraint="immutable read<tile<...>>"}
+  %left, %right = channel.fanout %read : read<tile<144xi32>, mutable> -> (read<tile<144xi32>>, read<tile<144xi32>>)
+  func.return
+}
+
+// ====
+
+func.def @copy_requires_matching_payload(%read: read<tile<144xi32>>, %write: write<tile<144xf32>>) {
+  // ERROR@+1: TYPE/003 {operand_name="destination", actual_type="write<tile<144xf32>>", expected_constraint="write with the same payload type as the source read"}
+  channel.copy %read -> %write : read<tile<144xi32>>, write<tile<144xf32>>
+  func.return
+}
+
+// ====
+
+func.def @bind_requires_slots(%storage: view<144xi32>, %capacity: index) {
+  // ERROR@+1: TYPE/003 {operand_name="storage", actual_type="view<144xi32>", expected_constraint="one leading slot dimension followed by the channel payload shape"}
+  %channel = channel.bind<fifo> %storage, %capacity : view<144xi32>, index -> channel<tile<144xi32>>
+  func.return
+}
+
+// ====
+
+func.def @release_requires_read(%write: write<tile<144xi32>>) {
+  // ERROR@+1: TYPE/003 {operand_name="read", actual_type="write<tile<144xi32>>", expected_constraint="read<tile<...>> with optional mutable permission"}
+  channel.release %write : write<tile<144xi32>>
+  func.return
+}
+
+// ====
+
+func.def @fanout_requires_readers(%read: read<tile<144xi32>>) {
+  // ERROR@+1: STRUCTURE/057 {op_name="channel.fanout", field_name="reads", actual_count="0", minimum_count="2"}
+  channel.fanout %read : read<tile<144xi32>> -> ()
+  func.return
+}
+
+// ====
+
+func.def @fanout_preserves_payload(%read: read<tile<144xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="reads", actual_type="read<tile<128xi32>>", expected_constraint="the same immutable read type as the source"}
+  %left, %right = channel.fanout %read : read<tile<144xi32>> -> (read<tile<144xi32>>, read<tile<128xi32>>)
+  func.return
+}
+
+// ====
+
+func.def @record_requires_tile(%channel: channel<i32>) {
+  // ERROR@+1: TYPE/003 {operand_name="channel", actual_type="channel<i32>", expected_constraint="channel<tile<...>>"}
+  %read = channel.accept %channel : channel<i32> -> read<i32>
+  func.return
+}
+
+// ====
+
+func.def @select_requires_index_rank(%channel: channel<tile<1xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="source_rank", actual_type="i32", expected_constraint="index"}
+  %source_rank, %read = channel.select %channel : channel<tile<1xi32>> -> (i32, read<tile<1xi32>>)
+  func.return
+}
+
+// ====
+
+func.def @select_preserves_payload(%channel: channel<tile<1xi32>>) {
+  // ERROR@+1: TYPE/004 {result_name="read", actual_type="read<tile<2xi32>>", expected_constraint="immutable read matching the channel payload"}
+  %source_rank, %read = channel.select %channel : channel<tile<1xi32>> -> (index, read<tile<2xi32>>)
+  func.return
+}

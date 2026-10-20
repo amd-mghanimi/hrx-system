@@ -9,7 +9,7 @@
 #include "loom/error/error_catalog.h"
 #include "loom/error/error_defs_tables.inl"
 
-static_assert(sizeof(loom_error_def_t) == 32,
+static_assert(sizeof(loom_error_def_t) == (IREE_PTR_SIZE == 8 ? 32 : 28),
               "generated error definitions must remain compact");
 static_assert(sizeof(loom_error_param_def_t) == 4,
               "generated error parameter definitions must remain packed");
@@ -51,6 +51,34 @@ bool loom_error_domain_from_name(iree_string_view_t name,
     }
   }
   return false;
+}
+
+bool loom_error_ref_parse(iree_string_view_t value, loom_error_ref_t* out_ref) {
+  if (out_ref == NULL) {
+    return false;
+  }
+  *out_ref = LOOM_ERROR_REF_NONE;
+  iree_string_view_t domain_name = iree_string_view_empty();
+  iree_string_view_t code_text = iree_string_view_empty();
+  loom_error_domain_t domain = LOOM_ERROR_DOMAIN_COUNT_;
+  uint32_t code = 0;
+  if (iree_string_view_split(value, '/', &domain_name, &code_text) < 0 ||
+      !loom_error_domain_from_name(domain_name, &domain) ||
+      !iree_string_view_atoi_uint32_base(code_text, 10, &code) || code == 0 ||
+      code > LOOM_ERROR_REF_CODE_MASK) {
+    return false;
+  }
+  char canonical_code[5] = {0};
+  const int canonical_code_length = iree_snprintf(
+      canonical_code, sizeof(canonical_code), "%03u", (unsigned)code);
+  if (canonical_code_length <= 0 ||
+      !iree_string_view_equal(
+          code_text,
+          iree_make_string_view(canonical_code, canonical_code_length))) {
+    return false;
+  }
+  *out_ref = LOOM_ERROR_REF(domain, code);
+  return true;
 }
 
 const char* loom_emitter_name(loom_emitter_t emitter) {

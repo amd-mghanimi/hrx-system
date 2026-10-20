@@ -21,12 +21,56 @@ amdf_cc_library(
     visibility = [
         "//libamdf/src:__subpackages__",
     ],
+    deps = [":host_export"],
+)
+
+amdf_cc_library(
+    name = "host_export",
+    hdrs = ["host_export.h"],
+    visibility = ["//libamdf/src:__subpackages__"],
+    deps = [":host_memory"],
+)
+
+amdf_cc_library(
+    name = "native_host_export",
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:windows": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//libamdf/src:__pkg__"],
+    deps = select({
+        "@platforms//os:linux": ["//libamdf/src/platform/linux:host_export"],
+        "@platforms//os:windows": ["//libamdf/src/platform/windows:host_export"],
+        "//conditions:default": [],
+    }),
 )
 
 amdf_cc_library(
     name = "host_memory",
     hdrs = ["host_memory.h"],
     visibility = ["//libamdf/src:__subpackages__"],
+)
+
+amdf_cc_library(
+    name = "host_reservation",
+    hdrs = ["host_reservation.h"],
+    visibility = ["//libamdf/src:__subpackages__"],
+)
+
+amdf_cc_library(
+    name = "native_host_reservation",
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:windows": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//libamdf/src:__pkg__"],
+    deps = select({
+        "@platforms//os:linux": ["//libamdf/src/platform/linux:host_reservation"],
+        "@platforms//os:windows": ["//libamdf/src/platform/windows:host_reservation"],
+        "//conditions:default": [],
+    }),
 )
 
 amdf_cc_library(
@@ -40,6 +84,27 @@ amdf_cc_library(
     deps = select({
         "@platforms//os:linux": ["//libamdf/src/platform/linux:host_memory"],
         "@platforms//os:windows": ["//libamdf/src/platform/windows:host_memory"],
+        "//conditions:default": [],
+    }),
+)
+
+amdf_cc_library(
+    name = "observation",
+    hdrs = ["observation.h"],
+    visibility = ["//libamdf/src:__subpackages__"],
+)
+
+amdf_cc_library(
+    name = "native_observation",
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:windows": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//libamdf/src:__subpackages__"],
+    deps = select({
+        "@platforms//os:linux": ["//libamdf/src/platform/linux:observation"],
+        "@platforms//os:windows": ["//libamdf/src/platform/windows:observation"],
         "//conditions:default": [],
     }),
 )

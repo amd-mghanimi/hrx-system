@@ -1,0 +1,71 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+func.def @store_packetized_elements(%output: buffer, %a: i64, %b: i64, %c: i64, %d: i64, %e: i64) {
+  %base = index.constant 0 : offset
+  %view = buffer.view %output[%base] : buffer -> view<5xi64>
+  %value = vector.from_elements %a, %b, %c, %d, %e : vector<5xi64>
+  vector.store %value, %view[0] : vector<5xi64>, view<5xi64>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @store_packetized_elements(%output: reg<wasm.i32>, %a: reg<wasm.i64>, %b: reg<wasm.i64>, %c: reg<wasm.i64>, %d: reg<wasm.i64>, %e: reg<wasm.i64>) asm {
+  %22 = i64x2.splat %a
+  %23 = i64x2.replace_lane %22, %b, 1
+  %24 = i64x2.splat %c
+  %25 = i64x2.replace_lane %24, %d, 1
+  v128.store %output, %23
+  v128.store %output, %25 {offset = 16}
+  i64.store %output, %e {offset = 32}
+  return
+}
+
+// ====
+
+// Logical rank does not alter packet construction. Together with the wide i64
+// case above, two live lanes cover every physical constructor descriptor.
+func.def @construct_shaped_elements(%byte0: f8E4M3, %byte1: f8E4M3, %word0: bf16, %word1: bf16, %predicate0: i1, %predicate1: i1, %float0: f32, %float1: f32, %double0: f64, %double1: f64) -> (vector<16xf8E4M3>, vector<8xbf16>, vector<4xi1>, vector<4xf32>, vector<2xf64>) {
+  %byte_shaped = vector.from_elements %byte0, %byte1 : vector<1x2xf8E4M3>
+  %byte2 = vector.bitcast %byte_shaped : vector<1x2xf8E4M3> to vector<2xf8E4M3>
+  %byte4 = vector.interleave<0> %byte2, %byte2 : vector<2xf8E4M3>, vector<2xf8E4M3> -> vector<4xf8E4M3>
+  %byte8 = vector.interleave<0> %byte4, %byte4 : vector<4xf8E4M3>, vector<4xf8E4M3> -> vector<8xf8E4M3>
+  %bytes = vector.interleave<0> %byte8, %byte8 : vector<8xf8E4M3>, vector<8xf8E4M3> -> vector<16xf8E4M3>
+  %word_shaped = vector.from_elements %word0, %word1 : vector<1x2xbf16>
+  %word2 = vector.bitcast %word_shaped : vector<1x2xbf16> to vector<2xbf16>
+  %word4 = vector.interleave<0> %word2, %word2 : vector<2xbf16>, vector<2xbf16> -> vector<4xbf16>
+  %words = vector.interleave<0> %word4, %word4 : vector<4xbf16>, vector<4xbf16> -> vector<8xbf16>
+  %predicate_shaped = vector.from_elements %predicate0, %predicate1 : vector<1x2xi1>
+  %predicate2 = vector.bitcast %predicate_shaped : vector<1x2xi1> to vector<2xi1>
+  %predicates = vector.interleave<0> %predicate2, %predicate2 : vector<2xi1>, vector<2xi1> -> vector<4xi1>
+  %float_shaped = vector.from_elements %float0, %float1 : vector<1x2xf32>
+  %float2 = vector.bitcast %float_shaped : vector<1x2xf32> to vector<2xf32>
+  %floats = vector.interleave<0> %float2, %float2 : vector<2xf32>, vector<2xf32> -> vector<4xf32>
+  %double_shaped = vector.from_elements %double0, %double1 : vector<1x2xf64>
+  %doubles = vector.bitcast %double_shaped : vector<1x2xf64> to vector<2xf64>
+  func.return %bytes, %words, %predicates, %floats, %doubles : vector<16xf8E4M3>, vector<8xbf16>, vector<4xi1>, vector<4xf32>, vector<2xf64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @construct_shaped_elements(%byte0: reg<wasm.i32>, %byte1: reg<wasm.i32>, %word0: reg<wasm.i32>, %word1: reg<wasm.i32>, %predicate0: reg<wasm.i32>, %predicate1: reg<wasm.i32>, %float0: reg<wasm.f32>, %float1: reg<wasm.f32>, %double0: reg<wasm.f64>, %double1: reg<wasm.f64>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %47 = i8x16.splat %byte0
+  %byte2 = i8x16.replace_lane %47, %byte1, 1
+  %byte4 = i8x16.shuffle %byte2, %byte2, 0, 16, 1, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %byte8 = i8x16.shuffle %byte4, %byte4, 0, 16, 1, 17, 2, 18, 3, 19, 0, 0, 0, 0, 0, 0, 0, 0
+  %bytes = i8x16.shuffle %byte8, %byte8, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23
+  %52 = i16x8.splat %word0
+  %word2 = i16x8.replace_lane %52, %word1, 1
+  %word4 = i8x16.shuffle %word2, %word2, 0, 1, 16, 17, 2, 3, 18, 19, 0, 0, 0, 0, 0, 0, 0, 0
+  %words = i8x16.shuffle %word4, %word4, 0, 1, 16, 17, 2, 3, 18, 19, 4, 5, 20, 21, 6, 7, 22, 23
+  %56 = i32.const 0
+  %57 = i32.sub %56, %predicate0
+  %58 = i32x4.splat %57
+  %59 = i32.sub %56, %predicate1
+  %predicate2 = i32x4.replace_lane %58, %59, 1
+  %predicates = i8x16.shuffle %predicate2, %predicate2, 0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23
+  %62 = f32x4.splat %float0
+  %float2 = f32x4.replace_lane %62, %float1, 1
+  %floats = i8x16.shuffle %float2, %float2, 0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23
+  %65 = f64x2.splat %double0
+  %doubles = f64x2.replace_lane %65, %double1, 1
+  return %bytes, %words, %predicates, %floats, %doubles
+}

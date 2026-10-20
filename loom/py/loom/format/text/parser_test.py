@@ -15,6 +15,7 @@ from loom.assembly import (
     GLUE,
     LPAREN,
     RPAREN,
+    Attr,
     OptionalGroup,
     Param,
     Ref,
@@ -75,6 +76,7 @@ from loom.ir import (
     EncodingType,
     EnumArrayAttr,
     FunctionType,
+    GroupType,
     Module,
     Operation,
     ParameterizedAttr,
@@ -89,6 +91,7 @@ from loom.ir import (
     StaticDim,
     StorageSpace,
     StorageType,
+    StringArrayAttr,
     SymbolName,
     SymbolNameArray,
     Type,
@@ -1127,6 +1130,45 @@ class TestParseOptionalGroup:
         assert op.operands == [0]
         assert absent_op.operands == []
 
+    def test_inverted_group_prints_for_absent_anchor(self) -> None:
+        alternative_op = Op(
+            "test.optional_alternative",
+            group=test_ops,
+            attrs=[AttrDef("count", "i64", optional=True)],
+            format=[
+                OptionalGroup(
+                    [kw("count"), Attr("count")],
+                    anchor="count",
+                ),
+                OptionalGroup(
+                    [LPAREN, RPAREN],
+                    anchor="count",
+                    inverted=True,
+                ),
+            ],
+        )
+        parser = Parser()
+        parser.register_ops([alternative_op])
+        module = Module()
+        count_op = parser.parse_operation_from_text(
+            "test.optional_alternative count 2", module=module
+        )
+        empty_op = parser.parse_operation_from_text(
+            "test.optional_alternative ()", module=module
+        )
+
+        printer = Printer()
+        printer.register_ops([alternative_op])
+        assert count_op.attributes == {"count": 2}
+        assert empty_op.attributes == {}
+        assert (
+            printer.print_operation(count_op, module)
+            == "test.optional_alternative count 2"
+        )
+        assert (
+            printer.print_operation(empty_op, module) == "test.optional_alternative ()"
+        )
+
 
 class TestParseScopedEnumRef:
     def test_stable_spelling_roundtrips_at_python_format_boundary(self) -> None:
@@ -1601,6 +1643,30 @@ class TestRoundTrip:
         printed = _op_printer().print_operation(op, Module())
         assert printed == text
         assert _op_printer().print_operation(_parse_op(printed), Module()) == text
+
+    def test_string_arrays_preserve_order_duplicates_and_presence(self) -> None:
+        text = (
+            'test.string_array_attrs ["gfx12-generic", "gfx1250", '
+            '"gfx12-generic"] using [] '
+            '{fallbacks = ["gfx11-generic", "gfx12-generic"]}'
+        )
+        op = _parse_op(text)
+
+        assert op.attributes["required_values"] == StringArrayAttr(
+            ["gfx12-generic", "gfx1250", "gfx12-generic"]
+        )
+        assert op.attributes["optional_values"] == StringArrayAttr()
+        assert op.attributes["dict"]["fallbacks"] == StringArrayAttr(
+            ["gfx11-generic", "gfx12-generic"]
+        )
+        assert _op_printer().print_operation(op, Module()) == text
+
+        absent = _parse_op('test.string_array_attrs ["gfx1250"]')
+        assert "optional_values" not in absent.attributes
+
+    def test_string_arrays_reject_mixed_elements(self) -> None:
+        with pytest.raises(ParseError, match="expected STRING"):
+            _parse_op('test.string_array_attrs ["gfx1250", 12]')
 
     def test_signed_enum_sets_canonicalize_by_stable_value(self) -> None:
         text = "test.signed_enum_set_attrs [high, -middle, low] using [-high]"
@@ -2623,39 +2689,52 @@ class TestParseDynamicEncoding:
 
 
 class TestParsePoolType:
-    def test_static_pool(self) -> None:
-        """pool<65536> parses to PoolType with static block size."""
+    def test_pool(self) -> None:
         from loom.ir import PoolType
 
-        pool_type = _parse_type("pool<65536>")
-        assert isinstance(pool_type, PoolType)
-        assert pool_type.block_size == StaticDim(65536)
-
-    def test_dynamic_pool(self) -> None:
-        """pool<[%BS]> parses to PoolType with dynamic block size."""
-        from loom.ir import PoolType
-
-        module = Module()
-        scope = NameScope()
-        bs_id = module.add_value(Value(name="BS", type=INDEX))
-        scope.define("BS", bs_id)
-        pool_type = _parse_type("pool<[%BS]>", scope=scope, module=module)
-        assert isinstance(pool_type, PoolType)
-        assert pool_type.has_dynamic_block_size
-        assert pool_type.block_size == DynamicDim(bs_id)
+        assert _parse_type("pool") == PoolType()
 
     def test_pool_roundtrip(self) -> None:
-        """pool<[%BS]> round-trips through parse → print in a function."""
         text = (
-            "test.func @use_pool(%BS: index, %pool: pool<[%BS]>) -> (pool<[%BS]>) {\n"
-            "  test.yield %pool : pool<[%BS]>\n"
+            "test.func @use_pool(%pool: pool) -> (pool) {\n"
+            "  test.yield %pool : pool\n"
             "}\n"
         )
         module = _op_parser().parse(text)
-        printed = _op_printer().print_module(module)
-        assert printed == text, (
-            f"Round-trip failed.\nInput:\n{text}\nOutput:\n{printed}"
+        assert _op_printer().print_module(module) == text
+
+
+# ============================================================================
+# Group type parsing
+# ============================================================================
+
+
+class TestParseGroupType:
+    def test_static_group(self) -> None:
+        group_type = _parse_type("group<2x4>")
+        assert group_type == GroupType((StaticDim(2), StaticDim(4)))
+
+    def test_dynamic_group(self) -> None:
+        module = Module()
+        scope = NameScope()
+        worker_count = module.add_value(Value(name="workers", type=INDEX))
+        scope.define("workers", worker_count)
+        group_type = _parse_type("group<[%workers]>", scope=scope, module=module)
+        assert group_type == GroupType((DynamicDim(worker_count),))
+
+    def test_group_requires_at_least_one_dimension(self) -> None:
+        with pytest.raises(ParseError, match="group dimension"):
+            _parse_type("group<>")
+
+    def test_group_roundtrip(self) -> None:
+        text = (
+            "test.func @use_group(%workers: index, "
+            "%group: group<[%workers]>) -> (group<[%workers]>) {\n"
+            "  test.yield %group : group<[%workers]>\n"
+            "}\n"
         )
+        module = _op_parser().parse(text)
+        assert _op_printer().print_module(module) == text
 
 
 # ============================================================================
@@ -2684,12 +2763,12 @@ class TestParsePredicates:
         assert _op_printer().print_module(present_module) == present_text
         assert _op_printer().print_module(absent_module) == absent_text
 
-    def test_single_mul_predicate(self) -> None:
-        """Parse a function with where [mul(%M, 16)]."""
+    def test_single_multiple_of_predicate(self) -> None:
+        """Parse a function with where [multiple_of(%M, 16)]."""
 
         module = self._parse_module(
             "test.func @f(%M: index, %a: tensor<[%M]xf32>)"
-            " where [mul(%M, 16)] {\n"
+            " where [multiple_of(%M, 16)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2698,7 +2777,7 @@ class TestParsePredicates:
         predicates = op.attributes.get("predicates", [])
         assert len(predicates) == 1
         pred = predicates[0]
-        assert pred.kind == "mul"
+        assert pred.kind == "multiple_of"
         assert len(pred.args) == 2
         assert pred.args[0].tag == "value"
         assert pred.args[0].value == op.regions[0].blocks[0].arg_ids[0]
@@ -2710,7 +2789,7 @@ class TestParsePredicates:
 
         module = self._parse_module(
             "test.func @f(%M: index, %K: index, %a: tensor<[%M]x[%K]xf32>)"
-            " where [mul(%M, 16), lt(%K, 1024), ne(%K, 0), range(%M, 32, 512)] {\n"
+            " where [multiple_of(%M, 16), lt(%K, 1024), ne(%K, 0), range(%M, 32, 512)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2718,7 +2797,7 @@ class TestParsePredicates:
         assert op is not None
         predicates = op.attributes.get("predicates", [])
         assert len(predicates) == 4
-        assert predicates[0].kind == "mul"
+        assert predicates[0].kind == "multiple_of"
         assert predicates[1].kind == "lt"
         assert predicates[2].kind == "ne"
         assert predicates[3].kind == "range"
@@ -2729,12 +2808,12 @@ class TestParsePredicates:
         assert range_pred.args[1].value == 32
         assert range_pred.args[2].value == 512
 
-    def test_pow2_single_arg(self) -> None:
-        """Parse pow2(%N) — single-argument predicate."""
+    def test_power_of_two_single_arg(self) -> None:
+        """Parse power_of_two(%N) — single-argument predicate."""
 
         module = self._parse_module(
             "test.func @f(%N: index, %a: tensor<[%N]xf32>)"
-            " where [pow2(%N)] {\n"
+            " where [power_of_two(%N)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2742,18 +2821,18 @@ class TestParsePredicates:
         assert op is not None
         predicates = op.attributes.get("predicates", [])
         assert len(predicates) == 1
-        assert predicates[0].kind == "pow2"
+        assert predicates[0].kind == "power_of_two"
         assert len(predicates[0].args) == 1
 
     def test_predicate_arity_mismatch_rejected(self) -> None:
         """Predicate kind names have fixed arity."""
 
         with pytest.raises(
-            ParseError, match="predicate 'pow2' expects 1 arguments, got 2"
+            ParseError, match="predicate 'power_of_two' expects 1 arguments, got 2"
         ):
             self._parse_module(
                 "test.func @f(%N: index, %a: tensor<[%N]xf32>)"
-                " where [pow2(%N, 16)] {\n"
+                " where [power_of_two(%N, 16)] {\n"
                 "  test.yield\n"
                 "}\n"
             )
@@ -2809,7 +2888,7 @@ class TestParsePredicates:
         """Where clause followed by function body."""
         module = self._parse_module(
             "test.func @f(%M: index, %a: tensor<[%M]xf32>) -> (tensor<[%M]xf32>)"
-            " where [mul(%M, 16)] {\n"
+            " where [multiple_of(%M, 16)] {\n"
             "  test.yield %a : tensor<[%M]xf32>\n"
             "}\n"
         )
@@ -2835,7 +2914,7 @@ class TestPredicateRoundTrip:
     def test_single_predicate_function(self) -> None:
         """Function-like ops must round-trip dim names and predicates."""
         self._roundtrip_text(
-            "test.func @f(%M: index, %a: tensor<[%M]xf32>) where [mul(%M, 16)] {\n"
+            "test.func @f(%M: index, %a: tensor<[%M]xf32>) where [multiple_of(%M, 16)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2843,14 +2922,23 @@ class TestPredicateRoundTrip:
     def test_multiple_predicates_function(self) -> None:
         self._roundtrip_text(
             "test.func @f(%M: index, %K: index, %a: tensor<[%M]x[%K]xf32>) "
-            "where [mul(%M, 16), lt(%K, 1024), range(%M, 32, 512)] {\n"
+            "where [multiple_of(%M, 16), lt(%K, 1024), range(%M, 32, 512)] {\n"
             "  test.yield\n"
             "}\n"
         )
 
-    def test_pow2_predicate(self) -> None:
+    def test_unsigned_relation_predicates(self) -> None:
         self._roundtrip_text(
-            "test.func @f(%N: index, %a: tensor<[%N]xf32>) where [pow2(%N)] {\n"
+            "test.func @f(%lhs: i32, %rhs: i32) where "
+            "[ult(%lhs, %rhs), ule(%lhs, %rhs), ugt(%lhs, %rhs), "
+            "uge(%lhs, %rhs)] {\n"
+            "  test.yield\n"
+            "}\n"
+        )
+
+    def test_power_of_two_predicate(self) -> None:
+        self._roundtrip_text(
+            "test.func @f(%N: index, %a: tensor<[%N]xf32>) where [power_of_two(%N)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2866,7 +2954,7 @@ class TestPredicateRoundTrip:
     def test_predicates_with_body(self) -> None:
         self._roundtrip_text(
             "test.func @f(%M: index, %a: tensor<[%M]xf32>) -> (tensor<[%M]xf32>)"
-            " where [mul(%M, 16)] {\n"
+            " where [multiple_of(%M, 16)] {\n"
             "  test.yield %a : tensor<[%M]xf32>\n"
             "}\n"
         )
@@ -2874,7 +2962,7 @@ class TestPredicateRoundTrip:
     def test_public_device_with_predicates(self) -> None:
         self._roundtrip_text(
             "test.func public device @vnni(%M: index, %K: index, %w: tensor<[%M]x[%K]xi8>) "
-            "where [mul(%M, 16), mul(%K, 32)] {\n"
+            "where [multiple_of(%M, 16), multiple_of(%K, 32)] {\n"
             "  test.yield\n"
             "}\n"
         )
@@ -2893,7 +2981,7 @@ class TestAssumeOpRoundTrip:
     def test_single_predicate(self) -> None:
         self._roundtrip_text(
             "test.func @f(%M: index) -> (index) {\n"
-            "  %M2 = test.assume %M [mul(%M, 16)] : index\n"
+            "  %M2 = test.assume %M [multiple_of(%M, 16)] : index\n"
             "  test.yield %M2 : index\n"
             "}\n"
         )
@@ -2901,15 +2989,15 @@ class TestAssumeOpRoundTrip:
     def test_multiple_predicates(self) -> None:
         self._roundtrip_text(
             "test.func @f(%M: index, %K: index) -> (index, index) {\n"
-            "  %M2, %K2 = test.assume %M, %K [mul(%M, 16), lt(%K, 1024)] : index, index\n"
+            "  %M2, %K2 = test.assume %M, %K [multiple_of(%M, 16), lt(%K, 1024)] : index, index\n"
             "  test.yield %M2, %K2 : index, index\n"
             "}\n"
         )
 
-    def test_pow2_predicate(self) -> None:
+    def test_power_of_two_predicate(self) -> None:
         self._roundtrip_text(
             "test.func @f(%N: index) -> (index) {\n"
-            "  %N2 = test.assume %N [pow2(%N)] : index\n"
+            "  %N2 = test.assume %N [power_of_two(%N)] : index\n"
             "  test.yield %N2 : index\n"
             "}\n"
         )
@@ -2976,10 +3064,10 @@ class TestDynamicDimScoping:
             " -> (tile<[%M]xf32>)\n"
         )
 
-    def test_dynamic_pool_references_earlier_arg(self) -> None:
-        """Dynamic pool block size references earlier index arg."""
+    def test_dynamic_group_references_earlier_arg(self) -> None:
+        """Dynamic group dimension references earlier index arg."""
         self._roundtrip_text(
-            "test.decl @p(%BS: index, %pool: pool<[%BS]>) -> (pool<[%BS]>)\n"
+            "test.decl @group(%width: index, %members: group<[%width]>) -> (group<[%width]>)\n"
         )
 
     def test_dynamic_encoding_references_earlier_arg(self) -> None:
@@ -2990,10 +3078,10 @@ class TestDynamicDimScoping:
         )
 
     def test_all_dynamic_in_one_signature(self) -> None:
-        """Dynamic dims, encoding, and pool all in one function."""
+        """Dynamic dimensions and encoding alongside an opaque pool."""
         self._roundtrip_text(
             "test.decl @kitchen_sink(%M: index, %N: index, %enc: encoding,"
-            " %t: tile<[%M]x[%N]xf32, %enc>, %p: pool<[%M]>)"
+            " %t: tile<[%M]x[%N]xf32, %enc>, %p: pool)"
             " -> (tile<[%M]x[%N]xf32, %enc>)\n"
         )
 

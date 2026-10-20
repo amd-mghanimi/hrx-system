@@ -44,10 +44,9 @@ static iree_status_t loom_render_string_list(
   return loom_output_stream_write_char(stream, ']');
 }
 
-// Renders a single param value into the stream.
-static iree_status_t loom_render_param(const loom_diagnostic_param_t* param,
-                                       loom_type_formatter_t type_formatter,
-                                       loom_output_stream_t* stream) {
+iree_status_t loom_diagnostic_render_param_value(
+    const loom_diagnostic_param_t* param, loom_type_formatter_t type_formatter,
+    loom_output_stream_t* stream) {
   switch (param->kind) {
     case LOOM_PARAM_STRING:
       return loom_output_stream_write(stream, param->string);
@@ -118,8 +117,8 @@ static iree_status_t loom_expand_template(const char* message_template,
         IREE_ASSERT_UNREACHABLE("diagnostic param kind does not match schema");
         IREE_BUILTIN_UNREACHABLE();
       }
-      IREE_RETURN_IF_ERROR(
-          loom_render_param(&params[param_index], type_formatter, stream));
+      IREE_RETURN_IF_ERROR(loom_diagnostic_render_param_value(
+          &params[param_index], type_formatter, stream));
     } else {
       // Unknown placeholder — emit it literally so the output is debuggable.
       IREE_RETURN_IF_ERROR(loom_output_stream_write(
@@ -209,7 +208,7 @@ iree_status_t loom_type_format_minimal(loom_type_t type, void* user_data,
       return loom_output_stream_write_cstring(stream, "encoding<...>");
     }
     case LOOM_TYPE_POOL:
-      return loom_output_stream_write_cstring(stream, "pool<...>");
+      return loom_output_stream_write_cstring(stream, "pool");
     case LOOM_TYPE_NONE:
       return loom_output_stream_write_cstring(stream, "<none>");
     default:

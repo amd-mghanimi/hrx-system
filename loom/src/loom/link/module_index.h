@@ -83,6 +83,10 @@ enum loom_link_symbol_flag_bits_e {
   LOOM_LINK_SYMBOL_FLAG_TEST_ONLY = 1u << 6,
   // Source symbol is explicitly preserved by ordinary symbol pruning.
   LOOM_LINK_SYMBOL_FLAG_RETAIN = 1u << 7,
+  // Concrete definition may coalesce with same-named link-once definitions.
+  // The producer promises equivalent semantics; linking validates contracts
+  // but does not compare bodies.
+  LOOM_LINK_SYMBOL_FLAG_LINK_ONCE = 1u << 8,
 };
 typedef uint32_t loom_link_symbol_flags_t;
 
@@ -133,6 +137,9 @@ typedef struct loom_link_module_index_module_t {
   const loom_module_t* materialized_module;
   // True when the index owns materialized_module and frees it on destroy.
   bool owns_materialized_module;
+  // Source ID whose text is the provider's authored input, or invalid when the
+  // provider has no exact text snapshot.
+  loom_source_id_t primary_source_id;
   // First symbol ordinal owned by this module.
   iree_host_size_t symbol_start_ordinal;
   // Number of symbols owned by this module.
@@ -146,9 +153,8 @@ typedef struct loom_link_module_index_module_t {
     // Module-local target symbol ordinals in deterministic occurrence order.
     // Targets may repeat within a source row.
     const uint32_t* values;
-    // Target interface constraints parallel to values. Zero accepts any
-    // target interface.
-    const loom_symbol_interface_flags_t* target_interfaces;
+    // Target interface and dependency-role contracts parallel to values.
+    const loom_symbol_reference_contract_t* contracts;
     // Source root region indices plus one parallel to values. Zero identifies
     // a source symbol contract or a module-root occurrence.
     const uint8_t* source_root_region_indices_plus_one;
@@ -377,6 +383,14 @@ const loom_link_module_index_module_t* loom_link_module_index_symbol_module(
 // before LIBRARY providers and ties use provider insertion order. This order
 // does not resolve duplicate definitions; linkage validates uniqueness.
 const loom_link_module_index_symbol_t* loom_link_module_index_lookup_global(
+    const loom_link_module_index_t* index, iree_string_view_t name);
+
+// Looks up the canonical link-once concrete definition named |name|.
+//
+// The representative is indexed once per name and gives repeated definitions
+// one stable construction identity without rescanning their same-name chain.
+const loom_link_module_index_symbol_t*
+loom_link_module_index_lookup_link_once_definition(
     const loom_link_module_index_t* index, iree_string_view_t name);
 
 // Returns the first indexed symbol named |name| across all identity classes.

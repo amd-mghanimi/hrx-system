@@ -17,6 +17,7 @@
 #define LOOM_CODEGEN_LOW_ALLOCATION_MATERIALIZATION_H_
 
 #include "iree/base/api.h"
+#include "iree/base/bitmap.h"
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/allocation.h"
 #include "loom/codegen/low/storage_layout.h"
@@ -37,8 +38,9 @@ enum {
 typedef struct loom_low_allocation_materialized_spill_t {
   // SSA value represented by the materialized spill storage.
   loom_value_id_t value_id;
-  // Register value class that could not remain fully physical.
-  loom_liveness_value_class_t value_class;
+  // Original register class in the emission frame's target descriptor set.
+  // Retained across allocation snapshot rebuilds after spill insertion.
+  uint16_t descriptor_reg_class_id;
   // Materialized spill record flags.
   loom_low_allocation_materialized_spill_flags_t flags;
   // Allocation assignment index associated with |value_id|.
@@ -79,13 +81,22 @@ typedef struct loom_low_allocation_materialized_spill_list_t {
   iree_host_size_t record_count;
 } loom_low_allocation_materialized_spill_list_t;
 
+typedef struct loom_low_allocation_materialized_value_list_t {
+  // Materialized values owned by the caller-provided arena.
+  const loom_value_id_t* values;
+  // Number of entries in |values|.
+  iree_host_size_t count;
+} loom_low_allocation_materialized_value_list_t;
+
 typedef struct loom_low_allocation_materialization_options_t {
   // True when |supported_storage_spaces| names the complete target lowering
   // capability for newly generated spill storage.
   bool has_supported_storage_spaces;
   // Storage spaces this materialization may create for spill slots.
   loom_low_storage_space_set_t supported_storage_spaces;
-  // True when successful spill insertion should emit BACKEND/009 feedback.
+  // True when an explicit diagnostic mode requests BACKEND/009 feedback for
+  // successful spill insertion. Compile reports use
+  // |record_materialized_spills| instead.
   bool emit_spill_diagnostics;
   // True when materialized spill records should be retained in |out_result|.
   bool record_materialized_spills;
@@ -94,6 +105,10 @@ typedef struct loom_low_allocation_materialization_options_t {
   // CFG/signature rewrites can invalidate obsolete later plans before they are
   // turned into unnecessary storage traffic.
   iree_host_size_t max_spill_plan_count;
+  // Borrowed module-value membership for retained private producer placement.
+  // Materialization clears values whose users it changes, preserving placement
+  // for other producers across the next schedule rebuild. May be empty.
+  iree_bitmap_t per_user_placement_values;
   // Structured diagnostic emitter for materialized allocation feedback.
   iree_diagnostic_emitter_t emitter;
 } loom_low_allocation_materialization_options_t;
@@ -101,6 +116,14 @@ typedef struct loom_low_allocation_materialization_options_t {
 typedef struct loom_low_allocation_materialization_result_t {
   // Number of error diagnostics emitted before mutating the low function.
   uint32_t error_count;
+  // Register requirements while the generated low.spill/low.reload ops survive.
+  // Includes reload results and values newly consumed by spills. Target
+  // lowering that replaces these ops supplies the replacement representation's
+  // facts.
+  loom_low_allocation_materialized_value_list_t required_register_values;
+  // Single-consumer low.reload results private to their consumer setup chain
+  // while the generated reloads survive.
+  loom_low_allocation_materialized_value_list_t per_user_placement_values;
   // Number of low.storage.reserve ops created from spill plans.
   uint32_t storage_count;
   // Number of low.spill stores inserted.
@@ -109,6 +132,8 @@ typedef struct loom_low_allocation_materialization_result_t {
   uint32_t reload_count;
   // Byte size of low.storage.reserve ops created from spill plans.
   uint64_t storage_bytes;
+  // Strongest byte alignment required by the created spill storage.
+  uint64_t storage_minimum_alignment;
   // Byte traffic from low.spill stores inserted.
   uint64_t spill_bytes;
   // Byte traffic from low.reload ops inserted.
@@ -119,19 +144,24 @@ typedef struct loom_low_allocation_materialization_result_t {
   iree_host_size_t materialized_spill_count;
 } loom_low_allocation_materialization_result_t;
 
-// Materializes spill plans in |table| into low.storage.reserve, low.spill, and
-// low.reload ops. Existing entry-block storage reservations are moved to its
+// Materializes the selected |spill_plans| from |table| into
+// low.storage.reserve, low.spill, and low.reload ops. The allocation snapshot
+// remains immutable; callers may omit plans whose values were reconstructed
+// without storage. Existing entry-block storage reservations are moved to its
 // prefix after ABI live-in/resource imports without changing their relative
 // order or byte offsets. New reservations append to that prefix, dominating
 // all generated traffic even when earlier repairs inserted executable entry
 // copies. Stores are inserted at the defining point of each spilled op-result
-// value, non-entry block argument stores are inserted on incoming edges before
-// the branch, and
-// reloads are inserted immediately before each remaining original operand use.
-// Materialized non-entry block arguments are removed from the block signature
-// and from all predecessor low.br payloads.
+// value, function-region non-entry block argument stores are inserted on
+// incoming edges before the branch, and reloads are inserted immediately before
+// each remaining original operand use. Materialized function-region non-entry
+// block arguments are removed from the block signature and from all predecessor
+// low.br payloads. Nested-region block arguments are register ABI values and
+// never appear in a spill plan.
 iree_status_t loom_low_allocation_materialize_spills(
     const loom_low_allocation_table_t* table,
+    const loom_low_allocation_spill_plan_t* spill_plans,
+    iree_host_size_t spill_plan_count,
     const loom_low_allocation_materialization_options_t* options,
     iree_arena_allocator_t* arena,
     loom_low_allocation_materialization_result_t* out_result);

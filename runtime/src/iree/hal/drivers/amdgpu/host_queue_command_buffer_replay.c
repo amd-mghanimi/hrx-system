@@ -247,8 +247,6 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
       iree_hal_amdgpu_host_queue_publish_profile_host_writes(replay->queue);
     }
 
-    iree_hal_amdgpu_notification_ring_publish_epoch(
-        &replay->queue->notification_ring, submission_id);
     if (queue_device_event) {
       const uint64_t timestamp_packet_id =
           submission.first_packet_id + submission.packet_count - 1;
@@ -275,6 +273,8 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
               &replay->queue->notification_ring));
       iree_hal_amdgpu_aql_ring_commit(packet, header, /*setup=*/0);
     }
+    iree_hal_amdgpu_notification_ring_publish_epoch(
+        &replay->queue->notification_ring, submission_id);
     iree_hal_amdgpu_aql_ring_doorbell(
         &replay->queue->aql_ring,
         submission.first_packet_id + submission.packet_count - 1);

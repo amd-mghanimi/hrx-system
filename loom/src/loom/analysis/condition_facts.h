@@ -33,6 +33,66 @@
 extern "C" {
 #endif
 
+// Complete semantics of an integer comparison, independent of its result's
+// users. Unlike a derived relation, this certificate is equivalent to the
+// entire Boolean result. It borrows SSA identities from an immutable module
+// snapshot; rewriting the comparison or its operand types invalidates it.
+typedef struct loom_condition_integer_comparison_t {
+  // Comparison operation kind: index.cmp or scalar.cmpi.
+  loom_op_kind_t kind;
+  // Operand element type, including signed i1 and target-sized index/offset.
+  loom_scalar_type_t operand_type;
+  // Predicate in the comparison operation's dialect.
+  uint8_t predicate;
+  // Left comparison operand in the source snapshot.
+  loom_value_id_t lhs;
+  // Right comparison operand in the source snapshot.
+  loom_value_id_t rhs;
+} loom_condition_integer_comparison_t;
+
+// Retains the complete comparison semantics of |op|. Other Boolean producers
+// return false, even when they imply an integer relation. This decodes one
+// operation without traversing its operands or allocating storage.
+bool loom_condition_integer_comparison_describe(
+    const loom_module_t* module, const loom_op_t* op,
+    loom_condition_integer_comparison_t* out_comparison);
+
+// Decodes the comparison's relation in its raw integer carrier order. The
+// relation applies to lhs and rhs as stored; |out_unsigned_order| distinguishes
+// unsigned from signed relational predicates. Equality predicates have no
+// signedness. Returns false only for an invalid predicate.
+bool loom_condition_integer_comparison_relation(
+    const loom_condition_integer_comparison_t* comparison,
+    loom_symbolic_integer_relation_t* out_relation, bool* out_unsigned_order);
+
+// Returns the mathematical integer relation equivalent to one comparison
+// outcome under the provided ambient facts. Unsigned carrier order is
+// translated only when the complete operand ranges make the translated
+// relation equivalent without additional edge-local assumptions.
+bool loom_condition_integer_comparison_equivalent_relation(
+    const loom_condition_integer_comparison_t* comparison,
+    const loom_fact_context_t* context, bool assumed_truth,
+    const loom_value_facts_t* lhs_facts, const loom_value_facts_t* rhs_facts,
+    loom_symbolic_integer_relation_t* out_relation);
+
+// Proves comparison truth from operand facts in the comparison's original
+// scalar or target carrier domain. Returns false when the facts cannot decide
+// the result. Evaluation reads no IR and allocates no storage.
+bool loom_condition_integer_comparison_evaluate(
+    const loom_condition_integer_comparison_t* comparison,
+    const loom_fact_context_t* context, const loom_value_facts_t* lhs_facts,
+    const loom_value_facts_t* rhs_facts, bool* out_result);
+
+// Refines caller-owned numeric facts for one assumed comparison outcome.
+// Facts retain their mathematical source representation: comparisons whose
+// carrier interpretation cannot be represented by an interval leave them
+// unchanged. Reads no IR, allocates no storage, and does not publish edge-local
+// facts into the ambient fact table.
+void loom_condition_integer_comparison_refine_facts(
+    const loom_condition_integer_comparison_t* comparison,
+    const loom_fact_context_t* context, bool assumed_truth,
+    loom_value_facts_t* lhs_facts, loom_value_facts_t* rhs_facts);
+
 typedef enum loom_condition_integer_operand_kind_e {
   // Operand is an SSA value.
   LOOM_CONDITION_INTEGER_OPERAND_VALUE = 0,
@@ -58,12 +118,13 @@ typedef struct loom_condition_integer_relation_t {
   loom_condition_integer_operand_t right;
 } loom_condition_integer_relation_t;
 
-// Exact Boolean truth derived while traversing a condition expression.
+// Exact predicate truth derived while traversing a condition expression.
+// Register predicates retain the branch outcome, not an integer value of one.
 typedef struct loom_condition_boolean_fact_t {
-  // Boolean SSA value whose result is known.
+  // SSA predicate whose truth is known.
   loom_value_id_t value_id;
 
-  // Exact result of the Boolean SSA value.
+  // Exact truth of the predicate.
   bool value;
 } loom_condition_boolean_fact_t;
 
@@ -237,7 +298,9 @@ iree_status_t loom_condition_facts_query(
 // Derives every integer relation and exact Boolean truth implied by assuming
 // |condition_value| evaluates to |assumed_truth|. The returned facts are
 // canonicalized and deduplicated. Allocation failure is the only reason a
-// valid query cannot produce a complete result.
+// valid query cannot produce a complete result. With a NULL fact table,
+// consequences depend only on Boolean structure and immutable literals, not
+// numeric observations that may change across loop iterations.
 iree_status_t loom_condition_facts_query_complete(
     loom_condition_query_t* query, const loom_value_fact_table_t* fact_table,
     loom_value_id_t condition_value, bool assumed_truth,

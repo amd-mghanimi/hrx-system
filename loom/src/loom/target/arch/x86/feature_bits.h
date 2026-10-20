@@ -29,7 +29,24 @@ typedef uint64_t loom_x86_feature_bits_t;
 #define LOOM_X86_FEATURE_AVX_VNNI_INT16 (UINT64_C(1) << 4)
 // Target supports AVX10.2 extended VNNI dot products.
 #define LOOM_X86_FEATURE_AVX10_2 (UINT64_C(1) << 5)
-// Target supports AVX-512 BF16 dot products.
+// Target supports AVX-512 BF16 conversions and dot products.
 #define LOOM_X86_FEATURE_AVX512_BF16 (UINT64_C(1) << 6)
+// Target supports AVX-512 FP16 arithmetic and conversions.
+#define LOOM_X86_FEATURE_AVX512_FP16 (UINT64_C(1) << 7)
+// Target supports AVX-NE-CONVERT packed floating-point conversions.
+#define LOOM_X86_FEATURE_AVX_NE_CONVERT (UINT64_C(1) << 8)
+// Target supports VEX F16C half/single-precision conversions.
+#define LOOM_X86_FEATURE_F16C (UINT64_C(1) << 9)
+// Target supports BMI2 scalar bit manipulation instructions.
+#define LOOM_X86_FEATURE_BMI2 (UINT64_C(1) << 10)
+// Target supports BMI1 scalar bit manipulation instructions.
+#define LOOM_X86_FEATURE_BMI (UINT64_C(1) << 11)
+// Target supports scalar population-count instructions.
+#define LOOM_X86_FEATURE_POPCNT (UINT64_C(1) << 12)
+// Target supports scalar leading-zero-count instructions.
+#define LOOM_X86_FEATURE_LZCNT (UINT64_C(1) << 13)
+
+// All optional x86 features understood by target contracts.
+#define LOOM_X86_FEATURE_KNOWN_BITS ((UINT64_C(1) << 14) - 1)
 
 #endif  // LOOM_TARGET_ARCH_X86_FEATURE_BITS_H_

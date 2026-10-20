@@ -21,6 +21,10 @@ common --check_direct_dependencies=error
 common --http_connector_attempts=12
 common --http_connector_retry_max_timeout=5s
 
+# Try alternate archive endpoints after the declared source URL fails, including
+# dependencies whose URLs and patches are owned by the Bazel Central Registry.
+common --downloader_config=build_tools/bazel/downloader.cfg
+
 # Bazel's default lockfile mode is "update", which lets ordinary read-only
 # commands such as "bazel mod graph" silently rewrite MODULE.bazel.lock when
 # module extension facts change. Normal development, CI, and agent workflows
@@ -52,6 +56,25 @@ build --enable_runfiles
 # runfiles trees, which is brittle around symlinked source runfiles.
 build --incompatible_default_to_explicit_init_py
 
+# Ordinary developer commands intentionally retain Bazel's fastbuild mode and
+# do not pay for link-time optimization. This is the one reproducible optimized
+# profile used for release artifacts and performance work. Destination CPU
+# selection belongs to the target platform/toolchain; host-dependent flags such
+# as -march=native are deliberately not part of this fleet-cacheable profile.
+build:opt --compilation_mode=opt
+build:opt --features=thin_lto_link
+build:opt --features=optimize_for_speed
+build:opt --host_features=optimize_for_speed
+
+# Restore native CPython symbols without changing project optimization or ASAN.
+build:python-runtime-debug --//build_tools/bazel:python_runtime_debug=true
+
+# Use one pinned mimalloc instance for the build-selected IREE allocator.
+# Global C++ allocation follows the same provider through the process ABI.
+# Sanitizer configurations override this request and retain system allocation.
+build:mimalloc --//runtime/config/base:allocator_system=mimalloc
+build:mimalloc --custom_malloc=//third_party:allocator_new_delete
+
 # Windows compiler presets select one compiler policy; registered toolchains
 # match it to the host and destination. Native Windows defaults to clang-cl.
 build:windows-clang-cl --//build_tools/windows:compiler=clang-cl
@@ -61,15 +84,23 @@ build:windows-msvc --//build_tools/windows:compiler=msvc
 # Windows diagnostics before subsequent CI phases can replace the inputs.
 build:windows --verbose_failures
 
+# Ordinary builds do not execute their outputs. Defer expensive Windows
+# runfiles trees until a local action, test, or run command requires them.
+build:windows --nobuild_runfile_links
+
 # Destinations are independent of compiler selection. Native builds infer their
 # destination; cross builds preserve the native host for code generators.
 build:windows-x86_64 --platforms=//build_tools/windows:windows_x86_64
-# Cross-building test artifacts does not require a Windows executor. Test
+build:macos-arm64 --platforms=//build_tools/macos:macos_arm64
+build:macos-x86_64 --platforms=//build_tools/macos:macos_x86_64
+# Cross-building test artifacts does not require a destination executor. Test
 # commands restore execution-platform qualification before running them.
 build:windows-x86_64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=false
 test:windows-x86_64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=true
-build:macos-arm64 --platforms=//build_tools/macos:macos_arm64
-build:macos-x86_64 --platforms=//build_tools/macos:macos_x86_64
+build:macos-arm64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=false
+test:macos-arm64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=true
+build:macos-x86_64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=false
+test:macos-x86_64 --@bazel_tools//tools/test:incompatible_use_default_test_toolchain=true
 
 # -----------------------------------------------------------------------------
 # Test presets.
@@ -81,7 +112,9 @@ test --test_output=errors
 # Keep Python test entry-point directories off sys.path. Bazel supplies the
 # declared runfiles roots explicitly; allowing the script directory to win can
 # shadow standard-library modules with package-local files such as types.py.
-test --test_env=PYTHONSAFEPATH=1
+# Build and test analysis share this setting so switching commands preserves
+# configured test nodes. It only changes test environments, not build actions.
+build --test_env=PYTHONSAFEPATH=1
 
 # Local presubmit uses the configured Bazel graph. Build and runtime
 # requirements belong on targets and package policy rather than tag filters.
@@ -112,6 +145,11 @@ build:sanitizer --features=sanitizer_debug_info
 build:sanitizer --force_ignore_dash_static
 build:sanitizer --test_timeout=120,600,1800,-1
 build:sanitizer --//build_tools/bazel:sanitizer=true
+
+# Keep Vulkan ICDs mapped for sanitizer exit scans and symbolization, matching
+# IREE's own sanitized dynamic-library lifetime. Loader-owned ICDs otherwise
+# unload independently of IREE and lose process-global allocation roots.
+build:sanitizer --test_env=VK_LOADER_DISABLE_DYNAMIC_LIBRARY_UNLOADING=1
 
 # AddressSanitizer.
 build:asan --config=sanitizer

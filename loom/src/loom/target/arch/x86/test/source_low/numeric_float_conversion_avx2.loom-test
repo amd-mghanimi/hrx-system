@@ -1,0 +1,263 @@
+// RUN: emit source-low target=x86:avx2 output=low
+
+func.def @widen_f32_f64_1(%input: f32) -> (f64) {
+  %result = scalar.extf %input : f32 to f64
+  func.return %result : f64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (f32) -> (f64)}) @widen_f32_f64_1(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %result = vcvtss2sd.xmm %input, %input
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f64_1(%input: bf16) -> (f64) {
+  %result = scalar.extf %input : bf16 to f64
+  func.return %result : f64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (bf16) -> (f64)}) @widen_bf16_f64_1(%input: reg<x86.gpr32>) -> (reg<x86.xmm>) asm {
+  %7 = copy %input : reg<x86.gpr32> -> reg<x86.gpr32>
+  %8 = shl.imm.gpr32 %7 {shift = 16}
+  %9 = vmovd.xmm.gpr32 %8
+  %result = vcvtss2sd.xmm %9, %9
+  return %result
+}
+
+// ====
+
+func.def @widen_f32_f64_2(%input: vector<2xf32>) -> (vector<2xf64>) {
+  %result = vector.extf %input : vector<2xf32> to vector<2xf64>
+  func.return %result : vector<2xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xf32>) -> (vector<2xf64>)}) @widen_f32_f64_2(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %result = vcvtps2pd.xmm.xmm %input
+  return %result
+}
+
+// ====
+
+func.def @widen_f32_f64_4(%input: vector<4xf32>) -> (vector<4xf64>) {
+  %result = vector.extf %input : vector<4xf32> to vector<4xf64>
+  func.return %result : vector<4xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xf32>) -> (vector<4xf64>)}) @widen_f32_f64_4(%input: reg<x86.xmm>) -> (reg<x86.ymm>) asm {
+  %result = vcvtps2pd.ymm.xmm %input
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f32_2(%input: vector<2xbf16>) -> (vector<2xf32>) {
+  %result = vector.extf %input : vector<2xbf16> to vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xbf16>) -> (vector<2xf32>)}) @widen_bf16_f32_2(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %5 = vpmovzxwd.xmm %input
+  %result = vpslld.xmm %5, 16
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f32_4(%input: vector<4xbf16>) -> (vector<4xf32>) {
+  %result = vector.extf %input : vector<4xbf16> to vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xbf16>) -> (vector<4xf32>)}) @widen_bf16_f32_4(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %5 = vpmovzxwd.xmm %input
+  %result = vpslld.xmm %5, 16
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f32_8(%input: vector<8xbf16>) -> (vector<8xf32>) {
+  %result = vector.extf %input : vector<8xbf16> to vector<8xf32>
+  func.return %result : vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<8xbf16>) -> (vector<8xf32>)}) @widen_bf16_f32_8(%input: reg<x86.xmm>) -> (reg<x86.ymm>) asm {
+  %5 = vpmovzxwd.ymm %input
+  %result = vpslld.ymm %5, 16
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f64_2(%input: vector<2xbf16>) -> (vector<2xf64>) {
+  %result = vector.extf %input : vector<2xbf16> to vector<2xf64>
+  func.return %result : vector<2xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xbf16>) -> (vector<2xf64>)}) @widen_bf16_f64_2(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %5 = vpmovzxwd.xmm %input
+  %6 = vpslld.xmm %5, 16
+  %result = vcvtps2pd.xmm.xmm %6
+  return %result
+}
+
+// ====
+
+func.def @widen_bf16_f64_4(%input: vector<4xbf16>) -> (vector<4xf64>) {
+  %result = vector.extf %input : vector<4xbf16> to vector<4xf64>
+  func.return %result : vector<4xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xbf16>) -> (vector<4xf64>)}) @widen_bf16_f64_4(%input: reg<x86.xmm>) -> (reg<x86.ymm>) asm {
+  %5 = vpmovzxwd.xmm %input
+  %6 = vpslld.xmm %5, 16
+  %result = vcvtps2pd.ymm.xmm %6
+  return %result
+}
+
+// ====
+
+func.def @narrow_f64_f32_1(%input: f64) -> (f32) {
+  %result = scalar.fptrunc %input : f64 to f32
+  func.return %result : f32
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (f64) -> (f32)}) @narrow_f64_f32_1(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %result = vcvtsd2ss.xmm %input, %input
+  return %result
+}
+
+// ====
+
+func.def @narrow_f64_f32_2(%input: vector<2xf64>) -> (vector<2xf32>) {
+  %result = vector.fptrunc %input : vector<2xf64> to vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xf64>) -> (vector<2xf32>)}) @narrow_f64_f32_2(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %result = vcvtpd2ps.xmm.xmm %input
+  return %result
+}
+
+// ====
+
+func.def @narrow_f64_f32_4(%input: vector<4xf64>) -> (vector<4xf32>) {
+  %result = vector.fptrunc %input : vector<4xf64> to vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xf64>) -> (vector<4xf32>)}) @narrow_f64_f32_4(%input: reg<x86.ymm>) -> (reg<x86.xmm>) asm {
+  %result = vcvtpd2ps.xmm.ymm %input
+  return %result
+}
+
+// ====
+
+func.def @narrow_f64_f32_8_memory(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<8xf64>
+  %destination = buffer.view %output[%base] : buffer -> view<8xf32>
+  %value = vector.load %source[0] : view<8xf64> -> vector<8xf64>
+  %result = vector.fptrunc %value : vector<8xf64> to vector<8xf32>
+  vector.store %result, %destination[0] : vector<8xf32>, view<8xf32>
+  func.return
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @narrow_f64_f32_8_memory(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %15 = vmovdqu32.load.ymm %input {disp32 = 0}
+  %16 = vcvtpd2ps.xmm.ymm %15
+  %17 = vmovdqu32.load.ymm %input {disp32 = 32}
+  %18 = vcvtpd2ps.xmm.ymm %17
+  vmovdqu32.store.xmm %16, %output {disp32 = 0}
+  vmovdqu32.store.xmm %18, %output {disp32 = 16}
+  return
+}
+
+// ====
+
+func.def @narrow_f64_f16_packet_1(%input: vector<1xf64>) -> (vector<1xf16>) {
+  %result = vector.fptrunc %input : vector<1xf64> to vector<1xf16>
+  func.return %result : vector<1xf16>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<1xf64>) -> (vector<1xf16>)}) @narrow_f64_f16_packet_1(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %9 = vpermilpd.xmm %input, 0
+  %10 = vmovq.gpr64.xmm %9
+  %11 = mov.imm64 -9223372036854775808
+  %12 = copy %10 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %13 = and.gpr64 %12, %11
+  %14 = shr.imm.gpr64 %13 {shift = 48}
+  %15 = mov.imm64 9223372036854775807
+  %16 = and.gpr64 %10, %15
+  %17 = mov.imm64 4503599627370495
+  %18 = copy %16 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %19 = and.gpr64 %18, %17
+  %20 = mov.imm64 4503599627370496
+  %21 = or.gpr64 %19, %20
+  %22 = copy %16 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %23 = shr.imm.gpr64 %22 {shift = 52}
+  %24 = mov.imm64 1008
+  %25 = cmp.sgt.imm.gpr64 %23, 1008
+  %26 = select.gpr64 %25, %24, %23
+  %27 = mov.imm64 1051
+  %28 = sub.gpr64 %27, %26
+  %29 = mov.imm64 63
+  %30 = cmp.sgt.imm.gpr64 %28, 63
+  %31 = select.gpr64 %30, %29, %28
+  %32 = copy %21 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %33 = copy %31 : reg<x86.gpr64> -> reg<x86.rcx>
+  %34 = shr.cl.gpr64 %32, %33
+  %35 = mov.imm64 1
+  %36 = copy %31 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %37 = sub.imm.gpr64 %36 {imm32 = 1}
+  %38 = copy %37 : reg<x86.gpr64> -> reg<x86.rcx>
+  %39 = shl.cl.gpr64 %35, %38
+  %40 = sub.imm.gpr64 %39 {imm32 = 1}
+  %41 = and.imm.gpr64 %34 {imm32 = 1}
+  %42 = add.gpr64 %21, %40
+  %43 = add.gpr64 %42, %41
+  %44 = copy %31 : reg<x86.gpr64> -> reg<x86.rcx>
+  %45 = shr.cl.gpr64 %43, %44
+  %46 = copy %16 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %47 = shr.imm.gpr64 %46 {shift = 42}
+  %48 = and.imm.gpr64 %47 {imm32 = 1}
+  %49 = mov.imm64 -4539626225366204417
+  %50 = copy %16 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %51 = add.gpr64 %50, %49
+  %52 = add.gpr64 %51, %48
+  %53 = shr.imm.gpr64 %52 {shift = 42}
+  %54 = mov.imm64 4544132024016830464
+  %55 = cmp.slt.gpr64 %16, %54
+  %56 = select.gpr64 %55, %45, %53
+  %57 = mov.imm64 31744
+  %58 = cmp.sge.imm.gpr64 %56, 31744
+  %59 = select.gpr64 %58, %57, %56
+  %61 = copy %16 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %62 = and.gpr64 %61, %17
+  %63 = shr.imm.gpr64 %62 {shift = 42}
+  %64 = or.imm.gpr64 %63 {imm32 = 31744}
+  %65 = or.imm.gpr64 %64 {imm32 = 512}
+  %66 = mov.imm64 9218868437227405312
+  %67 = cmp.sgt.gpr64 %16, %66
+  %68 = select.gpr64 %67, %65, %59
+  %69 = or.gpr64 %14, %68
+  %70 = mov.trunc.gpr32.gpr64 %69
+  %71 = vmovd.xmm.gpr32 %70
+  %result = vpbroadcastw.xmm %71
+  return %result
+}

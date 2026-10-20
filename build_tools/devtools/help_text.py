@@ -130,16 +130,30 @@ installed and this checkout should not get a local tool environment.""",
             "bazel": "paranoid",
             "cmake": "default",
         }[lane]
+        bazel_policy_example = (
+            f"  python dev.py {lane} hook --bazel-config remote-execution\n"
+            if lane == "bazel"
+            else ""
+        )
+        bazel_policy_text = (
+            "\nFor Bazel hooks, repeat `--bazel-config` to persist locally "
+            "selected Bazel\nconfigurations in every build, test, and "
+            "static-analysis command."
+            if lane == "bazel"
+            else ""
+        )
         return CommandHelp(
             description=f"Install Git hooks for {build_system_name}.",
             epilog=f"""Examples:
   python dev.py {lane} hook
   python dev.py {lane} hook --profile {default_profile}
+{bazel_policy_example}\
   python dev.py {lane} hook --verify
 
 This writes ignored lefthook-local.yml with the selected build system/profile
 and then runs lefthook install. Re-run this command with a different --profile
-to change the default profile used by Git commits. The installed hook uses
+to change the default profile used by Git commits.{bazel_policy_text}
+The installed hook uses
 the staged index as its validation and mutation boundary. A fix that changes
 the index stops the attempt before tests and prints the review/retry action.
 Explicit `precommit --amend` provides read-only amended-candidate validation.
@@ -155,6 +169,7 @@ active.""",
   python dev.py bazel configure
   python dev.py bazel configure -DIREE_HAL_DRIVER_AMDGPU=ON
   python dev.py bazel configure -DIREE_HAL_DRIVER_AMDGPU=ON -DIREE_ROCM_PATH=/opt/rocm -DIREE_ROCM_DEPENDENCY_MODE=pinned
+  python dev.py bazel configure -DIREE_HAL_DRIVER_XDNA=ON
   python dev.py bazel configure -DAMDF_BUILD=ON
   python dev.py bazel configure -DLOOM_TARGET_AMDGPU=ON
   python dev.py bazel configure --importer-env tilelang

@@ -89,6 +89,41 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
   return (iree_task_topology_node_id_t)node_number;
 }
 
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology) {
+  iree_numa_node_id_t common_node = IREE_NUMA_NODE_ANY;
+  for (iree_host_size_t i = 0; i < topology->group_count; ++i) {
+    iree_thread_affinity_t affinity = topology->groups[i].ideal_thread_affinity;
+    if (iree_thread_affinity_is_unspecified(affinity)) {
+      return IREE_NUMA_NODE_ANY;
+    }
+    for (uint32_t cpu = 0; cpu < (affinity.group_any ? 1u : 1u + affinity.smt);
+         ++cpu) {
+      iree_numa_node_id_t node = affinity.group;
+      if (!affinity.group_any) {
+        if (affinity.group > UINT16_MAX || affinity.id + cpu >= 64) {
+          return IREE_NUMA_NODE_ANY;
+        }
+        PROCESSOR_NUMBER processor = {0};
+        processor.Group = (WORD)affinity.group;
+        processor.Number = (BYTE)(affinity.id + cpu);
+        USHORT resolved_node = 0;
+        if (!GetNumaProcessorNodeEx(&processor, &resolved_node) ||
+            resolved_node == UINT16_MAX) {
+          return IREE_NUMA_NODE_ANY;
+        }
+        node = resolved_node;
+      }
+      if (common_node == IREE_NUMA_NODE_ANY) {
+        common_node = node;
+      } else if (common_node != node) {
+        return IREE_NUMA_NODE_ANY;
+      }
+    }
+  }
+  return common_node;
+}
+
 //===----------------------------------------------------------------------===//
 // Topology initialization helpers
 //===----------------------------------------------------------------------===//
@@ -439,7 +474,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)node_id);
 
   iree_task_topology_initialize(out_topology);
-  out_topology->node_id = node_id;
 
   // Query the total size required for all information and allocate storage for
   // it on the stack - it's generally just a few KB.

@@ -77,8 +77,8 @@ class LinkerTest : public ::testing::Test {
                        iree_string_view_t filename = IREE_SV("test.loom")) {
     loom_module_t* module = nullptr;
     loom_text_parse_options_t parse_options = {
-        /*.diagnostic_sink=*/{loom_diagnostic_stderr_sink, nullptr},
-        /*.max_errors=*/20,
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr},
+        .max_errors = 20,
     };
     loom_low_descriptor_text_asm_environment_initialize(
         &low_registry_, &parse_options.low_asm_environment);
@@ -95,8 +95,8 @@ class LinkerTest : public ::testing::Test {
                        iree_string_view_t filename = IREE_SV("test.loom")) {
     loom_module_t* module = nullptr;
     loom_text_parse_options_t parse_options = {
-        /*.diagnostic_sink=*/{loom_diagnostic_stderr_sink, nullptr},
-        /*.max_errors=*/20,
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr},
+        .max_errors = 20,
     };
     loom_low_descriptor_text_asm_environment_initialize(
         &low_registry_, &parse_options.low_asm_environment);
@@ -125,7 +125,7 @@ class LinkerTest : public ::testing::Test {
   loom_linker_t* CreateIncrementalLinker() {
     loom_linker_t* linker = nullptr;
     const loom_linker_options_t options = {
-        /*.module_name=*/IREE_SV("linked"),
+        .module_name = IREE_SV("linked"),
     };
     IREE_CHECK_OK(loom_linker_allocate(&context_, &options, &block_pool_,
                                        iree_allocator_system(), &linker));
@@ -148,8 +148,8 @@ class LinkerTest : public ::testing::Test {
     }
     std::vector<iree_string_view_t> roots(root_symbols);
     loom_link_options_t options = {
-        /*.module_name=*/IREE_SV("linked"),
-        /*.root_symbols=*/{/*.count=*/roots.size(), /*.values=*/roots.data()},
+        .module_name = IREE_SV("linked"),
+        .root_symbols = {.count = roots.size(), .values = roots.data()},
     };
     iree_status_t status = loom_link_materialized_modules(
         inputs.data(), inputs.size(), &options, &block_pool_,
@@ -170,8 +170,8 @@ class LinkerTest : public ::testing::Test {
 
   void Verify(const loom_module_t* module) {
     loom_verify_options_t options = {
-        /*.sink=*/{loom_diagnostic_stderr_sink, nullptr},
-        /*.max_errors=*/100,
+        .sink = {loom_diagnostic_stderr_sink, nullptr},
+        .max_errors = 100,
     };
     loom_verify_result_t result = {};
     IREE_ASSERT_OK(loom_verify_module(module, &options, &result));
@@ -261,14 +261,20 @@ func.def @helper(%x: i32) -> (i32) {
   loom_linker_t* linker = CreateIncrementalLinker();
   loom_symbol_ref_t declaration_targets[2] = {};
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      linker, declaration, loom_linker_source_symbol_output_list_empty(),
-      {/*.count=*/IREE_ARRAYSIZE(declaration_targets),
-       /*.values=*/declaration_targets}));
+      linker, declaration, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
+      {
+          .count = IREE_ARRAYSIZE(declaration_targets),
+          .values = declaration_targets,
+      }));
   loom_symbol_ref_t definition_targets[2] = {};
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      linker, definition, loom_linker_source_symbol_output_list_empty(),
-      {/*.count=*/IREE_ARRAYSIZE(definition_targets),
-       /*.values=*/definition_targets}));
+      linker, definition, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
+      {
+          .count = IREE_ARRAYSIZE(definition_targets),
+          .values = definition_targets,
+      }));
 
   loom_module_t* linked = nullptr;
   IREE_ASSERT_OK(loom_linker_finish(linker, &linked));
@@ -288,6 +294,65 @@ func.def @helper(%x: i32) -> (i32) {
   EXPECT_TRUE(iree_string_view_starts_with(
       loom_string_table_get(&linked->strings, second_helper->name_id),
       IREE_SV("helper$link")));
+}
+
+TEST_F(LinkerTest, ExactSelectionMergesIntoSelectedTargetIdentity) {
+  loom_module_t* definition = Parse(IREE_SV(R"(
+func.def @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+  loom_module_t* requester = Parse(IREE_SV(R"(
+func.decl @identity(%x: i32) -> (i32)
+
+func.def public @caller(%x: i32) -> (i32) {
+  %y = func.call @identity(%x) : (i32) -> (i32)
+  func.return %y : i32
+}
+)"));
+  loom_module_t* unrelated = Parse(IREE_SV(R"(
+func.def @identity(%x: i32) -> (i32) {
+  %sum = scalar.addi %x, %x : i32
+  func.return %sum : i32
+}
+)"));
+
+  loom_linker_t* linker = CreateIncrementalLinker();
+  loom_symbol_ref_t definition_target = loom_symbol_ref_null();
+  IREE_ASSERT_OK(loom_linker_add_exact_module(
+      linker, definition, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
+      {.count = 1, .values = &definition_target}));
+  ASSERT_TRUE(loom_symbol_ref_is_valid(definition_target));
+
+  const loom_symbol_ref_t requester_targets[] = {
+      definition_target,
+      loom_symbol_ref_null(),
+  };
+  IREE_ASSERT_OK(loom_linker_add_exact_module(
+      linker, requester,
+      loom_linker_selected_symbol_target_list_t{
+          .count = IREE_ARRAYSIZE(requester_targets),
+          .values = requester_targets,
+      },
+      loom_linker_source_symbol_output_list_empty(),
+      loom_linker_target_symbol_list_empty()));
+  IREE_ASSERT_OK(loom_linker_add_exact_module(
+      linker, unrelated, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
+      loom_linker_target_symbol_list_empty()));
+
+  loom_module_t* linked = nullptr;
+  IREE_ASSERT_OK(loom_linker_finish(linker, &linked));
+  loom_linker_free(linker);
+  modules_.push_back(linked);
+  Verify(linked);
+
+  const std::string text = Print(linked);
+  EXPECT_EQ(text.find("func.decl @identity"), std::string::npos);
+  EXPECT_NE(text.find("func.call @identity"), std::string::npos);
+  EXPECT_NE(text.find("func.def @identity("), std::string::npos);
+  EXPECT_NE(text.find("func.def @identity$link0("), std::string::npos);
 }
 
 TEST_F(LinkerTest, CommandDefinitionSupersedesMatchingDeclaration) {
@@ -391,6 +456,84 @@ func.def @unused(%x: i32) -> (i32) {
             std::string::npos);
   EXPECT_EQ(text.find("func.decl @unused_decl"), std::string::npos);
   EXPECT_EQ(text.find("func.def @unused"), std::string::npos);
+}
+
+TEST_F(LinkerTest, LinkRootsReportResolvedSymbolsInRequestOrder) {
+  loom_module_t* module = Parse(IREE_SV(R"(
+func.def @first(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+
+func.def @second(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+
+  const loom_module_t* inputs[] = {module};
+  const iree_string_view_t roots[] = {
+      IREE_SV("@second"),
+      IREE_SV("@first"),
+      IREE_SV("@second"),
+  };
+  loom_symbol_ref_t root_targets[IREE_ARRAYSIZE(roots)] = {};
+  const loom_link_options_t options = {
+      .module_name = IREE_SV("linked"),
+      .root_symbols = {.count = IREE_ARRAYSIZE(roots), .values = roots},
+      .root_target_symbols =
+          {
+              .count = IREE_ARRAYSIZE(root_targets),
+              .values = root_targets,
+          },
+  };
+  loom_module_t* linked = nullptr;
+  IREE_ASSERT_OK(loom_link_materialized_modules(
+      inputs, IREE_ARRAYSIZE(inputs), &options, &block_pool_,
+      iree_allocator_system(), &linked));
+  modules_.push_back(linked);
+  Verify(linked);
+
+  EXPECT_EQ(root_targets[0].module_id, 0u);
+  EXPECT_EQ(root_targets[1].module_id, 0u);
+  EXPECT_EQ(root_targets[2].module_id, 0u);
+  EXPECT_EQ(root_targets[0].symbol_id, root_targets[2].symbol_id);
+  EXPECT_NE(root_targets[0].symbol_id, root_targets[1].symbol_id);
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(
+          &linked->strings,
+          linked->symbols.entries[root_targets[0].symbol_id].name_id),
+      IREE_SV("second")));
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(
+          &linked->strings,
+          linked->symbols.entries[root_targets[1].symbol_id].name_id),
+      IREE_SV("first")));
+}
+
+TEST_F(LinkerTest, LinkRootsRejectMismatchedTargetStorage) {
+  loom_module_t* module = Parse(IREE_SV(R"(
+func.def @root(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+
+  const loom_module_t* inputs[] = {module};
+  const iree_string_view_t roots[] = {IREE_SV("@root")};
+  loom_symbol_ref_t root_targets[2] = {};
+  const loom_link_options_t options = {
+      .module_name = IREE_SV("linked"),
+      .root_symbols = {.count = IREE_ARRAYSIZE(roots), .values = roots},
+      .root_target_symbols =
+          {
+              .count = IREE_ARRAYSIZE(root_targets),
+              .values = root_targets,
+          },
+  };
+  loom_module_t* linked = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        loom_link_materialized_modules(
+                            inputs, IREE_ARRAYSIZE(inputs), &options,
+                            &block_pool_, iree_allocator_system(), &linked));
+  EXPECT_EQ(linked, nullptr);
 }
 
 TEST_F(LinkerTest, LinkRootInternalizesPublicDependencies) {
@@ -658,7 +801,7 @@ TEST_F(LinkerTest, MergesDeclarationPredicatesIntoDefinition) {
   loom_module_t* harness = Parse(IREE_SV(R"(
 test.target<low_core> @test_target
 
-func.decl target(@test_target) @bounded(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [mul(%m, 16)]
+func.decl target(@test_target) @bounded(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [multiple_of(%m, 16)]
 )"));
   loom_module_t* corpus = Parse(IREE_SV(R"(
 func.def @bounded(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) {
@@ -673,7 +816,7 @@ func.def @bounded(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) {
   EXPECT_EQ(text.find("func.decl @bounded"), std::string::npos);
   EXPECT_NE(text.find("func.def target(@test_target) @bounded"),
             std::string::npos);
-  EXPECT_NE(text.find("where [mul(%m, 16)]"), std::string::npos);
+  EXPECT_NE(text.find("where [multiple_of(%m, 16)]"), std::string::npos);
 }
 
 TEST_F(LinkerTest, RejectsDeclarationDefinitionTargetConflict) {
@@ -824,7 +967,7 @@ kernel.def @fill(%element_count: index) {
 
 TEST_F(LinkerTest, KeepsDeclarationWhenNoDefinitionExists) {
   loom_module_t* harness = Parse(IREE_SV(R"(
-func.decl @external_identity(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [mul(%m, 16)]
+func.decl @external_identity(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [multiple_of(%m, 16)]
 )"));
 
   loom_module_t* linked = Link({harness});
@@ -833,7 +976,7 @@ func.decl @external_identity(%m: index, %x: tensor<[%m]xf32>) -> (tensor<[%m]xf3
   std::string text = Print(linked);
   EXPECT_NE(text.find("func.decl @external_identity"), std::string::npos);
   EXPECT_NE(text.find("tensor<[%m]xf32"), std::string::npos);
-  EXPECT_NE(text.find("where [mul(%m, 16)]"), std::string::npos);
+  EXPECT_NE(text.find("where [multiple_of(%m, 16)]"), std::string::npos);
 }
 
 TEST_F(LinkerTest, UsesConfigDefinitionOverDeclaration) {
@@ -841,15 +984,16 @@ TEST_F(LinkerTest, UsesConfigDefinitionOverDeclaration) {
 config.def @model36.model.hidden_size = 4096 : index
 )"));
   loom_module_t* library = Parse(IREE_SV(R"(
-config.decl @model36.model.hidden_size : %value: index where [range(%value, 1, 8192), mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 1, 8192), multiple_of(%value, 16)]
 )"));
 
   loom_module_t* linked = Link({root, library});
   Verify(linked);
 
   std::string text = Print(linked);
-  EXPECT_NE(text.find("config.def @model36.model.hidden_size = 4096 : index"),
+  EXPECT_NE(text.find("config.def @model36.model.hidden_size = 4096 :"),
             std::string::npos);
+  EXPECT_NE(text.find("where [range("), std::string::npos);
   EXPECT_EQ(text.find("config.decl @model36.model.hidden_size"),
             std::string::npos);
 }
@@ -892,7 +1036,7 @@ TEST_F(LinkerTest, RejectsConfigDefinitionViolatingDeclaration) {
 config.def @model36.model.hidden_size = 4103 : index
 )"));
   loom_module_t* library = Parse(IREE_SV(R"(
-config.decl @model36.model.hidden_size : %value: index where [range(%value, 1, 8192), mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 1, 8192), multiple_of(%value, 16)]
 )"));
 
   loom_module_t* linked = nullptr;
@@ -906,7 +1050,7 @@ TEST_F(LinkerTest, MergesConfigDeclarations) {
 config.decl @model36.model.hidden_size : %value: index where [range(%value, 1, 8192)]
 )"));
   loom_module_t* second = Parse(IREE_SV(R"(
-config.decl @model36.model.hidden_size : %value: index where [mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [multiple_of(%value, 16)]
 )"));
 
   loom_module_t* linked = Link({first, second});
@@ -916,7 +1060,7 @@ config.decl @model36.model.hidden_size : %value: index where [mul(%value, 16)]
   EXPECT_NE(text.find("config.decl @model36.model.hidden_size"),
             std::string::npos);
   EXPECT_NE(text.find("range(%value, 1, 8192)"), std::string::npos);
-  EXPECT_NE(text.find("mul(%value, 16)"), std::string::npos);
+  EXPECT_NE(text.find("multiple_of(%value, 16)"), std::string::npos);
 }
 
 TEST_F(LinkerTest, RenamesPrivateDefinitionConflictsAndRewritesCalls) {
@@ -985,14 +1129,14 @@ func.def @helper(%x: i32) -> (i32) {
 TEST_F(LinkerTest, IncrementalLinkDoesNotReferenceReleasedSourceModules) {
   loom_linker_t* linker = nullptr;
   loom_linker_options_t linker_options = {
-      /*.module_name=*/IREE_SV("linked"),
+      .module_name = IREE_SV("linked"),
   };
   IREE_ASSERT_OK(loom_linker_allocate(&context_, &linker_options, &block_pool_,
                                       iree_allocator_system(), &linker));
 
   iree_string_view_t roots[] = {IREE_SV("@caller")};
   loom_linker_add_options_t add_options = {
-      /*.root_symbols=*/{/*.count=*/IREE_ARRAYSIZE(roots), /*.values=*/roots},
+      .root_symbols = {.count = IREE_ARRAYSIZE(roots), .values = roots},
   };
   {
     ModulePtr harness = ParseOwned(IREE_SV(R"(
@@ -1055,28 +1199,30 @@ func.def @unused_corpus(%x: i32) -> (i32) {
   const iree_host_size_t harness_symbols[] = {0, 1};
   IREE_ASSERT_OK(loom_linker_add_module_symbols(
       linker, harness,
-      (loom_linker_source_symbol_list_t){
-          /*.count=*/IREE_ARRAYSIZE(harness_symbols),
-          /*.ordinals=*/harness_symbols,
+      loom_linker_source_symbol_list_t{
+          .count = IREE_ARRAYSIZE(harness_symbols),
+          .ordinals = harness_symbols,
       },
       loom_linker_source_symbol_binding_list_empty(),
+      loom_linker_selected_symbol_target_list_empty(),
       loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   const iree_host_size_t corpus_symbols[] = {0};
   IREE_ASSERT_OK(loom_linker_add_module_symbols(
       linker, corpus,
-      (loom_linker_source_symbol_list_t){
-          /*.count=*/IREE_ARRAYSIZE(corpus_symbols),
-          /*.ordinals=*/corpus_symbols,
+      loom_linker_source_symbol_list_t{
+          .count = IREE_ARRAYSIZE(corpus_symbols),
+          .ordinals = corpus_symbols,
       },
       loom_linker_source_symbol_binding_list_empty(),
+      loom_linker_selected_symbol_target_list_empty(),
       loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   const iree_string_view_t roots[] = {IREE_SV("@caller")};
   IREE_ASSERT_OK(
-      loom_linker_finalize_roots(linker, (iree_string_view_list_t){
-                                             /*.count=*/IREE_ARRAYSIZE(roots),
-                                             /*.values=*/roots,
+      loom_linker_finalize_roots(linker, iree_string_view_list_t{
+                                             .count = IREE_ARRAYSIZE(roots),
+                                             .values = roots,
                                          }));
   loom_module_t* linked = nullptr;
   IREE_ASSERT_OK(loom_linker_finish(linker, &linked));
@@ -1108,13 +1254,14 @@ func.def public @caller(%x: i32) -> (i32) {
 
   loom_linker_t* linker = CreateIncrementalLinker();
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      linker, source, loom_linker_source_symbol_output_list_empty(),
+      linker, source, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   const iree_string_view_t roots[] = {IREE_SV("@caller")};
   IREE_ASSERT_OK(
-      loom_linker_finalize_roots(linker, (iree_string_view_list_t){
-                                             /*.count=*/IREE_ARRAYSIZE(roots),
-                                             /*.values=*/roots,
+      loom_linker_finalize_roots(linker, iree_string_view_list_t{
+                                             .count = IREE_ARRAYSIZE(roots),
+                                             .values = roots,
                                          }));
   loom_module_t* linked = nullptr;
   IREE_ASSERT_OK(loom_linker_finish(linker, &linked));
@@ -1134,7 +1281,8 @@ TEST_F(LinkerTest, ExactModuleLinksMetadataWithoutSymbols) {
 
   loom_linker_t* linker = CreateIncrementalLinker();
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      linker, source, loom_linker_source_symbol_output_list_empty(),
+      linker, source, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   loom_module_t* linked = nullptr;
   IREE_ASSERT_OK(loom_linker_finish(linker, &linked));
@@ -1167,7 +1315,8 @@ func.def @second() {
 
   loom_linker_t* dense_linker = CreateIncrementalLinker();
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      dense_linker, source, loom_linker_source_symbol_output_list_empty(),
+      dense_linker, source, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   loom_module_t* dense_linked = nullptr;
   IREE_ASSERT_OK(loom_linker_finish(dense_linker, &dense_linked));
@@ -1179,11 +1328,12 @@ func.def @second() {
   loom_linker_t* sparse_linker = CreateIncrementalLinker();
   IREE_ASSERT_OK(loom_linker_add_module_symbols(
       sparse_linker, source,
-      (loom_linker_source_symbol_list_t){
-          /*.count=*/IREE_ARRAYSIZE(source_symbols),
-          /*.ordinals=*/source_symbols,
+      loom_linker_source_symbol_list_t{
+          .count = IREE_ARRAYSIZE(source_symbols),
+          .ordinals = source_symbols,
       },
       loom_linker_source_symbol_binding_list_empty(),
+      loom_linker_selected_symbol_target_list_empty(),
       loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
   loom_module_t* sparse_linked = nullptr;
@@ -1219,11 +1369,12 @@ func.def public @caller(%x: i32) -> (i32) {
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         loom_linker_add_module_symbols(
                             linker, source,
-                            (loom_linker_source_symbol_list_t){
-                                /*.count=*/IREE_ARRAYSIZE(source_symbols),
-                                /*.ordinals=*/source_symbols,
+                            loom_linker_source_symbol_list_t{
+                                .count = IREE_ARRAYSIZE(source_symbols),
+                                .ordinals = source_symbols,
                             },
                             loom_linker_source_symbol_binding_list_empty(),
+                            loom_linker_selected_symbol_target_list_empty(),
                             loom_linker_source_symbol_output_list_empty(),
                             loom_linker_target_symbol_list_empty()));
   loom_linker_free(linker);
@@ -1247,28 +1398,30 @@ func.def public @caller(%x: i32) -> (i32) {
   loom_linker_t* linker = CreateIncrementalLinker();
   loom_symbol_ref_t projected_target = loom_symbol_ref_null();
   IREE_ASSERT_OK(loom_linker_add_exact_module(
-      linker, projected, loom_linker_source_symbol_output_list_empty(),
-      (loom_linker_target_symbol_list_t){
-          /*.count=*/1,
-          /*.values=*/&projected_target,
+      linker, projected, loom_linker_selected_symbol_target_list_empty(),
+      loom_linker_source_symbol_output_list_empty(),
+      loom_linker_target_symbol_list_t{
+          .count = 1,
+          .values = &projected_target,
       }));
   ASSERT_TRUE(loom_symbol_ref_is_valid(projected_target));
 
   const iree_host_size_t source_symbols[] = {1};
   const loom_linker_source_symbol_binding_t source_bindings[] = {{
-      /*.source_ordinal=*/0,
-      /*.target=*/projected_target,
+      .source_ordinal = 0,
+      .target = projected_target,
   }};
   IREE_ASSERT_OK(loom_linker_add_module_symbols(
       linker, source,
-      (loom_linker_source_symbol_list_t){
-          /*.count=*/IREE_ARRAYSIZE(source_symbols),
-          /*.ordinals=*/source_symbols,
+      loom_linker_source_symbol_list_t{
+          .count = IREE_ARRAYSIZE(source_symbols),
+          .ordinals = source_symbols,
       },
-      (loom_linker_source_symbol_binding_list_t){
-          /*.count=*/IREE_ARRAYSIZE(source_bindings),
-          /*.values=*/source_bindings,
+      loom_linker_source_symbol_binding_list_t{
+          .count = IREE_ARRAYSIZE(source_bindings),
+          .values = source_bindings,
       },
+      loom_linker_selected_symbol_target_list_empty(),
       loom_linker_source_symbol_output_list_empty(),
       loom_linker_target_symbol_list_empty()));
 
@@ -1299,44 +1452,48 @@ func.def @second() {
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         loom_linker_add_module_symbols(
                             linker, source,
-                            (loom_linker_source_symbol_list_t){
-                                /*.count=*/1,
-                                /*.ordinals=*/nullptr,
+                            loom_linker_source_symbol_list_t{
+                                .count = 1,
+                                .ordinals = nullptr,
                             },
                             loom_linker_source_symbol_binding_list_empty(),
+                            loom_linker_selected_symbol_target_list_empty(),
                             loom_linker_source_symbol_output_list_empty(),
                             loom_linker_target_symbol_list_empty()));
   const iree_host_size_t duplicate_symbols[] = {0, 0};
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         loom_linker_add_module_symbols(
                             linker, source,
-                            (loom_linker_source_symbol_list_t){
-                                /*.count=*/IREE_ARRAYSIZE(duplicate_symbols),
-                                /*.ordinals=*/duplicate_symbols,
+                            loom_linker_source_symbol_list_t{
+                                .count = IREE_ARRAYSIZE(duplicate_symbols),
+                                .ordinals = duplicate_symbols,
                             },
                             loom_linker_source_symbol_binding_list_empty(),
+                            loom_linker_selected_symbol_target_list_empty(),
                             loom_linker_source_symbol_output_list_empty(),
                             loom_linker_target_symbol_list_empty()));
   const iree_host_size_t descending_symbols[] = {1, 0};
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         loom_linker_add_module_symbols(
                             linker, source,
-                            (loom_linker_source_symbol_list_t){
-                                /*.count=*/IREE_ARRAYSIZE(descending_symbols),
-                                /*.ordinals=*/descending_symbols,
+                            loom_linker_source_symbol_list_t{
+                                .count = IREE_ARRAYSIZE(descending_symbols),
+                                .ordinals = descending_symbols,
                             },
                             loom_linker_source_symbol_binding_list_empty(),
+                            loom_linker_selected_symbol_target_list_empty(),
                             loom_linker_source_symbol_output_list_empty(),
                             loom_linker_target_symbol_list_empty()));
   const iree_host_size_t out_of_range_symbols[] = {2};
   IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
                         loom_linker_add_module_symbols(
                             linker, source,
-                            (loom_linker_source_symbol_list_t){
-                                /*.count=*/IREE_ARRAYSIZE(out_of_range_symbols),
-                                /*.ordinals=*/out_of_range_symbols,
+                            loom_linker_source_symbol_list_t{
+                                .count = IREE_ARRAYSIZE(out_of_range_symbols),
+                                .ordinals = out_of_range_symbols,
                             },
                             loom_linker_source_symbol_binding_list_empty(),
+                            loom_linker_selected_symbol_target_list_empty(),
                             loom_linker_source_symbol_output_list_empty(),
                             loom_linker_target_symbol_list_empty()));
   loom_linker_free(linker);
@@ -1357,12 +1514,123 @@ func.def public @identity(%x: i32) -> (i32) {
   const loom_module_t* inputs[] = {first, second};
   loom_module_t* linked = nullptr;
   loom_link_options_t options = {
-      /*.module_name=*/IREE_SV("linked"),
+      .module_name = IREE_SV("linked"),
   };
   IREE_EXPECT_STATUS_IS(IREE_STATUS_ALREADY_EXISTS,
                         loom_link_materialized_modules(
                             inputs, IREE_ARRAYSIZE(inputs), &options,
                             &block_pool_, iree_allocator_system(), &linked));
+  EXPECT_EQ(linked, nullptr);
+}
+
+TEST_F(LinkerTest, CoalescesLinkOncePublicDefinitions) {
+  loom_module_t* first = Parse(IREE_SV(R"(
+func.def public linkonce @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+  loom_module_t* second = Parse(IREE_SV(R"(
+func.def public linkonce @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+
+  loom_module_t* linked = Link({first, second});
+  Verify(linked);
+
+  const std::string text = Print(linked);
+  const size_t definition =
+      text.find("func.def public linkonce @identity(%x: i32)");
+  EXPECT_NE(definition, std::string::npos);
+  EXPECT_EQ(text.find("func.def public linkonce @identity", definition + 1),
+            std::string::npos);
+}
+
+TEST_F(LinkerTest, RejectsIncompatibleLinkOnceDefinitions) {
+  loom_module_t* first = Parse(IREE_SV(R"(
+func.def public linkonce @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+  loom_module_t* second = Parse(IREE_SV(R"(
+func.def public linkonce @identity(%x: i64) -> (i64) {
+  func.return %x : i64
+}
+)"));
+
+  loom_module_t* linked = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        LinkStatus({first, second}, &linked));
+  EXPECT_EQ(linked, nullptr);
+}
+
+TEST_F(LinkerTest, RejectsMixedStrongAndLinkOnceDefinitions) {
+  loom_module_t* first = Parse(IREE_SV(R"(
+func.def public @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+  loom_module_t* second = Parse(IREE_SV(R"(
+func.def public linkonce @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)"));
+
+  loom_module_t* linked = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_ALREADY_EXISTS,
+                        LinkStatus({first, second}, &linked));
+  EXPECT_EQ(linked, nullptr);
+}
+
+TEST_F(LinkerTest, CoalescesLinkOnceKernelDefinitions) {
+  loom_module_t* first = Parse(IREE_SV(R"(
+kernel.def linkonce @copy() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%output: buffer) {
+  kernel.return
+}
+)"));
+  loom_module_t* second = Parse(IREE_SV(R"(
+kernel.def linkonce @copy() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%output: buffer) {
+  kernel.return
+}
+)"));
+
+  loom_module_t* linked = Link({first, second});
+  Verify(linked);
+
+  const std::string text = Print(linked);
+  const size_t definition = text.find("kernel.def linkonce @copy()");
+  EXPECT_NE(definition, std::string::npos);
+  EXPECT_EQ(text.find("kernel.def linkonce @copy()", definition + 1),
+            std::string::npos);
+}
+
+TEST_F(LinkerTest, RejectsIncompatibleLinkOnceKernelDefinitions) {
+  loom_module_t* first = Parse(IREE_SV(R"(
+kernel.def linkonce @copy() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%output: buffer) {
+  kernel.return
+}
+)"));
+  loom_module_t* second = Parse(IREE_SV(R"(
+kernel.def linkonce @copy() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%output: buffer, %value: i32) {
+  kernel.return
+}
+)"));
+
+  loom_module_t* linked = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        LinkStatus({first, second}, &linked));
   EXPECT_EQ(linked, nullptr);
 }
 
@@ -1381,7 +1649,7 @@ template.def<@demo.effect> @provider(%x: i32) -> (i32) {
   const loom_module_t* inputs[] = {harness, library};
   loom_module_t* linked = nullptr;
   loom_link_options_t options = {
-      /*.module_name=*/IREE_SV("linked"),
+      .module_name = IREE_SV("linked"),
   };
   IREE_ASSERT_OK(loom_link_materialized_modules(
       inputs, IREE_ARRAYSIZE(inputs), &options, &block_pool_,
@@ -1410,7 +1678,7 @@ template.def<@demo.effect> @provider(%x: i32) -> (i32) {
   const loom_module_t* inputs[] = {harness, library};
   loom_module_t* linked = nullptr;
   loom_link_options_t options = {
-      /*.module_name=*/IREE_SV("linked"),
+      .module_name = IREE_SV("linked"),
   };
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         loom_link_materialized_modules(

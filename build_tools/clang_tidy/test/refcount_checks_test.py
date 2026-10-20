@@ -53,6 +53,24 @@ class RefCountChecksTest(clang_tidy_test.ClangTidyAssertions):
                 "refcounted object factory "
                 "iree_clang_tidy_refcounted_with_base_allocate publishes "
                 "out_resource through allocate naming",
+                "object factory iree_clang_tidy_plain_create publishes "
+                "non-refcounted out_storage through create naming",
+                "object factory iree_clang_tidy_private_storage_create publishes "
+                "non-refcounted out_storage through create naming",
+                "object factory hrx_clang_tidy_plain_create publishes "
+                "non-refcounted out_storage through create naming",
+                "object factory loom_clang_tidy_plain_create publishes "
+                "non-refcounted out_storage through create naming",
+                "object factory loomc_clang_tidy_plain_create publishes "
+                "non-refcounted out_storage through create naming",
+                "object factory iree_clang_tidy_embedded_owner_create publishes "
+                "out_owner without typed void retain/release operations",
+                "object factory iree_clang_tidy_missing_opaque_create publishes "
+                "out_resource without typed void retain/release operations",
+                "object factory iree_clang_tidy_wrong_lifetime_create publishes "
+                "out_resource without typed void retain/release operations",
+                "object factory iree_clang_tidy_foreign_plain_create publishes "
+                "non-refcounted out_storage through create naming",
                 "resource is dereferenced after "
                 "iree_clang_tidy_refcount_void_release releases it",
                 "resources is dereferenced after "
@@ -88,6 +106,12 @@ class RefCountChecksTest(clang_tidy_test.ClangTidyAssertions):
                 "iree_clang_tidy_refcount_void_release releases it",
                 "released_before_wait is used after "
                 "iree_clang_tidy_refcount_void_release releases it",
+                "derived_resource is dereferenced after "
+                "iree_clang_tidy_derived_release releases it",
+                "opaque_resource is used after "
+                "iree_clang_tidy_opaque_release releases it",
+                "erased_resource is used after "
+                "iree_clang_tidy_erased_release releases it",
                 "[iree-refcount-lifecycle]",
             ],
         )
@@ -112,7 +136,18 @@ class RefCountChecksTest(clang_tidy_test.ClangTidyAssertions):
                 "iree_clang_tidy_refcount_local_counter_release",
                 "iree_clang_tidy_refcount_lookup_retain",
                 "iree_clang_tidy_refcounted_create",
-                "iree_clang_tidy_plain_allocate",
+                "iree_clang_tidy_virtual_buffer_create",
+                "iree_clang_tidy_private_resource_create",
+                "iree_clang_tidy_refcounted_with_base_create",
+                "iree_clang_tidy_created_opaque_create",
+                "iree_clang_tidy_created_later_create",
+                "iree_clang_tidy_created_handle_create",
+                "iree_clang_tidy_stream_create",
+                "iree_clang_tidy_context_stream_create",
+                "iree_clang_tidy_context_create",
+                "amdf_clang_tidy_native_create",
+                "amdf_clang_tidy_opaque_create",
+                "factory iree_clang_tidy_plain_allocate ",
                 "iree_clang_tidy_refcounted_output_name_ignored_allocate",
                 "iree_clang_tidy_refcounted_initialize",
                 "iree_clang_tidy_virtual_memory_release",
@@ -121,6 +156,8 @@ class RefCountChecksTest(clang_tidy_test.ClangTidyAssertions):
                 "awaited_resource",
                 "waited_resource",
                 "side_counter",
+                "iree_clang_tidy_lease_release",
+                "iree_clang_tidy_lock_release",
             ],
         )
 

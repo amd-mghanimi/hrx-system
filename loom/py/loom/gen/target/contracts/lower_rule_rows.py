@@ -10,17 +10,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from loom.dsl import EncodingOperandSummaryDef
 from loom.gen.support.c import c_i64_literal as _c_i64_literal
-from loom.gen.support.string_pool import CStringPool
 from loom.gen.target.contracts import lower_rule_spelling
 from loom.target.contracts import (
     LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS,
     LOWER_EMIT_FLAG_RESULT_TYPE_PATTERN,
     LOWER_RULE_FLAG_CONTRACT_ONLY,
+    LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH,
     LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS,
+    LOWER_RULE_PRIORITY_SHIFT,
     LOWER_SOURCE_MEMORY_NONE,
     CompiledLowerRuleSet,
     ContractFragment,
+    DescriptorOperandMaterialization,
     GuardKind,
     LowerAttrCopy,
     LowerAttrCopyKind,
@@ -38,17 +41,19 @@ from loom.target.contracts import (
     SourceMemoryAddressMaterializer,
     SourceMemoryByteOffsetMaterializer,
     SourceMemoryIntegerConversion,
+    SourceMemoryRejectionReason,
     SourceNodeRelation,
     TypePattern,
 )
 from loom.target.contracts.diagnostics import DiagnosticParamKind
-from loom.target.low_descriptors import Descriptor
+from loom.target.low_descriptors import Descriptor, descriptor_stable_id
 
 _GUARD_VALUE_REF_KINDS = frozenset(
     (
         GuardKind.VALUE_TYPE,
         GuardKind.VALUE_MATERIALIZABLE,
         GuardKind.LOW_VALUE_REGISTER_CLASS,
+        GuardKind.LOW_VALUE_REPRESENTATION,
         GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT,
         GuardKind.VALUE_STATIC_DIM0_MULTIPLE,
         GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT_EQ,
@@ -56,30 +61,71 @@ _GUARD_VALUE_REF_KINDS = frozenset(
         GuardKind.VALUE_SIGNED_BIT_COUNT,
         GuardKind.VALUE_UNSIGNED_BIT_COUNT,
         GuardKind.VALUE_EXACT_I64,
+        GuardKind.VALUE_NOT_EXACT_I64,
         GuardKind.VALUE_EXACT_POWER_OF_TWO_I64,
-        GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD,
+        GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+        GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND,
         GuardKind.VALUE_EXACT_FLOAT,
+        GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
+        GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+        GuardKind.VALUE_NOT_NAN,
+        GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL,
         GuardKind.VALUE_I64_RANGE,
         GuardKind.VALUE_I64_RANGE_LE,
         GuardKind.VALUE_I64_RANGE_GE,
+        GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
         GuardKind.VALUE_FLOAT_EQUALS,
         GuardKind.VALUE_STORAGE_ELEMENT_FORMAT,
+        GuardKind.VALUE_STORAGE_OPERAND_SCHEMA,
         GuardKind.VALUE_MEMORY_SPACE,
         GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
         GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
         GuardKind.VALUE_NO_USES,
+        GuardKind.VALUE_NO_USES_AFTER,
         GuardKind.VECTOR_EXTRACT_SHAPE,
     )
 )
 
 _GUARD_OTHER_VALUE_REF_KINDS = frozenset(
     (
+        GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+        GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
         GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT_EQ,
         GuardKind.VALUE_STATIC_ELEMENT_COUNT_EQ,
         GuardKind.VALUE_I64_RANGE_LE,
         GuardKind.VALUE_I64_RANGE_GE,
         GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
         GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
+        GuardKind.VECTOR_EXTRACT_SHAPE,
+    )
+)
+
+_LOWER_RULE_FLAG_WIDE_PRIMARY_EMIT = 1 << 3
+_LOWER_RULE_PRIMARY_EMIT_ORDINAL_MAX = 0xFE
+LOWER_RULE_REPORT_KEY_ORDINAL_MAX = 0xFE
+
+_GUARD_NO_PAYLOAD_KINDS = frozenset(
+    (
+        GuardKind.TARGET_WHOLE_SUBGROUP,
+        GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+        GuardKind.VALUE_TYPE,
+        GuardKind.ATTR_KIND,
+        GuardKind.DESCRIPTOR_AVAILABLE,
+        GuardKind.VALUE_MATERIALIZABLE,
+        GuardKind.LOW_VALUE_REGISTER_CLASS,
+        GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT_EQ,
+        GuardKind.VALUE_STATIC_ELEMENT_COUNT_EQ,
+        GuardKind.VALUE_EXACT_I64,
+        GuardKind.VALUE_NOT_EXACT_I64,
+        GuardKind.VALUE_EXACT_FLOAT,
+        GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
+        GuardKind.VALUE_NOT_NAN,
+        GuardKind.VALUE_I64_RANGE_LE,
+        GuardKind.VALUE_I64_RANGE_GE,
+        GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
+        GuardKind.VALUE_STORAGE_OPERAND_SCHEMA,
+        GuardKind.VALUE_NO_USES,
+        GuardKind.VALUE_NO_USES_AFTER,
         GuardKind.VECTOR_EXTRACT_SHAPE,
     )
 )
@@ -94,12 +140,45 @@ _ATTR_COPY_VALUE_REF_KINDS = frozenset(
         LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER,
         LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32,
         LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_SHIFT,
+        LowerAttrCopyKind.VALUE_I32_DIVISOR_MAGIC_MULTIPLIER,
+        LowerAttrCopyKind.VALUE_I32_DIVISOR_MAGIC_SHIFT,
         LowerAttrCopyKind.VALUE_I32_AS_U32_BITS,
         LowerAttrCopyKind.VALUE_FLOAT_BITS,
         LowerAttrCopyKind.VALUE_FLOAT_AS_F32_I32,
+        LowerAttrCopyKind.VALUE_FLOAT_AS_F64_I64,
         LowerAttrCopyKind.VALUE_FLOAT_AS_F64_I32_WORD,
+        LowerAttrCopyKind.VALUE_FLOAT_POWER_OF_TWO_EXPONENT,
+        LowerAttrCopyKind.VALUE_FLOAT_POWER_OF_TWO_NEGATED_EXPONENT,
         LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_SCALED,
         LowerAttrCopyKind.VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED,
+        LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK,
+    )
+)
+
+_ATTR_COPY_SOURCE_ATTR_KINDS = frozenset(
+    (
+        LowerAttrCopyKind.DIRECT,
+        LowerAttrCopyKind.ENUM_ORDINAL,
+        LowerAttrCopyKind.ENUM_REMAP,
+        LowerAttrCopyKind.I64_LOG2,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+        LowerAttrCopyKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_QUOTIENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_REMAINDER,
+        LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
+        LowerAttrCopyKind.ATTRS_PACK_CONSECUTIVE,
+        LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
+        LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
+        LowerAttrCopyKind.I64_LOW_BIT_MASK,
+        LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_MASK,
+        LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_CLEAR_MASK,
+        LowerAttrCopyKind.I64_LITERAL_MINUS_ATTR,
+        LowerAttrCopyKind.I64_LITERAL_MINUS_ATTRS,
+        LowerAttrCopyKind.I64_ATTR_MINUS_LITERAL,
     )
 )
 
@@ -114,6 +193,18 @@ def guard_uses_other_value_ref(kind: GuardKind) -> bool:
 
 def attr_copy_uses_value_ref(kind: LowerAttrCopyKind) -> bool:
     return kind in _ATTR_COPY_VALUE_REF_KINDS
+
+
+def attr_copy_uses_source_attr(kind: LowerAttrCopyKind) -> bool:
+    return kind in _ATTR_COPY_SOURCE_ATTR_KINDS
+
+
+def attr_copy_uses_other_value_ref(kind: LowerAttrCopyKind) -> bool:
+    return kind in (
+        LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER,
+        LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32,
+        LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_SHIFT,
+    )
 
 
 def diagnostic_has_implicit_target_context(row: LowerDiagnostic) -> bool:
@@ -194,6 +285,8 @@ def source_node_row(row: LowerSourceNode) -> list[str]:
     relation_names = {
         SourceNodeRelation.ADJACENT_UNIQUE_USER: ("LOOM_LOW_LOWER_SOURCE_NODE_ADJACENT_UNIQUE_USER"),
         SourceNodeRelation.ADJACENT_DEFINITION: ("LOOM_LOW_LOWER_SOURCE_NODE_ADJACENT_DEFINITION"),
+        SourceNodeRelation.EXCLUSIVE_USER: ("LOOM_LOW_LOWER_SOURCE_NODE_EXCLUSIVE_USER"),
+        SourceNodeRelation.EXCLUSIVE_DEFINITION: ("LOOM_LOW_LOWER_SOURCE_NODE_EXCLUSIVE_DEFINITION"),
     }
     _append_field(fields, "relation", relation_names[row.relation], always=True)
     _append_field(
@@ -229,6 +322,7 @@ def source_node_row(row: LowerSourceNode) -> list[str]:
 def source_memory_row(
     row: LowerSourceMemory,
     *,
+    shape_index: int,
     byte_offset_materializer_ordinal: int,
     address_materializer_ordinal: int,
     diagnostics_index: int,
@@ -246,6 +340,10 @@ def source_memory_row(
         flags.append("LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_DYNAMIC_STRIDE_VALUES")
     if constraint.preserve_source_index:
         flags.append("LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_PRESERVE_SOURCE_INDEX")
+    if constraint.require_subgroup_uniform:
+        flags.append("LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_SUBGROUP_UNIFORM")
+    if constraint.reuse_view_base:
+        flags.append("LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_REUSE_VIEW_BASE")
     if constraint.cache_policy_build_flags is None:
         flags.append("LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_CACHE_POLICY_ANY")
     if flags:
@@ -286,25 +384,9 @@ def source_memory_row(
         constraint.vector_lane_count,
         always=True,
     )
-    _append_field(
-        fields,
-        "vector_lane_byte_stride",
-        _c_i64_literal(constraint.vector_lane_byte_stride),
-        always=True,
-    )
-    _append_field(
-        fields,
-        "static_byte_offset_minimum",
-        _c_i64_literal(constraint.static_byte_offset_minimum),
-        always=True,
-    )
-    _append_field(
-        fields,
-        "static_byte_offset_maximum",
-        _c_i64_literal(constraint.static_byte_offset_maximum),
-        always=True,
-    )
+    _append_field(fields, "shape_index", shape_index, always=True)
     _append_field(fields, "minimum_alignment", constraint.minimum_alignment)
+    _append_field(fields, "element_stride_unsigned_bit_count", constraint.element_stride_unsigned_bit_count)
     _append_field(
         fields,
         "dynamic_term_count",
@@ -327,12 +409,11 @@ def source_memory_row(
         lower_rule_spelling.SOURCE_MEMORY_DYNAMIC_INDEX_SOURCE_C_NAMES[constraint.dynamic_index_source],
         default="LOOM_LOW_SOURCE_MEMORY_DYNAMIC_INDEX_SOURCE_NONE",
     )
-    if constraint.dynamic_byte_stride is not None:
-        _append_field(
-            fields,
-            "dynamic_byte_stride",
-            _c_i64_literal(constraint.dynamic_byte_stride),
-        )
+    _append_field(
+        fields,
+        "byte_offset_unsigned_bit_count",
+        constraint.byte_offset_unsigned_bit_count,
+    )
     _append_field(
         fields,
         "dynamic_offset_unsigned_bit_count",
@@ -358,31 +439,45 @@ def source_memory_row(
     return fields
 
 
-def source_memory_diagnostic_indices(
-    row: LowerSourceMemory,
-) -> tuple[int, int, int, int]:
+def source_memory_shape(row: LowerSourceMemory) -> tuple[int, int, int, int]:
+    constraint = row.constraint
     return (
-        row.diagnostic_index,
-        row.dynamic_offset_diagnostic_index,
-        row.address_layout_diagnostic_index,
-        row.address_diagnostic_index,
+        constraint.vector_lane_byte_stride,
+        constraint.static_byte_offset_minimum,
+        constraint.static_byte_offset_maximum,
+        0 if constraint.dynamic_byte_stride is None else constraint.dynamic_byte_stride,
     )
 
 
-def source_memory_diagnostics_row(
-    indices: tuple[int, int, int, int],
-) -> list[str]:
-    (
-        constraint_diagnostic_index,
-        dynamic_offset_diagnostic_index,
-        address_layout_diagnostic_index,
-        address_diagnostic_index,
-    ) = indices
+def source_memory_shape_row(shape: tuple[int, int, int, int]) -> list[str]:
     return [
-        ".constraint_diagnostic_index = " + lower_rule_spelling.diagnostic_index(constraint_diagnostic_index),
-        ".dynamic_offset_diagnostic_index = " + lower_rule_spelling.diagnostic_index(dynamic_offset_diagnostic_index),
-        ".address_layout_diagnostic_index = " + lower_rule_spelling.diagnostic_index(address_layout_diagnostic_index),
-        ".address_diagnostic_index = " + lower_rule_spelling.diagnostic_index(address_diagnostic_index),
+        f".vector_lane_byte_stride = {_c_i64_literal(shape[0])}",
+        f".static_byte_offset_minimum = {_c_i64_literal(shape[1])}",
+        f".static_byte_offset_maximum = {_c_i64_literal(shape[2])}",
+        f".dynamic_byte_stride = {_c_i64_literal(shape[3])}",
+    ]
+
+
+def source_memory_diagnostic_indices(
+    row: LowerSourceMemory,
+) -> tuple[int, ...]:
+    if len(row.rejection_diagnostic_indices) != len(SourceMemoryRejectionReason):
+        raise ValueError("source-memory rejection diagnostic count disagrees with its reasons")
+    return row.rejection_diagnostic_indices
+
+
+def source_memory_diagnostics_row(
+    indices: tuple[int, ...],
+) -> list[str]:
+    if len(indices) != len(SourceMemoryRejectionReason):
+        raise ValueError("source-memory rejection diagnostic count disagrees with its reasons")
+    return [
+        f".rejection_diagnostic_indices[LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_{reason.name}] = " + lower_rule_spelling.diagnostic_index(index)
+        for reason, index in zip(
+            SourceMemoryRejectionReason,
+            indices,
+            strict=True,
+        )
     ]
 
 
@@ -421,6 +516,8 @@ def source_memory_byte_offset_materializer_row(
         f".constant_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.constant)}",
         f".add_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.add)}",
         f".multiply_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.multiply)}",
+        f".multiply_add_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.multiply_add)}",
+        f".static_bias_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.static_bias)}",
         f".shift_left_descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.shift_left)}",
     ]
 
@@ -462,6 +559,8 @@ def descriptor_ref_keys(table: CompiledLowerRuleSet, source_contract: ContractFr
                     materializer.add,
                     materializer.multiply,
                     materializer.shift_left,
+                    materializer.multiply_add,
+                    materializer.static_bias,
                     *(conversion.descriptor for conversion in materializer.integer_conversions),
                 )
                 if descriptor is not None
@@ -484,8 +583,8 @@ def descriptor_ref_keys(table: CompiledLowerRuleSet, source_contract: ContractFr
     return tuple(descriptor.key for descriptor in source_contract.descriptor_set.descriptors if descriptor.key in used_keys)
 
 
-def descriptor_ref_row(key_string_ref: str) -> list[str]:
-    return [f".key_string_ref = {key_string_ref}"]
+def descriptor_ref_row(key: str) -> list[str]:
+    return [f".stable_id = UINT64_C(0x{descriptor_stable_id(key):016x})"]
 
 
 def _descriptor_ref_index(descriptor_refs: Mapping[str, int], descriptor: Descriptor | None) -> int:
@@ -495,55 +594,115 @@ def _descriptor_ref_index(descriptor_refs: Mapping[str, int], descriptor: Descri
 
 
 def _rule_flags_c_expression(flags: int) -> str:
-    if flags == LOWER_RULE_FLAG_CONTRACT_ONLY:
-        return "LOOM_LOW_LOWER_RULE_FLAG_CONTRACT_ONLY"
-    if flags == LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS:
-        return "LOOM_LOW_LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS"
-    if flags == (LOWER_RULE_FLAG_CONTRACT_ONLY | LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS):
-        return "LOOM_LOW_LOWER_RULE_FLAG_CONTRACT_ONLY | LOOM_LOW_LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS"
-    return f"0x{flags:X}"
+    names = (
+        (LOWER_RULE_FLAG_CONTRACT_ONLY, "LOOM_LOW_LOWER_RULE_FLAG_CONTRACT_ONLY"),
+        (LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS, "LOOM_LOW_LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS"),
+        (LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH, "LOOM_LOW_LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH"),
+        (_LOWER_RULE_FLAG_WIDE_PRIMARY_EMIT, "LOOM_LOW_LOWER_RULE_FLAG_WIDE_PRIMARY_EMIT"),
+    )
+    parts = [name for mask, name in names if flags & mask]
+    known_flags = sum(mask for mask, _ in names)
+    priority = flags >> LOWER_RULE_PRIORITY_SHIFT
+    if priority:
+        parts.append(f"LOOM_LOW_LOWER_RULE_PRIORITY({priority})")
+        known_flags |= 0xF << LOWER_RULE_PRIORITY_SHIFT
+    remaining_flags = flags & ~known_flags
+    if remaining_flags:
+        parts.append(f"0x{remaining_flags:X}")
+    return " | ".join(parts) if parts else "0"
 
 
-def guard_row(descriptor_refs: Mapping[str, int], row: LowerGuard) -> list[str]:
+def guard_row(
+    descriptor_refs: Mapping[str, int],
+    row: LowerGuard,
+    *,
+    storage_operand_schema_ordinals: Mapping[EncodingOperandSummaryDef, int] | None = None,
+    payload_ordinal: int = 0,
+) -> list[str]:
     fields: list[str] = []
     _append_field(fields, "kind", lower_rule_spelling.GUARD_KIND_C_NAMES[row.kind], always=True)
 
     if guard_uses_value_ref(row.kind):
-        _append_field(fields, "value_ref_index", row.value_ref_index, always=True)
+        _append_field(
+            fields,
+            "selector.value.value_ref_index",
+            row.value_ref_index,
+            always=True,
+        )
     if guard_uses_other_value_ref(row.kind):
         _append_field(
             fields,
-            "other_value_ref_index",
+            "selector.value.other_value_ref_index",
             row.other_value_ref_index,
             always=True,
         )
 
     if row.kind in (
-        GuardKind.ATTR_KIND,
-        GuardKind.ENUM_ATTR_EQUALS,
-        GuardKind.I64_RANGE,
-        GuardKind.OPERAND_SEGMENT_COUNT,
-        GuardKind.I64_ARRAY_COUNT,
-        GuardKind.I64_ARRAY_ELEMENT_RANGE,
-        GuardKind.I64_ARRAY_ELEMENTS_RANGE,
         GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
         GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
         GuardKind.VECTOR_EXTRACT_SHAPE,
     ):
-        _append_field(fields, "attr_index", row.attr_index, always=True)
+        _append_field(
+            fields,
+            "selector.value.parameter_index",
+            row.attr_index,
+            always=True,
+        )
+    elif row.kind in (
+        GuardKind.ATTR_KIND,
+        GuardKind.ENUM_ATTR_EQUALS,
+        GuardKind.ENUM_ATTR_IN,
+        GuardKind.I64_RANGE,
+        GuardKind.I64_ATTRS_SUM_EQUALS,
+        GuardKind.TARGET_WHOLE_SUBGROUP,
+        GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+        GuardKind.OPERAND_SEGMENT_COUNT,
+        GuardKind.OPERAND_SEGMENT_EXACT_BITS,
+        GuardKind.I64_ARRAY_COUNT,
+        GuardKind.I64_ARRAY_ELEMENT_RANGE,
+        GuardKind.I64_ARRAY_ELEMENTS_RANGE,
+    ):
+        _append_field(
+            fields,
+            "selector.attribute.attr_index",
+            row.attr_index,
+            always=True,
+        )
 
     if row.kind == GuardKind.VALUE_TYPE:
         _append_field(
             fields,
-            "index",
-            f"{{.type_pattern_index = {row.type_pattern_index}}}",
+            "selector.value.parameter_index",
+            row.type_pattern_index,
             always=True,
         )
     elif row.kind == GuardKind.I64_ARRAY_ELEMENT_RANGE:
         _append_field(
             fields,
-            "index",
-            f"{{.element_index = {row.u64}}}",
+            "selector.attribute.element_index",
+            row.u64,
+            always=True,
+        )
+    elif row.kind in (
+        GuardKind.I64_ATTRS_SUM_EQUALS,
+        GuardKind.TARGET_WHOLE_SUBGROUP,
+        GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+    ):
+        _append_field(
+            fields,
+            "selector.attribute.other_attr_index",
+            row.other_attr_index,
+            always=True,
+        )
+    elif row.kind == GuardKind.VALUE_STORAGE_OPERAND_SCHEMA:
+        if row.storage_operand_schema is None:
+            raise ValueError("storage operand-schema guard is missing its schema")
+        if storage_operand_schema_ordinals is None:
+            raise ValueError("storage operand-schema guard is missing its table")
+        _append_field(
+            fields,
+            "selector.value.parameter_index",
+            storage_operand_schema_ordinals[row.storage_operand_schema],
             always=True,
         )
     if row.diagnostic_index != 0xFFFF:
@@ -555,19 +714,46 @@ def guard_row(descriptor_refs: Mapping[str, int], row: LowerGuard) -> list[str]:
         )
     if row.kind == GuardKind.ATTR_KIND:
         _append_field(fields, "attr_kind", lower_rule_spelling.attr_kind_c_name(row.attr_kind), always=True)
+    if row.kind == GuardKind.DESCRIPTOR_AVAILABLE:
+        _append_field(
+            fields,
+            "selector.descriptor.descriptor_ref",
+            _descriptor_ref_index(descriptor_refs, row.descriptor),
+            always=True,
+        )
+    if row.kind == GuardKind.LOW_VALUE_REGISTER_CLASS:
+        _append_field(
+            fields,
+            "selector.value.parameter_index",
+            row.register_class_id,
+            always=True,
+        )
+    if payload_ordinal:
+        _append_field(fields, "payload_ordinal", payload_ordinal, always=True)
+    return fields
+
+
+def guard_payload_row(row: LowerGuard) -> list[str]:
+    """Returns the kind-selected immediate payload stored outside a guard."""
+
     u64_payload: str | None = None
     if row.kind in (
         GuardKind.ENUM_ATTR_EQUALS,
+        GuardKind.ENUM_ATTR_IN,
         GuardKind.OPERAND_SEGMENT_COUNT,
+        GuardKind.OPERAND_SEGMENT_EXACT_BITS,
         GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT,
+        GuardKind.LOW_VALUE_REPRESENTATION,
         GuardKind.VALUE_STATIC_DIM0_MULTIPLE,
         GuardKind.I64_ARRAY_COUNT,
         GuardKind.VALUE_SIGNED_BIT_COUNT,
         GuardKind.VALUE_UNSIGNED_BIT_COUNT,
-        GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD,
+        GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+        GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND,
         GuardKind.VALUE_FLOAT_EQUALS,
         GuardKind.INSTANCE_FLAGS_HAS_ALL,
         GuardKind.INSTANCE_FLAGS_HAS_NONE,
+        GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL,
     ):
         u64_payload = lower_rule_spelling.u64_c_literal(row.u64)
     elif row.kind == GuardKind.VALUE_STORAGE_ELEMENT_FORMAT:
@@ -577,50 +763,73 @@ def guard_row(descriptor_refs: Mapping[str, int], row: LowerGuard) -> list[str]:
     elif row.kind == GuardKind.VALUE_MEMORY_SPACE:
         u64_payload = lower_rule_spelling.memory_space_mask(row.memory_spaces)
     if u64_payload is not None:
-        _append_field(
-            fields,
-            "payload",
-            f"{{.u64 = {u64_payload}}}",
-            always=True,
-        )
-    elif row.kind == GuardKind.VALUE_EXACT_POWER_OF_TWO_I64:
-        _append_field(
-            fields,
-            "payload",
-            f"{{.addend = {_c_i64_literal(row.addend)}}}",
-            always=True,
-        )
-    if row.kind == GuardKind.DESCRIPTOR_AVAILABLE:
-        _append_field(
-            fields,
-            "descriptor_ref",
-            _descriptor_ref_index(descriptor_refs, row.descriptor),
-            always=True,
-        )
-    if row.kind == GuardKind.LOW_VALUE_REGISTER_CLASS:
-        _append_field(fields, "register_class_id", row.register_class_id, always=True)
+        return [f".u64 = {u64_payload}"]
+    if row.kind == GuardKind.VALUE_EXACT_POWER_OF_TWO_I64:
+        return [f".addend = {_c_i64_literal(row.addend)}"]
+    if row.kind == GuardKind.I64_ATTRS_SUM_EQUALS:
+        return [f".i64 = {_c_i64_literal(row.literal_i64)}"]
     if row.kind in (
         GuardKind.I64_RANGE,
         GuardKind.I64_ARRAY_ELEMENT_RANGE,
         GuardKind.I64_ARRAY_ELEMENTS_RANGE,
         GuardKind.VALUE_I64_RANGE,
+        GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+        GuardKind.TARGET_SUBGROUP_SIZE_RANGE,
     ):
-        _append_field(
-            fields,
-            "payload",
-            f"{{.i64_range = {{.minimum = {_c_i64_literal(row.minimum_i64)}, .maximum = {_c_i64_literal(row.maximum_i64)}}}}}",
-            always=True,
-        )
-    elif row.kind in (
+        return [f".i64_range = {{.minimum = {_c_i64_literal(row.minimum_i64)}, .maximum = {_c_i64_literal(row.maximum_i64)}}}"]
+    if row.kind in (
         GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
         GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
     ):
+        return [f".packed_integer = {{.storage_payload_multiple = UINT32_C({row.u64}), .storage_unit_bit_count = UINT32_C({row.minimum_i64}), .maximum_lane_count = UINT32_C({row.maximum_i64})}}"]
+    if row.kind in _GUARD_NO_PAYLOAD_KINDS:
+        return []
+    raise ValueError(f"unclassified lower guard payload kind: {row.kind.value}")
+
+
+def storage_operand_schema_row(schema: EncodingOperandSummaryDef) -> list[str]:
+    """Returns one exact encoded-operand schema initializer."""
+
+    fields: list[str] = []
+    for field_name in (
+        "element_format",
+        "scale_format",
+        "secondary_scale_format",
+    ):
+        value = getattr(schema, field_name)
+        _append_field(fields, field_name, lower_rule_spelling.u64_c_literal(value))
+    for field_name in (
+        "payload_packing",
+        "scale_topology",
+        "affine_policy",
+        "rounding_policy",
+        "codebook_policy",
+        "sparsity_policy",
+    ):
+        _append_field(fields, field_name, getattr(schema, field_name))
+    if schema.zero_scale_fallback:
         _append_field(
             fields,
-            "payload",
-            f"{{.packed_integer = {{.storage_payload_multiple = UINT32_C({row.u64}), .storage_unit_bit_count = UINT32_C({row.minimum_i64}), .maximum_lane_count = UINT32_C({row.maximum_i64})}}}}",
-            always=True,
+            "flags",
+            "LOOM_VALUE_FACT_ENCODED_OPERAND_FLAG_ZERO_SCALE_FALLBACK",
         )
+    if schema.sparsity_group_nonzero_element_count or schema.sparsity_group_element_count:
+        _append_field(
+            fields,
+            "sparsity_group",
+            f"{{.nonzero_element_count = {schema.sparsity_group_nonzero_element_count}, .element_count = {schema.sparsity_group_element_count}}}",
+        )
+    _append_field(fields, "payload_register_count", schema.payload_register_count)
+    _append_field(fields, "payload_element_count", schema.payload_element_count)
+    if schema.scale_group_element_count or schema.scale_group_shape:
+        shape = ", ".join(str(extent) for extent in schema.scale_group_shape)
+        shape_field = f", .shape = {{{shape}}}" if shape else ""
+        _append_field(
+            fields,
+            "scale_group",
+            f"{{.element_count = {schema.scale_group_element_count}{shape_field}}}",
+        )
+    _append_field(fields, "scale_operand_count", schema.scale_operand_count)
     return fields
 
 
@@ -639,27 +848,34 @@ def attr_copy_row(
         target_name_string_ref,
         always=True,
     )
-    if row.kind in (
-        LowerAttrCopyKind.DIRECT,
-        LowerAttrCopyKind.ENUM_ORDINAL,
-        LowerAttrCopyKind.I64_LOG2,
-        LowerAttrCopyKind.I64_ARRAY_ELEMENT,
-        LowerAttrCopyKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
-        LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
-        LowerAttrCopyKind.ATTRS_PACK_CONSECUTIVE,
-        LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
-        LowerAttrCopyKind.I64_LOW_BIT_MASK,
-        LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_MASK,
-        LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_CLEAR_MASK,
-        LowerAttrCopyKind.I64_LITERAL_MINUS_ATTR,
-        LowerAttrCopyKind.I64_LITERAL_MINUS_ATTRS,
-        LowerAttrCopyKind.I64_ATTR_MINUS_LITERAL,
-    ):
+    _append_field(fields, "source_node_index", row.source_node_index)
+    if attr_copy_uses_source_attr(row.kind):
         _append_field(fields, "source_attr_index", row.source_attr_index, always=True)
+    if row.kind == LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY:
+        _append_field(
+            fields,
+            "source_operand_field_index",
+            row.source_operand_field_index,
+            always=True,
+        )
+    if row.kind == LowerAttrCopyKind.READ_ONLY_DATA_LITERAL:
+        _append_field(
+            fields,
+            "literal_data_offset",
+            row.literal_data_offset,
+            always=True,
+        )
+        _append_field(
+            fields,
+            "literal_data_length",
+            row.literal_data_length,
+            always=True,
+        )
     if row.kind in (
         LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_MASK,
         LowerAttrCopyKind.I64_SHIFTED_LOW_BIT_CLEAR_MASK,
         LowerAttrCopyKind.I64_LITERAL_MINUS_ATTRS,
+        LowerAttrCopyKind.ENUM_REMAP,
     ):
         _append_field(
             fields,
@@ -670,12 +886,19 @@ def attr_copy_row(
     if row.kind in (
         LowerAttrCopyKind.I64_ARRAY_ELEMENT,
         LowerAttrCopyKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+        LowerAttrCopyKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_QUOTIENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_REMAINDER,
         LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
         LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
+        LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
         LowerAttrCopyKind.VALUE_EXACT_I64_I32_WORD,
         LowerAttrCopyKind.VALUE_FLOAT_AS_F64_I32_WORD,
         LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_SCALED,
         LowerAttrCopyKind.VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED,
+        LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK,
+        LowerAttrCopyKind.ENUM_REMAP,
     ):
         _append_field(
             fields,
@@ -687,8 +910,12 @@ def attr_copy_row(
         LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
         LowerAttrCopyKind.ATTRS_PACK_CONSECUTIVE,
         LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
+        LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
         LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_SCALED,
         LowerAttrCopyKind.VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED,
+        LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK,
+        LowerAttrCopyKind.ENUM_REMAP,
     ):
         _append_field(
             fields,
@@ -699,6 +926,11 @@ def attr_copy_row(
     if row.kind in (
         LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
         LowerAttrCopyKind.ATTRS_PACK_CONSECUTIVE,
+        LowerAttrCopyKind.ENUM_REMAP,
+        LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+        LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY,
     ):
         _append_field(
             fields,
@@ -709,10 +941,17 @@ def attr_copy_row(
     _append_field(fields, "target_bit_offset", row.target_bit_offset)
     if attr_copy_uses_value_ref(row.kind):
         _append_field(fields, "value_ref_index", row.value_ref_index, always=True)
+    if attr_copy_uses_other_value_ref(row.kind):
+        _append_field(fields, "other_value_ref_index", row.other_value_ref_index, always=True)
     if row.kind in (
         LowerAttrCopyKind.I64_LITERAL,
         LowerAttrCopyKind.I64_ARRAY_ELEMENT_PLUS_LITERAL,
+        LowerAttrCopyKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_QUOTIENT,
+        LowerAttrCopyKind.I64_ARRAY_ELEMENT_REMAINDER,
         LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
+        LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+        LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
         LowerAttrCopyKind.I64_LITERAL_MINUS_ATTR,
         LowerAttrCopyKind.I64_LITERAL_MINUS_ATTRS,
         LowerAttrCopyKind.I64_ATTR_MINUS_LITERAL,
@@ -723,6 +962,8 @@ def attr_copy_row(
         LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER,
         LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_SCALED,
         LowerAttrCopyKind.VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED,
+        LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK,
+        LowerAttrCopyKind.ENUM_REMAP,
     ):
         _append_field(
             fields,
@@ -749,17 +990,25 @@ def tied_result_row(row: LowerTiedResult) -> list[str]:
     return fields
 
 
-def emit_row(descriptor_refs: Mapping[str, int], row: LowerEmit) -> list[str]:
+def emit_ref_row(descriptor_refs: Mapping[str, int], row: LowerEmit, emit_index: int) -> list[str]:
+    return [
+        f".descriptor_ref = {_descriptor_ref_index(descriptor_refs, row.descriptor)}",
+        f".emit_index = {emit_index}",
+    ]
+
+
+def emit_row(row: LowerEmit) -> list[str]:
     fields: list[str] = []
     flags = lower_rule_spelling.emit_flags(row.flags)
     _append_field(fields, "kind", lower_rule_spelling.EMIT_KIND_C_NAMES[row.kind], always=True)
     _append_field(fields, "flags", flags)
-    _append_field(
-        fields,
-        "descriptor_ref",
-        _descriptor_ref_index(descriptor_refs, row.descriptor),
-        always=True,
-    )
+    if row.operand_materialization is not DescriptorOperandMaterialization.DIRECT:
+        _append_field(
+            fields,
+            "operand_materialization",
+            lower_rule_spelling.OPERAND_MATERIALIZATION_C_NAMES[row.operand_materialization],
+            always=True,
+        )
     if row.operand_ref_count:
         _append_field(fields, "operand_ref_start", row.operand_ref_start, always=True)
         _append_field(fields, "operand_ref_count", row.operand_ref_count, always=True)
@@ -802,6 +1051,7 @@ def emit_row(descriptor_refs: Mapping[str, int], row: LowerEmit) -> list[str]:
             always=True,
         )
         _append_field(fields, "attr_copy_count", row.attr_copy_count, always=True)
+    _append_field(fields, "has_read_only_data_attributes", int(row.has_read_only_data_attributes))
     if row.tied_result_count:
         _append_field(
             fields,
@@ -837,16 +1087,23 @@ def emit_row(descriptor_refs: Mapping[str, int], row: LowerEmit) -> list[str]:
 def rule_row(
     row: LowerRule,
     report_key_ordinals: Mapping[str, int],
+    primary_descriptor_feature_class: int = 0,
 ) -> list[str]:
     fields: list[str] = []
-    _append_field(fields, "source_op_kind", lower_rule_spelling.op_c_name(row.source_op), always=True)
-    if row.flags:
-        _append_field(fields, "flags", _rule_flags_c_expression(row.flags), always=True)
+    flags = row.flags
+    primary_emit = row.primary_emit_ordinal
+    if primary_emit != 0xFFFF and primary_emit <= _LOWER_RULE_PRIMARY_EMIT_ORDINAL_MAX:
+        primary_emit = f"LOOM_LOW_LOWER_RULE_PRIMARY_EMIT({primary_emit}, {primary_descriptor_feature_class})"
+    elif primary_emit != 0xFFFF:
+        flags |= _LOWER_RULE_FLAG_WIDE_PRIMARY_EMIT
+    if flags:
+        _append_field(fields, "flags", _rule_flags_c_expression(flags), always=True)
     if row.report_key:
+        report_key_ordinal = report_key_ordinals[row.report_key]
         _append_field(
             fields,
             "report_key_ordinal",
-            report_key_ordinals[row.report_key],
+            (report_key_ordinal if report_key_ordinal <= LOWER_RULE_REPORT_KEY_ORDINAL_MAX else "LOOM_LOW_LOWER_RULE_REPORT_KEY_WIDE"),
             always=True,
         )
     _append_field(fields, "temporary_count", row.temporary_count)
@@ -865,8 +1122,8 @@ def rule_row(
         _append_field(fields, "emit_count", row.emit_count, always=True)
         _append_field(
             fields,
-            "metadata.emit.primary_emit_ordinal",
-            row.primary_emit_ordinal,
+            "metadata.emit.primary_emit",
+            primary_emit,
             always=True,
         )
     if row.alias_ref_count:
@@ -898,6 +1155,15 @@ def rule_row(
     return fields
 
 
+def wide_report_key_row(rule_index: int, report_key_ordinal: int) -> list[str]:
+    """Emits one sparse wide report-key ordinal selected by rule index."""
+
+    return [
+        f".rule_index = {rule_index}",
+        f".report_key_ordinal = {report_key_ordinal}",
+    ]
+
+
 def span_row(row: LowerRuleSpan) -> list[str]:
     fields: list[str] = []
     _append_field(fields, "source_op_kind", lower_rule_spelling.op_c_name(row.source_op), always=True)
@@ -910,17 +1176,27 @@ def rule_set_row(
     *,
     table: CompiledLowerRuleSet,
     source_contract: ContractFragment,
-    string_pool: CStringPool,
-    string_data_name: str,
+    string_pool_initializer: str | None,
     spans_name: str,
     rules_name: str,
+    rule_root_producer_closure_bits: tuple[int, ...],
+    rule_root_producer_closure_bits_name: str,
+    primary_descriptor_feature_masks: tuple[int, ...],
+    primary_descriptor_feature_masks_name: str,
+    has_dynamic_primary_descriptor_features: bool,
     report_keys: tuple[str, ...],
     report_keys_name: str,
+    wide_report_keys: tuple[tuple[int, int], ...],
+    wide_report_keys_name: str,
     type_patterns_name: str,
+    type_pattern_ranges: tuple[object, ...],
+    type_pattern_ranges_name: str,
     value_refs_name: str,
     source_nodes_name: str,
     materializers_name: str,
     source_memories_name: str,
+    source_memory_shapes: tuple[object, ...],
+    source_memory_shapes_name: str,
     source_memory_diagnostics: tuple[object, ...],
     source_memory_diagnostics_name: str,
     source_memory_byte_offset_materializers: tuple[object, ...],
@@ -930,13 +1206,19 @@ def rule_set_row(
     descriptor_ref_keys: tuple[str, ...],
     descriptor_refs_name: str,
     diagnostic_param_rows: tuple[tuple[LowerDiagnosticParam, int], ...],
-    diagnostic_params_name: str,
+    diagnostic_param_kinds_name: str,
+    diagnostic_param_values_name: str,
     diagnostic_param_refs: tuple[int, ...],
     diagnostic_param_refs_name: str,
+    guard_payloads: tuple[tuple[str, ...], ...],
+    guard_payloads_name: str,
     guard_rows: tuple[LowerGuard, ...],
     guards_name: str,
+    storage_operand_schemas: tuple[EncodingOperandSummaryDef, ...],
+    storage_operand_schemas_name: str,
     guard_refs: tuple[int, ...],
     guard_refs_name: str,
+    literal_data_name: str,
     attr_copies_name: str,
     tied_results_name: str,
     emit_rows: tuple[LowerEmit, ...],
@@ -946,12 +1228,32 @@ def rule_set_row(
     diagnostics_name: str,
 ) -> list[str]:
     fields: list[str] = []
+    flags: list[str] = []
     if source_contract.target_contract_query:
-        fields.append(".flags = LOOM_LOW_LOWER_RULE_SET_FLAG_TARGET_CONTRACT_QUERY")
-    if string_pool.entries:
-        fields.append(f".string_pool = {{.data = {string_data_name}, .data_length = sizeof({string_data_name}) - 1}}")
+        flags.append("LOOM_LOW_LOWER_RULE_SET_FLAG_TARGET_CONTRACT_QUERY")
+    if any(
+        source_node.relation
+        in (
+            SourceNodeRelation.EXCLUSIVE_USER,
+            SourceNodeRelation.EXCLUSIVE_DEFINITION,
+        )
+        for source_node in table.source_nodes
+    ):
+        flags.append("LOOM_LOW_LOWER_RULE_SET_FLAG_NONLOCAL_SOURCE_GRAPHS")
+    if has_dynamic_primary_descriptor_features:
+        flags.append("LOOM_LOW_LOWER_RULE_SET_FLAG_DYNAMIC_PRIMARY_DESCRIPTOR_FEATURES")
+    if flags:
+        fields.append(f".flags = {' | '.join(flags)}")
     _append_table_fields(fields, "spans", table.spans, spans_name)
     _append_table_fields(fields, "rules", table.rules, rules_name)
+    if rule_root_producer_closure_bits:
+        fields.append(f".rule_root_producer_closure_bits = {rule_root_producer_closure_bits_name}")
+    _append_table_fields(
+        fields,
+        "primary_descriptor_feature_masks",
+        primary_descriptor_feature_masks,
+        primary_descriptor_feature_masks_name,
+    )
     _append_table_fields(
         fields,
         "report_key_string_refs",
@@ -960,9 +1262,21 @@ def rule_set_row(
     )
     _append_table_fields(
         fields,
+        "wide_report_keys",
+        wide_report_keys,
+        wide_report_keys_name,
+    )
+    _append_table_fields(
+        fields,
         "type_patterns",
         table.type_patterns,
         type_patterns_name,
+    )
+    _append_table_fields(
+        fields,
+        "type_pattern_ranges",
+        type_pattern_ranges,
+        type_pattern_ranges_name,
     )
     _append_table_fields(fields, "value_refs", table.value_refs, value_refs_name)
     _append_table_fields(
@@ -982,6 +1296,12 @@ def rule_set_row(
         "source_memories",
         table.source_memories,
         source_memories_name,
+    )
+    _append_table_fields(
+        fields,
+        "source_memory_shapes",
+        source_memory_shapes,
+        source_memory_shapes_name,
     )
     _append_table_fields(
         fields,
@@ -1007,25 +1327,37 @@ def rule_set_row(
         descriptor_ref_keys,
         descriptor_refs_name,
     )
-    _append_table_fields(
-        fields,
-        "diagnostic_params",
-        diagnostic_param_rows,
-        diagnostic_params_name,
-    )
+    if diagnostic_param_rows:
+        fields.append(f".diagnostic_params = {{.kinds = {diagnostic_param_kinds_name}, .values = {diagnostic_param_values_name}, .count = IREE_ARRAYSIZE({diagnostic_param_kinds_name})}}")
     _append_table_fields(
         fields,
         "diagnostic_param_refs",
         diagnostic_param_refs,
         diagnostic_param_refs_name,
     )
+    _append_table_fields(
+        fields,
+        "guard_payloads",
+        guard_payloads,
+        guard_payloads_name,
+    )
     _append_table_fields(fields, "guards", guard_rows, guards_name)
+    _append_table_fields(
+        fields,
+        "storage_operand_schemas",
+        storage_operand_schemas,
+        storage_operand_schemas_name,
+    )
     _append_table_fields(fields, "guard_refs", guard_refs, guard_refs_name)
     _append_table_fields(fields, "attr_copies", table.attr_copies, attr_copies_name)
     _append_table_fields(fields, "tied_results", table.tied_results, tied_results_name)
     _append_table_fields(fields, "emit_refs", emit_refs, emit_refs_name)
     _append_table_fields(fields, "emits", emit_rows, emits_name)
     _append_table_fields(fields, "diagnostics", table.diagnostics, diagnostics_name)
+    if table.literal_data:
+        fields.append(f".literal_data = {literal_data_name}")
+    if string_pool_initializer is not None:
+        fields.append(f".string_pool = {string_pool_initializer}")
     return fields
 
 
@@ -1048,8 +1380,6 @@ def _table_count_field_name(field_name: str) -> str:
         return "source_memory_count"
     if field_name == "source_memory_diagnostics":
         return "source_memory_diagnostic_count"
-    if field_name == "diagnostic_params":
-        return "diagnostic_param_count"
     if field_name == "diagnostic_param_refs":
         return "diagnostic_param_ref_count"
     if field_name == "guard_refs":
@@ -1059,66 +1389,64 @@ def _table_count_field_name(field_name: str) -> str:
     return f"{field_name[:-1]}_count"
 
 
-def diagnostic_param_row(
+def diagnostic_value_row(
     row: LowerDiagnosticParam,
     *,
     string_value_ref: str | None = None,
 ) -> list[str]:
-    if row.kind == DiagnosticParamKind.STRING_LITERAL and string_value_ref is None:
-        raise ValueError("diagnostic string literal is missing its string reference")
-    fields: list[str] = []
-    _append_field(
-        fields,
-        "kind",
-        lower_rule_spelling.DIAGNOSTIC_PARAM_KIND_C_NAMES[row.kind],
-        always=True,
-    )
     if row.kind == DiagnosticParamKind.STRING_LITERAL:
-        _append_field(
-            fields,
-            "value",
-            f"{{.string_value_ref = {string_value_ref}}}",
-            always=True,
-        )
+        if string_value_ref is None:
+            raise ValueError("diagnostic string literal is missing its string reference")
+        return [f".string_value_ref = {string_value_ref}"]
     if row.kind == DiagnosticParamKind.VALUE_TYPE:
-        _append_field(
-            fields,
-            "value",
-            f"{{.value_ref_index = {row.value_ref_index}}}",
-            always=True,
-        )
+        return [f".value_ref_index = {row.value_ref_index}"]
     if row.kind == DiagnosticParamKind.I64_LITERAL:
-        _append_field(
-            fields,
-            "value",
-            f"{{.i64_value = {_c_i64_literal(row.i64_value)}}}",
-            always=True,
-        )
+        return [f".i64_value = {_c_i64_literal(row.i64_value)}"]
     if row.kind == DiagnosticParamKind.U32_LITERAL:
-        _append_field(
-            fields,
-            "value",
-            f"{{.u32_value = {row.u32_value}}}",
-            always=True,
-        )
+        return [f".u32_value = {row.u32_value}"]
     if row.kind == DiagnosticParamKind.U64_LITERAL:
-        _append_field(
-            fields,
-            "value",
-            f"{{.u64_value = {lower_rule_spelling.u64_c_literal(row.u64_value)}}}",
-            always=True,
-        )
+        return [f".u64_value = {lower_rule_spelling.u64_c_literal(row.u64_value)}"]
     if row.kind == DiagnosticParamKind.BOOL_LITERAL:
-        _append_field(
-            fields,
-            "value",
-            f"{{.bool_value = {str(row.bool_value).lower()}}}",
-            always=True,
+        return [f".bool_value = {str(row.bool_value).lower()}"]
+    if row.kind in (
+        DiagnosticParamKind.TARGET_KEY,
+        DiagnosticParamKind.EXPORT_NAME,
+        DiagnosticParamKind.CONFIG_KEY,
+        DiagnosticParamKind.FUNCTION_NAME,
+        DiagnosticParamKind.SOURCE_OP_NAME,
+        DiagnosticParamKind.SOURCE_MEMORY_MINIMUM_ALIGNMENT,
+    ):
+        return []
+    raise ValueError(f"unsupported diagnostic parameter kind: {row.kind}")
+
+
+def type_pattern_range(
+    type_pattern: TypePattern,
+) -> tuple[int | str, int | str] | None:
+    if type_pattern.minimum_lanes is not None and type_pattern.maximum_lanes is not None:
+        return type_pattern.minimum_lanes, type_pattern.maximum_lanes
+    if type_pattern.minimum_static_elements is not None and type_pattern.maximum_static_elements is not None:
+        return (
+            type_pattern.minimum_static_elements,
+            type_pattern.maximum_static_elements,
         )
-    return fields
+    return None
 
 
-def type_pattern_row(type_pattern: TypePattern) -> list[str]:
+def type_pattern_range_row(
+    shape_range: tuple[int | str, int | str],
+) -> list[str]:
+    return [
+        f".minimum = {lower_rule_spelling.c_expression(shape_range[0])}",
+        f".maximum = {lower_rule_spelling.c_expression(shape_range[1])}",
+    ]
+
+
+def type_pattern_row(
+    type_pattern: TypePattern,
+    *,
+    range_ref: int = 0,
+) -> list[str]:
     flags = ["LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_KIND"]
     if type_pattern.elements:
         flags.append("LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_ELEMENT")
@@ -1146,22 +1474,16 @@ def type_pattern_row(type_pattern: TypePattern) -> list[str]:
             row[0] += " | LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_RANK | LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_STATIC_DIM0"
             row.append(f".shape.exact.dim0 = {lower_rule_spelling.c_expression(type_pattern.lanes)}")
         elif type_pattern.minimum_lanes is not None and type_pattern.maximum_lanes is not None:
+            if range_ref == 0:
+                raise ValueError("generated vector lane range is missing its table ref")
             row.append(".rank = 1")
             row[0] += " | LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_RANK | LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_STATIC_DIM0_RANGE"
-            row.extend(
-                [
-                    f".shape.dim0_range.minimum = {lower_rule_spelling.c_expression(type_pattern.minimum_lanes)}",
-                    f".shape.dim0_range.maximum = {lower_rule_spelling.c_expression(type_pattern.maximum_lanes)}",
-                ]
-            )
+            row.append(f".shape.range_ref = {range_ref}")
         elif type_pattern.minimum_static_elements is not None and type_pattern.maximum_static_elements is not None:
+            if range_ref == 0:
+                raise ValueError("generated vector static element range is missing its table ref")
             row[0] += " | LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_STATIC_ELEMENT_COUNT_RANGE"
-            row.extend(
-                [
-                    f".shape.static_element_count_range.minimum = {lower_rule_spelling.c_expression(type_pattern.minimum_static_elements)}",
-                    f".shape.static_element_count_range.maximum = {lower_rule_spelling.c_expression(type_pattern.maximum_static_elements)}",
-                ]
-            )
+            row.append(f".shape.range_ref = {range_ref}")
         else:
             raise ValueError("generated vector type patterns require static shape")
     return row

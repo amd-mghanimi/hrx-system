@@ -14,6 +14,7 @@ from loom.ir import (
     DialectType,
     EncodingInstance,
     FunctionType,
+    GroupType,
     ParameterizedAttr,
     ParameterizedAttrArray,
     ParameterizedType,
@@ -40,6 +41,8 @@ def _parts(value: Any) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
             return (ShapedType, kind, element, alignment), (*dims, encoding)
         case FunctionType(arg_types=args, result_types=results):
             return (FunctionType, len(args)), (*args, *results)
+        case GroupType(dims=dimensions):
+            return (GroupType,), dimensions
         case DialectType(name=name, params=parameters):
             return (DialectType, name), parameters
         case RegisterType():

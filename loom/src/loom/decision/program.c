@@ -10,8 +10,8 @@ typedef struct loom_decision_program_conjunction_result_t {
   // Combined ternary conjunction outcome.
   loom_decision_truth_t feasibility;
 
-  // First unresolved constraint, or the invalid constraint.
-  loom_decision_program_constraint_ref_t unresolved_constraint;
+  // First constraint deciding rejection or uncertainty, or invalid on match.
+  loom_decision_program_constraint_ref_t decisive_constraint;
 } loom_decision_program_conjunction_result_t;
 
 IREE_ATTRIBUTE_ALWAYS_INLINE static inline loom_decision_predicate_operand_t
@@ -89,7 +89,7 @@ loom_decision_program_evaluate_conjunction(
     loom_decision_program_conjunction_t conjunction) {
   loom_decision_program_conjunction_result_t result = {
       .feasibility = LOOM_DECISION_TRUTH_TRUE,
-      .unresolved_constraint = LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID,
+      .decisive_constraint = LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID,
   };
   for (uint16_t i = 0; i < conjunction.feature_count; ++i) {
     const uint32_t feature_ordinal = conjunction.first_feature + i;
@@ -98,14 +98,15 @@ loom_decision_program_evaluate_conjunction(
     if (truth == LOOM_DECISION_TRUTH_FALSE) {
       return (loom_decision_program_conjunction_result_t){
           .feasibility = LOOM_DECISION_TRUTH_FALSE,
-          .unresolved_constraint = LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID,
+          .decisive_constraint =
+              loom_decision_program_feature_constraint_ref(feature_ordinal),
       };
     }
     if (truth == LOOM_DECISION_TRUTH_UNKNOWN) {
       result.feasibility = LOOM_DECISION_TRUTH_UNKNOWN;
-      if (result.unresolved_constraint ==
+      if (result.decisive_constraint ==
           LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID) {
-        result.unresolved_constraint =
+        result.decisive_constraint =
             loom_decision_program_feature_constraint_ref(feature_ordinal);
       }
     }
@@ -118,14 +119,15 @@ loom_decision_program_evaluate_conjunction(
     if (truth == LOOM_DECISION_TRUTH_FALSE) {
       return (loom_decision_program_conjunction_result_t){
           .feasibility = LOOM_DECISION_TRUTH_FALSE,
-          .unresolved_constraint = LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID,
+          .decisive_constraint =
+              loom_decision_program_predicate_constraint_ref(predicate_ordinal),
       };
     }
     if (truth == LOOM_DECISION_TRUTH_UNKNOWN) {
       result.feasibility = LOOM_DECISION_TRUTH_UNKNOWN;
-      if (result.unresolved_constraint ==
+      if (result.decisive_constraint ==
           LOOM_DECISION_PROGRAM_CONSTRAINT_INVALID) {
-        result.unresolved_constraint =
+        result.decisive_constraint =
             loom_decision_program_predicate_constraint_ref(predicate_ordinal);
       }
     }
@@ -184,7 +186,7 @@ void loom_decision_program_evaluate(
   }
   if (hard_requirements.feasibility == LOOM_DECISION_TRUTH_UNKNOWN) {
     out_result->kind = LOOM_DECISION_PROGRAM_RESULT_UNRESOLVED;
-    out_result->unresolved_constraint = hard_requirements.unresolved_constraint;
+    out_result->unresolved_constraint = hard_requirements.decisive_constraint;
     if (resolution_policy == LOOM_DECISION_PROGRAM_DEFER_UNRESOLVED) {
       for (uint32_t i = 0; i < program->choice_count; ++i) {
         const loom_decision_program_choice_t* choice = &program->choices[i];
@@ -225,7 +227,7 @@ void loom_decision_program_evaluate(
         group_has_maybe = true;
         if (highest_maybe_action == LOOM_DECISION_PROGRAM_ACTION_INVALID) {
           highest_maybe_action = choice->action_ordinal;
-          highest_maybe_constraint = choice_result.unresolved_constraint;
+          highest_maybe_constraint = choice_result.decisive_constraint;
         }
         if (resolution_policy == LOOM_DECISION_PROGRAM_DEFER_UNRESOLVED) {
           loom_decision_program_append_live(choice->action_ordinal,
@@ -317,7 +319,7 @@ static void loom_decision_program_reduce_evidence(
         group_has_maybe = true;
         if (highest_maybe_action == LOOM_DECISION_PROGRAM_ACTION_INVALID) {
           highest_maybe_action = choice->action_ordinal;
-          highest_maybe_constraint = evidence->unresolved_constraint;
+          highest_maybe_constraint = evidence->decisive_constraint;
         }
         if (resolution_policy == LOOM_DECISION_PROGRAM_DEFER_UNRESOLVED) {
           loom_decision_program_append_live(choice->action_ordinal,
@@ -400,7 +402,7 @@ void loom_decision_program_evaluate_all(
   }
   if (hard_requirements.feasibility == LOOM_DECISION_TRUTH_UNKNOWN) {
     out_result->kind = LOOM_DECISION_PROGRAM_RESULT_UNRESOLVED;
-    out_result->unresolved_constraint = hard_requirements.unresolved_constraint;
+    out_result->unresolved_constraint = hard_requirements.decisive_constraint;
     if (resolution_policy != LOOM_DECISION_PROGRAM_DEFER_UNRESOLVED) {
       return;
     }
@@ -412,7 +414,7 @@ void loom_decision_program_evaluate_all(
               choice->conjunction);
       choice_evidence[i] = (loom_decision_program_choice_evidence_t){
           .feasibility = choice_result.feasibility,
-          .unresolved_constraint = choice_result.unresolved_constraint,
+          .decisive_constraint = choice_result.decisive_constraint,
       };
       if (choice_result.feasibility != LOOM_DECISION_TRUTH_FALSE) {
         loom_decision_program_append_live(choice->action_ordinal,
@@ -430,7 +432,7 @@ void loom_decision_program_evaluate_all(
             program->choices[i].conjunction);
     choice_evidence[i] = (loom_decision_program_choice_evidence_t){
         .feasibility = choice_result.feasibility,
-        .unresolved_constraint = choice_result.unresolved_constraint,
+        .decisive_constraint = choice_result.decisive_constraint,
     };
   }
   loom_decision_program_reduce_evidence(program, choice_evidence,

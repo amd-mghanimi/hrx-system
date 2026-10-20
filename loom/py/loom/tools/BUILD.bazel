@@ -11,6 +11,27 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
+exports_files(["source_inventory.py"])
+
+iree_py_library(
+    name = "source_inventory",
+    srcs = ["source_inventory.py"],
+    imports = ["../.."],
+)
+
+iree_py_test(
+    name = "source_inventory_test",
+    size = "small",
+    srcs = [
+        "pytest_style_runner.py",
+        "source_inventory_test.py",
+    ],
+    args = ["loom.tools.source_inventory_test"],
+    main = "pytest_style_runner.py",
+    tags = ["manual"],
+    deps = [":source_inventory"],
+)
+
 iree_py_library(
     name = "tools",
     srcs = [
@@ -60,6 +81,12 @@ iree_py_library(
     ],
 )
 
+iree_py_library(
+    name = "export_cxx",
+    srcs = ["export_cxx.py"],
+    deps = ["//loom/py/loom/format/cxx"],
+)
+
 iree_py_binary(
     name = "loom-compile-report",
     srcs = ["compile_report.py"],
@@ -75,6 +102,13 @@ iree_py_binary(
 )
 
 iree_py_binary(
+    name = "loom-export-cxx",
+    srcs = ["export_cxx.py"],
+    main = "export_cxx.py",
+    deps = [":export_cxx"],
+)
+
+iree_py_binary(
     name = "pytest_style_runner",
     srcs = ["pytest_style_runner.py"],
     main = "pytest_style_runner.py",
@@ -85,8 +119,10 @@ iree_py_test(
     srcs = [
         "amdgpu_asm_test.py",
         "compile_report_test.py",
+        "export_cxx_test.py",
         "loom_opt_test.py",
         "pytest_style_runner.py",
+        "pytest_style_runner_test.py",
         "source_lint_test.py",
         "source_surface_test.py",
     ],
@@ -94,6 +130,8 @@ iree_py_test(
         "loom.tools.amdgpu_asm_test",
         "loom.tools.compile_report_test",
         "loom.tools.loom_opt_test",
+        "loom.tools.export_cxx_test",
+        "loom.tools.pytest_style_runner_test",
         "loom.tools.source_surface_test",
         "loom.tools.source_lint_test",
     ],
@@ -101,8 +139,10 @@ iree_py_test(
     deps = [
         ":amdgpu_asm",
         ":compile_report",
+        ":export_cxx",
         ":loom_opt",
         ":source_lint",
         ":tools",
+        "//loom/py/loom/format/cxx:test_support",
     ],
 )

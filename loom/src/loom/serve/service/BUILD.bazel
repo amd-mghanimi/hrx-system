@@ -1,0 +1,130 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test")
+
+package(
+    default_visibility = ["//loom/src/loom/serve:implementation"],
+    features = ["layering_check"],
+    licenses = ["notice"],
+)
+
+exports_files(
+    [
+        "executables_test.cc",
+        "testdata/executables/prepare.loom",
+    ],
+    visibility = ["//loom/src/loom/serve:implementation"],
+)
+
+loom_cc_library(
+    name = "service",
+    hdrs = ["service.h"],
+    deps = [
+        ":inspection",
+        ":kind",
+        ":reconfiguration",
+        "//loom/src/loom/serve/runtime/host:wake",
+        "//loom/src/loom/serve/telemetry:latency",
+        "//loom/src/loom/serve/telemetry:stream",
+        "//loom/src/loom/serve/transport/http:server",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/tokenizer",
+    ],
+)
+
+loom_cc_library(
+    name = "kind",
+    srcs = ["kind.c"],
+    hdrs = ["kind.h"],
+    deps = ["//runtime/src/iree/base"],
+)
+
+loom_cc_test(
+    name = "kind_test",
+    srcs = ["kind_test.cc"],
+    deps = [
+        ":kind",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_library(
+    name = "reconfiguration",
+    hdrs = ["reconfiguration.h"],
+    deps = [
+        "//loom/src/loom/serve/runtime/program:sources",
+        "//loom/src/loom/serve/runtime/program:variant_pool",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "execution_reconfiguration",
+    srcs = ["execution_reconfiguration.c"],
+    hdrs = ["execution_reconfiguration.h"],
+    deps = [
+        ":reconfiguration",
+        "//loom/src/loom/serve/runtime/host:wake",
+        "//loom/src/loom/serve/runtime/program:compilation",
+        "//loom/src/loom/serve/runtime/program:sources",
+        "//loom/src/loom/serve/runtime/program:variant_pool",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "executables",
+    srcs = ["executables.c"],
+    hdrs = ["executables.h"],
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/binding/c:task_pool",
+        "//loom/src/loom/serve/runtime/device",
+        "//loom/src/loom/serve/runtime/host",
+        "//loom/src/loom/serve/runtime/parameter:bank",
+        "//loom/src/loom/serve/runtime/parameter:residency",
+        "//loom/src/loom/serve/runtime/parameter:weights",
+        "//loom/src/loom/serve/runtime/program:compilation",
+        "//loom/src/loom/serve/runtime/program:jit",
+        "//loom/src/loom/serve/runtime/program:module",
+        "//loom/src/loom/serve/runtime/program:preparation",
+        "//loom/src/loom/serve/runtime/program:sources",
+        "//loom/src/loom/serve/runtime/program:stage_set",
+        "//loom/src/loom/serve/runtime/program:stage_table",
+        "//loom/src/loom/serve/runtime/program:variant_pool",
+        "//loom/src/loom/serve/service:execution_reconfiguration",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/vm",
+    ],
+)
+
+loom_cc_library(
+    name = "inspection",
+    srcs = ["inspection.c"],
+    hdrs = ["inspection.h"],
+    deps = [
+        "//loom/src/loom/serve/telemetry:record",
+        "//loom/src/loom/util:json",
+        "//loom/src/loom/util:stream",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_test(
+    name = "inspection_test",
+    srcs = ["inspection_test.cc"],
+    deps = [
+        ":inspection",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)

@@ -15,6 +15,12 @@ iree_py_library(
   SRCS
     "__init__.py"
     "contracts.py"
+    "float_extension.py"
+    "float_narrowing.py"
+    "predicate.py"
+    "vector_integer_arithmetic.py"
+    "vector_integer_extension.py"
+    "vector_shifts.py"
   DEPS
     loom::py::loom::core
     loom::py::loom::dialect::index::index
@@ -23,7 +29,116 @@ iree_py_library(
     loom::py::loom::dialect::view::view
     loom::py::loom::target::arch::wasm::descriptors
     loom::py::loom::target::contracts::contracts
+    loom::py::loom::target::emit::float_narrowing
     loom::py::loom::target::emit::package
+)
+
+iree_py_test(
+  NAME
+    contracts_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "contracts_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.contracts_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    predicate_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "predicate_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.predicate_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    vector_integer_arithmetic_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "vector_integer_arithmetic_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.vector_integer_arithmetic_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    vector_integer_extension_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "vector_integer_extension_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.vector_integer_extension_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    float_extension_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "float_extension_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.float_extension_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    vector_shifts_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "vector_shifts_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.emit.wasm.vector_shifts_test"
+  DEPS
+    loom::py::loom::target::emit::wasm::contracts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

@@ -12,7 +12,6 @@
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
 #include "iree/tooling/value_io.h"
-#include "loom/target/types.h"
 #include "loom/tooling/execution/hal/artifact.h"
 #include "loom/tooling/execution/hal/runtime.h"
 
@@ -21,8 +20,9 @@ extern "C" {
 #endif
 
 enum {
-  // Maximum number of HAL dispatch constants accepted by the generic runner.
-  LOOM_RUN_HAL_MAX_CONSTANT_COUNT = 64,
+  // Maximum byte length of HAL dispatch constants accepted by the generic
+  // runner.
+  LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH = 256,
   // Maximum number of HAL dispatch bindings accepted by the generic runner.
   LOOM_RUN_HAL_MAX_BINDING_COUNT = 64,
 };
@@ -33,10 +33,10 @@ typedef struct loom_run_hal_invocation_options_t {
   iree_string_view_t function_name;
   // Dispatch workgroup count in x, y, z order.
   uint32_t workgroup_count[3];
-  // Dispatch constants in HAL ABI order.
-  uint32_t constants[LOOM_RUN_HAL_MAX_CONSTANT_COUNT];
-  // Number of entries in |constants|.
-  iree_host_size_t constant_count;
+  // Byte-addressed dispatch constants in the reflected HAL ABI layout.
+  uint8_t constants[LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH];
+  // Live byte length of |constants|, including ABI padding.
+  iree_host_size_t constant_byte_length;
 } loom_run_hal_invocation_options_t;
 
 typedef struct loom_run_hal_binding_specs_t {
@@ -66,15 +66,11 @@ typedef struct loom_run_hal_invocation_plan_t {
   loom_run_hal_binding_list_t expected_bindings;
   // True when |expected_bindings| should be compared after dispatch.
   bool has_expected_bindings;
-  // Plan-owned heap HAL allocator backing expected host binding buffers.
-  iree_hal_allocator_t* expected_binding_allocator;
   // Maximum number of output elements to format.
   iree_host_size_t max_output_element_count;
 } loom_run_hal_invocation_plan_t;
 
 typedef struct loom_run_hal_prepared_candidate_t {
-  // Target-neutral bundle resolved for |executable|, when available.
-  const loom_target_bundle_t* target_bundle;
   // Prepared HAL executable retained for repeated dispatches.
   iree_hal_executable_t* executable;
 } loom_run_hal_prepared_candidate_t;
@@ -110,9 +106,9 @@ typedef struct loom_run_hal_queue_dispatch_t {
   // Static dispatch configuration copied from the invocation plan.
   iree_hal_dispatch_config_t config;
   // Dispatch constants copied from the invocation plan in HAL ABI order.
-  uint32_t constants[LOOM_RUN_HAL_MAX_CONSTANT_COUNT];
-  // Number of entries in |constants|.
-  iree_host_size_t constant_count;
+  uint8_t constants[LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH];
+  // Live byte length of |constants|, including ABI padding.
+  iree_host_size_t constant_byte_length;
   // Required number of direct buffer bindings for each submission.
   iree_host_size_t binding_count;
   // Timeline semaphore signaled after each direct queue dispatch.
@@ -140,20 +136,76 @@ typedef struct loom_run_hal_dispatch_batch_t {
   iree_hal_queue_execute_flags_t execute_flags;
 } loom_run_hal_dispatch_batch_t;
 
+typedef uint8_t loom_run_hal_dispatch_sequence_representation_t;
+typedef enum loom_run_hal_dispatch_sequence_representation_e {
+  LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_NONE = 0,
+  LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_COMMAND_BUFFER = 1,
+  LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT = 2,
+} loom_run_hal_dispatch_sequence_representation_e;
+
+typedef struct loom_run_hal_dispatch_sequence_options_t {
+  // Command-buffer mode used by an indirect sequence.
+  iree_hal_command_buffer_mode_t command_buffer_mode;
+  // Queue execute flags used by an indirect sequence submission.
+  iree_hal_queue_execute_flags_t execute_flags;
+} loom_run_hal_dispatch_sequence_options_t;
+
+typedef struct loom_run_hal_dispatch_sequence_direct_step_t
+    loom_run_hal_dispatch_sequence_direct_step_t;
+
 typedef struct loom_run_hal_dispatch_sequence_t {
-  // Reusable command buffer containing one ordered dispatch sequence.
-  iree_hal_command_buffer_t* command_buffer;
-  // Timeline semaphore signaled after each sequence submission.
-  iree_hal_semaphore_t* semaphore;
-  // Payload value to signal on the next sequence submission.
-  uint64_t next_signal_value;
-  // Number of indirect buffer slots required at submission.
+  // Host allocator owning direct-representation storage.
+  iree_allocator_t host_allocator;
+  // Prepared representation selected from the target ABI.
+  loom_run_hal_dispatch_sequence_representation_t representation;
+  // Number of flattened buffer bindings required at submission.
   iree_host_size_t binding_count;
+  // Reusable indirect command-buffer representation.
+  struct {
+    // Command buffer containing one epoch-ordered dispatch sequence.
+    iree_hal_command_buffer_t* command_buffer;
+    // Timeline semaphore joining each command-buffer execution.
+    iree_hal_semaphore_t* completion_semaphore;
+    // Completion payload value assigned to the next execution.
+    uint64_t next_signal_value;
+    // Queue execute flags used for each submission.
+    iree_hal_queue_execute_flags_t execute_flags;
+  } command_buffer;
+  // Reusable direct queue-dispatch representation.
+  struct {
+    // Single allocation backing every direct-representation array.
+    uint8_t* storage;
+    // Captured direct dispatch records in source order.
+    loom_run_hal_dispatch_sequence_direct_step_t* steps;
+    // Timeline semaphore pool indexed by the step position within each epoch.
+    iree_hal_semaphore_t** semaphores;
+    // Reusable wait payload values paired with |semaphores|.
+    uint64_t* payload_values;
+    // Flattened captured binding lengths in step and ABI order.
+    iree_device_size_t* binding_lengths;
+    // Flattened direct buffer refs resolved for the active submission.
+    iree_hal_buffer_ref_t* binding_refs;
+    // Number of entries in |steps|.
+    iree_host_size_t step_count;
+    // Number of entries in |semaphores| and |payload_values|.
+    iree_host_size_t semaphore_count;
+    // Number of execution epochs represented by |steps|.
+    iree_host_size_t epoch_count;
+    // Number of steps in the terminal execution epoch.
+    iree_host_size_t terminal_step_count;
+    // Payload value assigned to the first epoch of the next execution.
+    uint64_t next_epoch_signal_value;
+    // Number of pool slots in the predecessor frontier for the next execution.
+    // The corresponding payloads remain in |payload_values|.
+    iree_host_size_t predecessor_semaphore_count;
+  } direct;
 } loom_run_hal_dispatch_sequence_t;
 
 typedef struct loom_run_hal_dispatch_sequence_step_t {
   // Prepared executable dispatched by this step.
   const loom_run_hal_prepared_candidate_t* candidate;
+  // Queue submission representation required by this executable ABI.
+  loom_run_hal_dispatch_sequence_representation_t representation;
   // Monotonic execution epoch. Adjacent steps in one epoch may overlap.
   iree_host_size_t execution_epoch;
   // Function, launch geometry, and direct constants captured by this step.
@@ -191,6 +243,12 @@ typedef struct loom_run_hal_invocation_result_t {
 void loom_run_hal_invocation_options_initialize(
     loom_run_hal_invocation_options_t* out_options);
 
+// Returns true when two materialized invocations dispatch the same function,
+// geometry, and constant payload.
+bool loom_run_hal_invocation_options_equal(
+    const loom_run_hal_invocation_options_t* lhs,
+    const loom_run_hal_invocation_options_t* rhs);
+
 // Initializes a request to dispatch the single executable function over one
 // workgroup.
 void loom_run_hal_invocation_request_initialize(
@@ -222,6 +280,10 @@ void loom_run_hal_iteration_deinitialize(loom_run_hal_iteration_t* iteration);
 void loom_run_hal_dispatch_batch_options_initialize(
     loom_run_hal_dispatch_batch_options_t* out_options);
 
+// Initializes sequence options matching ordinary correctness execution.
+void loom_run_hal_dispatch_sequence_options_initialize(
+    loom_run_hal_dispatch_sequence_options_t* out_options);
+
 // Initializes an empty direct HAL queue dispatch.
 void loom_run_hal_queue_dispatch_initialize(
     loom_run_hal_queue_dispatch_t* out_dispatch);
@@ -245,6 +307,10 @@ void loom_run_hal_dispatch_sequence_initialize(
 // Releases storage owned by |sequence|.
 void loom_run_hal_dispatch_sequence_deinitialize(
     loom_run_hal_dispatch_sequence_t* sequence);
+
+// Returns true when |sequence| owns a complete reusable representation.
+bool loom_run_hal_dispatch_sequence_is_prepared(
+    const loom_run_hal_dispatch_sequence_t* sequence);
 
 // Initializes an invocation result. Must be paired with
 // loom_run_hal_invocation_result_deinitialize().
@@ -370,16 +436,23 @@ iree_status_t loom_run_hal_dispatch_sequence_batch_prepare_from_plan_ring(
     const loom_run_hal_dispatch_batch_options_t* batch_options,
     iree_allocator_t allocator, loom_run_hal_dispatch_batch_t* out_batch);
 
-// Records one reusable ordered sequence with indirect buffer bindings.
+// Prepares one reusable ordered sequence with deferred buffer identities.
 //
 // |steps| contains |step_count| entries in source order. Dispatch constants,
 // geometry, and binding ranges are captured while buffer identities are
 // supplied through a binding table at execution. Adjacent steps with different
 // execution epochs carry an execution and dispatch-write visibility edge;
-// steps in one epoch may overlap. No barrier follows the terminal dispatch.
+// steps in one epoch may overlap. Each step declares whether its executable
+// ABI requires direct queue dispatch or an indirect command buffer. Direct
+// sequences reuse a timeline semaphore pool sized to the widest epoch; each
+// epoch advances the pool payload, and its terminal frontier orders the next
+// execution without a synthetic queue barrier. A sequence mixing direct and
+// indirect representations is invalid.
 iree_status_t loom_run_hal_dispatch_sequence_prepare(
     const loom_run_hal_runtime_t* runtime, iree_host_size_t step_count,
     const loom_run_hal_dispatch_sequence_step_t* steps,
+    const loom_run_hal_dispatch_sequence_options_t* options,
+    iree_allocator_t host_allocator,
     loom_run_hal_dispatch_sequence_t* out_sequence);
 
 // Submits |sequence| with |binding_table| and waits for completion.

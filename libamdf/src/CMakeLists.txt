@@ -12,6 +12,22 @@ iree_add_all_subdirs()
 if(AMDF_BUILD)
 iree_cc_library(
   NAME
+    observation
+  HDRS
+    "observation.h"
+  SRCS
+    "observation.c"
+  DEPS
+    amdf::headers
+    libamdf::src::platform::native_observation
+    libamdf::src::platform::observation
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD)
+iree_cc_library(
+  NAME
     atomics
   HDRS
     "atomics.h"
@@ -221,6 +237,7 @@ iree_cc_library(
     ::allocator
     ::device
     ::endpoint
+    ::host_memory
     ::instance
     ::memory_pair
     ::memory_profile
@@ -228,6 +245,8 @@ iree_cc_library(
     ::structure
     amdf::headers
     libamdf::src::platform
+    libamdf::src::platform::host_memory
+    libamdf::src::platform::native_host_memory
     libamdf::src::platform::native_instance
   PUBLIC
 )
@@ -263,7 +282,9 @@ iree_cc_library(
     ::memory_profile
     ::memory_resource
     amdf::headers
+    libamdf::src::platform::host_export
     libamdf::src::platform::host_memory
+    libamdf::src::platform::native_host_export
     libamdf::src::platform::native_host_memory
   PUBLIC
 )
@@ -291,6 +312,32 @@ iree_cc_library(
     ::memory_scope_state
     ::structure
     amdf::headers
+    libamdf::src::platform
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD)
+iree_cc_library(
+  NAME
+    memory_reservation
+  HDRS
+    "host_reservation.h"
+    "memory_reservation.h"
+  SRCS
+    "host_reservation.c"
+    "memory_reservation.c"
+  DEPS
+    ::allocator
+    ::device
+    ::host_memory
+    ::instance
+    ::kernel_queue
+    ::memory_resource
+    ::structure
+    amdf::headers
+    libamdf::src::platform::host_reservation
+    libamdf::src::platform::native_host_reservation
   PUBLIC
 )
 endif()
@@ -321,6 +368,7 @@ iree_cc_test(
     memory_test
   SRCS
     "memory_construction_test.cc"
+    "memory_reservation_test.cc"
     "memory_test.cc"
     "memory_test_fixture.cc"
     "memory_test_fixture.h"
@@ -331,11 +379,15 @@ iree_cc_test(
     ::host_mapping
     ::instance
     ::memory
+    ::memory_reservation
     ::memory_scope
     ::memory_scope_state
     amdf::headers
     iree::third_party::google_test
     iree::third_party::google_test_main
+    libamdf::src::platform
+    libamdf::src::platform::host_memory
+    libamdf::src::platform::native_host_memory
     ${_memory_test_platform_deps}
   LABELS
     "iree-build-requirement=libamdf"
@@ -461,6 +513,7 @@ iree_cc_library(
     ::instance
     ::kernel_queue
     ::memory
+    ::memory_reservation
     ::pci
     ::structure
     ::user_queue

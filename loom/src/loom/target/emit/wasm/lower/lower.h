@@ -23,14 +23,15 @@ extern "C" {
 // Returns the package-local lowering policy for the Wasm scalar and SIMD
 // subset.
 //
-// The policy maps buffer references, narrow scalar bit patterns, and
-// i32/index/offset values to reg<wasm.i32>, i64 values to reg<wasm.i64>,
-// f32/f64 values to their matching Wasm scalar registers, and
-// vector<4xi32>/vector<4xi1>/vector<4xf32>/
-// vector<2xi64>/vector<2xf64> values to reg<wasm.v128>. It lowers the scalar
-// and fixed-width SIMD arithmetic subset described by the Wasm descriptor
-// tables. Unsupported source ops are rejected through structured target-low
-// diagnostics instead of producing partial low IR.
+// The policy maps buffer references, complete view addresses, narrow scalar
+// bit patterns, and i32/index/offset values to reg<wasm.i32>, i64 values to
+// reg<wasm.i64>, f32/f64 values to their matching Wasm scalar registers, and
+// internal static vectors whose physical byte count fits uint16_t to one or
+// more reg<wasm.v128> units. Exact single-v128 numeric shapes remain the
+// callable vector ABI. It lowers the scalar and fixed-width SIMD arithmetic
+// subset described by the Wasm descriptor tables. Unsupported source ops are
+// rejected through structured target-low diagnostics instead of producing
+// partial low IR.
 const loom_low_lower_policy_t* loom_wasm_low_lower_policy(void);
 
 // Initializes a target-owned registry mapping Wasm target-contract keys to

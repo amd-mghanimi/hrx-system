@@ -43,6 +43,7 @@ def generate_dialect_contents(generation: DialectGeneration) -> dict[str, str]:
             generation.parameterized_attrs,
             generation.encoding_families,
             include_path=include_path,
+            referenced_ops=generation.referenced_ops,
         )
         if generation.table_shards is not None
         else {
@@ -53,6 +54,7 @@ def generate_dialect_contents(generation: DialectGeneration) -> dict[str, str]:
                 generation.parameterized_attrs,
                 generation.encoding_families,
                 include_path=include_path,
+                referenced_ops=generation.referenced_ops,
             )
         }
     )

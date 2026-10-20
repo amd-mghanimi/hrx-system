@@ -45,6 +45,27 @@ enum loom_view_access_flag_bits_e {
 };
 typedef uint8_t loom_view_access_flags_t;
 
+// Observations of a buffer root beyond addressed payload access.
+enum loom_view_root_use_flag_bits_e {
+  // The root's memory space is refined. Relocating its addressed contents must
+  // translate the corresponding memory_space_refinements to the new storage.
+  LOOM_VIEW_ROOT_USE_MEMORY_SPACE = 1u << 0,
+
+  // An opaque buffer operation or type dependency observes the original root.
+  // Replacing only its addressed contents does not preserve that observation.
+  LOOM_VIEW_ROOT_USE_OPAQUE = 1u << 1,
+};
+typedef uint8_t loom_view_root_use_flags_t;
+
+// A source refinement whose storage identity was resolved during analysis.
+typedef struct loom_view_memory_space_refinement_t {
+  // Borrowed buffer.assume.memory_space operation in the analyzed scope.
+  const loom_op_t* operation;
+
+  // Original storage root, including through other root-preserving refinements.
+  loom_value_id_t root_value_id;
+} loom_view_memory_space_refinement_t;
+
 // Precision bits describing which parts of a region are known symbolically.
 enum loom_view_region_precision_flag_bits_e {
   // The storage root identity is known.
@@ -141,9 +162,25 @@ typedef struct loom_view_region_table_t {
   // Populated by analyze, including raw buffers and nested execution scopes.
   uint8_t* storage_flags_by_value_ordinal;
 
-  // Memory spaces that may change through acquisition, unknown effects, or
-  // writes without comparable storage identities. Bit i names memory space i.
+  // Source memory-space refinements, including those in nested control flow.
+  // Consumers changing storage use these rows instead of rediscovering uses.
+  struct {
+    // Rows owned by the expression context arena.
+    loom_view_memory_space_refinement_t* entries;
+    // Number of initialized rows.
+    iree_host_size_t count;
+    // Allocated row capacity.
+    iree_host_size_t capacity;
+  } memory_space_refinements;
+
+  // Memory spaces that may change through external acquisition, unknown
+  // effects, or writes without comparable storage identities.
   uint32_t interference_memory_spaces;
+
+  // Memory spaces potentially changed through channel or async-group progress.
+  // Ordinary stability queries include this mask. A closed execution may
+  // account for it using all communicating participants' analyzed writes.
+  uint32_t communication_memory_spaces;
 
   // Memory spaces written through scoped roots that can vary across executions.
   // Such writes may interfere with other varying roots despite local noalias.
@@ -203,6 +240,15 @@ iree_status_t loom_view_region_table_analyze(loom_view_region_table_t* table);
 loom_view_access_flags_t loom_view_region_table_root_access_flags(
     const loom_view_region_table_t* table, loom_value_id_t root_value_id);
 
+// Returns observations of |root_value_id| beyond typed-view construction and
+// root-preserving alignment/noalias refinements. Opaque observations prohibit
+// replacing the root with only its addressed contents. Memory-space refinements
+// require translation to the replacement storage and are retained in the table.
+// Roots outside the domain are opaque. Requires completed analysis; no
+// traversal.
+loom_view_root_use_flags_t loom_view_region_table_root_use_flags(
+    const loom_view_region_table_t* table, loom_value_id_t root_value_id);
+
 // Proves that an accessed storage root remains unchanged throughout the
 // analyzed domain. Local read-only access alone is insufficient: acquisition
 // may import another participant's writes, and unknown effects or incomparable
@@ -223,6 +269,23 @@ bool loom_view_region_table_root_is_stable(
 // spaces whose target representations may overlap.
 bool loom_view_memory_spaces_are_disjoint(loom_value_fact_memory_space_t left,
                                           loom_value_fact_memory_space_t right);
+
+// Returns the comparable alias partition for a known root, or NONE when
+// disjointness requires individual proof. Distinct known roots in different
+// non-NONE partitions cannot alias. Same-root accesses still require byte
+// range proofs, even when their alias assumptions differ.
+static inline loom_value_fact_alias_scope_id_t
+loom_view_region_comparable_alias_scope(const loom_view_region_t* region) {
+  return region->root_value_id == LOOM_VALUE_ID_INVALID
+             ? LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE
+             : region->alias_scope_id;
+}
+
+// Proves disjointness using only retained allocation origins, memory spaces,
+// and comparable alias scopes. Same-root byte ranges require the interval
+// query below. This query neither allocates nor inspects source IR.
+bool loom_view_region_roots_are_disjoint(const loom_view_region_t* left,
+                                         const loom_view_region_t* right);
 
 // Attempts to prove that two view regions cannot overlap. Same-root regions
 // use symbolic byte intervals. Distinct roots are disjoint when their concrete

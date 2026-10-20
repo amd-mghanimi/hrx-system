@@ -98,7 +98,7 @@ func.def @lowers_counted_for(%n: index, %seed: i32, %x: i32) -> (i32) {
   %14 = index.cmp slt, %11, %n : index
   cfg.cond_br %14, ^_bb2, ^_bb3
 ^_bb2:
-  %i = index.assume %11 [lt(%11, %n)] : index
+  %i = index.assume %11 [range(%11, 0, 9223372036854775806), lt(%11, %n)] : index
   %next = test.addi %acc, %x : i32
   %15 = index.add %i, %step : index
   cfg.br ^_bb1(%15: index, %next: i32)
@@ -128,7 +128,7 @@ func.def @lowers_offset_for(%byte_length: offset) {
   %6 = index.cmp ult, %4, %byte_length : offset
   cfg.cond_br %6, ^_bb2, ^_bb3
 ^_bb2:
-  %byte_offset = index.assume %4 [lt(%4, %byte_length)] : offset
+  %byte_offset = index.assume %4 [range(%4, 0, 9223372036854775806), lt(%4, %byte_length)] : offset
   test.use %byte_offset : offset
   %7 = index.add %byte_offset, %c1 : offset
   cfg.br ^_bb1(%7: offset)
@@ -158,7 +158,7 @@ func.def @preserves_static_for_iv_facts() {
   %6 = index.cmp slt, %4, %limit : index
   cfg.cond_br %6, ^_bb2, ^_bb3
 ^_bb2:
-  %i = index.assume %4 [range(%4, 0, 2), mul(%4, 2)] : index
+  %i = index.assume %4 [range(%4, 0, 2), multiple_of(%4, 2)] : index
   test.use %i : index
   %7 = index.add %i, %step : index
   cfg.br ^_bb1(%7: index)
@@ -194,7 +194,7 @@ kernel.def @preserves_kernel_for_iv_facts() {
   %7 = index.cmp slt, %5, %limit : index
   cfg.cond_br %7, ^_bb2, ^_bb3
 ^_bb2:
-  %i = index.assume %5 [range(%5, 0, 2), mul(%5, 2)] : index
+  %i = index.assume %5 [range(%5, 0, 2), multiple_of(%5, 2)] : index
   test.use %i : index
   %8 = index.add %i, %step : index
   cfg.br ^_bb1(%8: index)
@@ -228,6 +228,34 @@ func.def @lowers_while(%cond: i1, %seed: i32, %x: i32) -> (i32) {
   cfg.br ^_bb4(%forwarded: i32)
 ^_bb4(%result: i32):
   func.return %result : i32
+}
+
+// ====
+
+func.def @lowers_while_condition_payload(%cond: i1, %seed: i32, %x: i32) -> (i32, i32) {
+  %state, %payload = scf.while(%before = %seed : i32) -> (i32, i32) {
+    %forwarded = test.addi %before, %x : i32
+    scf.condition %cond, %before, %forwarded : i1, i32, i32
+  } do(%body_state: i32, %body_payload: i32) {
+    %next = test.addi %body_state, %body_payload : i32
+    scf.yield %next : i32
+  }
+  func.return %state, %payload : i32, i32
+}
+
+// ----
+func.def @lowers_while_condition_payload(%cond: i1, %seed: i32, %x: i32) -> (i32, i32) {
+  cfg.br ^_bb1(%seed: i32)
+^_bb1(%before: i32):
+  %forwarded = test.addi %before, %x : i32
+  cfg.cond_br %cond, ^_bb2, ^_bb3
+^_bb2:
+  %next = test.addi %before, %forwarded : i32
+  cfg.br ^_bb1(%next: i32)
+^_bb3:
+  cfg.br ^_bb4(%before: i32, %forwarded: i32)
+^_bb4(%state: i32, %payload: i32):
+  func.return %state, %payload : i32, i32
 }
 
 // ====

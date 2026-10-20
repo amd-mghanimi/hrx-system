@@ -54,6 +54,7 @@ class ScalarConversionMixin:
     def extf(
         self,
         *,
+        subnormal: str = ...,
         input: ValueRef,
         results: list[Type | TiedResultSpec],
         name: str | None = ...,
@@ -64,6 +65,7 @@ class ScalarConversionMixin:
     def fptrunc(
         self,
         *,
+        subnormal: str = ...,
         input: ValueRef,
         results: list[Type | TiedResultSpec],
         name: str | None = ...,

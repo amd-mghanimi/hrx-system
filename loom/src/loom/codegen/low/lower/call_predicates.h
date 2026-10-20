@@ -11,21 +11,32 @@
 
 #include "iree/base/api.h"
 #include "loom/codegen/low/lower/lower.h"
-#include "loom/rewrite/remap.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Proves |callee|'s argument predicates from the source invocation operands,
-// materializes them as low.assume facts, and updates |remap| so callee
-// arguments resolve to the assumed Low values. |remap| must initially map each
-// callee argument to its already-materialized Low call operand.
-iree_status_t loom_low_materialize_call_argument_contract(
+typedef struct loom_low_call_argument_contract_t
+    loom_low_call_argument_contract_t;
+
+// Proves the helper's argument predicates and retains a self-contained copy in
+// the function arena. Formal parameter identities remain distinct even when
+// several invocation operands name the same source value. Returns NULL when
+// the helper has no preconditions or a diagnostic rejects the invocation.
+iree_status_t loom_low_plan_call_argument_contract(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     iree_string_view_t callee_name, loom_func_like_t callee,
     const loom_value_id_t* callee_arguments, uint16_t callee_argument_count,
-    loom_value_slice_t source_operands, loom_ir_remap_t* remap);
+    loom_value_slice_t source_operands,
+    const loom_low_call_argument_contract_t** out_contract);
+
+// Materializes the proved predicates as low.assume and replaces |low_operands|
+// with its results. The contract retains the formal-to-operand correspondence;
+// emission needs neither the helper signature nor the source proof environment.
+iree_status_t loom_low_materialize_call_argument_contract(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_low_call_argument_contract_t* contract,
+    loom_value_id_t* low_operands);
 
 #ifdef __cplusplus
 }  // extern "C"

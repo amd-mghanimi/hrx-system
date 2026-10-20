@@ -29,90 +29,6 @@ endif()
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 amdf_cts_binary(
   NAME
-    allocator_static_bin
-  DEPS
-    ::allocator_cases
-    amdf::headers
-    libamdf::cts::util::static_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "allocator_static"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::allocator_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "allocator_static_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::allocator_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
-    allocator_shared_bin
-  DATA
-    amdf::amdf
-  DEPS
-    ::allocator_cases
-    amdf::headers
-    libamdf::cts::util::shared_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "allocator_shared"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::allocator_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "allocator_shared_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::allocator_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
     allocator_dynamic_bin
   DATA
     amdf::amdf
@@ -142,22 +58,6 @@ iree_native_test(
 endif()
 
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "allocator_dynamic_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-    "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
-  SRC
-    ::allocator_dynamic_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 iree_cc_library(
   NAME
     discovery_cases
@@ -171,90 +71,6 @@ iree_cc_library(
   TESTONLY
   ALWAYSLINK
   PUBLIC
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
-    discovery_static_bin
-  DEPS
-    ::discovery_cases
-    amdf::headers
-    libamdf::cts::util::static_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "discovery_static"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::discovery_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "discovery_static_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::discovery_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
-    discovery_shared_bin
-  DATA
-    amdf::amdf
-  DEPS
-    ::discovery_cases
-    amdf::headers
-    libamdf::cts::util::shared_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "discovery_shared"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::discovery_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "discovery_shared_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::discovery_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
 )
 endif()
 
@@ -290,22 +106,6 @@ iree_native_test(
 endif()
 
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "discovery_dynamic_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-    "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
-  SRC
-    ::discovery_dynamic_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 iree_cc_library(
   NAME
     memory_cases
@@ -319,90 +119,6 @@ iree_cc_library(
   TESTONLY
   ALWAYSLINK
   PUBLIC
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
-    memory_static_bin
-  DEPS
-    ::memory_cases
-    amdf::headers
-    libamdf::cts::util::static_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "memory_static"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::memory_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "memory_static_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::memory_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-amdf_cts_binary(
-  NAME
-    memory_shared_bin
-  DATA
-    amdf::amdf
-  DEPS
-    ::memory_cases
-    amdf::headers
-    libamdf::cts::util::shared_provider
-    libamdf::cts::util::test_main
-  TESTONLY
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "memory_shared"
-  ARGS
-    "--amdf_native_lifetime=process"
-  SRC
-    ::memory_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "memory_shared_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::memory_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
 )
 endif()
 
@@ -438,14 +154,94 @@ iree_native_test(
 endif()
 
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+iree_cc_library(
+  NAME
+    memory_reservation_cases
+  SRCS
+    "memory_reservation_test.cc"
+  DEPS
+    amdf::headers
+    iree::third_party::google_test
+    libamdf::cts::util::device_cache
+    libamdf::cts::util::provider_headers
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+amdf_cts_binary(
+  NAME
+    memory_reservation_dynamic_bin
+  DATA
+    amdf::amdf
+  DEPS
+    ::memory_reservation_cases
+    amdf::headers
+    libamdf::cts::util::dynamic_provider
+    libamdf::cts::util::test_main
+  TESTONLY
+)
+endif()
+
+if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 iree_native_test(
   NAME
-    "memory_dynamic_instance"
+    "memory_reservation_dynamic"
   ARGS
-    "--amdf_native_lifetime=instance"
+    "--amdf_native_lifetime=process"
     "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
   SRC
-    ::memory_dynamic_bin
+    ::memory_reservation_dynamic_bin
+  DATA
+    "amdf::amdf"
+  LABELS
+    "iree-build-requirement=libamdf"
+)
+endif()
+
+if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+iree_cc_library(
+  NAME
+    observation_cases
+  SRCS
+    "observation_test.cc"
+  DEPS
+    amdf::headers
+    iree::third_party::google_test
+    libamdf::cts::util::device_cache
+    libamdf::cts::util::provider_headers
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+amdf_cts_binary(
+  NAME
+    observation_dynamic_bin
+  DATA
+    amdf::amdf
+  DEPS
+    ::observation_cases
+    amdf::headers
+    libamdf::cts::util::dynamic_provider
+    libamdf::cts::util::test_main
+  TESTONLY
+)
+endif()
+
+if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+iree_native_test(
+  NAME
+    "observation_dynamic"
+  ARGS
+    "--amdf_native_lifetime=process"
+    "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
+  SRC
+    ::observation_dynamic_bin
   DATA
     "amdf::amdf"
   LABELS
@@ -497,19 +293,6 @@ iree_native_test(
 endif()
 
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "query_static_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::query_static_bin
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 amdf_cts_binary(
   NAME
     query_shared_bin
@@ -540,21 +323,6 @@ iree_native_test(
 endif()
 
 if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "query_shared_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
-  SRC
-    ::query_shared_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 amdf_cts_binary(
   NAME
     query_dynamic_bin
@@ -575,22 +343,6 @@ iree_native_test(
     "query_dynamic"
   ARGS
     "--amdf_native_lifetime=process"
-    "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
-  SRC
-    ::query_dynamic_bin
-  DATA
-    "amdf::amdf"
-  LABELS
-    "iree-build-requirement=libamdf"
-)
-endif()
-
-if(AMDF_BUILD AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-iree_native_test(
-  NAME
-    "query_dynamic_instance"
-  ARGS
-    "--amdf_native_lifetime=instance"
     "--amdf_library={{$<TARGET_FILE:amdf::amdf>}}"
   SRC
     ::query_dynamic_bin

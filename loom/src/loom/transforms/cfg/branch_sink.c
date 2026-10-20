@@ -11,12 +11,16 @@
 #include "loom/ir/module.h"
 #include "loom/ops/cfg/ops.h"
 #include "loom/ops/op_defs.h"
+#include "loom/rewrite/materialize.h"
+#include "loom/rewrite/remap.h"
 #include "loom/rewrite/rewriter.h"
 
 #define LOOM_BRANCH_SINK_STATISTICS(V, statistics_type)                  \
   V(statistics_type, branches_visited, "branches-visited",               \
     "Number of branch operations inspected.")                            \
   V(statistics_type, ops_sunk, "ops-sunk", "Number of operations sunk.") \
+  V(statistics_type, ops_rematerialized, "ops-rematerialized",           \
+    "Number of operations rematerialized in CFG successors.")            \
   V(statistics_type, selectors_sunk, "selectors-sunk",                   \
     "Number of branch selector operations sunk.")
 
@@ -87,6 +91,8 @@ typedef struct loom_branch_sink_context_t {
   loom_module_t* module;
   // Rewriter used for IR movement.
   loom_rewriter_t* rewriter;
+  // Resettable correspondence storage for one generic operation clone.
+  iree_arena_allocator_t remap_arena;
   // Shared motion legality analysis.
   loom_motion_analysis_t motion;
   // Region DFS stack for finding region-branch ops in a function.
@@ -194,6 +200,17 @@ static bool loom_branch_sink_value_uses_target_one_region(
     }
   }
 
+  loom_type_use_iterator_t attribute_users;
+  loom_attribute_users_begin(&module->type_uses, value_id, &attribute_users);
+  for (loom_attribute_user_t user = loom_attribute_users_next(&attribute_users);
+       user.op; user = loom_attribute_users_next(&attribute_users)) {
+    uint8_t region_index = loom_branch_sink_op_region_index(branch, user.op);
+    if (!loom_branch_sink_merge_region_index(region_index, target_region_index,
+                                             has_use)) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -243,6 +260,16 @@ static bool loom_branch_sink_value_uses_only_op(const loom_module_t* module,
       return false;
     }
     if (loom_value_def_op(user_value) != target_op) {
+      return false;
+    }
+    *has_use = true;
+  }
+
+  loom_type_use_iterator_t attribute_users;
+  loom_attribute_users_begin(&module->type_uses, value_id, &attribute_users);
+  for (loom_attribute_user_t user = loom_attribute_users_next(&attribute_users);
+       user.op; user = loom_attribute_users_next(&attribute_users)) {
+    if (user.op != target_op) {
       return false;
     }
     *has_use = true;
@@ -373,6 +400,342 @@ static iree_status_t loom_branch_sink_try_candidate(
   return iree_ok_status();
 }
 
+// Projects an operation nested under structured owners onto its containing
+// block in |region|. Uses in nested regions execute under that CFG block.
+static const loom_block_t* loom_branch_sink_cfg_ancestor_block(
+    const loom_region_t* region, const loom_op_t* op) {
+  while (op && op->parent_block && op->parent_block->parent_region != region) {
+    op = op->parent_op;
+  }
+  return op && op->parent_block && op->parent_block->parent_region == region
+             ? op->parent_block
+             : NULL;
+}
+
+static const loom_block_t* loom_branch_sink_cfg_block_arg_ancestor(
+    const loom_region_t* region, const loom_block_t* block) {
+  if (!block) {
+    return NULL;
+  }
+  if (block->parent_region == region) {
+    return block;
+  }
+  return block->first_op
+             ? loom_branch_sink_cfg_ancestor_block(region, block->first_op)
+             : NULL;
+}
+
+static uint8_t loom_branch_sink_cfg_successor(
+    const loom_dominance_info_t* dominance, const loom_block_t* successors[2],
+    const loom_block_t* use_block) {
+  uint8_t use_successor = LOOM_BRANCH_SINK_REGION_INDEX_NONE;
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (!loom_dominates_block(dominance, successors[i], use_block)) {
+      continue;
+    }
+    if (use_successor != LOOM_BRANCH_SINK_REGION_INDEX_NONE) {
+      return LOOM_BRANCH_SINK_REGION_INDEX_NONE;
+    }
+    use_successor = i;
+  }
+  return use_successor;
+}
+
+static uint8_t loom_branch_sink_cfg_successor_for_op(
+    loom_branch_sink_context_t* context, const loom_region_t* region,
+    const loom_block_t* successors[2], const loom_op_t* op) {
+  const loom_block_t* use_block =
+      loom_branch_sink_cfg_ancestor_block(region, op);
+  if (!use_block) {
+    return LOOM_BRANCH_SINK_REGION_INDEX_NONE;
+  }
+  return loom_branch_sink_cfg_successor(&context->motion.availability.dominance,
+                                        successors, use_block);
+}
+
+typedef struct loom_branch_sink_cfg_use_summary_t {
+  // Direct successor subtrees containing result uses.
+  uint8_t successor_mask;
+  // True when a use remains at the source decision or outside its successors.
+  bool has_retained_use;
+  // True when a result is captured by another value type or an attribute.
+  bool has_identity_use;
+} loom_branch_sink_cfg_use_summary_t;
+
+static void loom_branch_sink_cfg_use_summary_record(
+    uint8_t successor, bool identity_use,
+    loom_branch_sink_cfg_use_summary_t* summary) {
+  if (successor == LOOM_BRANCH_SINK_REGION_INDEX_NONE) {
+    summary->has_retained_use = true;
+  } else {
+    summary->successor_mask |= (uint8_t)(1u << successor);
+  }
+  summary->has_identity_use |= identity_use;
+}
+
+static bool loom_branch_sink_summarize_cfg_value_uses(
+    loom_branch_sink_context_t* context, const loom_region_t* region,
+    const loom_block_t* successors[2], loom_value_id_t value_id,
+    loom_branch_sink_cfg_use_summary_t* summary) {
+  if (value_id == LOOM_VALUE_ID_INVALID ||
+      value_id >= context->module->values.count) {
+    return false;
+  }
+  const loom_dominance_info_t* dominance =
+      &context->motion.availability.dominance;
+  const loom_value_t* value = loom_module_value(context->module, value_id);
+  const loom_use_t* uses = loom_value_uses(value);
+  for (uint32_t i = 0; i < value->use_count; ++i) {
+    loom_branch_sink_cfg_use_summary_record(
+        loom_branch_sink_cfg_successor_for_op(context, region, successors,
+                                              loom_use_user_op(uses[i])),
+        /*identity_use=*/false, summary);
+  }
+
+  loom_type_use_iterator_t type_users;
+  loom_module_value_type_users(context->module, value_id, &type_users);
+  for (loom_value_id_t user_value_id = loom_type_users_next(&type_users);
+       user_value_id != LOOM_VALUE_ID_INVALID;
+       user_value_id = loom_type_users_next(&type_users)) {
+    const loom_value_t* user_value =
+        loom_module_value(context->module, user_value_id);
+    const loom_block_t* use_block =
+        loom_value_is_block_arg(user_value)
+            ? loom_branch_sink_cfg_block_arg_ancestor(
+                  region, loom_value_def_block(user_value))
+            : loom_branch_sink_cfg_ancestor_block(
+                  region, loom_value_def_op(user_value));
+    loom_branch_sink_cfg_use_summary_record(
+        use_block
+            ? loom_branch_sink_cfg_successor(dominance, successors, use_block)
+            : LOOM_BRANCH_SINK_REGION_INDEX_NONE,
+        /*identity_use=*/true, summary);
+  }
+
+  loom_type_use_iterator_t attribute_users;
+  loom_attribute_users_begin(&context->module->type_uses, value_id,
+                             &attribute_users);
+  for (loom_attribute_user_t user = loom_attribute_users_next(&attribute_users);
+       user.op; user = loom_attribute_users_next(&attribute_users)) {
+    loom_branch_sink_cfg_use_summary_record(
+        loom_branch_sink_cfg_successor_for_op(context, region, successors,
+                                              user.op),
+        /*identity_use=*/true, summary);
+  }
+  return true;
+}
+
+static bool loom_branch_sink_summarize_cfg_result_uses(
+    loom_branch_sink_context_t* context, loom_op_t* branch_op,
+    const loom_block_t* successors[2], const loom_op_t* candidate_op,
+    loom_branch_sink_cfg_use_summary_t* out_summary) {
+  *out_summary = (loom_branch_sink_cfg_use_summary_t){0};
+  const loom_value_id_t* results = loom_op_const_results(candidate_op);
+  const loom_region_t* region = branch_op->parent_block->parent_region;
+  for (uint16_t i = 0; i < candidate_op->result_count; ++i) {
+    if (!loom_branch_sink_summarize_cfg_value_uses(context, region, successors,
+                                                   results[i], out_summary)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool loom_branch_sink_cfg_use_summary_unique_successor(
+    const loom_branch_sink_cfg_use_summary_t* summary, uint8_t* out_successor) {
+  if (summary->successor_mask != 1 && summary->successor_mask != 2) {
+    return false;
+  }
+  *out_successor = summary->successor_mask == 1 ? 0 : 1;
+  return true;
+}
+
+// Returns true when at least one result cannot travel through cfg-converge's
+// scalar join payload. Non-scalar values have no lawful inactive value, while
+// type and attribute uses retain the original SSA identity.
+static bool loom_branch_sink_results_require_cfg_locality(
+    const loom_module_t* module, const loom_op_t* candidate_op) {
+  const loom_value_id_t* results = loom_op_const_results(candidate_op);
+  for (uint16_t i = 0; i < candidate_op->result_count; ++i) {
+    const loom_value_t* value = loom_module_value(module, results[i]);
+    if (!loom_type_is_scalar(value->type) ||
+        loom_module_value_has_type_uses(module, results[i]) ||
+        loom_value_has_attribute_uses(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Reference carriers have no lawful inactive payload for cfg-converge.
+// Retaining the source identity and rebuilding pure reference metadata under
+// the successor predicate avoids inventing target-specific transport.
+static bool loom_branch_sink_results_are_reference_carriers(
+    const loom_module_t* module, const loom_op_t* candidate_op) {
+  const loom_value_id_t* results = loom_op_const_results(candidate_op);
+  for (uint16_t i = 0; i < candidate_op->result_count; ++i) {
+    const loom_value_t* value = loom_module_value(module, results[i]);
+    if (!loom_type_is_buffer(value->type) && !loom_type_is_view(value->type)) {
+      return false;
+    }
+  }
+  return candidate_op->result_count != 0;
+}
+
+static iree_status_t loom_branch_sink_clone_cfg_candidate(
+    loom_branch_sink_context_t* context, loom_op_t* branch_op,
+    const loom_block_t* successors[2], loom_op_t* candidate_op,
+    uint8_t target_successor) {
+  loom_op_t* insertion_op = successors[target_successor]->first_op;
+  IREE_ASSERT(insertion_op != NULL);
+
+  iree_arena_reset(&context->remap_arena);
+  loom_ir_remap_t remap;
+  IREE_RETURN_IF_ERROR(loom_ir_remap_initialize(
+      context->module, context->module, &context->remap_arena,
+      &(loom_ir_remap_options_t){
+          .allow_unmapped_values = true,
+      },
+      &remap));
+
+  loom_builder_ip_t saved_ip = loom_builder_save(&context->rewriter->builder);
+  loom_builder_set_before(&context->rewriter->builder, insertion_op);
+  loom_op_t* cloned_op = NULL;
+  iree_status_t status = loom_ir_clone_op(&context->rewriter->builder,
+                                          candidate_op, &remap, &cloned_op);
+  loom_builder_restore(&context->rewriter->builder, saved_ip);
+  IREE_RETURN_IF_ERROR(status);
+
+  const loom_value_id_t* source_results = loom_op_const_results(candidate_op);
+  const loom_value_id_t* cloned_results = loom_op_const_results(cloned_op);
+  for (uint16_t i = 0; i < candidate_op->result_count; ++i) {
+    IREE_RETURN_IF_ERROR(
+        loom_rewriter_clear_value_name(context->rewriter, cloned_results[i]));
+    IREE_RETURN_IF_ERROR(loom_rewriter_try_set_derived_value_name(
+        context->rewriter, source_results[i], cloned_results[i],
+        IREE_SV("remat")));
+  }
+
+  const loom_region_t* region = branch_op->parent_block->parent_region;
+  for (uint16_t i = 0; i < candidate_op->result_count; ++i) {
+    loom_value_t* source_value =
+        loom_module_value(context->module, source_results[i]);
+    uint32_t use_index = 0;
+    while (use_index < source_value->use_count) {
+      const loom_use_t use = loom_value_uses(source_value)[use_index];
+      const uint8_t successor = loom_branch_sink_cfg_successor_for_op(
+          context, region, successors, loom_use_user_op(use));
+      if (successor != target_successor) {
+        ++use_index;
+        continue;
+      }
+      IREE_RETURN_IF_ERROR(loom_rewriter_set_operand(
+          context->rewriter, loom_use_user_op(use), loom_use_operand_index(use),
+          cloned_results[i]));
+    }
+  }
+  ++context->statistics->ops_rematerialized;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_branch_sink_try_rematerialize_cfg_candidate(
+    loom_branch_sink_context_t* context, loom_op_t* branch_op,
+    const loom_block_t* successors[2], loom_op_t* candidate_op,
+    const loom_branch_sink_cfg_use_summary_t* use_summary,
+    uint8_t target_successor, bool* out_rematerialized) {
+  *out_rematerialized = false;
+  if (!loom_branch_sink_results_are_reference_carriers(context->module,
+                                                       candidate_op) ||
+      !loom_motion_op_can_rematerialize_effect_free(context->module,
+                                                    candidate_op) ||
+      use_summary->has_identity_use || !use_summary->has_retained_use) {
+    return iree_ok_status();
+  }
+
+  const loom_dominance_info_t* dominance =
+      &context->motion.availability.dominance;
+  loom_op_t* insertion_op = successors[target_successor]->first_op;
+  if (!insertion_op ||
+      loom_dominance_block_is_cyclic(dominance, successors[target_successor])) {
+    return iree_ok_status();
+  }
+  bool can_relocate = false;
+  IREE_RETURN_IF_ERROR(loom_motion_subtree_can_relocate_before(
+      &context->motion, candidate_op, insertion_op, &can_relocate));
+  if (!can_relocate) {
+    return iree_ok_status();
+  }
+
+  IREE_RETURN_IF_ERROR(loom_branch_sink_clone_cfg_candidate(
+      context, branch_op, successors, candidate_op, target_successor));
+  *out_rematerialized = true;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_branch_sink_try_cfg_candidate(
+    loom_branch_sink_context_t* context, loom_op_t* branch_op,
+    const loom_block_t* successors[2], loom_op_t* candidate_op,
+    bool* out_changed) {
+  *out_changed = false;
+  if (candidate_op->result_count == 0 ||
+      !loom_branch_sink_results_require_cfg_locality(context->module,
+                                                     candidate_op) ||
+      !loom_motion_op_can_relocate_effect_free(context->module, candidate_op)) {
+    return iree_ok_status();
+  }
+
+  loom_branch_sink_cfg_use_summary_t use_summary;
+  if (!loom_branch_sink_summarize_cfg_result_uses(
+          context, branch_op, successors, candidate_op, &use_summary)) {
+    return iree_ok_status();
+  }
+  uint8_t target_successor = LOOM_BRANCH_SINK_REGION_INDEX_NONE;
+  if (!loom_branch_sink_cfg_use_summary_unique_successor(&use_summary,
+                                                         &target_successor)) {
+    return iree_ok_status();
+  }
+  if (use_summary.has_retained_use) {
+    return loom_branch_sink_try_rematerialize_cfg_candidate(
+        context, branch_op, successors, candidate_op, &use_summary,
+        target_successor, out_changed);
+  }
+  const loom_block_t* target_block = successors[target_successor];
+  const loom_dominance_info_t* dominance =
+      &context->motion.availability.dominance;
+  if (loom_dominance_block_is_cyclic(dominance, target_block)) {
+    return iree_ok_status();
+  }
+
+  loom_op_t* insertion_op = target_block->first_op;
+  if (!insertion_op) {
+    return iree_ok_status();
+  }
+  bool can_relocate = false;
+  IREE_RETURN_IF_ERROR(loom_motion_subtree_can_relocate_before(
+      &context->motion, candidate_op, insertion_op, &can_relocate));
+  if (!can_relocate) {
+    return iree_ok_status();
+  }
+
+  IREE_RETURN_IF_ERROR(
+      loom_rewriter_move_before(context->rewriter, candidate_op, insertion_op));
+  *out_changed = true;
+  ++context->statistics->ops_sunk;
+  return iree_ok_status();
+}
+
+// A direct successor whose immediate dominator is not the branch source has a
+// reachable incoming path outside this decision. cfg-converge may move such a
+// decision behind the shared successor, invalidating branch-local references.
+static bool loom_branch_sink_cfg_has_shared_successor(
+    const loom_dominance_info_t* dominance, const loom_block_t* source,
+    const loom_block_t* successors[2]) {
+  return loom_dominance_immediate_dominator_block(dominance, successors[0]) !=
+             source ||
+         loom_dominance_immediate_dominator_block(dominance, successors[1]) !=
+             source;
+}
+
 static iree_status_t loom_branch_sink_process_branch(
     loom_branch_sink_context_t* context, loom_region_branch_t branch,
     bool* out_changed) {
@@ -401,6 +764,27 @@ static iree_status_t loom_branch_sink_process_branch(
 static iree_status_t loom_branch_sink_process_cfg_cond_br(
     loom_branch_sink_context_t* context, loom_op_t* op, bool* out_changed) {
   ++context->statistics->branches_visited;
+
+  const loom_block_t* successors[] = {loom_cfg_cond_br_true_dest(op),
+                                      loom_cfg_cond_br_false_dest(op)};
+  const loom_dominance_info_t* dominance =
+      &context->motion.availability.dominance;
+  loom_op_t* selector_op = loom_branch_sink_value_producer(
+      context->module, loom_cfg_cond_br_condition(op));
+  if (loom_branch_sink_cfg_has_shared_successor(dominance, op->parent_block,
+                                                successors)) {
+    loom_op_t* candidate_op = op->prev_op;
+    while (candidate_op) {
+      loom_op_t* previous_op = candidate_op->prev_op;
+      if (candidate_op != selector_op) {
+        bool sunk = false;
+        IREE_RETURN_IF_ERROR(loom_branch_sink_try_cfg_candidate(
+            context, op, successors, candidate_op, &sunk));
+        *out_changed |= sunk;
+      }
+      candidate_op = previous_op;
+    }
+  }
 
   bool selector_sunk = false;
   IREE_RETURN_IF_ERROR(loom_branch_sink_try_selector(
@@ -473,6 +857,7 @@ iree_status_t loom_branch_sink_run(loom_pass_t* pass, loom_module_t* module,
       .module = module,
       .rewriter = &rewriter,
   };
+  iree_arena_initialize(pass->arena->block_pool, &context.remap_arena);
   iree_status_t status = loom_branch_sink_region_stack_initialize(
       pass->arena, &context.region_stack);
   if (iree_status_is_ok(status)) {
@@ -493,6 +878,7 @@ iree_status_t loom_branch_sink_run(loom_pass_t* pass, loom_module_t* module,
   if (iree_status_is_ok(status) && any_changed) {
     loom_pass_mark_changed(pass);
   }
+  iree_arena_deinitialize(&context.remap_arena);
   loom_rewriter_deinitialize(&rewriter);
   return status;
 }

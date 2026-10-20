@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "iree/hal/cts/util/test_base.h"
-#include "iree/hal/memory/passthrough_pool.h"
 
 namespace iree::hal::cts {
 
@@ -42,14 +41,9 @@ class DispatchPipelineTest : public CtsTestBase<> {
       GTEST_SKIP() << "device has no provisioned transfer-capable queue";
     }
 
-    iree_hal_queue_pool_backend_t backend = {};
-    IREE_ASSERT_OK(iree_hal_device_query_queue_pool_backend(
-        device_, iree_hal_queue_family(transfer_queue_), &backend));
-    iree_hal_passthrough_pool_options_t options = {};
-    options.asan = backend.asan;
-    IREE_ASSERT_OK(iree_hal_passthrough_pool_create(
-        options, backend.slab_provider, backend.notification,
-        iree_allocator_system(), &transient_pool_));
+    IREE_ASSERT_OK(CreateDevicePool(
+        IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_DISPATCH,
+        &transient_pool_));
 
     // Load the scale_and_offset kernel:
     //   output[i] = input[i] * scale + offset
@@ -97,14 +91,21 @@ class DispatchPipelineTest : public CtsTestBase<> {
             IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
         IREE_HAL_ACCESS_SCOPE_DISPATCH_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
     };
-    IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-        cmd,
-        IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER |
-            IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-        IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-            IREE_HAL_EXECUTION_STAGE_DISPATCH |
-            IREE_HAL_EXECUTION_STAGE_TRANSFER,
-        IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, 1, &memory_barrier, 0, nullptr));
+    const iree_hal_barrier_t execution_barrier = {
+        .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                             IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+        .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                             IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER,
+        .flags = IREE_HAL_BARRIER_FLAG_NONE,
+        .effects = {},
+        .memory_barrier_count = 1,
+        .memory_barriers = &memory_barrier,
+        .buffer_barrier_count = 0,
+        .buffer_barriers = nullptr,
+    };
+    IREE_ASSERT_OK(iree_hal_command_buffer_barrier(cmd, &execution_barrier));
   }
 
   iree_hal_executable_t* executable_ = nullptr;
@@ -256,16 +257,9 @@ TEST_P(DispatchPipelineTest, TransientInputPipeline) {
   // Allocate a transient buffer for input.
   SemaphoreList alloca_signal(device_, {0}, {1});
   SemaphoreList empty_wait;
-  iree_hal_buffer_params_t alloca_params = {0};
-  alloca_params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
-  alloca_params.usage =
-      IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-  alloca_params.queue_family_affinity = iree_hal_make_queue_family_affinity(
-      iree_hal_queue_family_ordinal(iree_hal_queue_family(transfer_queue_)));
-  const iree_hal_pool_reservation_request_t request = {
-      /*.params=*/alloca_params,
-      /*.allocation_size=*/kBufferSize,
-  };
+  const iree_hal_pool_reservation_request_t request =
+      iree_hal_make_pool_reservation_request(kBufferSize,
+                                             /*min_alignment=*/0);
   iree_hal_buffer_t* raw = nullptr;
   IREE_ASSERT_OK(iree_hal_queue_alloca(transfer_queue_, empty_wait,
                                        alloca_signal, transient_pool_,

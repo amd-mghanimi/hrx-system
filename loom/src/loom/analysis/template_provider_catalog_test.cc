@@ -87,7 +87,7 @@ class TemplateProviderCatalogTest : public ::testing::Test {
     IREE_CHECK_OK(loom_template_provider_catalog_build_local(&catalog_, module,
                                                              &fact_table_));
     return loom_template_provider_catalog_lookup(
-        &catalog_, {/*.module_id=*/0, /*.symbol_id=*/FindSymbol(module, name)});
+        &catalog_, {.module_id = 0, .symbol_id = FindSymbol(module, name)});
   }
 
   const loom_template_provider_summary_t* FindProvider(
@@ -103,8 +103,8 @@ class TemplateProviderCatalogTest : public ::testing::Test {
   void AddUkernelProvider(loom_module_t* module, iree_string_view_t family,
                           iree_string_view_t name, int64_t priority) {
     const loom_symbol_ref_t family_ref = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/FindSymbol(module, family),
+        .module_id = 0,
+        .symbol_id = FindSymbol(module, family),
     };
     loom_string_id_t name_id = LOOM_STRING_ID_INVALID;
     IREE_ASSERT_OK(loom_module_intern_string(module, name, &name_id));
@@ -118,11 +118,11 @@ class TemplateProviderCatalogTest : public ::testing::Test {
     loom_op_t* op = nullptr;
     IREE_ASSERT_OK(loom_template_ukernel_build(
         &builder, LOOM_TEMPLATE_UKERNEL_BUILD_FLAG_HAS_PRIORITY, family_ref,
-        /*visibility=*/0, /*retain=*/0, /*cc=*/0, /*purity=*/0,
+        /*visibility=*/0, /*retain=*/0, /*cc=*/0, /*effect_contract=*/0,
         /*temperature=*/0, loom_symbol_ref_null(),
         loom_parameterized_attr_array_empty(), priority,
-        (loom_symbol_ref_t){/*.module_id=*/0, /*.symbol_id=*/symbol_id}, &i32,
-        1, &i32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &op));
+        loom_symbol_ref_t{.module_id = 0, .symbol_id = symbol_id}, &i32, 1,
+        &i32, 1, nullptr, 0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &op));
     ASSERT_NE(op, nullptr);
   }
 
@@ -160,7 +160,7 @@ template.def<@qwen.q4.matmul> public priority(10) @fast(%arg0: i32) -> (i32) {
   EXPECT_EQ(fast->func_facts->visibility, LOOM_TEMPLATE_VISIBILITY_PUBLIC);
   EXPECT_TRUE(fast->has_body);
   EXPECT_EQ(fast->func_facts->calling_convention, 0);
-  EXPECT_EQ(fast->func_facts->purity, 0);
+  EXPECT_EQ(fast->func_facts->effect_contract, 0);
   EXPECT_EQ(fast->func_facts->temperature, 0);
   EXPECT_EQ(fast->func_facts->inline_policy, 0);
   EXPECT_EQ(fast->priority, 10);
@@ -188,8 +188,10 @@ template.def<@qwen.q4.matmul> public priority(10) @fast(%arg0: i32) -> (i32) {
 
   loom_template_provider_slice_t other = loom_template_provider_catalog_lookup(
       &catalog_,
-      {/*.module_id=*/0,
-       /*.symbol_id=*/FindSymbol(module.get(), IREE_SV("other.contract"))});
+      {
+          .module_id = 0,
+          .symbol_id = FindSymbol(module.get(), IREE_SV("other.contract")),
+      });
   ASSERT_EQ(other.count, 1u);
   EXPECT_TRUE(
       iree_string_view_equal(other.providers[0].name, IREE_SV("other")));
@@ -301,7 +303,7 @@ TEST_F(TemplateProviderCatalogTest,
 test.target<low_core> @source.gfx11
 template.decl @source.family(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>)
 
-template.def<@source.family> target(@source.gfx11) requires [#target.subgroup.size<32>] priority(7) @source.provider(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [mul(%m, 16)] {
+template.def<@source.family> target(@source.gfx11) requires [#target.subgroup.size<32>] priority(7) @source.provider(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [multiple_of(%m, 16)] {
   template.return %arg : tensor<[%m]xf32>
 }
 )");
@@ -318,12 +320,12 @@ template.decl @target.family(%n: index, %arg: tensor<[%n]xf32>) -> (tensor<[%n]x
       source_providers.providers[0];
 
   const loom_symbol_ref_t target_target = {
-      /*.module_id=*/0,
-      /*.symbol_id=*/FindSymbol(target.get(), IREE_SV("target.gfx11")),
+      .module_id = 0,
+      .symbol_id = FindSymbol(target.get(), IREE_SV("target.gfx11")),
   };
   const loom_symbol_ref_t target_family = {
-      /*.module_id=*/0,
-      /*.symbol_id=*/FindSymbol(target.get(), IREE_SV("target.family")),
+      .module_id = 0,
+      .symbol_id = FindSymbol(target.get(), IREE_SV("target.family")),
   };
   const iree_host_size_t target_value_count_before = target->values.count;
   loom_template_provider_summary_t bound = {};
@@ -363,7 +365,7 @@ template.decl @target.family(%n: index, %arg: tensor<[%n]xf32>) -> (tensor<[%n]x
 
   ASSERT_EQ(bound.predicate_count, 1u);
   ASSERT_NE(bound.predicates, nullptr);
-  EXPECT_EQ(bound.predicates[0].kind, LOOM_PREDICATE_MUL);
+  EXPECT_EQ(bound.predicates[0].kind, LOOM_PREDICATE_MULTIPLE_OF);
   EXPECT_EQ(bound.predicates[0].arg_tags[0], LOOM_PRED_ARG_VALUE);
   EXPECT_EQ((loom_value_id_t)bound.predicates[0].args[0],
             bound.argument_ids[0]);

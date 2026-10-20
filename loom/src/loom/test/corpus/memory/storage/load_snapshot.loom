@@ -1,0 +1,339 @@
+// A lane extracted after a write still observes the earlier vector load.
+kernel.def @extract_before_write() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  func.call @compute_extract_before_write(%input, %output) : (buffer, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_extract_before_write(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<1xi32>
+  %replacement = scalar.constant 99 : i32
+  %captured = vector.load %source[0] : view<4xi32> -> vector<4xi32>
+  view.store %replacement, %source[2] : i32, view<4xi32>
+  %lane = vector.extract %captured[2] : vector<4xi32> -> i32
+  view.store %lane, %destination[0] : i32, view<1xi32>
+  func.return
+}
+
+func.def @extract_before_write_oracle(%input: buffer, %output: buffer) {
+  func.call @compute_extract_before_write(%input, %output) : (buffer, buffer)
+  func.return
+}
+
+check.scenario @extract_before_write_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(7) step(3) : tensor<4xi32>
+    %output = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@extract_before_write, @extract_before_write_oracle>(%input, %output) : (tensor<4xi32>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<4xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<1xi32>
+    }
+  }
+  check.return
+}
+
+// A nested consumer may execute repeatedly without repeating its source read.
+kernel.def @extract_inside_loop() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%count0: index, %input: buffer, %output: buffer) {
+  func.call @compute_extract_inside_loop(%count0, %input, %output) : (index, buffer, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_extract_inside_loop(%count0: index, %input: buffer, %output: buffer) {
+  %count = index.assume %count0 [range(%count0, 1, 3)] : index
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = scalar.constant 0 : i32
+  %replacement = scalar.constant 99 : i32
+  %source = buffer.view %input[%base] : buffer -> view<4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<1xi32>
+  %captured = vector.load %source[0] : view<4xi32> -> vector<4xi32>
+  %result = scf.for %iv = [%begin to %count step %step](%sum = %initial : i32) -> (i32) {
+    view.store %replacement, %source[2] : i32, view<4xi32>
+    %lane = vector.extract %captured[2] : vector<4xi32> -> i32
+    %next = scalar.addi %sum, %lane : i32
+    scf.yield %next : i32
+  }
+  view.store %result, %destination[0] : i32, view<1xi32>
+  func.return
+}
+
+func.def @extract_inside_loop_oracle(%count0: index, %input: buffer, %output: buffer) {
+  func.call @compute_extract_inside_loop(%count0, %input, %output) : (index, buffer, buffer)
+  func.return
+}
+
+check.scenario @extract_inside_loop_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %count = check.literal value(3) : index
+    %input = check.generate.iota offset(7) step(3) : tensor<4xi32>
+    %output = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@extract_inside_loop, @extract_inside_loop_oracle>(%count, %input, %output) : (index, tensor<4xi32>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<4xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<1xi32>
+    }
+  }
+  check.return
+}
+
+// A wide reduction and a later store both observe the snapshot taken before
+// the source changes.
+kernel.def @wide_snapshot_reduction() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %sum_output: buffer, %saved_output: buffer) {
+  func.call @compute_wide_snapshot_reduction(%input, %sum_output, %saved_output) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_wide_snapshot_reduction(%input: buffer, %sum_output: buffer, %saved_output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<88xi32>
+  %sum_destination = buffer.view %sum_output[%base] : buffer -> view<1xi32>
+  %saved_destination = buffer.view %saved_output[%base] : buffer -> view<88xi32>
+  %captured = vector.load %source[0] : view<88xi32> -> vector<88xi32>
+  %replacement = scalar.constant 99 : i32
+  view.store %replacement, %source[0] : i32, view<88xi32>
+  %c0 = scalar.constant 0 : i32
+  %sum = vector.reduce<addi> %captured, %c0 : vector<88xi32>, i32
+  view.store %sum, %sum_destination[0] : i32, view<1xi32>
+  vector.store %captured, %saved_destination[0] : vector<88xi32>, view<88xi32>
+  func.return
+}
+
+func.def @wide_snapshot_reduction_oracle(%input: buffer, %sum_output: buffer, %saved_output: buffer) {
+  func.call @compute_wide_snapshot_reduction(%input, %sum_output, %saved_output) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @wide_snapshot_reduction_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(7) : tensor<88xi32>
+    %sum = check.generate.fill value(0) : tensor<1xi32>
+    %saved = check.generate.fill value(0) : tensor<88xi32>
+    check.compare<@wide_snapshot_reduction, @wide_snapshot_reduction_oracle>(%input, %sum, %saved) : (tensor<88xi32>, tensor<1xi32>, tensor<88xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<88xi32>
+      check.expect.bitwise actual(%sum) expected(%sum) : tensor<1xi32>
+      check.expect.bitwise actual(%saved) expected(%saved) : tensor<88xi32>
+    }
+  }
+  check.return
+}
+
+// Each workitem retains a wide computed snapshot across a barrier. A second
+// workgroup makes the launch coordinates observable when allocation needs
+// private spill storage for that snapshot.
+kernel.def @computed_snapshot_across_barrier() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 2 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %width = index.constant 64 : index
+  %group_begin = index.mul %group, %width : index
+  %workitem = index.add %group_begin, %lane : index
+  %stride = index.constant 1056 : index
+  %position = index.mul %workitem, %stride : index
+  %offset = index.cast %position : index to offset
+  %source = buffer.view %input[%offset] : buffer -> view<264xi32>
+  %destination = buffer.view %output[%offset] : buffer -> view<264xi32>
+  %loaded = vector.load %source[0] : view<264xi32> -> vector<264xi32>
+  %bias = scalar.constant 7 : i32
+  %biases = vector.splat %bias : vector<264xi32>
+  %captured = vector.addi %loaded, %biases : vector<264xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %begin = index.constant 0 : index
+  %end = index.constant 264 : index
+  %step = index.constant 1 : index
+  scf.for %element = [%begin to %end step %step] unroll(%end) {
+    %value = vector.extract %captured[%element] : vector<264xi32> -> i32
+    view.store %value, %destination[%element] : i32, view<264xi32>
+  }
+  kernel.return
+}
+
+func.def @computed_snapshot_across_barrier_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<33792xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<33792xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 33792 : index
+  %step = index.constant 1 : index
+  %bias = scalar.constant 7 : i32
+  scf.for %element = [%begin to %end step %step] {
+    %value = view.load %source[%element] : view<33792xi32> -> i32
+    %result = scalar.addi %value, %bias : i32
+    view.store %result, %destination[%element] : i32, view<33792xi32>
+  }
+  func.return
+}
+
+check.scenario @computed_snapshot_across_barrier_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-17001) step(3) : tensor<33792xi32>
+    %output = check.generate.fill value(-1) : tensor<33792xi32>
+    check.compare<@computed_snapshot_across_barrier, @computed_snapshot_across_barrier_oracle>(%input, %output) : (tensor<33792xi32>, tensor<33792xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<33792xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<33792xi32>
+    }
+  }
+  check.return
+}
+
+// A 128-byte snapshot crosses register boundaries and remains intact after its
+// source is poisoned. Partial stores preserve the remaining output bytes.
+kernel.def @capture_partial_byte_vectors() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %source, %destination = buffer.assume.alignment %input, %output {minimum_alignment = 64} : buffer, buffer
+  %origin = index.constant 0 : offset
+  %payload_origin = index.constant 64 : offset
+  %count_view = buffer.view %source[%origin] : buffer -> view<64xi32>
+  %source_view = buffer.view %source[%payload_origin] : buffer -> view<128xi8>
+  %destination_view = buffer.view %destination[%origin] : buffer -> view<512xi8>
+  %count_i32 = view.load %count_view[0] : view<64xi32> -> i32
+  %count = index.cast %count_i32 : i32 to index
+  %snapshot = vector.load %source_view[0] : view<128xi8> -> vector<128xi8>
+  %sentinel = vector.constant -91 : vector<64xi8>
+  vector.store<volatile> %sentinel, %source_view[0] : vector<64xi8>, view<128xi8>
+  vector.store<volatile> %sentinel, %source_view[64] : vector<64xi8>, view<128xi8>
+  vector.store %sentinel, %destination_view[0] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[64] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[128] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[192] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[256] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[320] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[384] : vector<64xi8>, view<512xi8>
+  vector.store %sentinel, %destination_view[448] : vector<64xi8>, view<512xi8>
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %captured = scf.for %iteration = [%c0 to %count step %c1](%carried = %snapshot : vector<128xi8>) -> (vector<128xi8>) {
+    vector.store %carried, %destination_view[0] : vector<128xi8>, view<512xi8>
+    %crossing = vector.slice %carried[63] : vector<128xi8> -> vector<64xi8>
+    vector.store %crossing, %destination_view[128] : vector<64xi8>, view<512xi8>
+    %wide = vector.slice %carried[1] : vector<128xi8> -> vector<96xi8>
+    vector.store %wide, %destination_view[192] : vector<96xi8>, view<512xi8>
+    %pair_left = vector.slice %carried[0] : vector<128xi8> -> vector<40xi8>
+    %pair_right = vector.slice %carried[40] : vector<128xi8> -> vector<40xi8>
+    %partial_pair = vector.concat<0> %pair_left, %pair_right : vector<40xi8>, vector<40xi8> -> vector<80xi8>
+    %pivot = vector.slice %carried[80] : vector<128xi8> -> vector<1xi8>
+    %partial_wide = vector.concat<0> %pivot, %partial_pair : vector<1xi8>, vector<80xi8> -> vector<81xi8>
+    %chain_tail = vector.slice %carried[81] : vector<128xi8> -> vector<47xi8>
+    %wide_partial = vector.concat<0> %partial_wide, %chain_tail : vector<81xi8>, vector<47xi8> -> vector<128xi8>
+    vector.store %wide_partial, %destination_view[288] : vector<128xi8>, view<512xi8>
+    %prefix = vector.slice %carried[0] : vector<128xi8> -> vector<1xi8>
+    %suffix = vector.slice %carried[1] : vector<128xi8> -> vector<63xi8>
+    %joined = vector.concat<0> %prefix, %suffix : vector<1xi8>, vector<63xi8> -> vector<64xi8>
+    %direct_tail = vector.slice %carried[64] : vector<128xi8> -> vector<1xi8>
+    %wide_joined = vector.concat<0> %joined, %direct_tail : vector<64xi8>, vector<1xi8> -> vector<65xi8>
+    vector.store %wide_joined, %destination_view[416] : vector<65xi8>, view<512xi8>
+    scf.yield %carried : vector<128xi8>
+  }
+  kernel.return
+}
+
+func.def @generate_partial_snapshot(%trial: index, %input: buffer) {
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  %origin = index.constant 0 : offset
+  %destination = buffer.view %input[%origin] : buffer -> view<256xi8>
+  %trial_value = index.cast %trial : index to i32
+  %c1 = scalar.constant 1 : i32
+  %record = scalar.addi %trial_value, %c1 : i32
+  %record_scale = scalar.constant 37 : i32
+  %record_bias = scalar.muli %record, %record_scale : i32
+  %position_scale = scalar.constant 13 : i32
+  scf.for %i = [%begin to %end step %step] {
+    %position = index.cast %i : index to i32
+    %position_bias = scalar.muli %position, %position_scale : i32
+    %value = scalar.addi %record_bias, %position_bias : i32
+    %byte = scalar.trunci %value : i32 to i8
+    view.store %byte, %destination[%i] : i8, view<256xi8>
+  }
+  %trip_variants = index.constant 3 : index
+  %variant = index.rem %trial, %trip_variants : index
+  %count_index = index.add %variant, %step : index
+  %count = index.cast %count_index : index to i32
+  %count_view = buffer.view %input[%origin] : buffer -> view<64xi32>
+  view.store %count, %count_view[0] : i32, view<64xi32>
+  func.return
+}
+
+func.def @copy_snapshot_bytes(%snapshot: buffer, %output: buffer, %source_origin: offset, %output_origin: offset, %length: offset) {
+  %begin = index.constant 0 : offset
+  %step = index.constant 1 : offset
+  scf.for %i = [%begin to %length step %step] {
+    %source = index.add %source_origin, %i : offset
+    %destination = index.add %output_origin, %i : offset
+    %byte = buffer.load.i8.u %snapshot[%source]
+    buffer.store.i8 %byte, %output[%destination]
+  }
+  func.return
+}
+
+func.def @partial_snapshot_reference(%input: buffer, %output: buffer) {
+  %begin = index.constant 0 : offset
+  %step = index.constant 1 : offset
+  %payload_origin = index.constant 64 : offset
+  %payload_bytes = index.constant 128 : offset
+  %output_bytes = index.constant 512 : offset
+  %snapshot = buffer.alloca<private> align(1) %payload_bytes : buffer
+  func.call @copy_snapshot_bytes(%input, %snapshot, %payload_origin, %begin, %payload_bytes) : (buffer, buffer, offset, offset, offset)
+  %sentinel = scalar.constant 165 : i32
+  scf.for %i = [%begin to %payload_bytes step %step] {
+    %position = index.add %payload_origin, %i : offset
+    buffer.store.i8 %sentinel, %input[%position]
+  }
+  scf.for %i = [%begin to %output_bytes step %step] {
+    buffer.store.i8 %sentinel, %output[%i]
+  }
+  %crossing_origin = index.constant 63 : offset
+  %crossing_bytes = index.constant 64 : offset
+  %wide_origin = index.constant 192 : offset
+  %wide_bytes = index.constant 96 : offset
+  %tail_origin = index.constant 416 : offset
+  %tail_bytes = index.constant 65 : offset
+  func.call @copy_snapshot_bytes(%snapshot, %output, %begin, %begin, %payload_bytes) : (buffer, buffer, offset, offset, offset)
+  func.call @copy_snapshot_bytes(%snapshot, %output, %crossing_origin, %payload_bytes, %crossing_bytes) : (buffer, buffer, offset, offset, offset)
+  func.call @copy_snapshot_bytes(%snapshot, %output, %step, %wide_origin, %wide_bytes) : (buffer, buffer, offset, offset, offset)
+  func.call @copy_snapshot_bytes(%snapshot, %output, %begin, %tail_origin, %tail_bytes) : (buffer, buffer, offset, offset, offset)
+  %reordered_origin = index.constant 288 : offset
+  %pivot = index.constant 80 : offset
+  scf.for %i = [%begin to %payload_bytes step %step] {
+    %is_first = index.cmp eq, %i, %begin : offset
+    %before_pivot = index.cmp ule, %i, %pivot : offset
+    %previous = index.sub %i, %step : offset
+    %ordinary_source = scf.select %before_pivot, %previous, %i : offset
+    %source = scf.select %is_first, %pivot, %ordinary_source : offset
+    %byte = buffer.load.i8.u %snapshot[%source]
+    %destination = index.add %reordered_origin, %i : offset
+    buffer.store.i8 %byte, %output[%destination]
+  }
+  func.return
+}
+
+check.scenario @captured_partial_vector_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_storage = check.generate.fill value(-91) : tensor<384xi8>
+    %input = check.tensor.view %input_storage offset(64) : tensor<384xi8> -> tensor<256xi8>
+    check.generate<@generate_partial_snapshot>(%trial, %input) : (index, tensor<256xi8>) -> ()
+    %output_storage = check.generate.fill value(-51) : tensor<640xi8>
+    %output = check.tensor.view %output_storage offset(64) : tensor<640xi8> -> tensor<512xi8>
+    check.compare<@capture_partial_byte_vectors, @partial_snapshot_reference>(%input, %output) : (tensor<256xi8>, tensor<512xi8>) -> () {
+      check.expect.bitwise actual(%input_storage) expected(%input_storage) : tensor<384xi8>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<640xi8>
+    }
+  }
+  check.return
+}

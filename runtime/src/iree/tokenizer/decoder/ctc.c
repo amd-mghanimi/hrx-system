@@ -9,27 +9,11 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "iree/tokenizer/decoder/wordpiece_cleanup.h"
+
 //===----------------------------------------------------------------------===//
 // CTC Decoder Implementation
 //===----------------------------------------------------------------------===//
-
-// Cleanup rules from HuggingFace tokenizers/src/decoders/wordpiece.rs.
-// Applied in order. All rules are shrinking or equal-size.
-typedef struct iree_tokenizer_decoder_ctc_cleanup_rule_t {
-  const char* pattern;
-  iree_host_size_t pattern_length;
-  const char* replacement;
-  iree_host_size_t replacement_length;
-} iree_tokenizer_decoder_ctc_cleanup_rule_t;
-
-static const iree_tokenizer_decoder_ctc_cleanup_rule_t kCleanupRules[] = {
-    {" .", 2, ".", 1},     {" ?", 2, "?", 1},           {" !", 2, "!", 1},
-    {" ,", 2, ",", 1},     {" ' ", 3, "'", 1},          {" n't", 4, "n't", 3},
-    {" 'm", 3, "'m", 2},   {" do not", 7, " don't", 6}, {" 's", 3, "'s", 2},
-    {" 've", 4, "'ve", 3}, {" 're", 4, "'re", 3},
-};
-static const iree_host_size_t kCleanupRuleCount =
-    sizeof(kCleanupRules) / sizeof(kCleanupRules[0]);
 
 typedef struct iree_tokenizer_decoder_ctc_t {
   iree_tokenizer_decoder_t base;
@@ -161,11 +145,13 @@ static iree_host_size_t iree_tokenizer_decoder_ctc_filter_map(
   }
 
   // Step 2a: Apply wordpiece cleanup rules.
-  for (iree_host_size_t i = 0; i < kCleanupRuleCount; ++i) {
-    const iree_tokenizer_decoder_ctc_cleanup_rule_t* rule = &kCleanupRules[i];
+  for (iree_host_size_t i = 0; i < IREE_TOKENIZER_WORDPIECE_CLEANUP_RULE_COUNT;
+       ++i) {
+    const iree_tokenizer_wordpiece_cleanup_rule_t* rule =
+        &iree_tokenizer_wordpiece_cleanup_rules[i];
     length = iree_tokenizer_decoder_ctc_replace_one(
-        output, length, rule->pattern, rule->pattern_length, rule->replacement,
-        rule->replacement_length);
+        output, length, rule->pattern.data, rule->pattern.size,
+        rule->replacement.data, rule->replacement.size);
   }
 
   // Step 2b: Replace word delimiter with space.
@@ -305,7 +291,6 @@ static void iree_tokenizer_decoder_ctc_destroy(
 static iree_status_t iree_tokenizer_decoder_ctc_state_initialize(
     const iree_tokenizer_decoder_t* decoder, void* storage,
     iree_tokenizer_decoder_state_t** out_state) {
-  IREE_TRACE_ZONE_BEGIN(z0);
   const iree_tokenizer_decoder_ctc_t* self =
       (const iree_tokenizer_decoder_ctc_t*)decoder;
 
@@ -323,16 +308,11 @@ static iree_status_t iree_tokenizer_decoder_ctc_state_initialize(
   state->cleanup = self->cleanup;
 
   *out_state = &state->base;
-  IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
 }
 
 static void iree_tokenizer_decoder_ctc_state_deinitialize(
-    iree_tokenizer_decoder_state_t* state) {
-  IREE_TRACE_ZONE_BEGIN(z0);
-  (void)state;
-  IREE_TRACE_ZONE_END(z0);
-}
+    iree_tokenizer_decoder_state_t* state) {}
 
 //===----------------------------------------------------------------------===//
 // Processing

@@ -16,6 +16,5 @@ check.case public @aligned_buffer_copy {
   check.expect.bitwise actual(%suffix) expected(%suffix_guard) : tensor<32xi32>
   %unchanged = check.generate.iota offset(1024) step(37) : tensor<48xi32>
   check.expect.bitwise actual(%input) expected(%unchanged) : tensor<48xi32>
-  check.expect.event<device> {count = 0, type = "asan_report"}
   check.return
 }

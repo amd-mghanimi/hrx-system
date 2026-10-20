@@ -58,6 +58,9 @@ iree_status_t loom_bytecode_type_decode_kind(
     case LOOM_BYTECODE_TYPE_PARAMETERIZED:
       *out_kind = LOOM_TYPE_PARAMETERIZED;
       return iree_ok_status();
+    case LOOM_BYTECODE_TYPE_GROUP:
+      *out_kind = LOOM_TYPE_GROUP;
+      return iree_ok_status();
     default: {
       loom_diagnostic_param_t params[] = {
           loom_param_u32(kind_byte),

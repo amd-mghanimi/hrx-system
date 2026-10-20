@@ -45,19 +45,6 @@ const loom_low_descriptor_set_t* LookupAmdgpuGfx125xDescriptorSet() {
       &registry.registry, IREE_SV("amdgpu.rdna4.gfx125x.core"));
 }
 
-uint16_t FindRegisterClassId(const loom_low_descriptor_set_t* descriptor_set,
-                             iree_string_view_t name) {
-  for (uint16_t i = 0; i < descriptor_set->reg_class_count; ++i) {
-    const loom_low_reg_class_t* reg_class = &descriptor_set->reg_classes[i];
-    const iree_string_view_t reg_class_name = loom_low_descriptor_set_string(
-        descriptor_set, reg_class->name_string_ref);
-    if (iree_string_view_equal(reg_class_name, name)) {
-      return i;
-    }
-  }
-  return LOOM_LOW_REG_CLASS_NONE;
-}
-
 class AmdgpuNativePreflightTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -100,8 +87,8 @@ class AmdgpuNativePreflightTest : public ::testing::Test {
     loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     return loom_symbol_ref_t{
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -139,7 +126,7 @@ class AmdgpuNativePreflightTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_low_func_def_build(
         &module_builder, LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_TARGET,
         /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-        /*purity=*/0, /*inline_policy=*/0,
+        /*effect_contract=*/0, /*inline_policy=*/0,
         /*allocation=*/0, /*schedule=*/0,
         /*descriptor_set=*/representation_contract, target_ref, /*abi=*/0,
         loom_named_attr_slice_t{}, loom_named_attr_slice_t{},
@@ -159,15 +146,13 @@ class AmdgpuNativePreflightTest : public ::testing::Test {
       const loom_low_descriptor_set_t* descriptor_set) const {
     const loom_target_bundle_t* target_bundle =
         loom_target_facts_bundle(&target_facts_.base);
-    return (loom_low_resolved_target_t){
-        /*.target_facts=*/&target_facts_.base,
-        /*.target_name=*/
-        loom_target_facts_identity_name(&target_facts_.base),
-        /*.descriptor_set_key=*/
-        loom_low_descriptor_set_string(descriptor_set,
-                                       descriptor_set->key_string_ref),
-        /*.feature_bits=*/target_bundle->config->contract_feature_bits,
-        /*.descriptor_set=*/descriptor_set,
+    return loom_low_resolved_target_t{
+        .target_facts = &target_facts_.base,
+        .target_name = loom_target_facts_identity_name(&target_facts_.base),
+        .descriptor_set_key = loom_low_descriptor_set_string(
+            descriptor_set, descriptor_set->key_string_ref),
+        .feature_bits = target_bundle->config->contract_feature_bits,
+        .descriptor_set = descriptor_set,
     };
   }
 
@@ -184,22 +169,25 @@ class AmdgpuNativePreflightTest : public ::testing::Test {
 
   loom_low_schedule_table_t Schedule(
       const loom_low_descriptor_set_t* descriptor_set) {
-    loom_low_schedule_table_t schedule = {};
-    schedule.module = module_;
-    schedule.function_op = function_op_;
-    schedule.target = ResolvedTarget(descriptor_set);
-    loom_low_storage_layout_builder_finish(
-        &storage_layout_builder_, &schedule.requirements.storage_layout);
+    loom_low_schedule_table_t schedule = {
+        .module = module_,
+        .function_op = function_op_,
+        .target = ResolvedTarget(descriptor_set),
+    };
+    IREE_CHECK_OK(loom_low_storage_layout_builder_finish(
+        &storage_layout_builder_, &table_arena_,
+        &schedule.requirements.storage_layout));
     return schedule;
   }
 
   loom_low_allocation_table_t Allocation(
       const loom_low_descriptor_set_t* descriptor_set) {
     physical_extents_.assign(descriptor_set->reg_class_count, 0);
-    loom_low_allocation_table_t allocation = {};
-    allocation.module = module_;
-    allocation.function_op = function_op_;
-    allocation.target = ResolvedTarget(descriptor_set);
+    loom_low_allocation_table_t allocation = {
+        .module = module_,
+        .function_op = function_op_,
+        .target = ResolvedTarget(descriptor_set),
+    };
     allocation.physical_extents.ends_by_reg_class = physical_extents_.data();
     allocation.physical_extents.count = physical_extents_.size();
     return allocation;
@@ -218,8 +206,7 @@ class AmdgpuNativePreflightTest : public ::testing::Test {
   std::vector<uint32_t> physical_extents_;
 };
 
-TEST_F(AmdgpuNativePreflightTest,
-       AgprNativeMetadataUnsupportedEmitsDiagnostic) {
+TEST_F(AmdgpuNativePreflightTest, RetainsAccumulatorAndMoveScratchExtents) {
   const loom_low_descriptor_set_t* descriptor_set =
       LookupAmdgpuCdna3DescriptorSet();
   if (descriptor_set == nullptr) {
@@ -227,44 +214,36 @@ TEST_F(AmdgpuNativePreflightTest,
   }
   BuildLowFunction(descriptor_set);
   const uint16_t agpr_reg_class_id =
-      FindRegisterClassId(descriptor_set, IREE_SV("amdgpu.agpr"));
-  ASSERT_NE(agpr_reg_class_id, LOOM_LOW_REG_CLASS_NONE);
+      loom_amdgpu_agpr_reg_class_id(descriptor_set);
+  ASSERT_NE(agpr_reg_class_id, UINT8_MAX);
 
   loom_low_schedule_table_t schedule = Schedule(descriptor_set);
 
-  loom_low_allocation_assignment_t assignment = {};
-  assignment.value_id = 0;
-  assignment.value_class.type_kind = LOOM_TYPE_REGISTER;
-  assignment.value_class.register_descriptor_set_stable_id =
-      descriptor_set->stable_id;
-  assignment.value_class.register_class_id = agpr_reg_class_id;
-  assignment.descriptor_reg_class_id = agpr_reg_class_id;
-  assignment.unit_count = 4;
-  assignment.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
-  assignment.location_count = 4;
+  loom_low_allocation_assignment_t assignment = {
+      .value_id = 0,
+      .descriptor_reg_class_id = agpr_reg_class_id,
+      .unit_count = 4,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_count = 4,
+  };
 
   loom_low_allocation_table_t allocation = Allocation(descriptor_set);
   allocation.assignments = &assignment;
   allocation.assignment_count = 1;
+  // A structural move uses a4 beyond the four-register SSA assignment.
+  physical_extents_[agpr_reg_class_id] = 5;
 
   DiagnosticEmissionCapture capture;
-  loom_amdgpu_native_preflight_options_t options = {};
-  options.emitter = capture.emitter();
+  loom_amdgpu_native_preflight_options_t options = {
+      .emitter = capture.emitter(),
+  };
   loom_amdgpu_native_preflight_t preflight = {};
   IREE_ASSERT_OK(loom_amdgpu_native_preflight_analyze(&schedule, &allocation,
                                                       &options, &preflight));
 
-  EXPECT_EQ(preflight.error_count, 1u);
-  ASSERT_EQ(capture.emissions.size(), 1u);
-  const testing::CapturedDiagnosticEmission& emission = capture.emissions[0];
-  EXPECT_EQ(emission.error, LOOM_ERR_AMDGPU_035);
-  ASSERT_EQ(emission.string_params.size(), 8u);
-  EXPECT_EQ(emission.string_params[0], "gfx942");
-  EXPECT_EQ(emission.string_params[3], "preflight");
-  EXPECT_EQ(emission.string_params[4], "<unknown>");
-  EXPECT_EQ(emission.string_params[5], "amdgpu.agpr");
-  EXPECT_EQ(emission.string_params[6], "amdgpu.agpr");
-  EXPECT_EQ(emission.string_params[7], "AGPR kernel-descriptor");
+  EXPECT_EQ(preflight.error_count, 0u);
+  EXPECT_TRUE(capture.emissions.empty());
+  EXPECT_EQ(preflight.next_free_agpr, 5u);
 }
 
 TEST_F(AmdgpuNativePreflightTest, UsesCompleteRetainedRegisterExtents) {
@@ -276,10 +255,6 @@ TEST_F(AmdgpuNativePreflightTest, UsesCompleteRetainedRegisterExtents) {
   loom_low_schedule_table_t schedule = Schedule(descriptor_set);
   loom_low_allocation_assignment_t assignments[2] = {};
   for (loom_low_allocation_assignment_t& assignment : assignments) {
-    assignment.value_class.type_kind = LOOM_TYPE_REGISTER;
-    assignment.value_class.register_descriptor_set_stable_id =
-        descriptor_set->stable_id;
-    assignment.value_class.register_class_id = LOOM_AMDGPU_REG_CLASS_ID_SGPR;
     assignment.descriptor_reg_class_id = LOOM_AMDGPU_REG_CLASS_ID_SGPR;
     assignment.unit_count = 1;
     assignment.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
@@ -319,8 +294,9 @@ TEST_F(AmdgpuNativePreflightTest, StackStorageUnsupportedEmitsDiagnostic) {
   const loom_low_allocation_table_t allocation = Allocation(descriptor_set);
 
   DiagnosticEmissionCapture capture;
-  loom_amdgpu_native_preflight_options_t options = {};
-  options.emitter = capture.emitter();
+  loom_amdgpu_native_preflight_options_t options = {
+      .emitter = capture.emitter(),
+  };
   loom_amdgpu_native_preflight_t preflight = {};
   IREE_ASSERT_OK(loom_amdgpu_native_preflight_analyze(&schedule, &allocation,
                                                       &options, &preflight));

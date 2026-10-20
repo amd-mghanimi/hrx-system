@@ -35,6 +35,38 @@ endif()
 if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_library(
   NAME
+    libhsa_without_descriptor_queue_create.so
+  SRCS
+    "libhsa.h"
+    "libhsa_tables.h"
+    "libhsa_without_descriptor_queue_create.c"
+  DEPS
+    iree::base
+    iree::third_party::hsa_runtime_headers
+  TESTONLY
+  SHARED
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_c_embed_data(
+  NAME
+    libhsa_without_descriptor_queue_create
+  SRCS
+    "$<TARGET_FILE:iree::hal::drivers::amdgpu::util::libhsa_without_descriptor_queue_create.so>"
+  C_FILE_OUTPUT
+    "libhsa_without_descriptor_queue_create_embed.c"
+  H_FILE_OUTPUT
+    "libhsa_without_descriptor_queue_create_embed.h"
+  TESTONLY
+  FLATTEN
+  PUBLIC
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_library(
+  NAME
     libaqlprofile
   HDRS
     "libaqlprofile.h"
@@ -61,6 +93,7 @@ iree_cc_test(
     "libhsa_test.cc"
   DEPS
     ::libhsa
+    ::libhsa_without_descriptor_queue_create
     iree::base
     iree::base::testing::dynamic_library_test_library
     iree::io::file_handle
@@ -177,10 +210,15 @@ iree_cc_library(
   HDRS
     "hsaco_metadata.h"
   SRCS
+    "hsaco_data_layout.c"
+    "hsaco_data_layout.h"
+    "hsaco_elf.c"
+    "hsaco_elf.h"
     "hsaco_metadata.c"
   DEPS
     iree::base
     iree::hal
+    iree::hal::drivers::amdgpu::abi
   PUBLIC
 )
 endif()
@@ -194,6 +232,7 @@ iree_cc_test(
   DEPS
     ::hsaco_metadata
     iree::base
+    iree::hal::drivers::amdgpu::abi
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
@@ -426,6 +465,7 @@ iree_cc_library(
   HDRS
     "aql_ring.h"
     "epoch_signal_table.h"
+    "host_write.h"
     "kernarg_ring.h"
     "notification_ring.h"
     "queue_upload_ring.h"
@@ -649,6 +689,8 @@ iree_cc_binary_benchmark(
     iree::base::threading
     iree::base::tooling::flags
     iree::hal
+    iree::hal::drivers::amdgpu
+    iree::hal::drivers::amdgpu::headers
     iree::hal::drivers::amdgpu::registration
     iree::third_party::google_benchmark
   TESTONLY

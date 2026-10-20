@@ -1,0 +1,671 @@
+// Every byte encoding crosses scalar and packed conversion paths. Row scales
+// are runtime data; the oracle uses scalar arithmetic and independent stores.
+kernel.def @float8_dequantization() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %scales: buffer, %scalar_output: buffer, %vector_output: buffer, %bfloat_output: buffer, %decoded_output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %e4_source = buffer.view %input[%base] : buffer -> view<64x4xf8E4M3>
+  %e5_source = buffer.view %input[%base] : buffer -> view<64x4xf8E5M2>
+  %scale_source = buffer.view %scales[%base] : buffer -> view<64xf32>
+  %scalar_result = buffer.view %scalar_output[%base] : buffer -> view<2x64x4xf32>
+  %vector_result = buffer.view %vector_output[%base] : buffer -> view<2x64x4xf32>
+  %bfloat_result = buffer.view %bfloat_output[%base] : buffer -> view<4x64x4xbf16>
+  %decoded_result = buffer.view %decoded_output[%base] : buffer -> view<64x4x2xf32>
+  %scale = view.load %scale_source[%lane] : view<64xf32> -> f32
+  %scale_vector = vector.splat %scale : vector<4xf32>
+  %e4 = vector.load %e4_source[%lane, 0] : view<64x4xf8E4M3> -> vector<4xf8E4M3>
+  %e5 = vector.load %e5_source[%lane, 0] : view<64x4xf8E5M2> -> vector<4xf8E5M2>
+  %e4_wide = vector.extf %e4 : vector<4xf8E4M3> to vector<4xf32>
+  %e5_wide = vector.extf %e5 : vector<4xf8E5M2> to vector<4xf32>
+  %e4_brain = vector.extf %e4 : vector<4xf8E4M3> to vector<4xbf16>
+  %e5_brain = vector.extf %e5 : vector<4xf8E5M2> to vector<4xbf16>
+  %e4_scaled = vector.mulf %e4_wide, %scale_vector : vector<4xf32>
+  %e5_scaled = vector.mulf %e5_wide, %scale_vector : vector<4xf32>
+  %e4_scaled_brain = vector.fptrunc %e4_scaled : vector<4xf32> to vector<4xbf16>
+  %e5_scaled_brain = vector.fptrunc %e5_scaled : vector<4xf32> to vector<4xbf16>
+  vector.store %e4_wide, %vector_result[0, %lane, 0] : vector<4xf32>, view<2x64x4xf32>
+  vector.store %e5_wide, %vector_result[1, %lane, 0] : vector<4xf32>, view<2x64x4xf32>
+  vector.store %e4_brain, %bfloat_result[0, %lane, 0] : vector<4xbf16>, view<4x64x4xbf16>
+  vector.store %e5_brain, %bfloat_result[1, %lane, 0] : vector<4xbf16>, view<4x64x4xbf16>
+  vector.store %e4_scaled_brain, %bfloat_result[2, %lane, 0] : vector<4xbf16>, view<4x64x4xbf16>
+  vector.store %e5_scaled_brain, %bfloat_result[3, %lane, 0] : vector<4xbf16>, view<4x64x4xbf16>
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %schema = encoding.define #encoding.f8e4m3<affine=scale_only, payload_elements=2, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %decode_scale = vector.splat %scale : vector<1xf32>
+  scf.for %column = [%begin to %end step %step] {
+    %e4_scalar = view.load %e4_source[%lane, %column] : view<64x4xf8E4M3> -> f8E4M3
+    %e5_scalar = view.load %e5_source[%lane, %column] : view<64x4xf8E5M2> -> f8E5M2
+    %e4_scalar_wide = scalar.extf %e4_scalar : f8E4M3 to f32
+    %e5_scalar_wide = scalar.extf %e5_scalar : f8E5M2 to f32
+    view.store %e4_scalar_wide, %scalar_result[0, %lane, %column] : f32, view<2x64x4xf32>
+    view.store %e5_scalar_wide, %scalar_result[1, %lane, %column] : f32, view<2x64x4xf32>
+    %payload = vector.splat %e4_scalar : vector<2xf8E4M3>
+    %decoded = vector.decode %payload using %schema {scale = %decode_scale : vector<1xf32>} : vector<2xf8E4M3>, encoding<schema> -> vector<2xf32>
+    vector.store %decoded, %decoded_result[%lane, %column, 0] : vector<2xf32>, view<64x4x2xf32>
+  }
+  kernel.return
+}
+
+func.def @float8_dequantization_oracle(%input: buffer, %scales: buffer, %scalar_output: buffer, %vector_output: buffer, %bfloat_output: buffer, %decoded_output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %rows = index.constant 64 : index
+  %columns = index.constant 4 : index
+  %step = index.constant 1 : index
+  %e4_source = buffer.view %input[%base] : buffer -> view<64x4xf8E4M3>
+  %e5_source = buffer.view %input[%base] : buffer -> view<64x4xf8E5M2>
+  %bytes = buffer.view %input[%base] : buffer -> view<64x4xi8>
+  %scale_source = buffer.view %scales[%base] : buffer -> view<64xf32>
+  %scalar_result = buffer.view %scalar_output[%base] : buffer -> view<2x64x4xf32>
+  %vector_result = buffer.view %vector_output[%base] : buffer -> view<2x64x4xf32>
+  %bfloat_result = buffer.view %bfloat_output[%base] : buffer -> view<4x64x4xbf16>
+  %decoded_result = buffer.view %decoded_output[%base] : buffer -> view<64x4x2xf32>
+  %magnitude_mask = scalar.constant 127 : i32
+  %sign_mask = scalar.constant 128 : i32
+  %sign_shift = scalar.constant 24 : i32
+  %special_exponent = scalar.constant 120 : i32
+  %infinity_bits = scalar.constant 2139095040 : i32
+  %nan_bits = scalar.constant 2143289344 : i32
+  scf.for %row = [%begin to %rows step %step] {
+    %scale = view.load %scale_source[%row] : view<64xf32> -> f32
+    scf.for %column = [%begin to %columns step %step] {
+      %e4 = view.load %e4_source[%row, %column] : view<64x4xf8E4M3> -> f8E4M3
+      %e5 = view.load %e5_source[%row, %column] : view<64x4xf8E5M2> -> f8E5M2
+      %e4_wide = scalar.extf %e4 : f8E4M3 to f32
+      %e5_wide = scalar.extf %e5 : f8E5M2 to f32
+      %e4_brain = scalar.fptrunc %e4_wide : f32 to bf16
+      %e5_brain = scalar.fptrunc %e5_wide : f32 to bf16
+      %e4_scaled = scalar.mulf %e4_wide, %scale : f32
+      %e5_scaled = scalar.mulf %e5_wide, %scale : f32
+      %e4_scaled_brain = scalar.fptrunc %e4_scaled : f32 to bf16
+      %e5_scaled_brain = scalar.fptrunc %e5_scaled : f32 to bf16
+      view.store %e4_wide, %scalar_result[0, %row, %column] : f32, view<2x64x4xf32>
+      view.store %e5_wide, %scalar_result[1, %row, %column] : f32, view<2x64x4xf32>
+      view.store %e4_wide, %vector_result[0, %row, %column] : f32, view<2x64x4xf32>
+      view.store %e5_wide, %vector_result[1, %row, %column] : f32, view<2x64x4xf32>
+      view.store %e4_brain, %bfloat_result[0, %row, %column] : bf16, view<4x64x4xbf16>
+      view.store %e5_brain, %bfloat_result[1, %row, %column] : bf16, view<4x64x4xbf16>
+      view.store %e4_scaled_brain, %bfloat_result[2, %row, %column] : bf16, view<4x64x4xbf16>
+      view.store %e5_scaled_brain, %bfloat_result[3, %row, %column] : bf16, view<4x64x4xbf16>
+      // IEEE E4M3 reserves the top exponent; scalar E4M3FN uses it for finite
+      // values except the final NaN payload. Decode those IEEE cases explicitly.
+      %byte = view.load %bytes[%row, %column] : view<64x4xi8> -> i8
+      %bits = scalar.extui %byte : i8 to i32
+      %magnitude = scalar.andi %bits, %magnitude_mask : i32
+      %sign = scalar.andi %bits, %sign_mask : i32
+      %sign_bits = scalar.shli %sign, %sign_shift : i32
+      %is_special = scalar.cmpi uge, %magnitude, %special_exponent : i32
+      %is_infinity = scalar.cmpi eq, %magnitude, %special_exponent : i32
+      %special_bits = scf.select %is_infinity, %infinity_bits, %nan_bits : i32
+      %signed_bits = scalar.ori %special_bits, %sign_bits : i32
+      %special = scalar.bitcast %signed_bits : i32 to f32
+      %decode_value = scf.select %is_special, %special, %e4_wide : f32
+      %decoded = scalar.mulf %decode_value, %scale : f32
+      view.store %decoded, %decoded_result[%row, %column, 0] : f32, view<64x4x2xf32>
+      view.store %decoded, %decoded_result[%row, %column, 1] : f32, view<64x4x2xf32>
+    }
+  }
+  func.return
+}
+
+check.scenario @float8_dequantization_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %scales = check.generate.random.uniform seed(%seed) range(-2.0 to 2.0) : tensor<64xf32>
+    %scalar_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %vector_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %bfloat_storage = check.generate.fill value(-123.0) : tensor<1040xbf16>
+    %decoded_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %scalar_output = check.tensor.view %scalar_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    %vector_output = check.tensor.view %vector_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    %bfloat_output = check.tensor.view %bfloat_storage offset(16) : tensor<1040xbf16> -> tensor<1024xbf16>
+    %decoded_output = check.tensor.view %decoded_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    %e4_negative_zero = check.tensor.view %vector_output offset(0) : tensor<512xf32> -> tensor<1xf32>
+    %e4_positive_zero = check.tensor.view %vector_output offset(512) : tensor<512xf32> -> tensor<1xf32>
+    %e5_negative_zero = check.tensor.view %vector_output offset(1024) : tensor<512xf32> -> tensor<1xf32>
+    %e5_positive_zero = check.tensor.view %vector_output offset(1536) : tensor<512xf32> -> tensor<1xf32>
+    %scaled_zeros = check.tensor.view %decoded_output offset(0) : tensor<512xf32> -> tensor<2xf32>
+    %e4_bfloat_zero = check.tensor.view %bfloat_output offset(0) : tensor<1024xbf16> -> tensor<1xbf16>
+    %e5_bfloat_zero = check.tensor.view %bfloat_output offset(512) : tensor<1024xbf16> -> tensor<1xbf16>
+    %e4_scaled_zero = check.tensor.view %bfloat_output offset(1024) : tensor<1024xbf16> -> tensor<1xbf16>
+    %e5_scaled_zero = check.tensor.view %bfloat_output offset(1536) : tensor<1024xbf16> -> tensor<1xbf16>
+    check.compare<@float8_dequantization, @float8_dequantization_oracle>(%input, %scales, %scalar_output, %vector_output, %bfloat_output, %decoded_output) : (tensor<256xi8>, tensor<64xf32>, tensor<512xf32>, tensor<512xf32>, tensor<1024xbf16>, tensor<512xf32>) -> () {
+      check.expect.close actual(%scalar_storage) expected(%scalar_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+      check.expect.close actual(%vector_storage) expected(%vector_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+      check.expect.close actual(%bfloat_storage) expected(%bfloat_storage) atol(0.0) rtol(0.0) nan(same) : tensor<1040xbf16>
+      check.expect.close actual(%decoded_storage) expected(%decoded_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+      check.expect.bitwise actual(%e4_negative_zero) expected(%e4_negative_zero) : tensor<1xf32>
+      check.expect.bitwise actual(%e4_positive_zero) expected(%e4_positive_zero) : tensor<1xf32>
+      check.expect.bitwise actual(%e5_negative_zero) expected(%e5_negative_zero) : tensor<1xf32>
+      check.expect.bitwise actual(%e5_positive_zero) expected(%e5_positive_zero) : tensor<1xf32>
+      check.expect.bitwise actual(%scaled_zeros) expected(%scaled_zeros) : tensor<2xf32>
+      check.expect.bitwise actual(%e4_bfloat_zero) expected(%e4_bfloat_zero) : tensor<1xbf16>
+      check.expect.bitwise actual(%e5_bfloat_zero) expected(%e5_bfloat_zero) : tensor<1xbf16>
+      check.expect.bitwise actual(%e4_scaled_zero) expected(%e4_scaled_zero) : tensor<1xbf16>
+      check.expect.bitwise actual(%e5_scaled_zero) expected(%e5_scaled_zero) : tensor<1xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %scales = check.generate.iota offset(-2.0) step(1.0) period(5) : tensor<64xf32>
+    %scalar_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %vector_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %bfloat_storage = check.generate.fill value(-123.0) : tensor<1040xbf16>
+    %decoded_storage = check.generate.fill value(-123.0) : tensor<520xf32>
+    %scalar_output = check.tensor.view %scalar_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    %vector_output = check.tensor.view %vector_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    %bfloat_output = check.tensor.view %bfloat_storage offset(16) : tensor<1040xbf16> -> tensor<1024xbf16>
+    %decoded_output = check.tensor.view %decoded_storage offset(16) : tensor<520xf32> -> tensor<512xf32>
+    check.compare<@float8_dequantization, @float8_dequantization_oracle>(%input, %scales, %scalar_output, %vector_output, %bfloat_output, %decoded_output) : (tensor<256xi8>, tensor<64xf32>, tensor<512xf32>, tensor<512xf32>, tensor<1024xbf16>, tensor<512xf32>) -> () {
+      check.expect.close actual(%scalar_storage) expected(%scalar_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+      check.expect.close actual(%vector_storage) expected(%vector_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+      check.expect.close actual(%bfloat_storage) expected(%bfloat_storage) atol(0.0) rtol(0.0) nan(same) : tensor<1040xbf16>
+      check.expect.close actual(%decoded_storage) expected(%decoded_storage) atol(0.0) rtol(0.0) nan(same) : tensor<520xf32>
+    }
+  }
+  check.return
+}
+
+// Each scenario invocation decodes one runtime case. Directed scale words
+// cover the E8M0 edges while deterministic entropy expands payload coverage.
+// A single MXFP8 group covers the ordinary BF16 decode path.
+func.def inline @e8m0_mxfp8_bf16_body(%input_buffer: buffer, %output_buffer: buffer) {
+  %input, %output = buffer.assume.noalias %input_buffer, %output_buffer : buffer, buffer
+  %base = index.constant 0 : offset
+  %payload_offset = index.constant 4 : offset
+  %origin = index.constant 0 : index
+  %scale_view = buffer.view %input[%base] : buffer -> view<1xi32>
+  %payload_view = buffer.view %input[%payload_offset] : buffer -> view<8xi8>
+  %output_view = buffer.view %output[%base] : buffer -> view<8xbf16>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=8, scale_format=e8m0, scale_group_elements=8, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %payload_bits = vector.load %payload_view[%origin] : view<8xi8> -> vector<8xi8>
+  %payload = vector.bitcast %payload_bits : vector<8xi8> to vector<8xf8E4M3>
+  %scale = vector.load %scale_view[%origin] : view<1xi32> -> vector<1xi32>
+  %decoded = vector.decode %payload using %schema {scale = %scale : vector<1xi32>} : vector<8xf8E4M3>, encoding<schema> -> vector<8xbf16>
+  vector.store %decoded, %output_view[%origin] : vector<8xbf16>, view<8xbf16>
+  func.return
+}
+
+kernel.def @e8m0_mxfp8_bf16() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_bf16_body(%input_buffer, %output_buffer) : (buffer, buffer)
+  kernel.return
+}
+
+func.def @e8m0_mxfp8_bf16_oracle(%input_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_bf16_body(%input_buffer, %output_buffer) : (buffer, buffer)
+  func.return
+}
+
+check.scenario @e8m0_mxfp8_bf16_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(0) step(16843009) period(256) : tensor<3xi32>
+    %expected_input = check.generate.iota offset(0) step(16843009) period(256) : tensor<3xi32>
+    %output = check.generate.fill value(-123.0) : tensor<8xbf16>
+    check.compare<@e8m0_mxfp8_bf16, @e8m0_mxfp8_bf16_oracle>(%input, %output) : (tensor<3xi32>, tensor<8xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<3xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xbf16>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("e8m0_mxfp8_bf16_input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<3xi32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<3xi32>
+    %output = check.generate.fill value(-123.0) : tensor<8xbf16>
+    check.compare<@e8m0_mxfp8_bf16, @e8m0_mxfp8_bf16_oracle>(%input, %output) : (tensor<3xi32>, tensor<8xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<3xi32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<8xbf16>
+    }
+  }
+  check.return
+}
+
+// Four packed E8M0 groups cover minimum, identity, doubled, and NaN scales.
+func.def inline @e8m0_mxfp8_grouped_body(%payload_buffer: buffer, %scale_buffer: buffer, %output_buffer: buffer) {
+  %payload_input, %scale_input, %output = buffer.assume.noalias %payload_buffer, %scale_buffer, %output_buffer : buffer, buffer, buffer
+  %base = index.constant 0 : offset
+  %e4_bf16_output_offset = index.constant 128 : offset
+  %e4_f16_output_offset = index.constant 192 : offset
+  %e5_f32_output_offset = index.constant 256 : offset
+  %e5_bf16_output_offset = index.constant 384 : offset
+  %e5_f16_output_offset = index.constant 448 : offset
+  %origin = index.constant 0 : index
+  %payload_view = buffer.view %payload_input[%base] : buffer -> view<32xi8>
+  %scale_view = buffer.view %scale_input[%base] : buffer -> view<1xi32>
+  %e4_f32_output_view = buffer.view %output[%base] : buffer -> view<32xf32>
+  %e4_bf16_output_view = buffer.view %output[%e4_bf16_output_offset] : buffer -> view<32xbf16>
+  %e4_f16_output_view = buffer.view %output[%e4_f16_output_offset] : buffer -> view<32xf16>
+  %e5_f32_output_view = buffer.view %output[%e5_f32_output_offset] : buffer -> view<32xf32>
+  %e5_bf16_output_view = buffer.view %output[%e5_bf16_output_offset] : buffer -> view<32xbf16>
+  %e5_f16_output_view = buffer.view %output[%e5_f16_output_offset] : buffer -> view<32xf16>
+  %e4_schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=32, scale_format=e8m0, scale_group_elements=8, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %e5_schema = encoding.define #encoding.f8e5m2<affine=scale_only, payload_elements=32, scale_format=e8m0, scale_group_elements=8, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %payload_bits = vector.load %payload_view[%origin] : view<32xi8> -> vector<32xi8>
+  %e4_payload = vector.bitcast %payload_bits : vector<32xi8> to vector<32xf8E4M3>
+  %e5_payload = vector.bitcast %payload_bits : vector<32xi8> to vector<32xf8E5M2>
+  %scale = vector.load %scale_view[%origin] : view<1xi32> -> vector<1xi32>
+  %e4_f32 = vector.decode %e4_payload using %e4_schema {scale = %scale : vector<1xi32>} : vector<32xf8E4M3>, encoding<schema> -> vector<32xf32>
+  %e4_bf16 = vector.decode %e4_payload using %e4_schema {scale = %scale : vector<1xi32>} : vector<32xf8E4M3>, encoding<schema> -> vector<32xbf16>
+  %e4_f16 = vector.decode %e4_payload using %e4_schema {scale = %scale : vector<1xi32>} : vector<32xf8E4M3>, encoding<schema> -> vector<32xf16>
+  %e5_f32 = vector.decode %e5_payload using %e5_schema {scale = %scale : vector<1xi32>} : vector<32xf8E5M2>, encoding<schema> -> vector<32xf32>
+  %e5_bf16 = vector.decode %e5_payload using %e5_schema {scale = %scale : vector<1xi32>} : vector<32xf8E5M2>, encoding<schema> -> vector<32xbf16>
+  %e5_f16 = vector.decode %e5_payload using %e5_schema {scale = %scale : vector<1xi32>} : vector<32xf8E5M2>, encoding<schema> -> vector<32xf16>
+  vector.store %e4_f32, %e4_f32_output_view[%origin] : vector<32xf32>, view<32xf32>
+  vector.store %e4_bf16, %e4_bf16_output_view[%origin] : vector<32xbf16>, view<32xbf16>
+  vector.store %e4_f16, %e4_f16_output_view[%origin] : vector<32xf16>, view<32xf16>
+  vector.store %e5_f32, %e5_f32_output_view[%origin] : vector<32xf32>, view<32xf32>
+  vector.store %e5_bf16, %e5_bf16_output_view[%origin] : vector<32xbf16>, view<32xbf16>
+  vector.store %e5_f16, %e5_f16_output_view[%origin] : vector<32xf16>, view<32xf16>
+  func.return
+}
+
+kernel.def @e8m0_mxfp8_grouped() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%payload_buffer: buffer, %scale_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_grouped_body(%payload_buffer, %scale_buffer, %output_buffer) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def @e8m0_mxfp8_grouped_oracle(%payload_buffer: buffer, %scale_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_grouped_body(%payload_buffer, %scale_buffer, %output_buffer) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @e8m0_mxfp8_grouped_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %payload = check.generate.fill value(56) : tensor<32xi8>
+    %expected_payload = check.generate.fill value(56) : tensor<32xi8>
+    %scale = check.generate.fill value(-8356096) : tensor<1xi32>
+    %expected_scale = check.generate.fill value(-8356096) : tensor<1xi32>
+    %output = check.generate.fill value(-123) : tensor<512xi8>
+    %e4_f32_output = check.tensor.view %output offset(0) : tensor<512xi8> -> tensor<32xf32>
+    %e4_bf16_output = check.tensor.view %output offset(128) : tensor<512xi8> -> tensor<32xbf16>
+    %e4_f16_output = check.tensor.view %output offset(192) : tensor<512xi8> -> tensor<32xf16>
+    %e5_f32_output = check.tensor.view %output offset(256) : tensor<512xi8> -> tensor<32xf32>
+    %e5_bf16_output = check.tensor.view %output offset(384) : tensor<512xi8> -> tensor<32xbf16>
+    %e5_f16_output = check.tensor.view %output offset(448) : tensor<512xi8> -> tensor<32xf16>
+    %e4_finite_f32 = check.tensor.view %e4_f32_output offset(0) : tensor<32xf32> -> tensor<24xf32>
+    %e4_finite_bf16 = check.tensor.view %e4_bf16_output offset(0) : tensor<32xbf16> -> tensor<24xbf16>
+    %e4_finite_f16 = check.tensor.view %e4_f16_output offset(0) : tensor<32xf16> -> tensor<24xf16>
+    %e5_finite_f32 = check.tensor.view %e5_f32_output offset(0) : tensor<32xf32> -> tensor<24xf32>
+    %e5_finite_bf16 = check.tensor.view %e5_bf16_output offset(0) : tensor<32xbf16> -> tensor<24xbf16>
+    %e5_finite_f16 = check.tensor.view %e5_f16_output offset(0) : tensor<32xf16> -> tensor<24xf16>
+    check.compare<@e8m0_mxfp8_grouped, @e8m0_mxfp8_grouped_oracle>(%payload, %scale, %output) : (tensor<32xi8>, tensor<1xi32>, tensor<512xi8>) -> () {
+      check.expect.bitwise actual(%payload) expected(%expected_payload) : tensor<32xi8>
+      check.expect.bitwise actual(%scale) expected(%expected_scale) : tensor<1xi32>
+      check.expect.close actual(%e4_f32_output) expected(%e4_f32_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf32>
+      check.expect.close actual(%e4_bf16_output) expected(%e4_bf16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xbf16>
+      check.expect.close actual(%e4_f16_output) expected(%e4_f16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf16>
+      check.expect.close actual(%e5_f32_output) expected(%e5_f32_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf32>
+      check.expect.close actual(%e5_bf16_output) expected(%e5_bf16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xbf16>
+      check.expect.close actual(%e5_f16_output) expected(%e5_f16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf16>
+      check.expect.bitwise actual(%e4_finite_f32) expected(%e4_finite_f32) : tensor<24xf32>
+      check.expect.bitwise actual(%e4_finite_bf16) expected(%e4_finite_bf16) : tensor<24xbf16>
+      check.expect.bitwise actual(%e4_finite_f16) expected(%e4_finite_f16) : tensor<24xf16>
+      check.expect.bitwise actual(%e5_finite_f32) expected(%e5_finite_f32) : tensor<24xf32>
+      check.expect.bitwise actual(%e5_finite_bf16) expected(%e5_finite_bf16) : tensor<24xbf16>
+      check.expect.bitwise actual(%e5_finite_f16) expected(%e5_finite_f16) : tensor<24xf16>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %payload_entropy = check.entropy.fork %entropy name("e8m0_mxfp8_grouped_payload") : check.entropy
+    %scale_entropy = check.entropy.fork %entropy name("e8m0_mxfp8_grouped_scale") : check.entropy
+    %payload_seed = check.entropy.read %payload_entropy[%trial] : check.entropy -> i64
+    %scale_seed = check.entropy.read %scale_entropy[%trial] : check.entropy -> i64
+    %payload = check.generate.random.uniform seed(%payload_seed) range(-128 to 127) : tensor<32xi8>
+    %expected_payload = check.generate.random.uniform seed(%payload_seed) range(-128 to 127) : tensor<32xi8>
+    %scale = check.generate.random.uniform seed(%scale_seed) range(-2147483648 to 2147483647) : tensor<1xi32>
+    %expected_scale = check.generate.random.uniform seed(%scale_seed) range(-2147483648 to 2147483647) : tensor<1xi32>
+    %output = check.generate.fill value(-123) : tensor<512xi8>
+    %e4_f32_output = check.tensor.view %output offset(0) : tensor<512xi8> -> tensor<32xf32>
+    %e4_bf16_output = check.tensor.view %output offset(128) : tensor<512xi8> -> tensor<32xbf16>
+    %e4_f16_output = check.tensor.view %output offset(192) : tensor<512xi8> -> tensor<32xf16>
+    %e5_f32_output = check.tensor.view %output offset(256) : tensor<512xi8> -> tensor<32xf32>
+    %e5_bf16_output = check.tensor.view %output offset(384) : tensor<512xi8> -> tensor<32xbf16>
+    %e5_f16_output = check.tensor.view %output offset(448) : tensor<512xi8> -> tensor<32xf16>
+    check.compare<@e8m0_mxfp8_grouped, @e8m0_mxfp8_grouped_oracle>(%payload, %scale, %output) : (tensor<32xi8>, tensor<1xi32>, tensor<512xi8>) -> () {
+      check.expect.bitwise actual(%payload) expected(%expected_payload) : tensor<32xi8>
+      check.expect.bitwise actual(%scale) expected(%expected_scale) : tensor<1xi32>
+      check.expect.close actual(%e4_f32_output) expected(%e4_f32_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf32>
+      check.expect.close actual(%e4_bf16_output) expected(%e4_bf16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xbf16>
+      check.expect.close actual(%e4_f16_output) expected(%e4_f16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf16>
+      check.expect.close actual(%e5_f32_output) expected(%e5_f32_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf32>
+      check.expect.close actual(%e5_bf16_output) expected(%e5_bf16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xbf16>
+      check.expect.close actual(%e5_f16_output) expected(%e5_f16_output) atol(0.0) rtol(0.0) nan(same) : tensor<32xf16>
+    }
+  }
+  check.return
+}
+
+// Two ordinary MXFP8 groups distinguish adjacent packed scale bytes.
+func.def inline @e8m0_mxfp8_wide_bf16_body(%input_buffer: buffer, %output_buffer: buffer) {
+  %input, %output = buffer.assume.noalias %input_buffer, %output_buffer : buffer, buffer
+  %base = index.constant 0 : offset
+  %payload_offset = index.constant 4 : offset
+  %origin = index.constant 0 : index
+  %scale_view = buffer.view %input[%base] : buffer -> view<1xi32>
+  %payload_view = buffer.view %input[%payload_offset] : buffer -> view<64xi8>
+  %output_view = buffer.view %output[%base] : buffer -> view<64xbf16>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=64, scale_format=e8m0, scale_group_elements=32, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %payload_bits = vector.load %payload_view[%origin] : view<64xi8> -> vector<64xi8>
+  %payload = vector.bitcast %payload_bits : vector<64xi8> to vector<64xf8E4M3>
+  %scale = vector.load %scale_view[%origin] : view<1xi32> -> vector<1xi32>
+  %decoded = vector.decode %payload using %schema {scale = %scale : vector<1xi32>} : vector<64xf8E4M3>, encoding<schema> -> vector<64xbf16>
+  vector.store %decoded, %output_view[%origin] : vector<64xbf16>, view<64xbf16>
+  func.return
+}
+
+kernel.def @e8m0_mxfp8_wide_bf16() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_wide_bf16_body(%input_buffer, %output_buffer) : (buffer, buffer)
+  kernel.return
+}
+
+func.def @e8m0_mxfp8_wide_bf16_oracle(%input_buffer: buffer, %output_buffer: buffer) {
+  func.call @e8m0_mxfp8_wide_bf16_body(%input_buffer, %output_buffer) : (buffer, buffer)
+  func.return
+}
+
+check.scenario @e8m0_mxfp8_wide_bf16_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(32895) step(16843009) period(256) : tensor<17xi32>
+    %expected_input = check.generate.iota offset(32895) step(16843009) period(256) : tensor<17xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp8_wide_bf16, @e8m0_mxfp8_wide_bf16_oracle>(%input, %output) : (tensor<17xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<17xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xbf16>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("e8m0_mxfp8_wide_bf16_input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<17xi32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<17xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp8_wide_bf16, @e8m0_mxfp8_wide_bf16_oracle>(%input, %output) : (tensor<17xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<17xi32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<64xbf16>
+    }
+  }
+  check.return
+}
+
+// One packed MXFP4 group covers the native packet decode path.
+kernel.def @e8m0_mxfp4_bf16() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_buffer: buffer, %output_buffer: buffer) {
+  %input, %output = buffer.assume.noalias %input_buffer, %output_buffer : buffer, buffer
+  %base = index.constant 0 : offset
+  %payload_offset = index.constant 4 : offset
+  %origin = index.constant 0 : index
+  %scale_view = buffer.view %input[%base] : buffer -> view<1xi32>
+  %payload_view = buffer.view %input[%payload_offset] : buffer -> view<4xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<32xbf16>
+  %schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=32, payload_packing=little_endian_nibbles, payload_registers=4, scale_format=e8m0, scale_group_elements=32, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+  %payload_bits = vector.load %payload_view[%origin] : view<4xi32> -> vector<4xi32>
+  %scale = vector.load %scale_view[%origin] : view<1xi32> -> vector<1xi32>
+  %decoded = vector.decode %payload_bits using %schema {scale = %scale : vector<1xi32>} : vector<4xi32>, encoding<schema> -> vector<32xbf16>
+  vector.store %decoded, %output_view[%origin] : vector<32xbf16>, view<32xbf16>
+  kernel.return
+}
+
+// Two packed MXFP4 groups make adjacent scale-byte selection observable.
+kernel.def @e8m0_mxfp4_wide_bf16() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_buffer: buffer, %output_buffer: buffer) {
+  %input, %output = buffer.assume.noalias %input_buffer, %output_buffer : buffer, buffer
+  %base = index.constant 0 : offset
+  %payload_offset = index.constant 4 : offset
+  %origin = index.constant 0 : index
+  %scale_view = buffer.view %input[%base] : buffer -> view<1xi32>
+  %payload_view = buffer.view %input[%payload_offset] : buffer -> view<8xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<64xbf16>
+  %schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=64, payload_packing=little_endian_nibbles, payload_registers=8, scale_format=e8m0, scale_group_elements=32, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+  %payload_bits = vector.load %payload_view[%origin] : view<8xi32> -> vector<8xi32>
+  %scale = vector.load %scale_view[%origin] : view<1xi32> -> vector<1xi32>
+  %decoded = vector.decode %payload_bits using %schema {scale = %scale : vector<1xi32>} : vector<8xi32>, encoding<schema> -> vector<64xbf16>
+  vector.store %decoded, %output_view[%origin] : vector<64xbf16>, view<64xbf16>
+  kernel.return
+}
+
+// Decodes an E8M0 byte without using the encoded-vector path under test.
+func.def inline @decode_e8m0_scale(%scale_byte: i32) -> (f32) {
+  %c0 = scalar.constant 0 : i32
+  %c23 = scalar.constant 23 : i32
+  %c255 = scalar.constant 255 : i32
+  %minimum_bits = scalar.constant 4194304 : i32
+  %nan_bits = scalar.constant 2143289344 : i32
+  %exponent_bits = scalar.shli %scale_byte, %c23 : i32
+  %is_minimum = scalar.cmpi eq, %scale_byte, %c0 : i32
+  %finite_bits = scf.select %is_minimum, %minimum_bits, %exponent_bits : i32
+  %is_nan = scalar.cmpi eq, %scale_byte, %c255 : i32
+  %bits = scf.select %is_nan, %nan_bits, %finite_bits : i32
+  %scale = scalar.bitcast %bits : i32 to f32
+  func.return %scale : f32
+}
+
+// Decodes a signed E2M1 nibble and rounds the scaled value to BF16.
+func.def inline @decode_e8m0_scaled_e2m1(%nibble: i32, %scale: f32) -> (bf16) {
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %c7 = scalar.constant 7 : i32
+  %c8 = scalar.constant 8 : i32
+  %c22 = scalar.constant 22 : i32
+  %c23 = scalar.constant 23 : i32
+  %c28 = scalar.constant 28 : i32
+  %f32_exponent_bias = scalar.constant 126 : i32
+  %half_bits = scalar.constant 1056964608 : i32
+  %magnitude = scalar.andi %nibble, %c7 : i32
+  %sign = scalar.andi %nibble, %c8 : i32
+  %is_zero = scalar.cmpi eq, %magnitude, %c0 : i32
+  %is_half = scalar.cmpi eq, %magnitude, %c1 : i32
+  %magnitude_bits = scf.if %is_zero -> (i32) {
+    scf.yield %c0 : i32
+  } else {
+    %nonzero_bits = scf.if %is_half -> (i32) {
+      scf.yield %half_bits : i32
+    } else {
+      %exponent = scalar.shrui %magnitude, %c1 : i32
+      %f32_exponent = scalar.addi %exponent, %f32_exponent_bias : i32
+      %exponent_bits = scalar.shli %f32_exponent, %c23 : i32
+      %mantissa = scalar.andi %magnitude, %c1 : i32
+      %mantissa_bits = scalar.shli %mantissa, %c22 : i32
+      %normal_bits = scalar.ori %exponent_bits, %mantissa_bits : i32
+      scf.yield %normal_bits : i32
+    }
+    scf.yield %nonzero_bits : i32
+  }
+  %sign_bits = scalar.shli %sign, %c28 : i32
+  %signed_bits = scalar.ori %magnitude_bits, %sign_bits : i32
+  %unscaled = scalar.bitcast %signed_bits : i32 to f32
+  %scaled = scalar.mulf %unscaled, %scale : f32
+  %result = scalar.fptrunc %scaled : f32 to bf16
+  func.return %result : bf16
+}
+
+func.def inline @decode_e8m0_mxfp4_bf16(%input_buffer: buffer, %output_buffer: buffer, %extent: index) {
+  %base = index.constant 0 : offset
+  %payload_offset = index.constant 4 : offset
+  %origin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %scale_group_elements = index.constant 32 : index
+  %payload_elements_per_word = index.constant 8 : index
+  %scale_byte_bits = index.constant 8 : index
+  %payload_element_bits = index.constant 4 : index
+  %byte_mask = scalar.constant 255 : i32
+  %nibble_mask = scalar.constant 15 : i32
+  %scale_view = buffer.view %input_buffer[%base] : buffer -> view<1xi32>
+  %payload_view = buffer.view %input_buffer[%payload_offset] : buffer -> view<8xi32>
+  %output_view = buffer.view %output_buffer[%base] : buffer -> view<64xbf16>
+  %scale_word = view.load %scale_view[%origin] : view<1xi32> -> i32
+  scf.for %position = [%origin to %extent step %step] {
+    %scale_group = index.div %position, %scale_group_elements : index
+    %scale_bit_position_index = index.mul %scale_group, %scale_byte_bits : index
+    %scale_bit_position = index.cast %scale_bit_position_index : index to i32
+    %shifted_scale = scalar.shrui %scale_word, %scale_bit_position : i32
+    %scale_byte = scalar.andi %shifted_scale, %byte_mask : i32
+    %scale = func.call @decode_e8m0_scale(%scale_byte) : (i32) -> (f32)
+    %payload_word_position = index.div %position, %payload_elements_per_word : index
+    %nibble_position = index.rem %position, %payload_elements_per_word : index
+    %payload_bit_position_index = index.mul %nibble_position, %payload_element_bits : index
+    %payload_bit_position = index.cast %payload_bit_position_index : index to i32
+    %payload_word = view.load %payload_view[%payload_word_position] : view<8xi32> -> i32
+    %shifted_payload = scalar.shrui %payload_word, %payload_bit_position : i32
+    %nibble = scalar.andi %shifted_payload, %nibble_mask : i32
+    %value = func.call @decode_e8m0_scaled_e2m1(%nibble, %scale) : (i32, f32) -> (bf16)
+    view.store %value, %output_view[%position] : bf16, view<64xbf16>
+  }
+  func.return
+}
+
+func.def @e8m0_mxfp4_bf16_oracle(%input_buffer: buffer, %output_buffer: buffer) {
+  %extent = index.constant 32 : index
+  func.call @decode_e8m0_mxfp4_bf16(%input_buffer, %output_buffer, %extent) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @e8m0_mxfp4_wide_bf16_oracle(%input_buffer: buffer, %output_buffer: buffer) {
+  %extent = index.constant 64 : index
+  func.call @decode_e8m0_mxfp4_bf16(%input_buffer, %output_buffer, %extent) : (buffer, buffer, index)
+  func.return
+}
+
+check.scenario @e8m0_mxfp4_bf16_subnormal_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // The first word supplies the scale byte. Four following payload words
+    // span all 16 E2M1 codes for every directed E8M0 boundary.
+    %minimum_input = check.generate.iota offset(0) step(241389886) period(256) : tensor<9xi32>
+    %expected_minimum_input = check.generate.iota offset(0) step(241389886) period(256) : tensor<9xi32>
+    %minimum_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%minimum_input, %minimum_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%minimum_input) expected(%expected_minimum_input) : tensor<9xi32>
+      check.expect.bitwise actual(%minimum_output) expected(%minimum_output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %next_input = check.generate.iota offset(1) step(241389886) period(256) : tensor<9xi32>
+    %next_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%next_input, %next_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%next_output) expected(%next_output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %normal_low_input = check.generate.iota offset(2) step(241389886) period(256) : tensor<9xi32>
+    %normal_low_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%normal_low_input, %normal_low_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%normal_low_output) expected(%normal_low_output) : tensor<64xbf16>
+    }
+  }
+  check.return
+}
+
+check.scenario @e8m0_mxfp4_bf16_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %identity_input = check.generate.iota offset(127) step(241389886) period(256) : tensor<9xi32>
+    %identity_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%identity_input, %identity_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%identity_output) expected(%identity_output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %doubled_input = check.generate.iota offset(128) step(241389886) period(256) : tensor<9xi32>
+    %doubled_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%doubled_input, %doubled_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%doubled_output) expected(%doubled_output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %maximum_input = check.generate.iota offset(254) step(241389886) period(256) : tensor<9xi32>
+    %maximum_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%maximum_input, %maximum_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%maximum_output) expected(%maximum_output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %nan_input = check.generate.iota offset(255) step(241389886) period(256) : tensor<9xi32>
+    %nan_output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%nan_input, %nan_output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.close actual(%nan_output) expected(%nan_output) atol(0.0) rtol(0.0) nan(same) : tensor<64xbf16>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("e8m0_mxfp4_bf16_input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<9xi32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_bf16, @e8m0_mxfp4_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<64xbf16>
+    }
+  }
+  check.return
+}
+
+check.scenario @e8m0_mxfp4_wide_bf16_values {
+  // Consecutive scale-byte pairs cover minimum/identity, the two scales above
+  // minimum, identity/doubled, and maximum-finite/NaN behavior. The mixed
+  // payload step spans all 16 E2M1 codes in every directed trial.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-98560) step(16702650) period(256) : tensor<9xi32>
+    %expected_input = check.generate.iota offset(-98560) step(16702650) period(256) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_wide_bf16, @e8m0_mxfp4_wide_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(513) step(16702650) period(256) : tensor<9xi32>
+    %expected_input = check.generate.iota offset(513) step(16702650) period(256) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_wide_bf16, @e8m0_mxfp4_wide_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(32895) step(16702650) period(256) : tensor<9xi32>
+    %expected_input = check.generate.iota offset(32895) step(16702650) period(256) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_wide_bf16, @e8m0_mxfp4_wide_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xbf16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(65534) step(16702650) period(256) : tensor<9xi32>
+    %expected_input = check.generate.iota offset(65534) step(16702650) period(256) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_wide_bf16, @e8m0_mxfp4_wide_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<64xbf16>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("e8m0_mxfp4_wide_bf16_input") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<9xi32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<9xi32>
+    %output = check.generate.fill value(-123.0) : tensor<64xbf16>
+    check.compare<@e8m0_mxfp4_wide_bf16, @e8m0_mxfp4_wide_bf16_oracle>(%input, %output) : (tensor<9xi32>, tensor<64xbf16>) -> () {
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xi32>
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<64xbf16>
+    }
+  }
+  check.return
+}

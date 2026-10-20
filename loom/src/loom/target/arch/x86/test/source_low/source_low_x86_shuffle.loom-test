@@ -1,0 +1,86 @@
+// Distinct XMM, YMM, and ZMM shuffle mechanisms share immutable controls
+// within and across functions.
+// RUN: emit source-low output=module
+
+x86.target<avx512> @target
+
+// Generated payload symbols avoid existing module names.
+global.rodata.def @__low_rodata_81a9947f = bytes("00")
+
+func.def target(@target) @shuffle_widths(%i8x16: vector<16xi8>, %i16x16: vector<16xi16>, %f32x8: vector<8xf32>, %i8x64: vector<64xi8>, %bf16x32: vector<32xbf16>, %f32x16: vector<16xf32>, %f64x8: vector<8xf64>) -> (vector<16xi8>, vector<16xi16>, vector<8xf32>, vector<64xi8>, vector<32xbf16>, vector<16xf32>, vector<8xf64>) {
+  %xmm = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %i8x16 : vector<16xi8>
+  %ymm_word = vector.shuffle<[15, 0, 14, 1, 13, 2, 12, 3, 11, 4, 10, 5, 9, 6, 8, 7]> %i16x16 : vector<16xi16>
+  %ymm_dword = vector.shuffle<[7, 0, 6, 1, 5, 2, 4, 3]> %f32x8 : vector<8xf32>
+  %zmm_byte = vector.shuffle<[63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %i8x64 : vector<64xi8>
+  %zmm_word = vector.shuffle<[31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %bf16x32 : vector<32xbf16>
+  %zmm_dword = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %f32x16 : vector<16xf32>
+  %zmm_qword = vector.shuffle<[7, 6, 5, 4, 3, 2, 1, 0]> %f64x8 : vector<8xf64>
+  func.return %xmm, %ymm_word, %ymm_dword, %zmm_byte, %zmm_word, %zmm_dword, %zmm_qword : vector<16xi8>, vector<16xi16>, vector<8xf32>, vector<64xi8>, vector<32xbf16>, vector<16xf32>, vector<8xf64>
+}
+
+func.def target(@target) @reuse_controls(%i8x16: vector<16xi8>, %f32x16: vector<16xf32>) -> (vector<16xi8>, vector<16xf32>) {
+  %xmm = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %i8x16 : vector<16xi8>
+  %zmm = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %f32x16 : vector<16xf32>
+  func.return %xmm, %zmm : vector<16xi8>, vector<16xf32>
+}
+
+// ----
+x86.target<avx512> @target
+
+global.rodata.def @__low_rodata_81a9947f = bytes("00")
+
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi8>, vector<16xi16>, vector<8xf32>, vector<64xi8>, vector<32xbf16>, vector<16xf32>, vector<8xf64>) -> (vector<16xi8>, vector<16xi16>, vector<8xf32>, vector<64xi8>, vector<32xbf16>, vector<16xf32>, vector<8xf64>)}) @shuffle_widths(%i8x16: reg<x86.xmm>, %i16x16: reg<x86.ymm>, %f32x8: reg<x86.ymm>, %i8x64: reg<x86.zmm>, %bf16x32: reg<x86.zmm>, %f32x16: reg<x86.zmm>, %f64x8: reg<x86.zmm>) -> (reg<x86.xmm>, reg<x86.ymm>, reg<x86.ymm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>) asm {
+  %14 = avx2.vmovdqu.rodata.xmm @__low_rodata_81a9947f$1
+  %xmm = vpshufb.xmm %i8x16, %14
+  %16 = avx2.vmovdqu.rodata.ymm @__low_rodata_5fe74fdf
+  %17 = vpermq.ymm %i16x16, 68
+  %18 = vpshufb.ymm %17, %16
+  %19 = avx2.vmovdqu.rodata.ymm @__low_rodata_d6020cbf
+  %20 = vpermq.ymm %i16x16, 238
+  %21 = vpshufb.ymm %20, %19
+  %ymm_word = vpor.ymm %18, %21
+  %23 = avx2.vmovdqu.rodata.ymm @__low_rodata_7cb0971f
+  %ymm_dword = vpermps.ymm %23, %f32x8
+  %25 = avx512.vmovdqu64.rodata.zmm @__low_rodata_a97beeff
+  %26 = avx512.vpermw.zmm %i8x64, %25
+  %27 = avx512.vpsrlw.zmm %25, 5
+  %28 = vpsrlvw %26, %27
+  %29 = avx512.vmovdqu64.rodata.zmm @__low_rodata_3a674b1f
+  %30 = avx512.vpermw.zmm %i8x64, %29
+  %31 = avx512.vpsrlw.zmm %29, 5
+  %32 = vpsrlvw %30, %31
+  %33 = avx512.vpsllw.zmm %28, 8
+  %34 = avx512.vpsrlw.zmm %33, 8
+  %35 = avx512.vpsllw.zmm %32, 8
+  %zmm_byte = vpord %34, %35
+  %zmm_word = avx512.vpermw.zmm %bf16x32, %29
+  %38 = avx512.vmovdqu64.rodata.zmm @__low_rodata_56b37f5f
+  %zmm_dword = avx512.vpermd.zmm %f32x16, %38
+  %40 = avx512.vmovdqu64.rodata.zmm @__low_rodata_bb2d255f
+  %zmm_qword = avx512.vpermq.zmm %f64x8, %40
+  return %xmm, %ymm_word, %ymm_dword, %zmm_byte, %zmm_word, %zmm_dword, %zmm_qword
+}
+
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi8>, vector<16xf32>) -> (vector<16xi8>, vector<16xf32>)}) @reuse_controls(%i8x16: reg<x86.xmm>, %f32x16: reg<x86.zmm>) -> (reg<x86.xmm>, reg<x86.zmm>) asm {
+  %46 = avx2.vmovdqu.rodata.xmm @__low_rodata_81a9947f$1
+  %xmm = vpshufb.xmm %i8x16, %46
+  %48 = avx512.vmovdqu64.rodata.zmm @__low_rodata_56b37f5f
+  %zmm = avx512.vpermd.zmm %f32x16, %48
+  return %xmm, %zmm
+}
+
+global.rodata.def @__low_rodata_81a9947f$1 = align(16) bytes("0f0e0d0c0b0a09080706050403020100")
+
+global.rodata.def @__low_rodata_5fe74fdf = align(32) bytes("808000018080020380800405808006078080080980800a0b80800c0d80800e0f")
+
+global.rodata.def @__low_rodata_d6020cbf = align(32) bytes("0e0f80800c0d80800a0b80800809808006078080040580800203808000018080")
+
+global.rodata.def @__low_rodata_7cb0971f = align(32) bytes("0700000000000000060000000100000005000000020000000400000003000000")
+
+global.rodata.def @__low_rodata_a97beeff = align(64) bytes("1f011e011d011c011b011a0119011801170116011501140113011201110110010f010e010d010c010b010a010901080107010601050104010301020101010001")
+
+global.rodata.def @__low_rodata_3a674b1f = align(64) bytes("1f001e001d001c001b001a0019001800170016001500140013001200110010000f000e000d000c000b000a000900080007000600050004000300020001000000")
+
+global.rodata.def @__low_rodata_56b37f5f = align(64) bytes("0f0000000e0000000d0000000c0000000b0000000a00000009000000080000000700000006000000050000000400000003000000020000000100000000000000")
+
+global.rodata.def @__low_rodata_bb2d255f = align(64) bytes("07000000000000000600000000000000050000000000000004000000000000000300000000000000020000000000000001000000000000000000000000000000")

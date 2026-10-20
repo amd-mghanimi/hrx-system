@@ -32,24 +32,6 @@ loom_cc_library(
 )
 
 loom_cc_library(
-    name = "program_composition",
-    srcs = ["program_composition.c"],
-    hdrs = ["program_composition.h"],
-    deps = [
-        "//loom/src/loom/analysis:scc",
-        "//loom/src/loom/analysis:symbol_references",
-        "//loom/src/loom/error:emitter",
-        "//loom/src/loom/error:error_defs",
-        "//loom/src/loom/ir",
-        "//loom/src/loom/ops:op_defs",
-        "//loom/src/loom/rewrite:callable",
-        "//loom/src/loom/rewrite:rewriter",
-        "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal:arena",
-    ],
-)
-
-loom_cc_library(
     name = "dispatch_counts",
     srcs = ["dispatch_counts.c"],
     hdrs = ["dispatch_counts.h"],
@@ -57,6 +39,7 @@ loom_cc_library(
         ":schedule",
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops/buffer",
@@ -64,6 +47,36 @@ loom_cc_library(
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/target:types",
         "//loom/src/loom/target/arch/cmd:program",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "launch_count_realization",
+    srcs = ["launch_count_realization.c"],
+    hdrs = ["launch_count_realization.h"],
+    deps = [
+        "//loom/src/loom/analysis:liveness_uses",
+        "//loom/src/loom/error:emitter",
+        "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:facts",
+        "//loom/src/loom/link:linker",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops:special_values",
+        "//loom/src/loom/ops/buffer",
+        "//loom/src/loom/ops/command",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/ops/view",
+        "//loom/src/loom/rewrite:materialize",
+        "//loom/src/loom/rewrite:remap",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/transforms/kernel:kernel_class_materializer",
+        "//loom/src/loom/util:dominance",
         "//loom/src/loom/util:fact_table",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
@@ -99,6 +112,7 @@ loom_cc_library(
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops/command",
         "//loom/src/loom/target/arch/cmd:abi_layout",
+        "//loom/src/loom/util:adaptive_sort",
         "//loom/src/loom/util:fact_table",
         "//loom/src/loom/util:walk",
         "//runtime/src/iree/base",
@@ -113,6 +127,9 @@ loom_cc_library(
     hdrs = ["transients.h"],
     deps = [
         ":schedule",
+        "//loom/src/loom/error:emitter",
+        "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops/buffer",
@@ -139,12 +156,13 @@ loom_cc_library(
     visibility = ["//loom/src/loom/target/arch/cmd:__subpackages__"],
     deps = [
         ":dispatch_counts",
+        ":launch_count_realization",
         ":lower",
         ":parameters",
-        ":program_composition",
         ":schedule",
         ":transients",
         "//loom/src/loom/analysis:symbol_references",
+        "//loom/src/loom/codegen:pass_environment",
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
         "//loom/src/loom/ir",
@@ -158,6 +176,7 @@ loom_cc_library(
         "//loom/src/loom/pass:interpreter",
         "//loom/src/loom/pass:program",
         "//loom/src/loom/pass:registry",
+        "//loom/src/loom/rewrite:module_projection",
         "//loom/src/loom/target/arch/cmd:abi_layout",
         "//loom/src/loom/target/arch/cmd:program",
         "//loom/src/loom/transforms/cleanup:pass_environment",
@@ -177,7 +196,6 @@ loom_cc_library(
     visibility = [
         "//loom/binding/c/target/cmd:__pkg__",
         "//loom/src/loom/target/arch/cmd:__subpackages__",
-        "//loom/src/loom/tools/loom-compile:__pkg__",
     ],
     deps = [
         ":program_plan",
@@ -202,7 +220,7 @@ loom_cc_library(
     deps = [
         ":program_plan",
         "//loom/src/loom/codegen/low:function",
-        "//loom/src/loom/codegen/low:target_binding",
+        "//loom/src/loom/codegen/low:representation_binding",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/low",
         "//loom/src/loom/target:registers",
@@ -215,8 +233,8 @@ loom_cc_library(
     ],
 )
 
-# The program-plan C++ test covers ownership after the source module is
-# released. Compiler transformations are covered textually through loom-check.
+# The program-plan C++ test covers ownership after source release and generated
+# source extraction. Portable command lowering is covered through loom-check.
 loom_cc_test(
     name = "program_plan_test",
     srcs = ["program_plan_test.cc"],
@@ -230,8 +248,12 @@ loom_cc_test(
         "//loom/src/loom/ir",
         "//loom/src/loom/link:module_index",
         "//loom/src/loom/ops:op_registry",
+        "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/low",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/ops/view",
         "//loom/src/loom/pass:builtin_registry",
         "//loom/src/loom/target/arch/cmd:artifact_set",
         "//loom/src/loom/target/arch/cmd:program",

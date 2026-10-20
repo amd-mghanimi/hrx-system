@@ -8,17 +8,19 @@
 // Test builds may additionally enable the synthetic test provider.
 
 #include "loom/target/arch/cmd/check/provider.h"
+#include "loom/target/configured/compiler_provider_set.h"
+#include "loom/tooling/export/cxx/loom_check.h"
 #include "loom/tooling/input/configured.h"
+#include "loom/tooling/input/loomc_configured.h"
+#include "loom/tools/loom-check/compile.h"
 #include "loom/tools/loom-check/provider.h"
 
 #ifndef LOOM_CHECK_HAVE_TEST_PROVIDER
 #define LOOM_CHECK_HAVE_TEST_PROVIDER 0
 #endif  // LOOM_CHECK_HAVE_TEST_PROVIDER
-
 #if LOOM_CHECK_HAVE_TEST_PROVIDER
 #include "loom/tools/loom-check/test_provider.h"
 #endif  // LOOM_CHECK_HAVE_TEST_PROVIDER
-
 #ifndef LOOM_CHECK_HAVE_EMIT_AMDGPU
 #define LOOM_CHECK_HAVE_EMIT_AMDGPU 0
 #endif  // LOOM_CHECK_HAVE_EMIT_AMDGPU
@@ -51,16 +53,17 @@
 #include "loom/target/arch/spirv/check/provider.h"
 #endif  // LOOM_CHECK_HAVE_TARGET_SPIRV
 #if LOOM_CHECK_HAVE_EMIT_SPIRV
-#include "loom/target/emit/spirv/check/provider.h"
+#include "loom/tooling/target/spirv/check/provider.h"
 #endif  // LOOM_CHECK_HAVE_EMIT_SPIRV
 #if LOOM_CHECK_HAVE_TARGET_WASM
 #include "loom/target/arch/wasm/check/provider.h"
 #endif  // LOOM_CHECK_HAVE_TARGET_WASM
 #if LOOM_CHECK_HAVE_TARGET_VM
-#include "loom/target/arch/vm/check.h"
+#include "loom/target/arch/vm/check/provider.h"
+#include "loom/tooling/target/vm/check/provider.h"
 #endif  // LOOM_CHECK_HAVE_TARGET_VM
 #if LOOM_CHECK_HAVE_EMIT_WASM
-#include "loom/target/emit/wasm/check/provider.h"
+#include "loom/tooling/target/wasm/check/provider.h"
 #endif  // LOOM_CHECK_HAVE_EMIT_WASM
 #if LOOM_CHECK_HAVE_TARGET_X86
 #include "loom/target/arch/x86/check/provider.h"
@@ -70,6 +73,7 @@
 #endif  // LOOM_CHECK_HAVE_TARGET_XDNA
 
 static const loom_check_provider_t* const kLoomCheckProviders[] = {
+    &loom_cxx_export_check_provider,
 #if LOOM_CHECK_HAVE_TEST_PROVIDER
     &loom_check_test_provider,
 #endif  // LOOM_CHECK_HAVE_TEST_PROVIDER
@@ -87,7 +91,10 @@ static const loom_check_provider_t* const kLoomCheckProviders[] = {
     &loom_wasm_check_provider,
 #endif  // LOOM_CHECK_HAVE_TARGET_WASM
 #if LOOM_CHECK_HAVE_TARGET_VM
+    // VM target records and descriptors.
     &loom_vm_check_provider,
+    // VM artifact emission and disassembly.
+    &loom_vm_emit_check_provider,
 #endif  // LOOM_CHECK_HAVE_TARGET_VM
 #if LOOM_CHECK_HAVE_EMIT_WASM
     &loom_wasm_emit_check_provider,
@@ -100,16 +107,20 @@ static const loom_check_provider_t* const kLoomCheckProviders[] = {
 #endif  // LOOM_CHECK_HAVE_TARGET_XDNA
 };
 
-static const loom_check_provider_set_t kLoomCheckProviderSet = {
-    .providers = kLoomCheckProviders,
-    .provider_count = IREE_ARRAYSIZE(kLoomCheckProviders),
-};
-
 int main(int argc, char** argv) {
   IREE_TRACE_APP_ENTER();
   IREE_TRACE_ZONE_BEGIN(z0);
+  const loom_check_compile_provider_t compile_provider = {
+      .import = loom_configured_input_loomc_importer(),
+  };
+  const loom_check_provider_set_t provider_set = {
+      .providers = kLoomCheckProviders,
+      .provider_count = IREE_ARRAYSIZE(kLoomCheckProviders),
+      .target_provider_set = loom_configured_emitter_provider_set(),
+      .compile_provider = &compile_provider,
+  };
   const int exit_code = loom_check_provider_main(
-      argc, argv, &kLoomCheckProviderSet, loom_configured_input_providers());
+      argc, argv, &provider_set, loom_configured_input_providers());
   IREE_TRACE_ZONE_END(z0);
   IREE_TRACE_APP_EXIT(exit_code);
   return exit_code;

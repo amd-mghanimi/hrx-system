@@ -17,8 +17,14 @@ static bool loom_tooling_cli_default_help_filter(iree_string_view_t flag_file,
   return iree_string_view_starts_with(flag_file, IREE_SV("loom/src/loom/")) ||
          iree_string_view_find(flag_file, IREE_SV("/loom/src/loom/"), 0) !=
              IREE_STRING_VIEW_NPOS ||
+         iree_string_view_starts_with(flag_file,
+                                      IREE_SV("loom\\src\\loom\\")) ||
+         iree_string_view_find(flag_file, IREE_SV("\\loom\\src\\loom\\"), 0) !=
+             IREE_STRING_VIEW_NPOS ||
          iree_string_view_ends_with(
-             flag_file, IREE_SV("runtime/src/iree/base/tooling/flags.c"));
+             flag_file, IREE_SV("runtime/src/iree/base/tooling/flags.c")) ||
+         iree_string_view_ends_with(
+             flag_file, IREE_SV("runtime\\src\\iree\\base\\tooling\\flags.c"));
 }
 
 void loom_tooling_cli_set_default_help_filter(void) {

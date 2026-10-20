@@ -1,8 +1,7 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/view_transport.loom-test
 // RUN: emit source-low target=x86:avx2 output=low
 
 func.def @wide_subview_selection(%input: buffer, %byte_base0: offset, %condition: i1) -> (i32) {
-  %byte_base = index.assume %byte_base0 [range(%byte_base0, 2147483648, 4294967296), mul(%byte_base0, 4)] : offset
+  %byte_base = index.assume %byte_base0 [range(%byte_base0, 2147483648, 4294967296), multiple_of(%byte_base0, 4)] : offset
   %aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
   %root = buffer.view %aligned[%byte_base] : buffer -> view<4xi32>
   %first = view.subview %root[1] : view<4xi32> -> view<1xi32>
@@ -13,7 +12,7 @@ func.def @wide_subview_selection(%input: buffer, %byte_base0: offset, %condition
 }
 
 // ----
-low.func.def target<x86.avx2.core> abi(object_function) @wide_subview_selection(%aligned: reg<x86.gpr64>, %byte_base: reg<x86.gpr64>, %condition: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, offset, i1) -> (i32)}) @wide_subview_selection(%aligned: reg<x86.gpr64>, %byte_base: reg<x86.gpr64>, %condition: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %20 = lea.disp %byte_base {disp32 = 4}
   %21 = lea.disp %byte_base {disp32 = 8}
   %22 = copy %21 : reg<x86.gpr64> -> reg<x86.gpr64>
@@ -37,7 +36,7 @@ func.def @distinct_root_selection(%first: buffer, %second: buffer, %condition: i
 }
 
 // ----
-low.func.def target<x86.avx2.core> abi(object_function) @distinct_root_selection(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %condition: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, buffer, i1) -> (i32)}) @distinct_root_selection(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %condition: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %first_offset = mov.imm64 4
   %second_offset = mov.imm64 8
   low.cond_br %condition, ^_bb1, ^_bb2 : reg<x86.gpr32>
@@ -48,191 +47,4 @@ low.func.def target<x86.avx2.core> abi(object_function) @distinct_root_selection
 ^_bb3(%selected_root: reg<x86.gpr64>, %selected_offset: reg<x86.gpr64>):
   %value = mov.load.indexed.gpr32 %selected_root, %selected_offset {disp32 = 0, scale = 1}
   return %value
-}
-
-// ====
-
-func.def public @rotate_buffer_views(%input: buffer, %count_input: index, %seed: i32) -> (i32) {
-  %count = index.assume %count_input [range(%count_input, 0, 257)] : index
-  %begin = index.constant 0 : index
-  %step = index.constant 1 : index
-  %depth = scalar.constant 4 : i32
-  %storage = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  %offset0 = index.constant 0 : offset
-  %slot0 = buffer.view %storage[%offset0] : buffer -> view<1xi32>
-  %ordinal0 = scalar.constant 0 : i32
-  %initial0 = scalar.addi %seed, %ordinal0 : i32
-  view.store %initial0, %slot0[0] : i32, view<1xi32>
-  %offset1 = index.constant 4 : offset
-  %slot1 = buffer.view %storage[%offset1] : buffer -> view<1xi32>
-  %ordinal1 = scalar.constant 1 : i32
-  %initial1 = scalar.addi %seed, %ordinal1 : i32
-  view.store %initial1, %slot1[0] : i32, view<1xi32>
-  %offset2 = index.constant 8 : offset
-  %slot2 = buffer.view %storage[%offset2] : buffer -> view<1xi32>
-  %ordinal2 = scalar.constant 2 : i32
-  %initial2 = scalar.addi %seed, %ordinal2 : i32
-  view.store %initial2, %slot2[0] : i32, view<1xi32>
-  %offset3 = index.constant 12 : offset
-  %slot3 = buffer.view %storage[%offset3] : buffer -> view<1xi32>
-  %ordinal3 = scalar.constant 3 : i32
-  %initial3 = scalar.addi %seed, %ordinal3 : i32
-  view.store %initial3, %slot3[0] : i32, view<1xi32>
-  %unroll = index.constant 2 : index
-  %last0, %last1, %last2, %last3 = scf.for %record = [%begin to %count step %step](%current0 = %slot0 : view<1xi32>, %current1 = %slot1 : view<1xi32>, %current2 = %slot2 : view<1xi32>, %current3 = %slot3 : view<1xi32>) -> (view<1xi32>, view<1xi32>, view<1xi32>, view<1xi32>) unroll(%unroll) {
-    %number = index.cast %record : index to i32
-    %future = scalar.addi %number, %depth : i32
-    %value = scalar.addi %seed, %future : i32
-    %refined = view.refine %current0 : view<1xi32> -> view<1xi32>
-    view.store %value, %refined[0] : i32, view<1xi32>
-    scf.yield %current1, %current2, %current3, %refined : view<1xi32>, view<1xi32>, view<1xi32>, view<1xi32>
-  }
-  %value0 = view.load %last0[0] : view<1xi32> -> i32
-  func.return %value0 : i32
-}
-
-// ----
-low.func.def public target<x86.avx2.core> abi(object_function) @rotate_buffer_views(%storage: reg<x86.gpr64>, %count: reg<x86.gpr64>, %seed: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
-  %begin = mov.imm64 0
-  %depth = mov.imm32 4
-  mov.store.gpr32 %seed, %storage {disp32 = 0}
-  %offset1 = mov.imm64 4
-  %ordinal1 = mov.imm32 1
-  %112 = copy %seed : reg<x86.gpr32> -> reg<x86.gpr32>
-  %initial1 = add.gpr32 %112, %ordinal1
-  mov.store.gpr32 %initial1, %storage {disp32 = 4}
-  %offset2 = mov.imm64 8
-  %ordinal2 = mov.imm32 2
-  %116 = copy %seed : reg<x86.gpr32> -> reg<x86.gpr32>
-  %initial2 = add.gpr32 %116, %ordinal2
-  mov.store.gpr32 %initial2, %storage {disp32 = 8}
-  %offset3 = mov.imm64 12
-  %ordinal3 = mov.imm32 3
-  %120 = copy %seed : reg<x86.gpr32> -> reg<x86.gpr32>
-  %initial3 = add.gpr32 %120, %ordinal3
-  mov.store.gpr32 %initial3, %storage {disp32 = 12}
-  low.br ^_bb1(%begin: reg<x86.gpr64>, %begin: reg<x86.gpr64>, %offset1: reg<x86.gpr64>, %offset2: reg<x86.gpr64>, %offset3: reg<x86.gpr64>)
-^_bb1(%record: reg<x86.gpr64>, %current0_offset: reg<x86.gpr64>, %current1_offset: reg<x86.gpr64>, %current2_offset: reg<x86.gpr64>, %current3_offset: reg<x86.gpr64>):
-  %122 = cmp.slt.gpr64 %record, %count
-  low.cond_br %122, ^_bb2, ^_bb6 : reg<x86.gpr32>
-^_bb2:
-  %number = mov.trunc.gpr32.gpr64 %record
-  %125 = copy %number : reg<x86.gpr32> -> reg<x86.gpr32>
-  %126 = add.gpr32 %125, %seed
-  %127 = copy %126 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %value = add.gpr32 %127, %depth
-  mov.store.indexed.gpr32 %value, %storage, %current0_offset {disp32 = 0, scale = 1}
-  %record_1 = lea.disp %record {disp32 = 1}
-  %130 = cmp.slt.gpr64 %record_1, %count
-  low.cond_br %130, ^_bb3, ^_bb4 : reg<x86.gpr32>
-^_bb3:
-  %number_1 = mov.trunc.gpr32.gpr64 %record_1
-  %133 = copy %number_1 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %134 = add.gpr32 %133, %seed
-  %135 = copy %134 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %value_1 = add.gpr32 %135, %depth
-  mov.store.indexed.gpr32 %value_1, %storage, %current1_offset {disp32 = 0, scale = 1}
-  low.br ^_bb5(%current2_offset: reg<x86.gpr64>, %current3_offset: reg<x86.gpr64>, %current0_offset: reg<x86.gpr64>, %current1_offset: reg<x86.gpr64>)
-^_bb4:
-  low.br ^_bb5(%current1_offset: reg<x86.gpr64>, %current2_offset: reg<x86.gpr64>, %current3_offset: reg<x86.gpr64>, %current0_offset: reg<x86.gpr64>)
-^_bb5(%103: reg<x86.gpr64>, %104: reg<x86.gpr64>, %105: reg<x86.gpr64>, %106: reg<x86.gpr64>):
-  %137 = lea.disp %record {disp32 = 2}
-  low.br ^_bb1(%137: reg<x86.gpr64>, %103: reg<x86.gpr64>, %104: reg<x86.gpr64>, %105: reg<x86.gpr64>, %106: reg<x86.gpr64>)
-^_bb6:
-  %value0 = mov.load.indexed.gpr32 %storage, %current0_offset {disp32 = 0, scale = 1}
-  return %value0
-}
-
-// ====
-
-func.def @correlated_duplicate_rotation(%input: buffer, %count_input: index, %first_offset_input: offset, %second_offset_input: offset) -> (i32) {
-  %count = index.assume %count_input [range(%count_input, 0, 257)] : index
-  %first_offset = index.assume %first_offset_input [range(%first_offset_input, 0, 4092), mul(%first_offset_input, 4)] : offset
-  %second_offset = index.assume %second_offset_input [range(%second_offset_input, 0, 4092), mul(%second_offset_input, 4)] : offset
-  %storage = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  %begin = index.constant 0 : index
-  %step = index.constant 1 : index
-  %first_view = buffer.view %storage[%first_offset] : buffer -> view<1xi32>
-  %second_view = buffer.view %storage[%second_offset] : buffer -> view<1xi32>
-  %last_a_offset, %last_a_view, %last_a_duplicate, %last_b_offset, %last_b_view = scf.for %i = [%begin to %count step %step](%a_offset = %first_offset : offset, %a_view = %first_view : view<1xi32>, %a_duplicate = %first_view : view<1xi32>, %b_offset = %second_offset : offset, %b_view = %second_view : view<1xi32>) -> (offset, view<1xi32>, view<1xi32>, offset, view<1xi32>) {
-    scf.yield %b_offset, %b_view, %b_view, %a_offset, %a_view : offset, view<1xi32>, view<1xi32>, offset, view<1xi32>
-  }
-  %last_a_offset_view = buffer.view %storage[%last_a_offset] : buffer -> view<1xi32>
-  %a_offset_value = view.load %last_a_offset_view[0] : view<1xi32> -> i32
-  %a_view_value = view.load %last_a_view[0] : view<1xi32> -> i32
-  %a_duplicate_value = view.load %last_a_duplicate[0] : view<1xi32> -> i32
-  %last_b_offset_view = buffer.view %storage[%last_b_offset] : buffer -> view<1xi32>
-  %b_offset_value = view.load %last_b_offset_view[0] : view<1xi32> -> i32
-  %b_view_value = view.load %last_b_view[0] : view<1xi32> -> i32
-  %sum0 = scalar.addi %a_offset_value, %a_view_value : i32
-  %sum1 = scalar.addi %sum0, %a_duplicate_value : i32
-  %sum2 = scalar.addi %sum1, %b_offset_value : i32
-  %sum3 = scalar.addi %sum2, %b_view_value : i32
-  func.return %sum3 : i32
-}
-
-// ----
-low.func.def target<x86.avx2.core> abi(object_function) @correlated_duplicate_rotation(%storage: reg<x86.gpr64>, %count: reg<x86.gpr64>, %first_offset: reg<x86.gpr64>, %second_offset: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
-  %begin = mov.imm64 0
-  low.br ^_bb1(%begin: reg<x86.gpr64>, %first_offset: reg<x86.gpr64>, %second_offset: reg<x86.gpr64>)
-^_bb1(%i: reg<x86.gpr64>, %a_offset: reg<x86.gpr64>, %b_offset: reg<x86.gpr64>):
-  %70 = cmp.slt.gpr64 %i, %count
-  low.cond_br %70, ^_bb2, ^_bb3 : reg<x86.gpr32>
-^_bb2:
-  %71 = lea.disp %i {disp32 = 1}
-  low.br ^_bb1(%71: reg<x86.gpr64>, %b_offset: reg<x86.gpr64>, %a_offset: reg<x86.gpr64>)
-^_bb3:
-  %a_offset_value = mov.load.indexed.gpr32 %storage, %a_offset {disp32 = 0, scale = 1}
-  %b_offset_value = mov.load.indexed.gpr32 %storage, %b_offset {disp32 = 0, scale = 1}
-  %74 = copy %a_offset_value : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum0 = add.gpr32 %74, %a_offset_value
-  %76 = copy %sum0 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum1 = add.gpr32 %76, %a_offset_value
-  %78 = copy %sum1 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum2 = add.gpr32 %78, %b_offset_value
-  %80 = copy %sum2 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum3 = add.gpr32 %80, %b_offset_value
-  return %sum3
-}
-
-// ====
-
-func.def @correlated_cfg_rotation(%input: buffer, %select: i1, %again: i1, %left_offset_input: offset, %right_offset_input: offset) -> (i32) {
-  %left_offset = index.assume %left_offset_input [range(%left_offset_input, 0, 4092), mul(%left_offset_input, 4)] : offset
-  %right_offset = index.assume %right_offset_input [range(%right_offset_input, 0, 4092), mul(%right_offset_input, 4)] : offset
-  %storage = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  cfg.cond_br %select, ^left, ^right
-^left:
-  cfg.br ^loop(%left_offset: offset, %left_offset: offset)
-^right:
-  cfg.br ^loop(%right_offset: offset, %right_offset: offset)
-^loop(%offset: offset, %duplicate_offset: offset):
-  cfg.cond_br %again, ^body, ^exit
-^body:
-  cfg.br ^loop(%duplicate_offset: offset, %offset: offset)
-^exit:
-  %view = buffer.view %storage[%offset] : buffer -> view<1xi32>
-  %duplicate_view = buffer.view %storage[%duplicate_offset] : buffer -> view<1xi32>
-  %value = view.load %view[0] : view<1xi32> -> i32
-  %duplicate_value = view.load %duplicate_view[0] : view<1xi32> -> i32
-  %sum = scalar.addi %value, %duplicate_value : i32
-  func.return %sum : i32
-}
-
-// ----
-low.func.def target<x86.avx2.core> abi(object_function) @correlated_cfg_rotation(%storage: reg<x86.gpr64>, %select: reg<x86.gpr32>, %again: reg<x86.gpr32>, %left_offset: reg<x86.gpr64>, %right_offset: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
-  low.cond_br %select, ^left, ^right : reg<x86.gpr32>
-^left:
-  low.br ^loop(%left_offset: reg<x86.gpr64>)
-^right:
-  low.br ^loop(%right_offset: reg<x86.gpr64>)
-^loop(%offset: reg<x86.gpr64>):
-  low.cond_br %again, ^body, ^exit : reg<x86.gpr32>
-^body:
-  low.br ^loop(%offset: reg<x86.gpr64>)
-^exit:
-  %value = mov.load.indexed.gpr32 %storage, %offset {disp32 = 0, scale = 1}
-  %24 = copy %value : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum = add.gpr32 %24, %value
-  return %sum
 }

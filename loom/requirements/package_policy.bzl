@@ -47,6 +47,17 @@ PACKAGE_POLICIES = [
         build_requirements = [IMPORT_CXX],
     ),
     package_policy(
+        packages = [
+            "loom/src/loom/serve/...",
+            "loom/src/loom/tooling/target/amd/xdna/serve/...",
+            "loom/src/loom/tooling/target/amdgpu/serve/...",
+            "loom/src/loom/tooling/target/cpu/serve/...",
+            "loom/src/loom/tooling/target/spirv/serve/...",
+            "loom/src/loom/tools/loom-serve/...",
+        ],
+        build_requirements = [TARGET_ARCH_VM],
+    ),
+    package_policy(
         packages = ["loom/src/loom/target/arch/amd/xdna/..."],
         build_requirements = [TARGET_ARCH_XDNA],
     ),
@@ -88,6 +99,10 @@ PACKAGE_POLICIES = [
         build_requirements = [TARGET_ARCH_SPIRV, EMIT_SPIRV],
     ),
     package_policy(
+        packages = ["loom/src/loom/target/emit/vm/..."],
+        build_requirements = [TARGET_ARCH_VM],
+    ),
+    package_policy(
         packages = ["loom/src/loom/target/emit/wasm/..."],
         build_requirements = [TARGET_ARCH_WASM, EMIT_WASM],
     ),
@@ -108,6 +123,10 @@ PACKAGE_POLICIES = [
     package_policy(
         packages = ["loom/src/loom/tooling/target/vm/..."],
         build_requirements = [TARGET_ARCH_VM],
+    ),
+    package_policy(
+        packages = ["loom/src/loom/tooling/target/wasm/..."],
+        build_requirements = [TARGET_ARCH_WASM, EMIT_WASM],
     ),
     package_policy(
         packages = ["loom/py/loom/importers/mlir/..."],

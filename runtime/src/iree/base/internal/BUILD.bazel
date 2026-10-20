@@ -20,6 +20,13 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
+iree_runtime_cc_library(
+    name = "file_io_posix",
+    srcs = ["file_io_posix.c"],
+    hdrs = ["file_io_posix.h"],
+    deps = ["//runtime/src/iree/base"],
+)
+
 #===------------------------------------------------------------------------===#
 # Core headers (internal)
 #===------------------------------------------------------------------------===#
@@ -53,6 +60,16 @@ iree_runtime_cc_test(
         "//runtime/src/iree/base:core_headers",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "atomics_disabled_test",
+    srcs = ["atomics_disabled_test.c"],
+    defines = ["IREE_SYNCHRONIZATION_DISABLE_UNSAFE=1"],
+    deps = [
+        ":internal",
+        "//runtime/src/iree/base",
     ],
 )
 
@@ -154,6 +171,7 @@ iree_runtime_cc_test(
 iree_runtime_cc_benchmark(
     name = "atomic_slist_benchmark",
     srcs = ["atomic_slist_benchmark.cc"],
+    args = ["--benchmark_filter=^(BM_PushPop|BM_PushNFlushFIFO/1024|BM_ContentionPushPop/iterations:10000/real_time/threads:8|BM_ProducerConsumerFlush/iterations:10000/real_time/threads:8)"],
     deps = [
         ":atomic_slist",
         "//runtime/src/iree/testing:benchmark_main",
@@ -247,6 +265,7 @@ iree_runtime_cc_library(
     name = "dynamic_library",
     srcs = [
         "dynamic_library_posix.c",
+        "dynamic_library_wasi.c",
         "dynamic_library_win32.c",
     ],
     hdrs = ["dynamic_library.h"],
@@ -379,6 +398,7 @@ iree_runtime_cc_library(
     name = "shm",
     srcs = [
         "shm_posix.c",
+        "shm_reservation.c",
         "shm_win32.c",
     ],
     hdrs = ["shm.h"],

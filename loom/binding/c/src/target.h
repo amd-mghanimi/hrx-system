@@ -9,8 +9,9 @@
 
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/pipeline/legalizer_registry.h"
+#include "loom/codegen/low/text_asm.h"
 #include "loom/codegen/pass_environment.h"
-#include "loom/pass/registry.h"
+#include "loom/format/text/printer.h"
 #include "loom/target/function_version.h"
 #include "loom/target/profile.h"
 #include "loom/target/provider.h"
@@ -26,10 +27,6 @@ typedef struct loom_low_repr_environment_t loom_low_repr_environment_t;
 extern "C" {
 #endif
 
-// Destroys a target-family profile owned by a public profile handle.
-typedef void (*loomc_target_profile_destroy_fn_t)(
-    loom_target_profile_t* profile, loomc_allocator_t allocator);
-
 // Prepared target pass capability tables derived from a public target
 // environment.
 typedef struct loomc_target_pass_environment_t {
@@ -38,6 +35,12 @@ typedef struct loomc_target_pass_environment_t {
 
   // Target-low descriptor registry used by target-low passes and emitters.
   loom_target_low_descriptor_registry_t low_descriptor_registry;
+
+  // Parser support borrowing this environment's target diagnostic providers.
+  loom_low_descriptor_text_asm_environment_storage_t text_asm_storage;
+
+  // Canonical target-aware type printer options for diagnostics.
+  loom_text_print_options_t diagnostic_type_print_options;
 
   // Source-to-target-low lowering policy registry used by source-to-low.
   loom_low_lower_policy_registry_t low_lower_policy_registry;
@@ -54,7 +57,7 @@ typedef struct loomc_target_pass_environment_t {
 
 // Creates a public target environment from an internal provider set.
 LOOMC_API_PRIVATE loomc_status_t
-loomc_target_environment_create_from_provider_set(
+loomc_target_environment_create_from_provider_set_internal(
     const loom_target_provider_set_t* provider_set, loomc_allocator_t allocator,
     loomc_target_environment_t** out_target_environment);
 
@@ -94,10 +97,12 @@ loomc_target_specialization_options_validate_environment(
     const loomc_target_specialization_options_t* options,
     const loomc_target_environment_t* target_environment);
 
-// Materializes internal function requests and target declaration bindings from
-// public options. Returned lists are owned by |arena| until it is reset.
+// Resolves public names into distinct module-local function and declaration
+// refs. Validates symbol kinds and disjoint assignments before publishing the
+// lists. Profiles must already be validated against the context environment.
+// Returned lists are owned by |arena| until it is reset.
 LOOMC_API_PRIVATE loomc_status_t loomc_target_specialization_options_make_lists(
-    const loomc_target_specialization_options_t* options,
+    const loomc_target_specialization_options_t* options, loom_module_t* module,
     iree_arena_allocator_t* arena,
     loom_target_specialization_request_list_t* out_requests,
     loom_target_declaration_binding_list_t* out_bindings);
@@ -109,35 +114,45 @@ LOOMC_API_PRIVATE loomc_status_t loomc_target_specialization_options_make_lists(
 LOOMC_API_PRIVATE loomc_status_t loomc_target_profile_create(
     loomc_target_environment_t* target_environment,
     loomc_string_view_t identifier, loom_target_profile_t* target_profile,
-    loomc_target_profile_destroy_fn_t destroy, loomc_allocator_t allocator,
+    loom_target_profile_destroy_fn_t destroy, loomc_allocator_t allocator,
     loomc_target_profile_t** out_profile);
 
 // Returns the typed target-family profile owned by a public profile.
 LOOMC_API_PRIVATE const loom_target_profile_t*
 loomc_target_profile_loom_target_profile(const loomc_target_profile_t* profile);
 
+// Returns whether |profile| owns storage created with |destroy|. Target-family
+// adapters use their private destructor identity before accessing storage that
+// extends the native compiler profile. Family identity alone does not establish
+// that allocation layout: named profiles have provider-owned static storage.
+LOOMC_API_PRIVATE bool loomc_target_profile_has_storage(
+    const loomc_target_profile_t* profile,
+    loom_target_profile_destroy_fn_t destroy);
+
 // Returns the target environment retained by a public profile.
 LOOMC_API_PRIVATE loomc_target_environment_t*
 loomc_target_profile_target_environment(const loomc_target_profile_t* profile);
+
+// Validates that a complete profile belongs to a compatible target
+// environment.
+LOOMC_API_PRIVATE loomc_status_t loomc_target_profile_validate_environment(
+    const loomc_target_profile_t* profile,
+    const loomc_target_environment_t* target_environment);
 
 // Returns the stable diagnostic identifier owned by a public profile.
 LOOMC_API_PRIVATE loomc_string_view_t
 loomc_target_profile_identifier(const loomc_target_profile_t* profile);
 
-// Initializes a stable pass registry combining builtin and target-owned pass
-// descriptors. The returned registry points into out_storage.
-LOOMC_API_PRIVATE loomc_status_t loomc_target_pass_registry_initialize(
-    const loomc_target_environment_t* target_environment,
-    loom_pass_registry_storage_t* out_storage,
-    const loom_pass_registry_t** out_registry);
-
-// Initializes codegen pass capability storage over optional target tables and
-// the context-owned cleanup registry, then returns its borrowed environment.
+// Initializes codegen pass capability storage over optional target tables,
+// compiler products, and the context-owned cleanup registry, then returns its
+// borrowed environment.
 LOOMC_API_PRIVATE loom_pass_environment_t
 loomc_codegen_pass_environment_storage_initialize(
     const loomc_target_pass_environment_t* target_environment,
     const loom_cleanup_pattern_registry_t* cleanup_pattern_registry,
     loom_function_version_owner_t* function_version_owner,
+    const loom_pass_environment_capability_t* launch_config_capability,
+    loom_target_compile_report_t* compile_report,
     loom_codegen_pass_environment_storage_t* out_storage);
 
 // Initializes a target-aware text low-asm environment over prepared target

@@ -67,6 +67,7 @@ from loom.dsl import (
     ATTR_TYPE_PARAMETERIZED,
     ATTR_TYPE_PARAMETERIZED_ARRAY,
     ATTR_TYPE_SIGNED_ENUM_SET,
+    ATTR_TYPE_STRING_ARRAY,
     ATTR_TYPE_SYMBOL,
     ATTR_TYPE_SYMBOL_ARRAY,
     ATTR_TYPE_SYMBOL_SET,
@@ -129,6 +130,7 @@ from loom.dsl import (
     ReferenceTypeKey,
     RegionBranchInterface,
     RegionDef,
+    RegionExecution,
     Release,
     Result,
     Retain,
@@ -143,9 +145,9 @@ from loom.dsl import (
     TiedResult,
     TypeDef,
     Writes,
-    YieldCountMatchesResults,
-    YieldElementTypesMatchResults,
-    YieldTypesMatchResults,
+    YieldCountMatches,
+    YieldElementTypesMatch,
+    YieldTypesMatch,
     binary_op,
     cast_op,
     comparison_op,
@@ -195,8 +197,12 @@ _TargetKind = EnumDef(
     [
         EnumCase("low_core", 1, doc="Generic target-low test core."),
         EnumCase("quirky", 2, doc="Synthetic edge-case target."),
+        EnumCase("device", 3, doc="Device environment containing low_core workers."),
     ],
     doc="Synthetic target kind for target-like interface tests.",
+    c_type="loom_test_target_kind_t",
+    c_const_prefix="LOOM_TEST_TARGET_KIND",
+    c_include="loom/target/test/target_records.h",
 )
 
 _TemplateFlags = EnumDef(
@@ -544,6 +550,7 @@ test_constant = Op(
         "%c42 = test.constant 42 : i32",
         "%pi = test.constant 3.14 : f32",
     ],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -579,6 +586,7 @@ test_clause_constant = Op(
     traits=[PURE, CONSTANT_LIKE],
     format=[Clause("value", Attr("value")), COLON, TypeOf("result")],
     examples=["%c42 = test.clause_constant value(42) : i32"],
+    eager_execution_cost=1,
 )
 
 test_clause_copy = Op(
@@ -816,6 +824,18 @@ test_fact_not_subnormal = Op(
     facts="loom_test_fact_not_subnormal_facts",
     format=[Ref("value"), COLON, TypeOf("value"), ARROW, ResultType("result")],
     examples=["%not_subnormal = test.fact_not_subnormal %x : f32 -> i1"],
+)
+
+test_fact_exact_float_types = Op(
+    "test.fact_exact_float_types",
+    group=test_ops,
+    doc="Exposes the exact destination float-type set as an i64 constant.",
+    operands=[Operand("value", ANY)],
+    results=[Result("result", INTEGER)],
+    traits=[PURE],
+    facts="loom_test_fact_exact_float_types_facts",
+    format=[Ref("value"), COLON, TypeOf("value"), ARROW, ResultType("result")],
+    examples=["%types = test.fact_exact_float_types %x : f32 -> i64"],
 )
 
 test_fact_subgroup_uniform = Op(
@@ -1324,6 +1344,7 @@ test_cmp = comparison_op(
     predicates=cmp_predicates,
     doc="Test comparison op.",
     examples=["%result = test.cmp lt, %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -1341,6 +1362,7 @@ test_map = Op(
             "body",
             doc="Element-wise body.",
             single_block=True,
+            execution=RegionExecution.REPEATED,
             terminator="test.yield",
         )
     ],
@@ -1348,8 +1370,8 @@ test_map = Op(
         AllShapesMatch("inputs"),
         BlockArgCount("body", "inputs"),
         BlockArgsMatchElementTypes("body", "inputs"),
-        YieldCountMatchesResults("body", "result"),
-        YieldElementTypesMatchResults("body", "result"),
+        YieldCountMatches("body", "result"),
+        YieldElementTypesMatch("body", "result"),
     ],
     traits=[PURE, ELEMENTWISE, ImplicitTerminator("test.implicit_yield")],
     format=[
@@ -1447,6 +1469,41 @@ test_invoke = Op(
     ],
     examples=[
         "%output, %count = test.invoke @callee(%weights, %input) : (tile<4xf32>, index) -> (%weights as tile<4xf32>, index)",
+    ],
+)
+
+# ============================================================================
+# test.signature_sink — locally scoped call result signature
+# ============================================================================
+
+test_signature_sink = Op(
+    "test.signature_sink",
+    group=test_ops,
+    doc=("Test terminal-style signature results that retain result identities for dependent types without exposing SSA values to following ops."),
+    operands=[Operand("operands", ANY, variadic=True)],
+    results=[
+        Result(
+            "results",
+            ANY,
+            variadic=True,
+            signature_only=True,
+        )
+    ],
+    traits=[UNKNOWN_EFFECTS],
+    format=[
+        GLUE,
+        LPAREN,
+        Refs("operands"),
+        RPAREN,
+        COLON,
+        LPAREN,
+        TypesOf("operands"),
+        RPAREN,
+        ARROW,
+        Scope([ResultTypeList("results")]),
+    ],
+    examples=[
+        "test.signature_sink() : () -> (%width: index, vector<[%width]xf32>)",
     ],
 )
 
@@ -1694,6 +1751,7 @@ test_loop = Op(
         LoopLikeInterface(
             body="body",
             iter_args="iter_args",
+            results="results",
             iv="iv",
             lower_bound="lower_bound",
             upper_bound="upper_bound",
@@ -1702,8 +1760,8 @@ test_loop = Op(
     ],
     constraints=[
         IterArgsMatchResults("iter_args", "results"),
-        YieldCountMatchesResults("body", "results"),
-        YieldTypesMatchResults("body", "results"),
+        YieldCountMatches("body", "results"),
+        YieldTypesMatch("body", "results"),
     ],
     traits=[ImplicitTerminator("test.implicit_yield")],
     format=[
@@ -1765,6 +1823,46 @@ test_block_args = Op(
     ],
 )
 
+test_block_arg_groups = Op(
+    "test.block_arg_groups",
+    group=test_ops,
+    doc="Test projected groups of one region entry signature.",
+    attrs=[
+        AttrDef(
+            "actual_count",
+            "i64",
+            doc="Number of entry arguments in the actual result group.",
+        ),
+    ],
+    regions=[
+        RegionDef(
+            "body",
+            doc="Body receiving the concatenated actual and expected groups.",
+            single_block=True,
+            terminator="test.yield",
+        )
+    ],
+    traits=[ImplicitTerminator("test.implicit_yield")],
+    format=[
+        kw("actual"),
+        BlockArgs(
+            "body",
+            group="actual",
+            end_attr="actual_count",
+        ),
+        kw("expected"),
+        BlockArgs(
+            "body",
+            group="expected",
+            start_attr="actual_count",
+        ),
+        Region("body"),
+    ],
+    examples=[
+        "test.block_arg_groups actual(%actual: f32) expected(%expected: f32) {\n  test.yield\n}",
+    ],
+)
+
 # ============================================================================
 # test.branch — if/else with both regions present
 # ============================================================================
@@ -1791,7 +1889,13 @@ test_branch = Op(
             terminator="test.yield",
         ),
     ],
-    interfaces=[RegionBranchInterface(selector="condition")],
+    interfaces=[
+        RegionBranchInterface(
+            selector="condition",
+            true_region="then_region",
+            false_region="else_region",
+        )
+    ],
     traits=[ImplicitTerminator("test.implicit_yield")],
     format=[
         Ref("condition"),
@@ -1833,6 +1937,13 @@ test_optional_region = Op(
         ),
     ],
     traits=[ImplicitTerminator("test.implicit_yield")],
+    interfaces=[
+        RegionBranchInterface(
+            selector="condition",
+            true_region="body",
+            false_region="else_region",
+        ),
+    ],
     format=[
         Ref("condition"),
         Region("body"),
@@ -2242,6 +2353,41 @@ test_compact_parameterized_attr = Op(
 )
 
 # ============================================================================
+# test.string_array_attrs — ordered string-array attributes
+# ============================================================================
+
+test_string_array_attrs = Op(
+    "test.string_array_attrs",
+    group=test_ops,
+    doc="Test op with required and optional ordered string arrays.",
+    attrs=[
+        AttrDef(
+            "required_values",
+            ATTR_TYPE_STRING_ARRAY,
+            doc="Required ordered string values.",
+        ),
+        AttrDef(
+            "optional_values",
+            ATTR_TYPE_STRING_ARRAY,
+            optional=True,
+            doc="Optional ordered string values.",
+        ),
+        AttrDef("dict", "dict", optional=True),
+    ],
+    format=[
+        Attr("required_values"),
+        OptionalGroup(
+            [kw("using"), Attr("optional_values")],
+            anchor="optional_values",
+        ),
+        AttrDict("dict"),
+    ],
+    examples=[
+        'test.string_array_attrs ["first", "second"] using []',
+    ],
+)
+
+# ============================================================================
 # test.enum_array_attrs — descriptor-backed enum-array attributes
 # ============================================================================
 
@@ -2542,8 +2688,8 @@ test_assume = Op(
         TypesOf("results"),
     ],
     examples=[
-        "%M2 = test.assume %M [mul(%M, 16)] : index",
-        "%M2, %K2 = test.assume %M, %K [mul(%M, 16), lt(%K, 1024)] : index, index",
+        "%M2 = test.assume %M [multiple_of(%M, 16)] : index",
+        "%M2, %K2 = test.assume %M, %K [multiple_of(%M, 16), lt(%K, 1024)] : index, index",
     ],
 )
 
@@ -2634,7 +2780,7 @@ test_read_resource = Op(
         ResultType("result"),
     ],
     examples=[
-        "%tile = test.read_resource %pool : pool<[%BS]> -> tile<4xf32>",
+        "%tile = test.read_resource %pool : pool -> tile<4xf32>",
     ],
 )
 
@@ -2661,7 +2807,7 @@ test_write_resource = Op(
         TypeOf("data"),
     ],
     examples=[
-        "test.write_resource %pool, %tile : pool<[%BS]>, tile<4xf32>",
+        "test.write_resource %pool, %tile : pool, tile<4xf32>",
     ],
 )
 
@@ -2691,7 +2837,7 @@ test_mutate_resource = Op(
         ResultType("old_value"),
     ],
     examples=[
-        "%old = test.mutate_resource %pool, %delta : pool<[%BS]>, i32 -> i32",
+        "%old = test.mutate_resource %pool, %delta : pool, i32 -> i32",
     ],
 )
 
@@ -2713,7 +2859,7 @@ test_alloc = Op(
         ResultType("result"),
     ],
     examples=[
-        "%pool = test.alloc %sz : index -> pool<[%BS]>",
+        "%pool = test.alloc %sz : index -> pool",
     ],
 )
 
@@ -2736,7 +2882,7 @@ test_resource_alloc = Op(
         ResultType("result"),
     ],
     examples=[
-        "%resource = test.resource.alloc %sz : index -> pool<[%BS]>",
+        "%resource = test.resource.alloc %sz : index -> pool",
     ],
 )
 
@@ -2748,7 +2894,7 @@ test_resource_borrow = Op(
     ownership_effects=[Borrow("resource")],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.borrow %resource : pool<[%BS]>",
+        "test.resource.borrow %resource : pool",
     ],
 )
 
@@ -2760,7 +2906,7 @@ test_resource_borrow_ref = Op(
     ownership_effects=[Borrow("resource", BY_REFERENCE)],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.borrow_ref %resource : pool<[%BS]>",
+        "test.resource.borrow_ref %resource : pool",
     ],
 )
 
@@ -2772,7 +2918,7 @@ test_resource_consume = Op(
     ownership_effects=[Consume("resource")],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.consume %resource : pool<[%BS]>",
+        "test.resource.consume %resource : pool",
     ],
 )
 
@@ -2792,7 +2938,7 @@ test_resource_retain = Op(
         ResultType("result"),
     ],
     examples=[
-        "%retained = test.resource.retain %resource : pool<[%BS]> -> pool<[%BS]>",
+        "%retained = test.resource.retain %resource : pool -> pool",
     ],
 )
 
@@ -2804,7 +2950,7 @@ test_resource_release = Op(
     ownership_effects=[Release("resource")],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.release %resource : pool<[%BS]>",
+        "test.resource.release %resource : pool",
     ],
 )
 
@@ -2816,7 +2962,7 @@ test_resource_discard = Op(
     ownership_effects=[Discard("resource")],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.discard %resource : pool<[%BS]>",
+        "test.resource.discard %resource : pool",
     ],
 )
 
@@ -2828,7 +2974,7 @@ test_resource_escape = Op(
     ownership_effects=[Escape("resource")],
     format=[Ref("resource"), COLON, TypeOf("resource")],
     examples=[
-        "test.resource.escape %resource : pool<[%BS]>",
+        "test.resource.escape %resource : pool",
     ],
 )
 
@@ -2851,7 +2997,7 @@ test_resource_alias = Op(
         ResultType("result"),
     ],
     examples=[
-        "%alias = test.resource.alias %resource : pool<[%BS]> -> pool<[%BS]>",
+        "%alias = test.resource.alias %resource : pool -> pool",
     ],
 )
 
@@ -2874,7 +3020,7 @@ test_resource_borrowed = Op(
         ResultType("result"),
     ],
     examples=[
-        "%borrowed = test.resource.borrowed %resource : pool<[%BS]> -> pool<[%BS]>",
+        "%borrowed = test.resource.borrowed %resource : pool -> pool",
     ],
 )
 
@@ -2894,7 +3040,7 @@ test_resource_move = Op(
         ResultType("result"),
     ],
     examples=[
-        "%moved = test.resource.move %resource : pool<[%BS]> -> pool<[%BS]>",
+        "%moved = test.resource.move %resource : pool -> pool",
     ],
 )
 
@@ -3181,4 +3327,8 @@ ALL_TEST_OPS: tuple[Op, ...] = (
     test_module_metadata,
     test_memory_fence,
     test_result_pair,
+    test_block_arg_groups,
+    test_signature_sink,
+    test_fact_exact_float_types,
+    test_string_array_attrs,
 )

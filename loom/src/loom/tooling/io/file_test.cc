@@ -30,6 +30,79 @@ static iree_status_t CountSegment(void* user_data,
   return iree_ok_status();
 }
 
+TEST(FileTest, ClassifiesOutputStreamAliases) {
+  EXPECT_TRUE(loom_tooling_output_path_is_stdout(iree_string_view_empty()));
+  EXPECT_TRUE(loom_tooling_output_path_is_stdout(IREE_SV("-")));
+  EXPECT_TRUE(loom_tooling_output_path_is_stdout(IREE_SV("stdout")));
+  EXPECT_FALSE(loom_tooling_output_path_is_stdout(IREE_SV("stderr")));
+  EXPECT_FALSE(loom_tooling_output_path_is_stdout(IREE_SV("output.bin")));
+}
+
+TEST(FileTest, ClassifiesExactTrailingSeparator) {
+  EXPECT_TRUE(loom_tooling_file_path_has_trailing_separator(IREE_SV("path/")));
+  EXPECT_TRUE(loom_tooling_file_path_has_trailing_separator(IREE_SV("path\\")));
+  EXPECT_FALSE(
+      loom_tooling_file_path_has_trailing_separator(IREE_SV("path/ ")));
+}
+
+TEST(FileTest, ValidatesExclusiveStdoutOutput) {
+  loom_tooling_output_path_t output_paths[] = {
+      {
+          .active = true,
+          .flag_name = IREE_SV("--first"),
+          .path = IREE_SV("stdout"),
+      },
+      {
+          .active = true,
+          .flag_name = IREE_SV("--second"),
+          .path = IREE_SV("-"),
+      },
+      {
+          .active = true,
+          .flag_name = IREE_SV("--file"),
+          .path = IREE_SV("output.bin"),
+      },
+  };
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        loom_tooling_output_paths_validate_exclusive_stdout(
+                            output_paths, IREE_ARRAYSIZE(output_paths)));
+
+  output_paths[1].active = false;
+  IREE_EXPECT_OK(loom_tooling_output_paths_validate_exclusive_stdout(
+      output_paths, IREE_ARRAYSIZE(output_paths)));
+}
+
+TEST(FileTest, ResolvesPathsRelativeToBase) {
+  struct ResolveCase {
+    // Base directory used for relative paths.
+    const char* base_directory;
+    // Path to resolve.
+    const char* path;
+    // Complete resolved path.
+    const char* expected;
+  };
+  const ResolveCase cases[] = {
+      {"modules", "fixtures/input.npy", "modules/fixtures/input.npy"},
+      {"modules", "../input.npy", "modules/../input.npy"},
+      {" modules ", " fixtures/input.npy ", " modules / fixtures/input.npy "},
+      {"", "fixtures/input.npy", "fixtures/input.npy"},
+      {"modules", "/fixtures/input.npy", "/fixtures/input.npy"},
+      {"modules", "C:/fixtures/input.npy", "C:/fixtures/input.npy"},
+      {"modules", "C:\\fixtures\\input.npy", "C:\\fixtures\\input.npy"},
+      {"modules", "\\\\server\\input.npy", "\\\\server\\input.npy"},
+  };
+  for (const ResolveCase& test_case : cases) {
+    SCOPED_TRACE(test_case.path);
+    char* resolved = nullptr;
+    IREE_ASSERT_OK(loom_tooling_file_path_resolve(
+        iree_make_cstring_view(test_case.base_directory),
+        iree_make_cstring_view(test_case.path), iree_allocator_system(),
+        &resolved));
+    EXPECT_STREQ(resolved, test_case.expected);
+    iree_allocator_free(iree_allocator_system(), resolved);
+  }
+}
+
 TEST(FileTest, WritesSegmentedByteSequenceInLogicalOrder) {
   iree_io_stream_t* stream = nullptr;
   IREE_ASSERT_OK(iree_io_vec_stream_create(IREE_IO_STREAM_MODE_WRITABLE, 64,
@@ -47,9 +120,9 @@ TEST(FileTest, WritesSegmentedByteSequenceInLogicalOrder) {
   ByteSequencePtr sequence_owner(sequence, iree_byte_sequence_release);
   iree_host_size_t segment_count = 0;
   IREE_ASSERT_OK(iree_byte_sequence_enumerate(
-      sequence, (iree_byte_sequence_segment_callback_t){
-                    /*.fn=*/CountSegment,
-                    /*.user_data=*/&segment_count,
+      sequence, iree_byte_sequence_segment_callback_t{
+                    .fn = CountSegment,
+                    .user_data = &segment_count,
                 }));
   ASSERT_GT(segment_count, 1u);
 

@@ -129,6 +129,47 @@ def _test_executable_test_applies_resource_group_tags_impl(env, target):
         "resource_group:shared-device",
     ])
 
+def _test_cross_package_wrapper_launches_source(name, **kwargs):
+    iree_executable_test(
+        name = name + "_subject",
+        src = "//build_tools/bazel/test/executable_fixture:binary",
+        tags = ["manual"],
+    )
+    analysis_test(
+        name = name,
+        impl = _test_cross_package_wrapper_launches_source_impl,
+        target = name + "_subject",
+        **kwargs
+    )
+
+def _test_cross_package_wrapper_launches_source_impl(env, target):
+    action = _find_action_with_output(
+        env,
+        target[TestingAspectInfo].actions,
+        target.label.name,
+    )
+    windows = bool(target[TestingAspectInfo].attrs.windows_launcher)
+    if windows:
+        env.expect.that_str(action.mnemonic).equals("ExecutableSymlink")
+        env.expect.that_str(
+            target[RunEnvironmentInfo].environment["IREE_BAZEL_EXECUTABLE_RUNFILE"],
+        ).equals("_main/build_tools/bazel/test/executable_fixture/binary.exe")
+    else:
+        env.expect.that_str(action.mnemonic).equals("FileWrite")
+        env.expect.that_str(action.content).contains(
+            '"${RUNFILES_DIR:-${TEST_SRCDIR:-$0.runfiles}}"',
+        )
+        env.expect.that_str(action.content).contains("export RUNFILES_DIR")
+        env.expect.that_str(action.content).contains(
+            "_main/build_tools/bazel/test/executable_fixture/binary",
+        )
+        env.expect.that_str(action.content).contains('"$@"')
+    _expect_basename(
+        env,
+        target[DefaultInfo].default_runfiles.files.to_list(),
+        "binary.exe" if windows else "binary",
+    )
+
 def _test_executable_wrapper_composes_source_suppressions(name, **kwargs):
     iree_cc_library(
         name = name + "_first",
@@ -185,6 +226,7 @@ def executable_rules_test_suite(name):
             _test_executable_alias_wraps_source,
             _test_executable_test_wraps_source,
             _test_executable_test_applies_resource_group_tags,
+            _test_cross_package_wrapper_launches_source,
             _test_executable_wrapper_composes_source_suppressions,
         ],
     )

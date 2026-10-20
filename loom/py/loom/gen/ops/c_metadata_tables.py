@@ -54,6 +54,7 @@ from loom.gen.ops.c_enums import (
 from loom.gen.ops.c_enums import error_ref_literal as _error_ref_literal
 from loom.gen.ops.c_names import COPYRIGHT
 from loom.gen.ops.c_names import c_dialect_enum as _c_dialect_enum
+from loom.gen.ops.c_names import c_dialect_include_path as _c_dialect_include_path
 from loom.gen.ops.c_names import c_encoding_enum_prefix as _c_encoding_enum_prefix
 from loom.gen.ops.c_names import (
     c_encoding_family_descriptor_name as _c_encoding_family_descriptor_name,
@@ -101,12 +102,36 @@ def _op_phase_c_name(op: Op) -> str:
     return phase.c_name
 
 
+def _validate_eager_execution_cost(op: Op) -> None:
+    """Validates authored generic eager-execution policy."""
+    has_unconditional_safety = op.has_trait("SafeToSpeculate") or op.has_trait("ConstantLike")
+    has_conditional_safety = op.execution_condition is not None
+    has_dynamic_traits = bool(op.effective_traits)
+    requires_policy = has_unconditional_safety or has_conditional_safety or has_dynamic_traits
+    cost = op.eager_execution_cost
+    if requires_policy and cost is None:
+        raise ValueError(f"Op '{op.name}': speculation legality requires an explicit eager_execution_cost")
+    if not requires_policy and cost is not None:
+        raise ValueError(f"Op '{op.name}': eager_execution_cost requires speculation legality")
+    if cost is None:
+        return
+    if isinstance(cost, bool) or not isinstance(cost, int) or not 0 <= cost <= 255:
+        raise ValueError(f"Op '{op.name}': eager_execution_cost must be an integer in [0, 255]")
+    if cost > 0 and not (has_unconditional_safety or has_conditional_safety):
+        raise ValueError(f"Op '{op.name}': positive eager_execution_cost requires static or fact-dependent speculation safety")
+
+
 def _op_semantics_row(op: Op, condition_refinement_index: int = 0) -> list[str]:
     """Returns a sparse initializer row for one op semantic metadata row."""
+    _validate_eager_execution_cost(op)
     contract_families = _contract_family_mask(op.contracts)
     row = [f".phase = {_op_phase_c_name(op)},"]
     if condition_refinement_index:
         row.append(f".condition_refinement_index = {condition_refinement_index},")
+    if op.execution_condition is not None:
+        row.append(f".execution_condition = {op.execution_condition.c_name},")
+    if op.eager_execution_cost:
+        row.append(f".eager_execution_cost = {op.eager_execution_cost},")
     if contract_families != "0":
         row.append(f".contract_families = {contract_families},")
     return row
@@ -206,6 +231,18 @@ def _symbol_retain_attr_index(op: Op) -> int | None:
     if retain_attr.attr_type != ATTR_TYPE_ENUM:
         raise ValueError(f"Op {op.name!r}: symbol_def.retain {op.symbol_def.retain!r} must name an enum attr")
     return retain_attr_index
+
+
+def _symbol_linkage_attr_index(op: Op) -> int | None:
+    """Returns the optional definition-linkage attribute index."""
+
+    if op.symbol_def is None or op.symbol_def.linkage is None:
+        return None
+    linkage_attr_index = c_queries.resolve_attr_index(op, op.symbol_def.linkage, "symbol_def.linkage")
+    linkage_attr = c_queries.non_flags_attrs(op)[linkage_attr_index]
+    if linkage_attr.attr_type != ATTR_TYPE_ENUM:
+        raise ValueError(f"Op {op.name!r}: symbol_def.linkage {op.symbol_def.linkage!r} must name an enum attr")
+    return linkage_attr_index
 
 
 def _symbol_product_carrier_attr_index(op: Op) -> int | None:
@@ -803,13 +840,14 @@ def generate_tables_c(
     encoding_families: Sequence[EncodingFamilyDef] = (),
     *,
     include_path: str | None = None,
+    referenced_ops: Sequence[Op] = (),
     emit_registration: bool = True,
     export_vtables: bool = False,
     private_header: bool = False,
 ) -> str:
     """Generates the tables.c file for a dialect (.rodata)."""
     lines: list[str] = []
-    ops_by_name = {op.name: op for op in ops}
+    ops_by_name = {op.name: op for op in (*referenced_ops, *ops)}
 
     lines.append(COPYRIGHT)
     lines.extend(line_comment_header("//", generator="loom.gen.ops.c_tables"))
@@ -820,6 +858,14 @@ def generate_tables_c(
         lines.append(f'#include "{include_path}/tables.h"')
     else:
         lines.append(f'#include "{include_path}/ops.h"')
+    reference_includes: set[str] = set()
+    for referenced_op in referenced_ops:
+        if referenced_op.group is None:
+            raise ValueError(f"Referenced op '{referenced_op.name}' requires its declaring dialect")
+        reference_path = _c_dialect_include_path(referenced_op.group)
+        if reference_path != include_path:
+            reference_includes.add(f'#include "{reference_path}/ops.h"')
+    lines.extend(sorted(reference_includes))
     if c_interfaces.target_like_bundle_table_symbols(ops):
         lines.append("")
         lines.append("#include <stddef.h>")
@@ -893,6 +939,8 @@ def generate_tables_c(
                     flags_parts.append("LOOM_OPERAND_VARIADIC")
                 if operand.optional:
                     flags_parts.append("LOOM_OPERAND_OPTIONAL")
+                if operand.observes_reference:
+                    flags_parts.append("LOOM_OPERAND_OBSERVES_REFERENCE")
                 effect_kind = effect_map.get(operand.name)
                 if effect_kind in (EffectKind.READ, EffectKind.READWRITE):
                     flags_parts.append("LOOM_OPERAND_READS")
@@ -924,6 +972,8 @@ def generate_tables_c(
                     flags_parts.append("LOOM_RESULT_VARIADIC")
                 if result.allocates:
                     flags_parts.append("LOOM_RESULT_ALLOCATES")
+                if getattr(result, "signature_only", False):
+                    flags_parts.append("LOOM_RESULT_SIGNATURE_ONLY")
                 flags = " | ".join(flags_parts) if flags_parts else "0"
                 result_ownership_effect = ownership_result_map.get(result.name)
                 source_operand_index = "LOOM_RESULT_OWNERSHIP_SOURCE_FIELD_NONE"
@@ -933,7 +983,11 @@ def generate_tables_c(
                         source_operand_index = str(c_queries.resolve_ownership_source_operand_index(op, result_ownership_effect.source))
                 else:
                     ownership_effect_name = "LOOM_RESULT_OWNERSHIP_NONE"
-                if result_ownership_effect is None:
+                reference_source = getattr(result, "reference_source", None)
+                if reference_source is not None:
+                    reference_source_index = next(i for i, operand in enumerate(op.operands) if operand.name == reference_source)
+                    lines.append(f"    {{{_bstring_expr(result.name)}, {type_constraint}, {flags}, {ownership_effect_name}, {source_operand_index}, {reference_source_index + 1}}},")
+                elif result_ownership_effect is None:
                     lines.append(f"    {{{_bstring_expr(result.name)}, {type_constraint}, {flags}}},")
                 else:
                     lines.append(f"    {{{_bstring_expr(result.name)}, {type_constraint}, {flags}, {ownership_effect_name}, {source_operand_index}}},")
@@ -990,6 +1044,8 @@ def generate_tables_c(
                     flag_names.append("LOOM_ATTR_ELIDE_DEFAULT")
                 if attr_def.open_enum:
                     flag_names.append("LOOM_ATTR_OPEN_ENUM")
+                if attr_def.executable_predicates:
+                    flag_names.append("LOOM_ATTR_EXECUTABLE_PREDICATES")
                 flags = " | ".join(flag_names) if flag_names else "0"
                 if attr_def.attr_type in ("enum", "enum_array", "signed_enum_set") and attr_def.enum_def:
                     enum_names = _enum_names_array_name(op, attr_def, shared_enums)
@@ -1046,7 +1102,18 @@ def generate_tables_c(
                     region_flags.append("LOOM_REGION_COMMAND_EFFECTS_ONLY")
                 flags = " | ".join(region_flags) if region_flags else "0"
                 terminator = c_traits.region_terminator_kind(op, region_def, ops_by_name)
-                lines.append(f"    {{{terminator}, {implicit_terminator}, {flags}}},")
+                execution = c_traits.region_execution(op, region_def)
+                execution_target = region_def.execution_target
+                target_index_plus_one = 0
+                if execution_target is not None:
+                    target_index = next((i for i, attr in enumerate(non_flags) if attr.name == execution_target), None)
+                    if target_index is None:
+                        raise ValueError(f"Op '{op.name}' region '{region_def.name}' execution_target '{execution_target}' does not name an attribute")
+                    target_attr = non_flags[target_index]
+                    if target_attr.attr_type != "symbol" or target_attr.symbol_ref is None or "target" not in target_attr.symbol_ref.interfaces:
+                        raise ValueError(f"Op '{op.name}' region '{region_def.name}' execution_target '{execution_target}' must reference a target symbol")
+                    target_index_plus_one = target_index + 1
+                lines.append(f"    {{{terminator}, {implicit_terminator}, {flags}, {execution}, {target_index_plus_one}}},")
             lines.append("};")
 
         # Constraint table.
@@ -1097,6 +1164,7 @@ def generate_tables_c(
         if op.symbol_def is not None:
             attr_index = c_queries.resolve_attr_index(op, op.symbol_def.field, "symbol_def")
             visibility_attr_index = _symbol_visibility_attr_index(op)
+            linkage_attr_index = _symbol_linkage_attr_index(op)
             retain_attr_index = _symbol_retain_attr_index(op)
             product_carrier_attr_index = _symbol_product_carrier_attr_index(op)
             value_contract_indices = _symbol_value_contract_indices(op)
@@ -1109,6 +1177,8 @@ def generate_tables_c(
                 lines.append(f"    .name_attr_index = {attr_index},")
             if visibility_attr_index is not None:
                 lines.append(f"    .visibility_attr_index_plus_one = {visibility_attr_index + 1},")
+            if linkage_attr_index is not None:
+                lines.append(f"    .linkage_attr_index_plus_one = {linkage_attr_index + 1},")
             if retain_attr_index is not None:
                 lines.append(f"    .retain_attr_index_plus_one = {retain_attr_index + 1},")
             if product_carrier_attr_index is not None:
@@ -1143,10 +1213,12 @@ def generate_tables_c(
         # Structural placement descriptor.
         required_parent_kinds = c_traits.trait_op_kinds(op, ops_by_name, "HasParent")
         required_ancestor_kinds = c_traits.trait_op_kinds(op, ops_by_name, "HasAncestor")
+        required_any_ancestor_kinds, required_any_ancestor_names = c_traits.any_ancestor_op_kinds(op, ops_by_name)
         forbidden_ancestor_kinds = c_traits.trait_op_kinds(op, ops_by_name, "NoAncestor")
-        if required_parent_kinds or required_ancestor_kinds or forbidden_ancestor_kinds:
+        if required_parent_kinds or required_ancestor_kinds or required_any_ancestor_kinds or forbidden_ancestor_kinds:
             required_parent_ptr = "NULL"
             required_ptr = "NULL"
+            required_any_ptr = "NULL"
             forbidden_ptr = "NULL"
             if required_parent_kinds:
                 required_parent_ptr = f"{prefix}_required_parents"
@@ -1157,6 +1229,11 @@ def generate_tables_c(
                 required_ptr = f"{prefix}_required_ancestors"
                 lines.append(f"static const loom_op_kind_t {required_ptr}[] = {{")
                 lines.extend(f"    {kind}," for kind in required_ancestor_kinds)
+                lines.append("};")
+            if required_any_ancestor_kinds:
+                required_any_ptr = f"{prefix}_required_any_ancestors"
+                lines.append(f"static const loom_op_kind_t {required_any_ptr}[] = {{")
+                lines.extend(f"    {kind}," for kind in required_any_ancestor_kinds)
                 lines.append("};")
             if forbidden_ancestor_kinds:
                 forbidden_ptr = f"{prefix}_forbidden_ancestors"
@@ -1170,6 +1247,11 @@ def generate_tables_c(
             if required_ptr != "NULL":
                 lines.append(f"    .required_ancestors = {required_ptr},")
                 lines.append(f"    .required_ancestor_count = IREE_ARRAYSIZE({required_ptr}),")
+            if required_any_ptr != "NULL":
+                required_any_names = " or ".join(required_any_ancestor_names)
+                lines.append(f"    .required_any_ancestors = {required_any_ptr},")
+                lines.append(f'    .required_any_ancestor_names = "{required_any_names}",')
+                lines.append(f"    .required_any_ancestor_count = IREE_ARRAYSIZE({required_any_ptr}),")
             if forbidden_ptr != "NULL":
                 lines.append(f"    .forbidden_ancestors = {forbidden_ptr},")
                 lines.append(f"    .forbidden_ancestor_count = IREE_ARRAYSIZE({forbidden_ptr}),")
@@ -1177,6 +1259,7 @@ def generate_tables_c(
 
         # Vtable.
         traits = c_traits.trait_flags(op)
+        successor_selector_operand_index = c_queries.resolve_successor_selector_operand_index(op)
         vtable_flag_bits: list[str] = []
         if layout.segmented_operands:
             vtable_flag_bits.append("LOOM_OP_VTABLE_SEGMENTED_OPERANDS")
@@ -1194,6 +1277,14 @@ def generate_tables_c(
             vtable_flag_bits.append("LOOM_OP_VTABLE_HAS_OPERAND_DICT")
         if op.keyed_module_record_attr is not None:
             vtable_flag_bits.append("LOOM_OP_VTABLE_KEYED_MODULE_RECORD")
+        if successor_selector_operand_index is not None:
+            vtable_flag_bits.append("LOOM_OP_VTABLE_HAS_SUCCESSOR_SELECTOR")
+        if any(attr.attr_type == ATTR_TYPE_PREDICATE_LIST for attr in non_flags):
+            vtable_flag_bits.append("LOOM_OP_VTABLE_HAS_PREDICATE_LIST")
+        if op.structural_materialization:
+            vtable_flag_bits.append("LOOM_OP_VTABLE_STRUCTURAL_MATERIALIZATION")
+        if any(getattr(result, "reference_source", None) is not None for result in op.results):
+            vtable_flag_bits.append("LOOM_OP_VTABLE_HAS_REFERENCE_SOURCE")
         vtable_flags_str = " | ".join(vtable_flag_bits) if vtable_flag_bits else "0"
 
         sym_kind = _symbol_kind(op)
@@ -1204,12 +1295,11 @@ def generate_tables_c(
         eff_traits = op.effective_traits or "NULL"
         interface_initializers = {spec.vtable_field: c_interfaces.interface_vtable_initializer(op, spec) for spec in c_interfaces.INTERFACES}
         symbol_def_ptr = f"&{prefix}_symbol_def" if op.symbol_def is not None else "NULL"
-        has_placement = any(trait.name in ("HasParent", "HasAncestor", "NoAncestor") for trait in op.traits)
+        has_placement = any(trait.name in ("HasParent", "HasAncestor", "HasAnyAncestor", "NoAncestor") for trait in op.traits)
         placement_ptr = f"&{prefix}_placement" if has_placement else "NULL"
         attr_desc_ptr = f"{prefix}_attr_desc" if non_flags else "NULL"
         operand_desc_ptr = f"{prefix}_operand_desc" if op.operands else "NULL"
         operand_descriptor_count = len(op.operands)
-        successor_selector_operand_index = c_queries.resolve_successor_selector_operand_index(op)
         implied_operand_descriptor_count = layout.fixed_operand_count
         if layout.segmented_operands:
             implied_operand_descriptor_count = -1
@@ -1241,7 +1331,6 @@ def generate_tables_c(
         if operand_role_mask_parts:
             lines.append(f"    .operand_role_mask = {' | '.join(sorted(set(operand_role_mask_parts)))},")
         if successor_selector_operand_index is not None:
-            lines.append("    .control_flow_flags = LOOM_OP_CONTROL_FLOW_HAS_SUCCESSOR_SELECTOR,")
             lines.append(f"    .successor_selector_operand_index = {successor_selector_operand_index},")
         if sym_kind != "LOOM_SYMBOL_NONE":
             lines.append(f"    .symbol_kind = {sym_kind},")
@@ -1416,13 +1505,13 @@ def generate_sharded_tables_c(
     encoding_families: Sequence[EncodingFamilyDef] = (),
     *,
     include_path: str | None = None,
+    referenced_ops: Sequence[Op] = (),
 ) -> dict[str, str]:
     """Generates an aggregator plus category shards for one dialect."""
-    all_ops: list[Op] = []
+    all_ops = [op for _, category_ops in category_groups for op in category_ops]
     table_files: dict[str, str] = {}
     for category, category_ops in category_groups:
         shard_ops = list(category_ops)
-        all_ops.extend(shard_ops)
         if not shard_ops:
             continue
         category_key = category.key
@@ -1432,6 +1521,7 @@ def generate_sharded_tables_c(
             dialect_id,
             shard_ops,
             include_path=include_path,
+            referenced_ops=(*referenced_ops, *all_ops),
             emit_registration=False,
             export_vtables=True,
             private_header=True,

@@ -11,6 +11,9 @@
 #include <cxx/token.h>
 #include <cxx/types.h>
 
+#include <algorithm>
+#include <array>
+
 #include "loom/import/cxx/source/error.h"
 #include "loom/ops/index/ops.h"
 #include "loom/ops/vector/ops.h"
@@ -19,11 +22,11 @@ namespace loom::cxx_import {
 
 loom_value_id_t Vectors::convert(loom_value_id_t value,
                                  const cxx::Type* input_type,
-                                 const cxx::Type* output_type,
-                                 cxx::AST* owner) {
+                                 const cxx::Type* output_type, cxx::AST* owner,
+                                 uint8_t fastmath) {
   auto input = types_.get(input_type, owner);
   auto output = types_.get(output_type, owner);
-  auto* vector = types_.vector(output_type);
+  auto* vector = types_.native_vector(output_type);
   if (!vector) {
     diagnostics_.reject(unit_, owner,
                         "vector conversion requires a vector destination");
@@ -33,7 +36,8 @@ loom_value_id_t Vectors::convert(loom_value_id_t value,
   }
   loom_op_t* op;
   if (loom_type_kind(input) == LOOM_TYPE_SCALAR) {
-    value = scalars_.convert(value, input_type, vector->elementType(), owner);
+    value = scalars_.convert(value, input_type, vector->elementType(), owner,
+                             fastmath);
     check(loom_vector_splat_build(&builder_, value, output,
                                   locations_.get(owner), &op));
   } else if (loom_type_kind(input) == LOOM_TYPE_VECTOR &&
@@ -54,12 +58,43 @@ loom_value_id_t Vectors::convert_elements(loom_value_id_t value,
                                           cxx::AST* owner) {
   auto input = types_.get(input_type, owner);
   auto output = types_.get(output_type, owner);
+  auto* input_vector = types_.native_vector(input_type);
+  auto* output_vector = types_.native_vector(output_type);
+  if (!input_vector || !output_vector ||
+      input_vector->elementCount() != output_vector->elementCount()) {
+    diagnostics_.reject(unit_, owner,
+                        "numeric vector conversion requires equal lane counts");
+  }
+  return convert_elements(value, input, input_vector->elementType(), output,
+                          output_vector->elementType(), owner);
+}
+
+Value Vectors::convert_elements(Value value, const VectorPartition& input,
+                                const VectorPartition& output,
+                                ValueArena& arena, cxx::AST* owner) {
+  auto components = value.components();
+  auto dimensions = components.first(input.component_count - 1);
+  BoundTypeStorage input_storage;
+  BoundTypeStorage output_storage;
+  auto input_type = input.bind_type(dimensions, input_storage);
+  auto output_type = output.bind_type(dimensions, output_storage);
+  auto converted = convert_elements(input.vector_value(components), input_type,
+                                    input.element_type, output_type,
+                                    output.element_type, owner);
+  std::array<loom_value_id_t, LOOM_TYPE_MAX_RANK + 1> result_components;
+  std::copy(dimensions.begin(), dimensions.end(), result_components.begin());
+  result_components[dimensions.size()] = converted;
+  return arena.capture(output,
+                       std::span<const loom_value_id_t>(result_components)
+                           .first(dimensions.size() + 1));
+}
+
+loom_value_id_t Vectors::convert_elements(
+    loom_value_id_t value, loom_type_t input, const cxx::Type* input_element,
+    loom_type_t output, const cxx::Type* output_element, cxx::AST* owner) {
   if (loom_type_equal(input, output)) {
     return value;
   }
-  auto* input_vector = types_.vector(input_type);
-  auto* input_element = input_vector->elementType();
-  auto* output_element = types_.vector(output_type)->elementType();
   bool floating_input = types_.is_float(input_element);
   bool floating_output = types_.is_float(output_element);
   auto* layout = unit_.control()->memoryLayout();
@@ -70,22 +105,27 @@ loom_value_id_t Vectors::convert_elements(loom_value_id_t value,
   if (floating_input && floating_output && input_size == output_size) {
     // F32 represents every value of the supported equal-width narrow formats
     // exactly. Only the final conversion rounds to the destination format.
-    auto widened = loom_type_shaped_1d(LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_F32,
-                                       input_vector->elementCount(), 0);
-    check(loom_vector_extf_build(&builder_, value, input, widened, location,
+    auto widened = input;
+    widened.header =
+        loom_type_make_header(LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_F32,
+                              loom_type_rank(input), loom_type_flags(input));
+    check(loom_vector_extf_build(&builder_, 0, value, input, widened, location,
                                  &op));
-    check(loom_vector_fptrunc_build(&builder_, loom_op_results(op)[0], widened,
-                                    output, location, &op));
+    check(loom_vector_fptrunc_build(&builder_, 0, loom_op_results(op)[0],
+                                    widened, output, location, &op));
     return loom_op_results(op)[0];
   }
   bool narrows = input_size > output_size;
   bool unsigned_input = types_.is_unsigned(input_element);
+  if (floating_input && floating_output) {
+    check((narrows ? loom_vector_fptrunc_build : loom_vector_extf_build)(
+        &builder_, 0, value, input, output, location, &op));
+    return loom_op_results(op)[0];
+  }
   auto build =
       floating_output
-          ? (floating_input ? (narrows ? loom_vector_fptrunc_build
-                                       : loom_vector_extf_build)
-                            : (unsigned_input ? loom_vector_uitofp_build
-                                              : loom_vector_sitofp_build))
+          ? (unsigned_input ? loom_vector_uitofp_build
+                            : loom_vector_sitofp_build)
           : (floating_input
                  ? (types_.is_unsigned(output_element)
                         ? loom_vector_fptoui_build
@@ -100,10 +140,11 @@ loom_value_id_t Vectors::convert_elements(loom_value_id_t value,
 loom_value_id_t Vectors::binary(cxx::TokenKind token, loom_value_id_t left,
                                 loom_value_id_t right,
                                 const cxx::Type* input_type,
-                                const cxx::Type* output_type, cxx::AST* owner) {
+                                const cxx::Type* output_type, cxx::AST* owner,
+                                uint8_t fastmath) {
   auto input = types_.get(input_type, owner);
   auto output = types_.get(output_type, owner);
-  auto* vector = types_.vector(input_type);
+  auto* vector = types_.native_vector(input_type);
   bool floating = types_.is_float(vector->elementType());
   bool unsigned_input = types_.is_unsigned(vector->elementType());
   auto source = locations_.get(owner);
@@ -139,8 +180,8 @@ loom_value_id_t Vectors::binary(cxx::TokenKind token, loom_value_id_t left,
           LOOM_VECTOR_CMPF_PREDICATE_OEQ, LOOM_VECTOR_CMPF_PREDICATE_UNE,
           LOOM_VECTOR_CMPF_PREDICATE_OLT, LOOM_VECTOR_CMPF_PREDICATE_OLE,
           LOOM_VECTOR_CMPF_PREDICATE_OGT, LOOM_VECTOR_CMPF_PREDICATE_OGE};
-      check(loom_vector_cmpf_build(&builder_, 0, predicates[predicate], left,
-                                   right, input, mask_type, source, &op));
+      check(loom_vector_cmpf_build(&builder_, fastmath, predicates[predicate],
+                                   left, right, input, mask_type, source, &op));
     } else {
       auto selected =
           predicate >= 2 && unsigned_input ? predicate + 4 : predicate;
@@ -186,16 +227,19 @@ loom_value_id_t Vectors::binary(cxx::TokenKind token, loom_value_id_t left,
   if (!build) {
     diagnostics_.reject(unit_, owner, "unsupported vector binary operator");
   }
-  check(build(&builder_, 0, left, right, output, source, &op));
+  const uint8_t flags = floating ? fastmath : 0;
+  check(build(&builder_, flags, left, right, output, source, &op));
   return loom_op_results(op)[0];
 }
 
 loom_value_id_t Vectors::unary(cxx::TokenKind token, loom_value_id_t value,
                                const cxx::Type* input_type,
-                               const cxx::Type* output_type, cxx::AST* owner) {
+                               const cxx::Type* output_type, cxx::AST* owner,
+                               uint8_t fastmath) {
   auto input = types_.get(input_type, owner);
   auto output = types_.get(output_type, owner);
-  bool floating = types_.is_float(types_.vector(input_type)->elementType());
+  bool floating =
+      types_.is_float(types_.native_vector(input_type)->elementType());
   auto source = locations_.get(owner);
   loom_op_t* op;
   switch (token) {
@@ -203,7 +247,8 @@ loom_value_id_t Vectors::unary(cxx::TokenKind token, loom_value_id_t value,
       return value;
     case cxx::TokenKind::T_MINUS:
       if (floating) {
-        check(loom_vector_negf_build(&builder_, 0, value, output, source, &op));
+        check(loom_vector_negf_build(&builder_, fastmath, value, output, source,
+                                     &op));
       } else {
         check(loom_vector_negi_build(&builder_, value, output, source, &op));
       }
@@ -219,7 +264,8 @@ loom_value_id_t Vectors::unary(cxx::TokenKind token, loom_value_id_t value,
           &builder_, floating ? loom_attr_f64(0.0) : loom_attr_i64(0), input,
           source, &op));
       return binary(cxx::TokenKind::T_EQUAL_EQUAL, value,
-                    loom_op_results(op)[0], input_type, output_type, owner);
+                    loom_op_results(op)[0], input_type, output_type, owner,
+                    fastmath);
     default:
       diagnostics_.reject(unit_, owner, "unsupported vector unary operator");
   }
@@ -230,7 +276,7 @@ loom_value_id_t Vectors::construct(std::span<const loom_value_id_t> elements,
                                    const cxx::Type* source_type,
                                    cxx::AST* owner) {
   auto output = types_.get(source_type, owner);
-  auto* vector = types_.vector(source_type);
+  auto* vector = types_.native_vector(source_type);
   if (elements.size() > vector->elementCount()) {
     diagnostics_.reject(unit_, owner, "too many vector initializer lanes");
   }
@@ -260,21 +306,42 @@ loom_value_id_t Vectors::constant(const cxx::ConstValue& value,
 loom_value_id_t Vectors::extract(loom_value_id_t value, loom_value_id_t index,
                                  const cxx::Type* source_type,
                                  const cxx::Type* index_type, cxx::AST* owner) {
+  index = cast_index(index, index_type, owner);
+  auto* vector = types_.native_vector(source_type);
+  types_.get(source_type, owner);
+  auto output = types_.get(vector->elementType(), owner);
+  loom_op_t* op;
+  int64_t selector = INT64_MIN;
+  check(loom_vector_extract_build(&builder_, value, &index, 1, &selector, 1,
+                                  output, locations_.get(owner), &op));
+  return loom_op_results(op)[0];
+}
+
+loom_value_id_t Vectors::insert(loom_value_id_t destination,
+                                loom_value_id_t lane, loom_value_id_t index,
+                                const cxx::Type* source_type,
+                                const cxx::Type* index_type, cxx::AST* owner) {
+  index = cast_index(index, index_type, owner);
+  auto output = types_.get(source_type, owner);
+  loom_op_t* op;
+  int64_t selector = INT64_MIN;
+  check(loom_vector_insert_build(&builder_, lane, destination, &index, 1,
+                                 &selector, 1, output, locations_.get(owner),
+                                 &op));
+  return loom_op_results(op)[0];
+}
+
+loom_value_id_t Vectors::cast_index(loom_value_id_t index,
+                                    const cxx::Type* index_type,
+                                    cxx::AST* owner) {
   if (!unit_.typeTraits().is_integral(index_type)) {
     diagnostics_.reject(unit_, owner,
                         "vector subscripts require integral indices");
   }
-  auto* vector = types_.vector(source_type);
-  types_.get(source_type, owner);
-  auto output = types_.get(vector->elementType(), owner);
   loom_op_t* op;
   check(loom_index_cast_build(&builder_, index, types_.get(index_type, owner),
                               loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
                               locations_.get(owner), &op));
-  index = loom_op_results(op)[0];
-  int64_t selector = INT64_MIN;
-  check(loom_vector_extract_build(&builder_, value, &index, 1, &selector, 1,
-                                  output, locations_.get(owner), &op));
   return loom_op_results(op)[0];
 }
 

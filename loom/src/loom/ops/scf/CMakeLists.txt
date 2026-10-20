@@ -9,6 +9,18 @@
 
 iree_add_all_subdirs()
 
+loom_cc_library(
+  NAME
+    op_defs
+  HDRS
+    "ops.h"
+  TEXTUAL_HDRS
+    "ops.inc"
+  DEPS
+    loom::ops::op_defs
+  PUBLIC
+)
+
 loom_cc_test(
   NAME
     builders_test
@@ -53,6 +65,20 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    traits_test
+  SRCS
+    "traits_test.cc"
+  DEPS
+    ::scf
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::op_defs
+)
+
+loom_cc_test(
+  NAME
     verify_test
   SRCS
     "verify_test.cc"
@@ -76,6 +102,8 @@ loom_generated_cc_library(
     "canonicalize_loop.c"
     "facts.c"
     "forwarding_equivalence.c"
+    "selectify_facts.c"
+    "traits.c"
     "verify.c"
   TEXTUAL_HDRS
     "ops.inc"
@@ -89,6 +117,7 @@ loom_generated_cc_library(
     "canonicalize.h"
     "forwarding_equivalence.h"
     "ops.h"
+    "selectify_facts.h"
   ARGS
     "--dialect=scf"
   EXTRA_OUTPUT_FLAGS
@@ -99,10 +128,16 @@ loom_generated_cc_library(
     iree::base::internal
     iree::base::internal::arena
     loom::analysis::availability
+    loom::analysis::condition_facts
+    loom::analysis::motion_policy
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
+    loom::ops::index
+    loom::ops::index::cast
+    loom::ops::index::comparison
     loom::ops::op_defs
     loom::ops::scalar
     loom::rewrite::remap

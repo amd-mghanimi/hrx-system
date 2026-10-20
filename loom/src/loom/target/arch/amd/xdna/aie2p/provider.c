@@ -52,12 +52,34 @@ static iree_status_t loom_aie2p_provider_build_string_attr(
   return iree_ok_status();
 }
 
+static iree_status_t loom_aie2p_provider_build_kernel_realization_run(
+    loom_builder_t* builder, void* user_data) {
+  (void)user_data;
+  loom_op_t* run_op = NULL;
+  return loom_pass_ir_build_run(builder, 0, IREE_SV("aie2p-realize-kernel"),
+                                loom_named_attr_slice_empty(), &run_op);
+}
+
 static iree_status_t loom_aie2p_provider_build_pipeline_lower_run(
     loom_builder_t* builder, void* user_data) {
   (void)user_data;
   loom_op_t* run_op = NULL;
   return loom_pass_ir_build_run(builder, 0, IREE_SV("aie2p-lower-pipeline"),
                                 loom_named_attr_slice_empty(), &run_op);
+}
+
+static iree_status_t loom_aie2p_provider_build_kernel_target_where(
+    loom_builder_t* builder, void* user_data) {
+  (void)user_data;
+  loom_named_attr_t contract_attr = {0};
+  IREE_RETURN_IF_ERROR(loom_aie2p_provider_build_string_attr(
+      builder, IREE_SV("contract"), IREE_SV("amd.xdna.aie2p.array"),
+      &contract_attr));
+  loom_op_t* where_op = NULL;
+  return loom_pass_ir_build_where(
+      builder, LOOM_PASS_WHERE_BUILD_FLAG_HAS_ATTRS, IREE_SV("target"),
+      loom_make_named_attr_slice(&contract_attr, 1),
+      loom_aie2p_provider_build_kernel_realization_run, NULL, &where_op);
 }
 
 static iree_status_t loom_aie2p_provider_build_pipeline_target_where(
@@ -76,18 +98,24 @@ static iree_status_t loom_aie2p_provider_build_pipeline_target_where(
 
 static iree_status_t loom_aie2p_provider_contribute_pipeline(
     const loom_target_pipeline_contribution_t* contribution) {
-  if (contribution->phase != LOOM_TARGET_PIPELINE_PHASE_SOURCE_TO_LOW) {
-    return iree_ok_status();
-  }
   loom_op_t* for_op = NULL;
-  return loom_pass_ir_build_for(contribution->builder, LOOM_PASS_ANCHOR_FUNC,
-                                loom_aie2p_provider_build_pipeline_target_where,
-                                NULL, &for_op);
+  switch (contribution->phase) {
+    case LOOM_TARGET_PIPELINE_PHASE_SOURCE_EXECUTION_REALIZATION:
+      return loom_pass_ir_build_for(
+          contribution->builder, LOOM_PASS_ANCHOR_FUNC,
+          loom_aie2p_provider_build_kernel_target_where, NULL, &for_op);
+    case LOOM_TARGET_PIPELINE_PHASE_SOURCE_EXECUTION_LOWERING:
+      return loom_pass_ir_build_for(
+          contribution->builder, LOOM_PASS_ANCHOR_FUNC,
+          loom_aie2p_provider_build_pipeline_target_where, NULL, &for_op);
+    default:
+      return iree_ok_status();
+  }
 }
 
 const loom_target_provider_t loom_aie2p_target_provider = {
     .profile_type = &loom_aie2p_target_profile_type,
-    .select_low_call_policy = loom_target_select_low_call_policy_require_inline,
+    .select_call_policy = loom_target_select_call_policy_require_inline,
     .materialize_definition = loom_aie2p_target_materialize_definition,
     .register_context = loom_aie2p_ops_register_dialect,
     .initialize_low_descriptor_registry =

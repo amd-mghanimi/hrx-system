@@ -4,8 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Benchmarks built-in type and location syntax at scales that expose small
-// per-occurrence costs in generated modules. Focused vocabulary classification
+// Benchmarks built-in type, predicate, and location syntax at scales that
+// expose small per-occurrence costs in generated modules. Focused vocabulary
 // rows isolate name lookup, while full-module rows include the actual parser
 // and canonical printer paths used by the JIT.
 
@@ -17,6 +17,7 @@
 #include "iree/base/internal/arena.h"
 #include "loom/format/text/parser.h"
 #include "loom/format/text/printer.h"
+#include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/location.h"
 #include "loom/ir/module.h"
@@ -48,12 +49,21 @@ BuildScalarTypeNameViews() {
   return names;
 }
 
+static std::array<iree_string_view_t, LOOM_PREDICATE_COUNT_>
+BuildPredicateNameViews() {
+  std::array<iree_string_view_t, LOOM_PREDICATE_COUNT_> names;
+  for (size_t i = 0; i < names.size(); ++i) {
+    names[i] = iree_make_cstring_view(loom_predicate_kind_name((uint8_t)i));
+  }
+  return names;
+}
+
 static constexpr std::array<const char*, 5> kShapedTypeNames = {
     "vector<16xbf16>",
     "tile<8x8xf32, %layout>",
     "tensor<1x64x64xf16, %layout>",
     "view<1024x512xf8E4M3, %layout>",
-    "pool<4096>",
+    "group<8>",
 };
 
 static constexpr std::array<const char*, 4> kNativeDenseShapedTypeNames = {
@@ -109,8 +119,7 @@ class TypeSyntaxBenchmark {
   }
 
   iree_status_t Parse(iree_string_view_t source, loom_module_t** out_module) {
-    loom_text_parse_options_t options = {};
-    options.max_errors = 1;
+    loom_text_parse_options_t options = {.max_errors = 1};
     return loom_text_parse(source, IREE_SV("type_syntax_benchmark.loom"),
                            &context_, &block_pool_, &options, out_module);
   }
@@ -268,6 +277,55 @@ static void BM_ScalarTypeClassifyMiss(benchmark::State& state) {
   state.SetItemsProcessed(state.iterations() * kClassificationBatchCount);
 }
 BENCHMARK(BM_ScalarTypeClassifyMiss);
+
+static void BM_PredicateClassifyKnown(benchmark::State& state) {
+  const auto predicate_names = BuildPredicateNameViews();
+  for (auto _ : state) {
+    for (int64_t batch = 0; batch < kClassificationBatchCount; ++batch) {
+      for (iree_string_view_t predicate_name : predicate_names) {
+        benchmark::DoNotOptimize(predicate_name);
+        loom_predicate_kind_t kind = LOOM_PREDICATE_COUNT_;
+        bool matched = loom_predicate_kind_parse(predicate_name, &kind);
+        benchmark::DoNotOptimize(matched);
+        benchmark::DoNotOptimize(kind);
+      }
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * LOOM_PREDICATE_COUNT_ *
+                          kClassificationBatchCount);
+}
+BENCHMARK(BM_PredicateClassifyKnown);
+
+static void BM_PredicateClassifyMiss(benchmark::State& state) {
+  for (auto _ : state) {
+    for (int64_t batch = 0; batch < kClassificationBatchCount; ++batch) {
+      iree_string_view_t predicate_name = IREE_SV("not_a_predicate");
+      benchmark::DoNotOptimize(predicate_name);
+      loom_predicate_kind_t kind = LOOM_PREDICATE_COUNT_;
+      bool matched = loom_predicate_kind_parse(predicate_name, &kind);
+      benchmark::DoNotOptimize(matched);
+      benchmark::DoNotOptimize(kind);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * kClassificationBatchCount);
+}
+BENCHMARK(BM_PredicateClassifyMiss);
+
+static void BM_PredicateNameKnown(benchmark::State& state) {
+  for (auto _ : state) {
+    for (int64_t batch = 0; batch < kClassificationBatchCount; ++batch) {
+      for (loom_predicate_kind_t kind = 0; kind < LOOM_PREDICATE_COUNT_;
+           ++kind) {
+        benchmark::DoNotOptimize(kind);
+        const char* name = loom_predicate_kind_name(kind);
+        benchmark::DoNotOptimize(name);
+      }
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * LOOM_PREDICATE_COUNT_ *
+                          kClassificationBatchCount);
+}
+BENCHMARK(BM_PredicateNameKnown);
 
 static void BM_LocationTagClassifyKnown(benchmark::State& state) {
   const auto tag_names = BuildLocationTagNameViews();

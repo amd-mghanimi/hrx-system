@@ -67,20 +67,27 @@ def test_arithmetic_generator_covers_fma_mix_descriptor_lattice() -> None:
 def test_arithmetic_generator_covers_packed_ternary_descriptor_candidates() -> None:
     arrays = amdgpu_arithmetic_candidates._PACKED_TERNARY_DESCRIPTOR_CANDIDATE_ARRAYS
 
-    assert [len(array.candidates) for array in arrays] == [2, 1, 2, 2]
+    assert [len(array.candidates) for array in arrays] == [2, 1, 1, 2, 2]
     assert arrays[0].candidates[0].descriptor_key == "amdgpu.v_pk_fmac_f16"
     assert arrays[0].candidates[0].source_permutation == (2, 0, 1)
     assert arrays[0].candidates[0].flags == ("LOOM_AMDGPU_PACKED_TERNARY_FLAG_TIED_ACCUMULATOR",)
-    assert arrays[1].candidates[0].descriptor_key == "amdgpu.v_pk_fma_f32"
-    assert arrays[1].candidates[0].packet_unit_count == 2
-    assert [candidate.descriptor_key for candidate in arrays[2].candidates] == [
-        "amdgpu.v_pk_mad_i16",
-        "amdgpu.v_pk_mad_u16",
-    ]
+    assert arrays[1].candidates[0].descriptor_key == "amdgpu.v_pk_fma_bf16"
+    assert arrays[1].candidates[0].packet_unit_count == 1
+    assert arrays[2].candidates[0].descriptor_key == "amdgpu.v_pk_fma_f32"
+    assert arrays[2].candidates[0].packet_unit_count == 2
     assert [candidate.descriptor_key for candidate in arrays[3].candidates] == [
+        "amdgpu.v_pk_mad_i16",
+        "amdgpu.v_pk_mad_u16",
+    ]
+    assert [candidate.descriptor_key for candidate in arrays[4].candidates] == [
         "amdgpu.v_pk_mad_u16",
         "amdgpu.v_pk_mad_i16",
     ]
+    source = amdgpu_arithmetic_candidates._emit_source(public_header=_ARITHMETIC_HEADER)
+    for suffix in ("fma_f16", "fma_bf16", "fma_f32", "mad_i16", "mad_u16"):
+        for mask in range(1, 8):
+            operands = "_".join(name for bit, name in enumerate(("A", "B", "C")) if mask & (1 << bit))
+            assert f"LOOM_AMDGPU_DESCRIPTOR_REF_V_PK_{suffix.upper()}_BROADCAST_{operands}," in source
 
 
 def test_arithmetic_generator_rejects_missing_fma_mix_descriptor_ref() -> None:
@@ -210,8 +217,18 @@ def test_atomic_generator_builds_contiguous_candidate_ranges() -> None:
 
     assert ranges
     assert len(ranges) < len(candidates)
-    covered_candidate_count = sum(candidate_count for _, _, candidate_count in ranges)
-    assert covered_candidate_count == len(candidates)
+    covered_candidates = {index for _, first, count in ranges for index in range(first, first + count)}
+    assert covered_candidates == set(range(len(candidates)))
+
+
+def test_atomic_exchange_ranges_share_bitwise_candidates() -> None:
+    candidates = amdgpu_atomic_candidates.amdgpu_atomic_descriptor_candidates()
+    ranges = {key: (first, count) for key, first, count in amdgpu_atomic_candidates._candidate_ranges(candidates)}
+    exchange_ranges = {key: value for key, value in ranges.items() if key[3] == "LOOM_ATOMIC_KIND_XCHGI"}
+    assert len(exchange_ranges) == 4  # LDS, buffer, global-saddr, and flat.
+    for key, (first, count) in exchange_ranges.items():
+        assert ranges[(*key[:3], "LOOM_ATOMIC_KIND_XCHGF")] == (first, count)
+        assert {candidate.value_kind.c_name for candidate in candidates[first : first + count]} == {"LOOM_AMDGPU_ATOMIC_VALUE_KIND_B32", "LOOM_AMDGPU_ATOMIC_VALUE_KIND_B64"}
 
 
 def test_atomic_generator_rejects_missing_descriptor_ref() -> None:
@@ -328,8 +345,28 @@ def test_memory_generator_distinguishes_unsigned_byte_loads() -> None:
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.BUFFER_RESOURCE: ("amdgpu.buffer_load_u8"),
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GLOBAL_SADDR: ("amdgpu.global_load_u8_saddr"),
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GLOBAL_FLAT: ("amdgpu.global_load_u8"),
+        amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GENERIC_FLAT: ("amdgpu.flat_load_u8"),
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.LDS: ("amdgpu.ds_read_u8"),
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.SCRATCH: ("amdgpu.scratch_load_u8_vaddr"),
+    }
+
+
+def test_memory_generator_covers_scalar_word_packets() -> None:
+    candidates = amdgpu_memory_candidates.amdgpu_memory_descriptor_candidates()
+    scalar_packets = {
+        (candidate.packet_byte_count, candidate.payload_register_count): candidate.descriptor_key
+        for candidate in candidates
+        if candidate.domain == amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GLOBAL_SMEM
+        and candidate.operation_kind == amdgpu_memory_candidates.AmdgpuMemoryOperationKind.LOAD
+        and candidate.payload_register_class == amdgpu_memory_candidates.AmdgpuMemoryPayloadRegisterClass.SGPR
+        and candidate.payload_format == amdgpu_memory_candidates.AmdgpuMemoryPayloadFormat.GENERIC
+    }
+
+    assert scalar_packets == {
+        (4, 1): "amdgpu.s_load_dword",
+        (8, 2): "amdgpu.s_load_dwordx2",
+        (12, 3): "amdgpu.s_load_b96",
+        (16, 4): "amdgpu.s_load_dwordx4",
     }
 
 
@@ -346,6 +383,7 @@ def test_memory_generator_covers_96_bit_source_memory_packets() -> None:
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.BUFFER_RESOURCE,
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GLOBAL_SADDR,
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GLOBAL_FLAT,
+        amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.GENERIC_FLAT,
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.LDS,
         amdgpu_memory_candidates.AmdgpuMemoryDescriptorDomain.SCRATCH,
     )

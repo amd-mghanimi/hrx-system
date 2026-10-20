@@ -18,7 +18,7 @@ class LowBuilder(DialectBuilder):
         visibility: str | None = ...,
         retain: str | None = ...,
         cc: str | None = ...,
-        purity: str | None = ...,
+        effect_contract: str | None = ...,
         inline_policy: str | None = ...,
         allocation: str | None = ...,
         schedule: str | None = ...,
@@ -71,7 +71,7 @@ class LowBuilder(DialectBuilder):
         visibility: str | None = ...,
         retain: str | None = ...,
         cc: str | None = ...,
-        purity: str | None = ...,
+        effect_contract: str | None = ...,
         inline_policy: str | None = ...,
         allocation: str | None = ...,
         schedule: str | None = ...,
@@ -103,7 +103,7 @@ class LowBuilder(DialectBuilder):
     def call(
         self,
         *,
-        purity: str | None = ...,
+        effect_contract: str | None = ...,
         inline_policy: str | None = ...,
         callee: str,
         operands: list[ValueRef] = ...,
@@ -183,7 +183,7 @@ class LowBuilder(DialectBuilder):
     def invoke(
         self,
         *,
-        purity: str | None = ...,
+        effect_contract: str | None = ...,
         inline_policy: str | None = ...,
         callee: str,
         operands: list[ValueRef] = ...,
@@ -370,5 +370,15 @@ class LowBuilder(DialectBuilder):
     def end(
         self,
         *,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def op_cond_br(
+        self,
+        *,
+        descriptor: str,
+        operands: list[ValueRef] = ...,
+        attrs: Mapping[str, Any] | None = ...,
+        true_dest: Block,
+        false_dest: Block,
         location_id: int | None = ...,
     ) -> None: ...

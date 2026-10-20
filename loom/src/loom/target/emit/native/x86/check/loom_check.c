@@ -6,7 +6,12 @@
 
 #include "loom/target/emit/native/x86/check/loom_check.h"
 
-#include "loom/target/emit/native/x86/assembly.h"
+#include "iree/io/vec_stream.h"
+#include "loom/analysis/symbol_facts.h"
+#include "loom/codegen/low/target_binding.h"
+#include "loom/ops/low/ops.h"
+#include "loom/target/emit/native/x86/abi.h"
+#include "loom/target/emit/native/x86/function.h"
 #include "loom/tools/loom-check/diagnostics.h"
 #include "loom/tools/loom-check/low_emit.h"
 
@@ -23,18 +28,15 @@ typedef struct loom_x86_loom_check_emit_options_t {
   // Number of entries in |allocation_budgets|.
   iree_host_size_t allocation_budget_count;
   // Fixed low allocation requests parsed from target options.
-  loom_check_low_emit_fixed_value_spec_t allocation_fixed_value_specs
-      [LOOM_CHECK_LOW_EMIT_MAX_ALLOCATION_FIXED_VALUES];
-  // Number of entries in |allocation_fixed_value_specs|.
-  iree_host_size_t allocation_fixed_value_spec_count;
+  loom_check_low_emit_fixed_value_spec_list_t allocation_fixed_values;
 } loom_x86_loom_check_emit_options_t;
 
 static bool loom_x86_loom_check_emit_provider_matches(
     const loom_check_emit_provider_t* provider,
     iree_string_view_t target_name) {
   (void)provider;
-  return iree_string_view_equal(target_name, IREE_SV("x86-assembly")) ||
-         iree_string_view_equal(target_name, IREE_SV("x86-asm"));
+  return iree_string_view_equal(target_name, IREE_SV("x86-frame")) ||
+         iree_string_view_equal(target_name, IREE_SV("x86-native-bytes"));
 }
 
 static iree_status_t loom_x86_loom_check_parse_key_value_option(
@@ -49,10 +51,10 @@ static iree_status_t loom_x86_loom_check_parse_key_value_option(
   if (iree_string_view_equal(name, IREE_SV("strategy"))) {
     if (options->has_schedule_strategy_option) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "duplicate x86 assembly option 'strategy'");
+                              "duplicate x86 native option 'strategy'");
     }
     IREE_RETURN_IF_ERROR(loom_check_low_emit_parse_schedule_strategy(
-        value, IREE_SV("x86 assembly"), &options->schedule_strategy));
+        value, IREE_SV("x86 native"), &options->schedule_strategy));
     options->has_schedule_strategy_option = true;
     *out_matched = true;
   }
@@ -68,11 +70,9 @@ static iree_status_t loom_x86_loom_check_parse_option(
     return iree_ok_status();
   }
   return loom_check_low_emit_parse_allocation_option(
-      token, IREE_SV("x86 assembly"), options->allocation_budgets,
+      token, IREE_SV("x86 native"), options->allocation_budgets,
       IREE_ARRAYSIZE(options->allocation_budgets),
-      &options->allocation_budget_count, options->allocation_fixed_value_specs,
-      IREE_ARRAYSIZE(options->allocation_fixed_value_specs),
-      &options->allocation_fixed_value_spec_count);
+      &options->allocation_budget_count, &options->allocation_fixed_values);
 }
 
 static iree_status_t loom_x86_loom_check_parse_emit_options(
@@ -90,16 +90,17 @@ static iree_status_t loom_x86_loom_check_parse_emit_options(
   option_text = iree_string_view_trim(option_text);
   if (!iree_string_view_starts_with(symbol_name, IREE_SV("@"))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "x86 assembly requires a low function symbol name");
+                            "x86 native emit requires a low function symbol");
   }
   out_options->function_symbol_name =
       iree_string_view_substr(symbol_name, 1, IREE_HOST_SIZE_MAX);
   if (iree_string_view_is_empty(out_options->function_symbol_name)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "x86 assembly low function symbol name is "
-                            "required");
+                            "x86 native emit function symbol is required");
   }
 
+  IREE_RETURN_IF_ERROR(loom_check_low_emit_fixed_value_spec_list_initialize(
+      option_text, request->case_arena, &out_options->allocation_fixed_values));
   while (!iree_string_view_is_empty(option_text)) {
     iree_string_view_t token = iree_string_view_empty();
     iree_string_view_t remaining = iree_string_view_empty();
@@ -114,53 +115,261 @@ static iree_status_t loom_x86_loom_check_parse_emit_options(
   return iree_ok_status();
 }
 
-static iree_status_t loom_x86_loom_check_emit_assembly(
-    const loom_low_emission_frame_t* frame, iree_string_builder_t* builder,
+static iree_status_t loom_x86_loom_check_format_frame(
+    const loom_x86_function_t* function, iree_string_builder_t* builder) {
+  IREE_RETURN_IF_ERROR(
+      iree_string_builder_append_cstring(builder, "callee-preserved:"));
+  if (!function->saved_registers) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, " none"));
+  }
+  static const char* const register_names[] = {
+      "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+      "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
+  };
+  const char* separator = " ";
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(register_names); ++i) {
+    if (function->saved_registers & (1u << i)) {
+      IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+          builder, "%s%s", separator, register_names[i]));
+      separator = ", ";
+    }
+  }
+  IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "\n"));
+  if (function->stack.allocation_size) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, "stack: %u bytes, alignment %u\n",
+        function->stack.allocation_size, function->stack.alignment));
+  }
+  if (function->stack.realignment.mask) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, "realignment: %s, saved RSP at +%u\n",
+        register_names[function->stack.realignment.scratch_register],
+        function->stack.realignment.saved_pointer_offset));
+  }
+  if (function->may_dirty_upper_vector_state &&
+      function->upper_vector_call_cleanup_count != 0) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, "upper-state-call-cleanups: %zu\n",
+        function->upper_vector_call_cleanup_count));
+  }
+  if (function->may_dirty_upper_vector_state &&
+      !function->has_upper_vector_result) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(
+        builder, "upper-state-cleanup: vzeroupper\n"));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_loom_check_append_native_bytes(
+    void* user_data, iree_const_byte_span_t block) {
+  iree_string_builder_t* builder = (iree_string_builder_t*)user_data;
+  for (iree_host_size_t i = 0; i < block.data_length; ++i) {
+    IREE_RETURN_IF_ERROR(
+        iree_string_builder_append_format(builder, " %02x", block.data[i]));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_loom_check_emit_native_bytes(
+    const loom_x86_function_t* function,
+    const loom_x86_module_abi_t* module_abi, iree_string_builder_t* builder,
     iree_arena_allocator_t* arena) {
-  return loom_x86_emit_assembly_fragment(&frame->schedule, &frame->allocation,
-                                         builder, arena);
+  uint32_t* symbol_indices = NULL;
+  loom_native_object_fixup_t* fixups = NULL;
+  iree_io_stream_t* stream = NULL;
+  iree_status_t status = iree_arena_allocate_array(
+      arena, module_abi->symbol_count, sizeof(*symbol_indices),
+      (void**)&symbol_indices);
+  if (iree_status_is_ok(status)) {
+    for (iree_host_size_t i = 0; i < module_abi->symbol_count; ++i) {
+      symbol_indices[i] = (uint32_t)i;
+    }
+    status = iree_arena_allocate_array(arena, function->symbol_fixup_count,
+                                       sizeof(*fixups), (void**)&fixups);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_io_vec_stream_create(IREE_IO_STREAM_MODE_WRITABLE |
+                                           IREE_IO_STREAM_MODE_SEEKABLE |
+                                           IREE_IO_STREAM_MODE_RESIZABLE,
+                                       256, iree_allocator_system(), &stream);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_x86_function_write(function, symbol_indices, 0, fixups,
+                                     stream, NULL, arena);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_string_builder_append_cstring(builder, "code:");
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_io_vec_stream_enumerate_blocks(
+        stream, loom_x86_loom_check_append_native_bytes, builder);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_string_builder_append_cstring(builder, "\n");
+  }
+  iree_io_stream_release(stream);
+  return status;
+}
+
+static iree_status_t loom_x86_loom_check_prepare_abis(
+    const loom_check_emit_provider_request_t* request, loom_module_t* module,
+    loom_x86_module_abi_t* out_module_abi) {
+  iree_host_size_t function_count = 0;
+  for (iree_host_size_t i = 0; i < module->symbols.count; ++i) {
+    const loom_op_t* op = module->symbols.entries[i].defining_op;
+    function_count +=
+        op != NULL && (loom_low_func_def_isa(op) || loom_low_func_decl_isa(op));
+  }
+  IREE_RETURN_IF_ERROR(
+      loom_x86_module_abi_initialize(module->symbols.count, function_count,
+                                     request->case_arena, out_module_abi));
+  loom_symbol_fact_table_t symbol_facts = {0};
+  loom_symbol_fact_table_initialize(&symbol_facts, request->case_arena);
+  iree_host_size_t function_index = 0;
+  for (loom_symbol_id_t symbol_id = 0; symbol_id < module->symbols.count;
+       ++symbol_id) {
+    loom_op_t* op = module->symbols.entries[symbol_id].defining_op;
+    if (op == NULL ||
+        (!loom_low_func_def_isa(op) && !loom_low_func_decl_isa(op))) {
+      continue;
+    }
+    loom_low_resolved_target_t target = {0};
+    IREE_RETURN_IF_ERROR(loom_low_resolve_function_target(
+        module, &symbol_facts, op, NULL, &request->low_registry->registry,
+        (iree_diagnostic_emitter_t){0}, &target));
+    if (target.descriptor_set == NULL) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "x86 native function has no resolved target");
+    }
+    bool supported = false;
+    iree_string_view_t constraint = iree_string_view_empty();
+    IREE_RETURN_IF_ERROR(loom_x86_function_abi_prepare(
+        module, loom_func_like_cast(module, op), &target, request->case_arena,
+        &supported, &constraint, &out_module_abi->functions[function_index]));
+    if (!supported) {
+      return iree_make_status(IREE_STATUS_UNIMPLEMENTED, "%.*s",
+                              (int)constraint.size, constraint.data);
+    }
+    loom_x86_module_abi_bind(out_module_abi, function_index++, symbol_id);
+  }
+  return iree_ok_status();
 }
 
 static iree_status_t loom_x86_loom_check_emit_provider_execute(
     const loom_check_emit_provider_t* provider,
-    const loom_check_emit_provider_request_t* request) {
+    const loom_check_emit_provider_request_t* request,
+    const loom_check_emit_native_module_t* native_module) {
   (void)provider;
   loom_x86_loom_check_emit_options_t options;
   IREE_RETURN_IF_ERROR(
       loom_x86_loom_check_parse_emit_options(request, &options));
 
+  loom_x86_module_abi_t module_abi = {0};
+  IREE_RETURN_IF_ERROR(loom_x86_loom_check_prepare_abis(
+      request, native_module->module, &module_abi));
+  const loom_string_id_t function_name_id = loom_module_lookup_string(
+      native_module->module, options.function_symbol_name);
+  const loom_symbol_id_t function_symbol_id =
+      function_name_id == LOOM_STRING_ID_INVALID
+          ? LOOM_SYMBOL_ID_INVALID
+          : loom_module_find_symbol(native_module->module, function_name_id);
+  const loom_x86_function_abi_t* function_abi =
+      function_symbol_id == LOOM_SYMBOL_ID_INVALID
+          ? NULL
+          : loom_x86_module_abi_lookup(
+                &module_abi,
+                (loom_symbol_ref_t){.symbol_id = function_symbol_id});
+
   loom_low_emission_frame_t frame = {0};
+  bool frame_accepted = false;
   const loom_low_emission_frame_spill_free_options_t spill_free_options = {0};
+  // The fixture supplies incoming value locations. Reserve RSP just as the
+  // object provider does before allocation; the native envelope uses it.
+  loom_low_allocation_reserved_range_t reserved_ranges[2] = {
+      {{0}},
+  };
+  const iree_host_size_t reserved_range_count =
+      function_abi != NULL
+          ? loom_x86_function_reserved_ranges(function_abi, reserved_ranges)
+          : 0;
+  const loom_low_emission_frame_options_t frame_options = {
+      .resolved_target = function_abi != NULL ? &function_abi->target : NULL,
+      .call_contracts =
+          {
+              .validate = loom_x86_function_call_contract_validate,
+              .query = loom_x86_function_call_contract,
+              .query_common_clobbers = loom_x86_function_common_call_clobbers,
+              .user_data = &module_abi,
+          },
+      .schedule_strategy = options.schedule_strategy,
+      .allocation_budgets = options.allocation_budgets,
+      .allocation_budget_count = options.allocation_budget_count,
+      .synchronous_storage_spaces = LOOM_LOW_STORAGE_SPACE_SET_STACK |
+                                    LOOM_LOW_STORAGE_SPACE_SET_PRIVATE |
+                                    LOOM_LOW_STORAGE_SPACE_SET_SCRATCH,
+      .allocation_entry_locations =
+          function_abi != NULL ? function_abi->call_contract.arguments : NULL,
+      .allocation_entry_location_count =
+          function_abi != NULL ? function_abi->call_contract.argument_count : 0,
+      .allocation_exit_locations =
+          function_abi != NULL ? function_abi->call_contract.results : NULL,
+      .allocation_exit_location_count =
+          function_abi != NULL ? function_abi->call_contract.result_count : 0,
+      .allocation_reserved_ranges = reserved_ranges,
+      .allocation_reserved_range_count = reserved_range_count,
+  };
   IREE_RETURN_IF_ERROR(loom_check_low_emit_packetize_function(
-      request, options.function_symbol_name, options.schedule_strategy,
-      /*schedule_diagnostic_flags=*/0,
-      /*allocation_diagnostic_flags=*/0, options.allocation_budgets,
-      options.allocation_budget_count, options.allocation_fixed_value_specs,
-      options.allocation_fixed_value_spec_count,
-      /*residency_model=*/NULL, loom_low_schedule_pair_affinity_list_empty(),
-      loom_low_schedule_structural_state_read_list_empty(),
-      /*storage_lease_provider=*/NULL, &spill_free_options, &frame));
+      request, native_module, options.function_symbol_name, &frame_options,
+      options.allocation_fixed_values.specs,
+      options.allocation_fixed_values.count, &spill_free_options, &frame,
+      &frame_accepted));
   if (request->diagnostic_collector != NULL &&
-      request->diagnostic_collector->count != 0) {
+      loom_check_diagnostic_collector_has_error(
+          request->diagnostic_collector)) {
     return iree_ok_status();
   }
-  if (frame.schedule.error_count != 0 || frame.allocation.error_count != 0) {
+  if (!frame_accepted) {
     return iree_ok_status();
   }
-  return loom_x86_loom_check_emit_assembly(
-      &frame, &request->result->actual_output, request->case_arena);
+  loom_check_diagnostic_emitter_capture_t capture = {
+      .diagnostic_collector = request->diagnostic_collector,
+      .module = native_module->module,
+      .source_resolver = native_module->source_resolver,
+  };
+  IREE_ASSERT_NE(function_abi, NULL);
+  loom_x86_function_t function;
+  bool accepted = false;
+  IREE_RETURN_IF_ERROR(loom_x86_function_prepare(
+      &frame, function_abi, &module_abi,
+      (iree_diagnostic_emitter_t){
+          .fn = loom_check_diagnostic_emitter_capture_emit,
+          .user_data = &capture,
+      },
+      request->case_arena, &accepted, &function));
+  if (!accepted) {
+    return iree_ok_status();
+  }
+  if (iree_string_view_equal(request->target_name,
+                             IREE_SV("x86-native-bytes"))) {
+    return loom_x86_loom_check_emit_native_bytes(
+        &function, &module_abi, &request->result->actual_output,
+        request->case_arena);
+  }
+  return loom_x86_loom_check_format_frame(&function,
+                                          &request->result->actual_output);
 }
 
 static iree_status_t loom_x86_loom_check_emit_provider_append_names(
     const loom_check_emit_provider_t* provider,
     iree_string_builder_t* builder) {
   (void)provider;
-  return iree_string_builder_append_cstring(builder, "x86-assembly, x86-asm");
+  return iree_string_builder_append_cstring(builder,
+                                            "x86-frame, x86-native-bytes");
 }
 
 const loom_check_emit_provider_t loom_x86_native_loom_check_emit_provider = {
     .name = IREE_SVL("x86-native"),
     .match = loom_x86_loom_check_emit_provider_matches,
-    .execute = loom_x86_loom_check_emit_provider_execute,
+    .execute_native = loom_x86_loom_check_emit_provider_execute,
     .append_names = loom_x86_loom_check_emit_provider_append_names,
 };

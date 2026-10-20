@@ -1,0 +1,104 @@
+// RUN: emit amdgpu-assembly @native_f64
+
+amdgpu.target<gfx942> @target {subgroup_size = 64}
+
+low.func.def target<amdgpu.cdna3.core>(@target) @native_f64(%lhs: reg<amdgpu.vgpr x2>, %rhs: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %sum = v_add_f64 %lhs, %rhs
+  %product = v_mul_f64 %lhs, %rhs
+  %root = v_sqrt_f64 %lhs
+  return %sum, %product, %root
+}
+
+// ----
+v_sqrt_f64 v[4:5], v[0:1]
+  v_add_f64 v[6:7], v[0:1], v[2:3]
+  v_mul_f64 v[0:1], v[0:1], v[2:3]
+  s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @compare_convert_f64
+
+amdgpu.target<gfx942> @target {subgroup_size = 64}
+
+low.func.def target<amdgpu.cdna3.core>(@target) @compare_convert_f64(%lhs: reg<amdgpu.vgpr x2>, %rhs: reg<amdgpu.vgpr x2>, %integer: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %compare = v_cmp_lt_f64 %lhs, %rhs
+  %converted = v_cvt_f64_i32 %integer
+  return %compare, %converted
+}
+
+// ----
+v_cmp_lt_f64 s[2:3], v[0:1], v[2:3]
+  v_cvt_f64_i32 v[0:1], s0
+  s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @round_convert_f64
+
+amdgpu.target<gfx942> @target {subgroup_size = 64}
+
+low.func.def target<amdgpu.cdna3.core>(@target) @round_convert_f64(%value: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %ceiled = v_ceil_f64 %value
+  %floored = v_floor_f64 %value
+  %rounded = v_rndne_f64 %value
+  %truncated = v_trunc_f64 %value
+  %signed = v_cvt_i32_f64 %value
+  %unsigned = v_cvt_u32_f64 %value
+  return %ceiled, %floored, %rounded, %truncated, %signed, %unsigned
+}
+
+// ----
+  v_cvt_i32_f64 v2, v[0:1]
+  v_cvt_u32_f64 v3, v[0:1]
+  v_ceil_f64 v[4:5], v[0:1]
+  v_floor_f64 v[6:7], v[0:1]
+  v_rndne_f64 v[8:9], v[0:1]
+  v_trunc_f64 v[0:1], v[0:1]
+  s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @subtract_f64
+
+amdgpu.target<gfx942> @target {subgroup_size = 64}
+
+low.func.def target<amdgpu.cdna3.core>(@target) @subtract_f64(%lhs: reg<amdgpu.vgpr x2>, %rhs: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>) asm {
+  %result = v_sub_f64 %lhs, %rhs
+  return %result
+}
+
+// ----
+v_add_f64 v[0:1], v[0:1], -v[2:3]
+  s_endpgm
+
+// ====
+// RUN: emit amdgpu-assembly @divide_f64
+
+amdgpu.target<gfx942> @target {subgroup_size = 64}
+
+low.func.def target<amdgpu.cdna3.core>(@target) @divide_f64(%numerator: reg<amdgpu.vgpr x2>, %denominator: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>) asm {
+  %scaled_denominator, %unused_mask = v_div_scale_f64 %denominator, %denominator, %numerator
+  %reciprocal = v_rcp_f64 %scaled_denominator
+  %error0 = v_fma_f64_neg_a_one %scaled_denominator, %reciprocal
+  %reciprocal0 = v_fma_f64 %reciprocal, %error0, %reciprocal
+  %error1 = v_fma_f64_neg_a_one %scaled_denominator, %reciprocal0
+  %scaled_numerator, %scale_mask = v_div_scale_f64 %numerator, %denominator, %numerator
+  %reciprocal1 = v_fma_f64 %reciprocal0, %error1, %reciprocal0
+  %quotient0 = v_mul_f64 %scaled_numerator, %reciprocal1
+  %remainder = v_fma_f64_neg_a %scaled_denominator, %quotient0, %scaled_numerator
+  %quotient1 = v_div_fmas_f64 %remainder, %reciprocal1, %quotient0, %scale_mask
+  %quotient = v_div_fixup_f64 %quotient1, %denominator, %numerator
+  return %quotient
+}
+
+// ----
+  v_div_scale_f64 v[4:5], v[2:3], v[2:3], v[0:1]
+  v_div_scale_f64 v[6:7], v[0:1], v[2:3], v[0:1]
+  v_rcp_f64 v[8:9], v[4:5]
+  v_fma_f64 v[10:11], -v[4:5], v[8:9], 1.0
+  v_fma_f64 v[8:9], v[8:9], v[10:11], v[8:9]
+  v_fma_f64 v[10:11], -v[4:5], v[8:9], 1.0
+  v_fma_f64 v[8:9], v[8:9], v[10:11], v[8:9]
+  v_mul_f64 v[10:11], v[6:7], v[8:9]
+  v_fma_f64 v[4:5], -v[4:5], v[10:11], v[6:7]
+  v_div_fmas_f64 v[4:5], v[4:5], v[8:9], v[10:11]
+  v_div_fixup_f64 v[0:1], v[4:5], v[2:3], v[0:1]
+  s_endpgm

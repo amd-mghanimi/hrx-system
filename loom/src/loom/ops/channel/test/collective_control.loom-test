@@ -1,0 +1,121 @@
+// RUN: pass scf-to-cfg,ownership-lifetime
+
+// Arithmetic helpers borrow ready payloads. The branch owns the unpublished
+// partial until both input contributions have arrived and been reduced.
+func.decl @initialize_partial(%source: view<256xf32>, %partial: view<256xf32>)
+
+func.decl @add_partial(%source: view<256xf32>, %partial: view<256xf32>)
+
+func.def noinline @fold_contribution(%incoming: channel<tile<256xf32>>, %write: write<tile<256xf32>>, %partial: view<256xf32>) -> (write<tile<256xf32>>) {
+  %read, %source = channel.acquire %incoming : channel<tile<256xf32>> -> (read<tile<256xf32>>, view<256xf32>)
+  func.call @add_partial(%source, %partial) : (view<256xf32>, view<256xf32>)
+  channel.release %read : read<tile<256xf32>>
+  func.return %write : write<tile<256xf32>>
+}
+
+// Each chunk contributes to the upstream reduction and a local observer.
+// Transport owns each copy separately; the function does not join those two
+// readers before proceeding to another chunk.
+func.def @reduce_branch(%left: channel<tile<256xf32>>, %right: channel<tile<256xf32>>, %partials: channel<tile<256xf32>>, %upstream: channel<tile<256xf32>>, %observer: channel<tile<256xf32>>, %chunks: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  scf.for %chunk = [%c0 to %chunks step %c1] {
+    %write, %partial = channel.reserve %partials : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+    %left_read, %left_value = channel.acquire %left : channel<tile<256xf32>> -> (read<tile<256xf32>>, view<256xf32>)
+    func.call @initialize_partial(%left_value, %partial) : (view<256xf32>, view<256xf32>)
+    channel.release %left_read : read<tile<256xf32>>
+    %complete = func.call @fold_contribution(%right, %write, %partial) : (channel<tile<256xf32>>, write<tile<256xf32>>, view<256xf32>) -> (write<tile<256xf32>>)
+    channel.publish %complete : write<tile<256xf32>>
+    %read = channel.accept %partials : channel<tile<256xf32>> -> read<tile<256xf32>>
+    %send, %observe = channel.fanout %read : read<tile<256xf32>> -> (read<tile<256xf32>>, read<tile<256xf32>>)
+    %upstream_write, %upstream_value = channel.reserve %upstream : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+    channel.copy %send -> %upstream_write : read<tile<256xf32>>, write<tile<256xf32>>
+    %observer_write, %observer_value = channel.reserve %observer : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+    channel.copy %observe -> %observer_write : read<tile<256xf32>>, write<tile<256xf32>>
+  }
+  func.return
+}
+
+// One rank's forwarding step can be composed into a cyclic topology. Seed
+// records and queue admission belong to its enclosing execution. The returned
+// incoming read is owned even while its payload is not ready.
+func.def noinline @forward_and_accept(%current: read<tile<256xf32>>, %outgoing: channel<tile<256xf32>>, %incoming: channel<tile<256xf32>>) -> (read<tile<256xf32>>) {
+  %write, %destination = channel.reserve %outgoing : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+  channel.copy %current -> %write : read<tile<256xf32>>, write<tile<256xf32>>
+  %next = channel.accept %incoming : channel<tile<256xf32>> -> read<tile<256xf32>>
+  func.return %next : read<tile<256xf32>>
+}
+
+func.def @forward_ring(%initial: read<tile<256xf32>>, %outgoing: channel<tile<256xf32>>, %incoming: channel<tile<256xf32>>, %hops: index) -> (read<tile<256xf32>>) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %last = scf.for %hop = [%c0 to %hops step %c1](%current = %initial : read<tile<256xf32>>) -> (read<tile<256xf32>>) {
+    %next = func.call @forward_and_accept(%current, %outgoing, %incoming) : (read<tile<256xf32>>, channel<tile<256xf32>>, channel<tile<256xf32>>) -> (read<tile<256xf32>>)
+    scf.yield %next : read<tile<256xf32>>
+  }
+  func.return %last : read<tile<256xf32>>
+}
+
+// ----
+func.decl @initialize_partial(%source: view<256xf32>, %partial: view<256xf32>)
+
+func.decl @add_partial(%source: view<256xf32>, %partial: view<256xf32>)
+
+func.def noinline @fold_contribution(%incoming: channel<tile<256xf32>>, %write: write<tile<256xf32>>, %partial: view<256xf32>) -> (write<tile<256xf32>>) {
+  %read, %source = channel.acquire %incoming : channel<tile<256xf32>> -> (read<tile<256xf32>>, view<256xf32>)
+  func.call @add_partial(%source, %partial) : (view<256xf32>, view<256xf32>)
+  channel.release %read : read<tile<256xf32>>
+  func.return %write : write<tile<256xf32>>
+}
+
+func.def @reduce_branch(%left: channel<tile<256xf32>>, %right: channel<tile<256xf32>>, %partials: channel<tile<256xf32>>, %upstream: channel<tile<256xf32>>, %observer: channel<tile<256xf32>>, %chunks: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  cfg.br ^_bb1(%c0: index)
+^_bb1(%49: index):
+  %51 = index.cmp slt, %49, %chunks : index
+  cfg.cond_br %51, ^_bb2, ^_bb3
+^_bb2:
+  %chunk = index.assume %49 [range(%49, 0, 9223372036854775806), lt(%49, %chunks)] : index
+  %write, %partial = channel.reserve %partials : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+  %left_read, %left_value = channel.acquire %left : channel<tile<256xf32>> -> (read<tile<256xf32>>, view<256xf32>)
+  func.call @initialize_partial(%left_value, %partial) : (view<256xf32>, view<256xf32>)
+  channel.release %left_read : read<tile<256xf32>>
+  %complete = func.call @fold_contribution(%right, %write, %partial) : (channel<tile<256xf32>>, write<tile<256xf32>>, view<256xf32>) -> (write<tile<256xf32>>)
+  channel.publish %complete : write<tile<256xf32>>
+  %read = channel.accept %partials : channel<tile<256xf32>> -> read<tile<256xf32>>
+  %send, %observe = channel.fanout %read : read<tile<256xf32>> -> (read<tile<256xf32>>, read<tile<256xf32>>)
+  %upstream_write, %upstream_value = channel.reserve %upstream : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+  channel.copy %send -> %upstream_write : read<tile<256xf32>>, write<tile<256xf32>>
+  %observer_write, %observer_value = channel.reserve %observer : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+  channel.copy %observe -> %observer_write : read<tile<256xf32>>, write<tile<256xf32>>
+  %52 = index.add %chunk, %c1 : index
+  cfg.br ^_bb1(%52: index)
+^_bb3:
+  func.return
+}
+
+func.def noinline @forward_and_accept(%current: read<tile<256xf32>>, %outgoing: channel<tile<256xf32>>, %incoming: channel<tile<256xf32>>) -> (read<tile<256xf32>>) {
+  %write, %destination = channel.reserve %outgoing : channel<tile<256xf32>> -> (write<tile<256xf32>>, view<256xf32>)
+  channel.copy %current -> %write : read<tile<256xf32>>, write<tile<256xf32>>
+  %next = channel.accept %incoming : channel<tile<256xf32>> -> read<tile<256xf32>>
+  func.return %next : read<tile<256xf32>>
+}
+
+func.def @forward_ring(%initial: read<tile<256xf32>>, %outgoing: channel<tile<256xf32>>, %incoming: channel<tile<256xf32>>, %hops: index) -> (read<tile<256xf32>>) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  cfg.br ^_bb1(%c0: index, %initial: read<tile<256xf32>>)
+^_bb1(%54: index, %current: read<tile<256xf32>>):
+  %57 = index.cmp slt, %54, %hops : index
+  cfg.cond_br %57, ^_bb2, ^_bb3
+^_bb2:
+  %hop = index.assume %54 [range(%54, 0, 9223372036854775806), lt(%54, %hops)] : index
+  %next = func.call @forward_and_accept(%current, %outgoing, %incoming) : (read<tile<256xf32>>, channel<tile<256xf32>>, channel<tile<256xf32>>) -> (read<tile<256xf32>>)
+  %58 = index.add %hop, %c1 : index
+  cfg.br ^_bb1(%58: index, %next: read<tile<256xf32>>)
+^_bb3:
+  cfg.br ^_bb4(%current: read<tile<256xf32>>)
+^_bb4(%last: read<tile<256xf32>>):
+  func.return %last : read<tile<256xf32>>
+}

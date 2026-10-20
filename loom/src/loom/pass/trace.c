@@ -68,8 +68,7 @@ static iree_string_view_t loom_pass_trace_kind_name(loom_pass_kind_t kind) {
   }
 }
 
-static iree_string_view_t loom_pass_trace_point_name(
-    loom_pass_trace_point_t point) {
+iree_string_view_t loom_pass_trace_point_name(loom_pass_trace_point_t point) {
   switch (point) {
     case LOOM_PASS_TRACE_POINT_BEFORE:
       return IREE_SV("before");
@@ -80,7 +79,7 @@ static iree_string_view_t loom_pass_trace_point_name(
   }
 }
 
-static iree_string_view_t loom_pass_trace_pass_key(
+iree_string_view_t loom_pass_trace_event_pass_key(
     const loom_pass_trace_event_t* event) {
   const loom_pass_program_instruction_t* instruction = event->instruction;
   if (!instruction ||
@@ -109,7 +108,8 @@ static bool loom_pass_trace_name_matches(
   if (iree_string_view_is_empty(request)) {
     return false;
   }
-  return iree_string_view_equal(request, loom_pass_trace_pass_key(event)) ||
+  return iree_string_view_equal(request,
+                                loom_pass_trace_event_pass_key(event)) ||
          iree_string_view_equal(request, options->stage) ||
          iree_string_view_equal(request, event->pipeline_symbol);
 }
@@ -179,7 +179,7 @@ static iree_status_t loom_pass_trace_write_text_event(
     const loom_pass_trace_event_t* event, iree_host_size_t event_ordinal,
     iree_string_view_t artifact_path, bool include_ir) {
   const iree_string_view_t point = loom_pass_trace_point_name(event->point);
-  const iree_string_view_t pass_key = loom_pass_trace_pass_key(event);
+  const iree_string_view_t pass_key = loom_pass_trace_event_pass_key(event);
   const iree_string_view_t pass_kind = loom_pass_trace_pass_kind(event);
   const iree_string_view_t anchor_kind =
       loom_pass_trace_kind_name(event->anchor_kind);
@@ -264,7 +264,7 @@ static iree_status_t loom_pass_trace_write_jsonl(
   const loom_pass_trace_options_t* options = trace->options;
   loom_output_stream_t* stream = options->stream;
   const iree_string_view_t point = loom_pass_trace_point_name(event->point);
-  const iree_string_view_t pass_key = loom_pass_trace_pass_key(event);
+  const iree_string_view_t pass_key = loom_pass_trace_event_pass_key(event);
   const iree_string_view_t pass_kind = loom_pass_trace_pass_kind(event);
   const iree_string_view_t anchor_kind =
       loom_pass_trace_kind_name(event->anchor_kind);
@@ -317,13 +317,11 @@ static iree_status_t loom_pass_trace_write_jsonl(
         &object, IREE_SV("ir_path"), artifact->path));
   } else {
     IREE_RETURN_IF_ERROR(loom_json_object_begin_field(&object, IREE_SV("ir")));
-    IREE_RETURN_IF_ERROR(loom_output_stream_write_char(stream, '"'));
-    loom_json_escape_stream_t escape_data;
-    loom_output_stream_t escape_stream;
-    loom_json_escape_stream_init(stream, &escape_data, &escape_stream);
+    loom_json_string_writer_t string;
+    IREE_RETURN_IF_ERROR(loom_json_string_begin(stream, &string));
     IREE_RETURN_IF_ERROR(loom_text_print_module_with_options(
-        event->module, &escape_stream, &options->print_options));
-    IREE_RETURN_IF_ERROR(loom_output_stream_write_char(stream, '"'));
+        event->module, &string.stream, &options->print_options));
+    IREE_RETURN_IF_ERROR(loom_json_string_end(&string));
   }
   IREE_RETURN_IF_ERROR(loom_json_object_end(&object));
   return loom_output_stream_write_char(stream, '\n');

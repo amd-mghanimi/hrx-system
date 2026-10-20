@@ -23,7 +23,9 @@ static int iree_hal_amdgpu_hostcall_provider_service_thread_main(
         IREE_LIBHSA(state->libhsa), state->notification_signal,
         HSA_SIGNAL_CONDITION_NE, observed_value, UINT64_MAX,
         HSA_WAIT_STATE_BLOCKED);
+    IREE_TRACE_ZONE_BEGIN_NAMED(z_service, "iree_hal_amdgpu_hostcall_service");
     state->provider.service(state->provider_context);
+    IREE_TRACE_ZONE_END(z_service);
     if (iree_atomic_load(&state->stop_requested, iree_memory_order_acquire)) {
       break;
     }
@@ -31,7 +33,7 @@ static int iree_hal_amdgpu_hostcall_provider_service_thread_main(
   return 0;
 }
 
-iree_status_t iree_hal_amdgpu_hostcall_provider_state_create(
+iree_status_t iree_hal_amdgpu_hostcall_provider_state_allocate(
     const iree_hal_hostcall_provider_t* provider,
     iree_hal_device_t* logical_device, const iree_hal_amdgpu_libhsa_t* libhsa,
     hsa_agent_t device_agent, hsa_amd_memory_pool_t shared_memory_pool,
@@ -139,12 +141,12 @@ iree_status_t iree_hal_amdgpu_hostcall_provider_state_create(
   if (iree_status_is_ok(status)) {
     *out_state = state;
   } else {
-    iree_hal_amdgpu_hostcall_provider_state_destroy(state);
+    iree_hal_amdgpu_hostcall_provider_state_free(state);
   }
   return status;
 }
 
-void iree_hal_amdgpu_hostcall_provider_state_destroy(
+void iree_hal_amdgpu_hostcall_provider_state_free(
     iree_hal_amdgpu_hostcall_provider_state_t* state) {
   if (!state) {
     return;

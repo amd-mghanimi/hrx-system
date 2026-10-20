@@ -9,14 +9,16 @@
 
 iree_add_all_subdirs()
 
-loom_generated_file(
+loom_generated_file_family(
   NAME
     scalarization_rows_gen
   GENERATOR
     loom::py::loom::gen::ops::c_vector_scalarization
-  OUTPUT
+  OUTPUTS
+    "cast_legalizer_rows.inl"
     "scalarization_rows.inl"
-  OUTPUT_FLAG
+  OUTPUT_FLAGS
+    "--cast-legalizer-rows"
     "--rows"
 )
 
@@ -27,16 +29,20 @@ loom_generated_cc_library(
     loom::py::loom::gen::ops::c_tables_vector_generator
   SRCS
     "canonicalize.c"
+    "combining.c"
     "construction.c"
     "facts.c"
     "fragment.c"
+    "interleave.c"
     "memory.c"
     "scalarization.c"
     "storage.c"
     "table.c"
+    "transpose.c"
     "type_transfer.c"
     "verify.c"
   TEXTUAL_HDRS
+    "cast_legalizer_rows.inl"
     "ops.inc"
     "scalarization_rows.inl"
   GENERATED_SRC_FLAGS
@@ -54,6 +60,7 @@ loom_generated_cc_library(
     "--table-shard=integer_arithmetic"
     "--table-shard=math"
     "--table-shard=memory"
+    "--table-shard=refinement"
     "--table-shard=reduction"
     "--table-shard=table"
   GENERATED_SRCS
@@ -71,17 +78,21 @@ loom_generated_cc_library(
     "tables/integer_arithmetic.c"
     "tables/math.c"
     "tables/memory.c"
+    "tables/refinement.c"
     "tables/reduction.c"
     "tables/table.c"
   HDRS
+    "combining.h"
     "construction.h"
     "fragment.h"
+    "interleave.h"
     "memory.h"
     "ops.h"
     "scalarization.h"
     "storage.h"
     "table.h"
     "tables.h"
+    "transpose.h"
   ARGS
     "--dialect=vector"
   EXTRA_OUTPUT_FLAGS
@@ -93,6 +104,7 @@ loom_generated_cc_library(
     iree::base::internal
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ops::atomic
@@ -100,6 +112,7 @@ loom_generated_cc_library(
     loom::ops::combining
     loom::ops::encoding
     loom::ops::index
+    loom::ops::index::cast
     loom::ops::op_defs
     loom::ops::scalar
     loom::ops::scf
@@ -122,6 +135,17 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ir
+)
+
+loom_cc_test(
+  NAME
+    interleave_test
+  SRCS
+    "interleave_test.cc"
+  DEPS
+    ::vector
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_test(

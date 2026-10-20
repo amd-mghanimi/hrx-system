@@ -56,6 +56,13 @@ typedef enum loom_target_legalization_policy_e {
   LOOM_TARGET_LEGALIZATION_POLICY_REQUIRE_NATIVE = 2,
 } loom_target_legalization_policy_t;
 
+typedef enum loom_target_boundary_representation_e {
+  // Semantic boundaries still carry authored logical values.
+  LOOM_TARGET_BOUNDARY_REPRESENTATION_LOGICAL = 0,
+  // Boundary projection has materialized target physical carriers.
+  LOOM_TARGET_BOUNDARY_REPRESENTATION_PROJECTED = 1,
+} loom_target_boundary_representation_t;
+
 typedef enum loom_target_legalizer_action_e {
   // The legalizer has no opinion about this op under the current target.
   LOOM_TARGET_LEGALIZER_ACTION_NO_COMMENT = 0,
@@ -88,6 +95,10 @@ enum loom_target_legalizer_entry_flag_bits_e {
   // rejecting it under require-native. An unanswered query can still have a
   // native lowering. Reference-only explicitly requests the recipe instead.
   LOOM_TARGET_LEGALIZER_ENTRY_FLAG_REQUIRE_CONTRACT_REJECTION = 1u << 1,
+  // Requires an unanswered contract query before applying the recipe or
+  // rejecting it under require-native. An explicit target rejection remains
+  // authoritative. Reference-only explicitly requests the recipe instead.
+  LOOM_TARGET_LEGALIZER_ENTRY_FLAG_REQUIRE_CONTRACT_UNHANDLED = 1u << 2,
 };
 typedef uint32_t loom_target_legalizer_entry_flags_t;
 
@@ -117,18 +128,44 @@ typedef struct loom_target_legalization_context_t {
   const loom_target_facts_t* target_facts;
   // Low descriptor set selected by the target bundle.
   const loom_low_descriptor_set_t* descriptor_set;
+  // Target packet candidates selected for |descriptor_set|, or NULL.
+  const loom_target_vector_packet_policy_t* vector_packet_policy;
+  // Target packet and scalar-word representation contract for shared
+  // packed-bitstream legalization, or NULL when disabled.
+  const loom_target_bitstream_policy_t* bitstream_policy;
+  // Complete target admission query for authored source vector carriers.
+  // Semantic rewrites that consume an aggregate may precede this admission;
+  // scalar fallback must not.
+  loom_target_vector_carrier_supported_callback_t
+      source_vector_carrier_supported;
+  // True when the source function signature contains a vector outside the
+  // target's callable carrier domain. Reference fallback leaves the body
+  // intact so final legality can diagnose the boundary without first
+  // expanding it.
+  bool source_function_has_unsupported_vector_carrier;
   // Source value facts visible to legalizers.
   const loom_value_fact_table_t* fact_table;
   // Analyzed view-region table visible to legalizers.
   const loom_view_region_table_t* view_regions;
+  // Immutable-snapshot owner for legalizers requiring function analyses.
+  loom_target_contract_function_analysis_callback_t function_analysis;
   // Lazy block-local read motion barriers visible to legalizers.
   loom_motion_read_barrier_table_t* read_motion_barriers;
   // Function-local value domain extendable during the current callback.
   loom_local_value_domain_t* value_domain;
   // Active rewriter for mutating the function body.
   loom_rewriter_t* rewriter;
+  // Packet graph creation observed during the active legalizer callback.
+  struct {
+    // Value checkpoint immediately before the first packet materialization.
+    loom_value_id_t value_checkpoint;
+    // True when value_checkpoint has been recorded.
+    bool recorded;
+  } component_packet_materialization;
   // Current legalization phase.
   loom_target_legalization_mode_t mode;
+  // Representation state of callable, CFG, and LoopLike boundaries.
+  loom_target_boundary_representation_t boundary_representation;
   // Strategy policy controlling native and reference legalizer participation.
   loom_target_legalization_policy_t policy;
   // Scoped arena available for rare legalization-side records.
@@ -139,6 +176,19 @@ typedef struct loom_target_legalization_context_t {
   // Read-only target contract query for already-legal checks.
   loom_target_contract_query_callback_t contract_query;
 } loom_target_legalization_context_t;
+
+// Records that the active legalizer is about to materialize a packet graph.
+// The target legalization driver uses the first checkpoint to give generated
+// decomposable operations to the component planner before reference fallback.
+static inline void
+loom_target_legalization_record_component_packet_materialization(
+    loom_target_legalization_context_t* context) {
+  if (!context->component_packet_materialization.recorded) {
+    context->component_packet_materialization.value_checkpoint =
+        loom_rewriter_value_checkpoint(context->rewriter);
+    context->component_packet_materialization.recorded = true;
+  }
+}
 
 // Returns the common target bundle selected for |context|.
 static inline const loom_target_bundle_t*
@@ -152,6 +202,12 @@ typedef iree_status_t (*loom_target_legalizer_fn_t)(
     loom_target_legalization_context_t* context, loom_op_t* op,
     loom_target_legalizer_result_t* out_result);
 
+// Returns true when a legalizer entry applies to |op|. Matchers run before the
+// target contract query and must remain cheap, allocation-free, and read-only.
+typedef bool (*loom_target_legalizer_match_fn_t)(
+    const loom_target_legalizer_entry_t* entry,
+    const loom_target_legalization_context_t* context, const loom_op_t* op);
+
 // Provider-owned rule copied into a composed legalizer registry.
 struct loom_target_legalizer_rule_t {
   // Entry-specific behavior flags.
@@ -162,6 +218,9 @@ struct loom_target_legalizer_rule_t {
   // A constrained rule's root kind must have at least one operand. Dispatch
   // checks this domain before querying the target contract or applying policy.
   loom_scalar_type_set_t first_operand_element_types;
+  // Optional target-owned applicability predicate evaluated before querying
+  // the target contract. NULL applies to every matching root and type.
+  loom_target_legalizer_match_fn_t match;
   // Rewriter callback for root_kind.
   loom_target_legalizer_fn_t legalize;
 };
@@ -179,6 +238,8 @@ struct loom_target_legalizer_entry_t {
   iree_string_view_t provider_name;
   // Rewrite strategy attached while composing the dense registry.
   loom_target_legalizer_strategy_t provider_strategy;
+  // Optional target-owned applicability predicate copied from the rule.
+  loom_target_legalizer_match_fn_t match;
   // Rewriter callback for root_kind.
   loom_target_legalizer_fn_t legalize;
 };
@@ -321,10 +382,48 @@ const loom_target_legalizer_registry_t*
 loom_target_legalizer_registry_storage_registry(
     const loom_target_legalizer_registry_storage_t* storage);
 
+// Acquires complete function analyses for a memory or component legalizer.
+iree_status_t loom_target_legalization_resolve_function_analysis(
+    loom_target_legalization_context_t* context);
+
 // Queries whether |op| is already legal for the selected target contract.
+// Rejected-rule identity and diagnostic payloads may be omitted; final legality
+// checking requests those details only for operations that remain unsupported.
 iree_status_t loom_target_legalization_query_contract(
     loom_target_legalization_context_t* context, const loom_op_t* op,
     loom_target_contract_query_result_t* out_result);
+
+// Queries |op| through a scoped vector lane-count projection. The projection
+// applies only for this query and does not mutate authored IR or context state.
+// As above, rejected-rule diagnostic details may be omitted.
+iree_status_t
+loom_target_legalization_query_contract_with_vector_lane_projection(
+    loom_target_legalization_context_t* context, const loom_op_t* op,
+    loom_target_contract_vector_lane_projection_t vector_lane_projection,
+    loom_target_contract_query_result_t* out_result);
+
+// Returns true when |type| has a source vector carrier under the selected
+// target lowering policy. Non-vector types always return true. A concrete
+// source passes its value identity; hypothetical types use
+// LOOM_VALUE_ID_INVALID.
+bool loom_target_legalization_has_source_vector_carrier(
+    const loom_target_legalization_context_t* context, loom_type_t type,
+    loom_value_id_t value_id);
+
+// Returns true when every vector operand and result of |op| has a source
+// carrier under the selected target lowering policy.
+bool loom_target_legalization_op_has_source_vector_carriers(
+    const loom_target_legalization_context_t* context, const loom_op_t* op);
+
+// Returns true when |type| has a packet carrier under the target's dedicated
+// packed-bitstream policy. Non-vector types always return true.
+bool loom_target_legalization_has_bitstream_packet_carrier(
+    const loom_target_legalization_context_t* context, loom_type_t type);
+
+// Returns true when every vector operand and result of |op| has a carrier
+// under the target's dedicated packed-bitstream policy.
+bool loom_target_legalization_op_has_bitstream_packet_carriers(
+    const loom_target_legalization_context_t* context, const loom_op_t* op);
 
 #ifdef __cplusplus
 }  // extern "C"

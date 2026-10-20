@@ -15,12 +15,10 @@
 #include "loom/ops/vector/fragment.h"
 #include "loom/ops/vector/ops.h"
 #include "loom/target/arch/amd/xdna/aie2p/descriptors/core_descriptors.h"
-#include "loom/target/arch/amd/xdna/aie2p/lower/encode.h"
 #include "loom/util/fact_table.h"
 
 typedef enum loom_aie2p_matrix_plan_kind_e {
   LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8 = 0x100,
-  LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP = 0x102,
 } loom_aie2p_matrix_plan_kind_t;
 
 typedef enum loom_aie2p_matrix_operation_e {
@@ -360,25 +358,23 @@ static iree_status_t loom_aie2p_select_matrix_mma(
       .operation = operation,
       .control = loom_aie2p_matrix_modes[numeric_mode].control,
   };
+  loom_type_t result_type = loom_type_none();
+  IREE_RETURN_IF_ERROR(loom_low_lower_make_register_type(
+      context, AIE2P_CORE_REG_CLASS_ID_AIE2P_MBMS, 4, &result_type));
+  IREE_RETURN_IF_ERROR(loom_low_lower_plan_value_type(
+      context, loom_vector_mma_result(source_op), result_type));
   *out_plan = loom_low_lower_plan_make(LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8, plan);
   return iree_ok_status();
 }
 
 bool loom_aie2p_matrix_plan_isa(loom_low_lower_plan_t plan) {
-  return plan.id == LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP ||
-         plan.id == LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8;
+  return plan.id == LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8;
 }
 
 iree_status_t loom_aie2p_select_matrix_plan(loom_low_lower_context_t* context,
                                             const loom_op_t* source_op,
                                             loom_low_lower_plan_t* out_plan) {
   *out_plan = loom_low_lower_plan_empty();
-  if (loom_vector_encode_isa(source_op) &&
-      loom_aie2p_encode_matches(context, source_op)) {
-    *out_plan =
-        loom_low_lower_plan_make(LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP, NULL);
-    return iree_ok_status();
-  }
   if (loom_vector_mma_isa(source_op)) {
     return loom_aie2p_select_matrix_mma(context, source_op, out_plan);
   }
@@ -388,26 +384,16 @@ iree_status_t loom_aie2p_select_matrix_plan(loom_low_lower_context_t* context,
 void loom_aie2p_mark_matrix_plan_demands(loom_low_lower_context_t* context,
                                          const loom_op_t* source_op,
                                          loom_low_lower_plan_t plan) {
-  switch ((loom_aie2p_matrix_plan_kind_t)plan.id) {
-    case LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP:
-      loom_low_lower_require_source_value_storage(
-          context, loom_vector_encode_source(source_op));
-      return;
-    case LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8: {
-      const loom_aie2p_matrix_mma_plan_t* matrix_plan =
-          (const loom_aie2p_matrix_mma_plan_t*)plan.target_data;
-      loom_low_lower_require_source_value_storage(
-          context, loom_vector_mma_lhs(source_op));
-      loom_low_lower_require_source_value_storage(
-          context, loom_vector_mma_rhs(source_op));
-      if (matrix_plan->operation == LOOM_AIE2P_MATRIX_OPERATION_ACCUMULATE) {
-        loom_low_lower_require_source_value_storage(
-            context, loom_vector_mma_init(source_op));
-      }
-      return;
-    }
+  const loom_aie2p_matrix_mma_plan_t* matrix_plan =
+      (const loom_aie2p_matrix_mma_plan_t*)plan.target_data;
+  loom_low_lower_require_source_value_storage(context,
+                                              loom_vector_mma_lhs(source_op));
+  loom_low_lower_require_source_value_storage(context,
+                                              loom_vector_mma_rhs(source_op));
+  if (matrix_plan->operation == LOOM_AIE2P_MATRIX_OPERATION_ACCUMULATE) {
+    loom_low_lower_require_source_value_storage(
+        context, loom_vector_mma_init(source_op));
   }
-  IREE_ASSERT_UNREACHABLE("AIE2P matrix demand has unknown plan kind");
 }
 
 void loom_aie2p_describe_matrix_plan(loom_low_lower_context_t* context,
@@ -415,21 +401,13 @@ void loom_aie2p_describe_matrix_plan(loom_low_lower_context_t* context,
                                      loom_low_lower_plan_t plan,
                                      loom_low_lower_plan_report_t* out_report) {
   (void)source_op;
-  *out_report = (loom_low_lower_plan_report_t){0};
-  switch ((loom_aie2p_matrix_plan_kind_t)plan.id) {
-    case LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP:
-      out_report->plan_key = IREE_SV("encode.bf16.bfp16ebs8");
-      return;
-    case LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8: {
-      const loom_aie2p_matrix_mma_plan_t* matrix_plan =
-          (const loom_aie2p_matrix_mma_plan_t*)plan.target_data;
-      out_report->plan_key = loom_low_descriptor_set_string(
+  const loom_aie2p_matrix_mma_plan_t* matrix_plan =
+      (const loom_aie2p_matrix_mma_plan_t*)plan.target_data;
+  *out_report = (loom_low_lower_plan_report_t){
+      .plan_key = loom_low_descriptor_set_string(
           loom_low_lower_context_descriptor_set(context),
-          matrix_plan->operation_descriptor.descriptor->mnemonic_string_ref);
-      return;
-    }
-  }
-  IREE_ASSERT_UNREACHABLE("AIE2P matrix report has unknown plan kind");
+          matrix_plan->operation_descriptor.descriptor->mnemonic_string_ref),
+  };
 }
 
 static iree_status_t loom_aie2p_emit_matrix_mma(
@@ -438,13 +416,11 @@ static iree_status_t loom_aie2p_emit_matrix_mma(
   loom_value_id_t lhs = LOOM_VALUE_ID_INVALID;
   loom_value_id_t rhs = LOOM_VALUE_ID_INVALID;
   loom_value_id_t init = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_low_lower_lookup_value(
-      context, loom_vector_mma_lhs(source_op), &lhs));
-  IREE_RETURN_IF_ERROR(loom_low_lower_lookup_value(
-      context, loom_vector_mma_rhs(source_op), &rhs));
+  lhs = loom_low_lower_lookup_value(context, loom_vector_mma_lhs(source_op));
+  rhs = loom_low_lower_lookup_value(context, loom_vector_mma_rhs(source_op));
   if (plan->operation == LOOM_AIE2P_MATRIX_OPERATION_ACCUMULATE) {
-    IREE_RETURN_IF_ERROR(loom_low_lower_lookup_value(
-        context, loom_vector_mma_init(source_op), &init));
+    init =
+        loom_low_lower_lookup_value(context, loom_vector_mma_init(source_op));
   }
 
   loom_type_t control_type = loom_type_none();
@@ -463,9 +439,8 @@ static iree_status_t loom_aie2p_emit_matrix_mma(
       loom_make_named_attr_slice(&control_attr, 1), control_type,
       source_op->location, &control_op));
 
-  loom_type_t result_type = loom_type_none();
-  IREE_RETURN_IF_ERROR(loom_low_lower_make_register_type(
-      context, AIE2P_CORE_REG_CLASS_ID_AIE2P_MBMS, 4, &result_type));
+  const loom_type_t result_type = loom_low_lower_value_binding_type(
+      context, loom_vector_mma_result(source_op));
   loom_value_id_t operands[4];
   iree_host_size_t operand_count = 0;
   if (plan->operation == LOOM_AIE2P_MATRIX_OPERATION_ACCUMULATE) {
@@ -486,14 +461,7 @@ static iree_status_t loom_aie2p_emit_matrix_mma(
 iree_status_t loom_aie2p_emit_matrix_plan(loom_low_lower_context_t* context,
                                           const loom_op_t* source_op,
                                           loom_low_lower_plan_t plan) {
-  switch ((loom_aie2p_matrix_plan_kind_t)plan.id) {
-    case LOOM_AIE2P_MATRIX_PLAN_ENCODE_BFP:
-      return loom_aie2p_emit_encode(context, source_op);
-    case LOOM_AIE2P_MATRIX_PLAN_MMA_M8N8K8:
-      return loom_aie2p_emit_matrix_mma(
-          context, source_op,
-          (const loom_aie2p_matrix_mma_plan_t*)plan.target_data);
-  }
-  IREE_ASSERT_UNREACHABLE("AIE2P matrix emission has unknown plan kind");
-  IREE_BUILTIN_UNREACHABLE();
+  return loom_aie2p_emit_matrix_mma(
+      context, source_op,
+      (const loom_aie2p_matrix_mma_plan_t*)plan.target_data);
 }

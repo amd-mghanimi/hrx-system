@@ -1,11 +1,9 @@
-aie2p.target<array> @array_target
-
-aie2p.target<core> @core_target
+aie2p.target<array> @npu
 
 // One BF16 gate/up output with F32 dot accumulation and quadratic gating.
 // Gate and up are rounded to BF16 before gate * (0.5 + 0.25 * gate) * up;
 // every epilogue operation rounds to BF16. The F32 output carries that value.
-config.decl @ffn_gate_up.input_size : %value: index where [range(%value, 512, 4096), mul(%value, 32)]
+config.decl @ffn_gate_up.input_size : %value: index where [range(%value, 512, 4096), multiple_of(%value, 32)]
 
 func.def inline @bf16_product(%lhs: vector<16xbf16>, %rhs: vector<16xbf16>) -> (vector<16xbf16>) {
   %c0 = vector.constant 0.0 : vector<16xbf16>
@@ -17,9 +15,7 @@ func.def inline @bf16_product(%lhs: vector<16xbf16>, %rhs: vector<16xbf16>) -> (
   func.return %result : vector<16xbf16>
 }
 
-func.def target(@core_target) @gate_up_tile(%input_arg: buffer, %weights_arg: buffer, %output_arg: buffer) {
-  %input, %weights, %output = buffer.assume.alignment %input_arg, %weights_arg, %output_arg {minimum_alignment = 64} : buffer, buffer, buffer
-  %input_size = config.get @ffn_gate_up.input_size : index
+func.def inline @gate_up_tile(%input_size: index, %input_view: view<[%input_size]xbf16>, %weights_view: view<2x[%input_size]xbf16>, %output_view: view<1xf32>) {
   %base = index.constant 0 : offset
   %c0 = index.constant 0 : index
   %step = index.constant 32 : index
@@ -29,9 +25,6 @@ func.def target(@core_target) @gate_up_tile(%input_arg: buffer, %weights_arg: bu
   %scratch = buffer.alloca<private> align(64) %scratch_bytes : buffer
   %scratch_view = buffer.view %scratch[%base] : buffer -> view<16xf32>
   %lanes = index.constant 16 : index
-  %input_view = buffer.view %input[%base] : buffer -> view<[%input_size]xbf16>
-  %weights_view = buffer.view %weights[%base] : buffer -> view<2x[%input_size]xbf16>
-  %output_view = buffer.view %output[%base] : buffer -> view<1xf32>
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %fzero = scalar.constant 0.0 : f32
@@ -71,17 +64,94 @@ func.def target(@core_target) @gate_up_tile(%input_arg: buffer, %weights_arg: bu
   func.return
 }
 
-pipeline.def<kernel> public retain target(@array_target) @ffn_gate_up_quadratic_bf16() launch(%input: buffer, %weights: buffer, %output: buffer) {
+// --8<-- [start:fill-input]
+func.def inline @fill_input(%input_size: index, %record: index, %input: buffer, %inputs: channel<tile<[%input_size]xbf16>>) {
+  %element_bytes = index.constant 2 : index
+  %record_elements = index.mul %record, %input_size : index
+  %byte_index = index.mul %record_elements, %element_bytes : index
+  %byte_offset = index.cast %byte_index : index to offset
+  %source = buffer.view %input[%byte_offset] : buffer -> view<[%input_size]xbf16>
+  %write, %destination = channel.reserve %inputs : channel<tile<[%input_size]xbf16>> -> (write<tile<[%input_size]xbf16>>, view<[%input_size]xbf16>)
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<[%input_size]xbf16> to view<[%input_size]xbf16> -> kernel.async.token
+  %pending = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %pending {newer_groups = 0} : kernel.async.group
+  channel.publish %write : write<tile<[%input_size]xbf16>>
+  func.return
+}
+
+// --8<-- [end:fill-input]
+// --8<-- [start:drain-output]
+func.def inline @drain_output(%record: index, %outputs: channel<tile<1xf32>>, %output: buffer) {
+  %element_bytes = index.constant 4 : index
+  %byte_index = index.mul %record, %element_bytes : index
+  %byte_offset = index.cast %byte_index : index to offset
+  %destination = buffer.view %output[%byte_offset] : buffer -> view<1xf32>
+  %read, %source = channel.acquire %outputs : channel<tile<1xf32>> -> (read<tile<1xf32>>, view<1xf32>)
+  %copy = kernel.async.copy %source to %destination {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<1xf32> to view<1xf32> -> kernel.async.token
+  %pending = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+  kernel.async.wait %pending {newer_groups = 0} : kernel.async.group
+  channel.release %read : read<tile<1xf32>>
+  func.return
+}
+
+// --8<-- [end:drain-output]
+pipeline.def<kernel> public retain target(@npu) @ffn_gate_up_quadratic_bf16() run(%input_arg: buffer, %weights_arg: buffer, %output_arg: buffer) {
   %input_size = config.get @ffn_gate_up.input_size : index
-  %c1 = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %c1 : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<[%input_size]xbf16>
-  %weights_view = buffer.view %weights[%base] : buffer -> view<2x[%input_size]xbf16>
-  %output_view = buffer.view %output[%base] : buffer -> view<1xf32>
-  %input_flow = pipeline.read %input_view on %workers : view<[%input_size]xbf16>, group -> pipeline.flow<tile<[%input_size]xbf16>>
-  %weights_flow = pipeline.read %weights_view on %workers : view<2x[%input_size]xbf16>, group -> pipeline.flow<tile<2x[%input_size]xbf16>>
-  %result = pipeline.stage @gate_up_tile on %workers(%input_flow, %weights_flow) : (group, pipeline.flow<tile<[%input_size]xbf16>>, pipeline.flow<tile<2x[%input_size]xbf16>>) -> (pipeline.flow<tile<1xf32>>)
-  pipeline.write %result to %output_view : pipeline.flow<tile<1xf32>>, view<1xf32>
-  pipeline.return
+  %record_count = index.constant 1 : index
+  %input, %weights, %output = buffer.assume.alignment %input_arg, %weights_arg, %output_arg {minimum_alignment = 64} : buffer, buffer, buffer
+  %tile_memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %single = index.constant 1 : index
+  %double_buffer = index.constant 2 : index
+  %element_bytes = index.constant 2 : index
+  %pair_elements = index.mul %double_buffer, %input_size : index
+  %pair_byte_count = index.mul %pair_elements, %element_bytes : index
+  %pair_bytes = index.cast %pair_byte_count : index to offset
+  %input_storage = buffer.alloca<workgroup> pool(%tile_memory) align(64) %pair_bytes : buffer
+  %input_slots = buffer.view %input_storage[%origin] : buffer -> view<2x[%input_size]xbf16>
+  %inputs = channel.bind<fifo> %input_slots, %double_buffer : view<2x[%input_size]xbf16>, index -> channel<tile<[%input_size]xbf16>>
+  %weight_storage = buffer.alloca<workgroup> pool(%tile_memory) align(64) %pair_bytes : buffer
+  %weight_slots = buffer.view %weight_storage[%origin] : buffer -> view<1x2x[%input_size]xbf16>
+  %resident_weights = channel.bind<fifo> %weight_slots, %single : view<1x2x[%input_size]xbf16>, index -> channel<tile<2x[%input_size]xbf16>>
+  %output_bytes = index.constant 8 : offset
+  %output_storage = buffer.alloca<workgroup> pool(%tile_memory) align(64) %output_bytes : buffer
+  %output_slots = buffer.view %output_storage[%origin] : buffer -> view<2x1xf32>
+  %outputs = channel.bind<fifo> %output_slots, %double_buffer : view<2x1xf32>, index -> channel<tile<1xf32>>
+
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %source_weights = buffer.view %weights[%origin] : buffer -> view<2x[%input_size]xbf16>
+    %weight_write, %weight_destination = channel.reserve %resident_weights : channel<tile<2x[%input_size]xbf16>> -> (write<tile<2x[%input_size]xbf16>>, view<2x[%input_size]xbf16>)
+    %weight_copy = kernel.async.copy %source_weights to %weight_destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<2x[%input_size]xbf16> to view<2x[%input_size]xbf16> -> kernel.async.token
+    %weight_pending = kernel.async.group %weight_copy : kernel.async.token -> kernel.async.group
+    kernel.async.wait %weight_pending {newer_groups = 0} : kernel.async.group
+    channel.publish %weight_write : write<tile<2x[%input_size]xbf16>>
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    %prefetch_count = index.min %double_buffer, %record_count : index
+    scf.for %record = [%begin to %prefetch_count step %step] {
+      func.call @fill_input(%input_size, %record, %input, %inputs) : (index, index, buffer, channel<tile<[%input_size]xbf16>>)
+    }
+    scf.for %record = [%begin to %record_count step %step] {
+      func.call @drain_output(%record, %outputs, %output) : (index, channel<tile<1xf32>>, buffer)
+      %next_record = index.add %record, %prefetch_count : index
+      %has_next = index.cmp ult, %next_record, %record_count : index
+      scf.if %has_next {
+        func.call @fill_input(%input_size, %next_record, %input, %inputs) : (index, index, buffer, channel<tile<[%input_size]xbf16>>)
+      }
+    }
+  }
+
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %weight_read, %weight_values = channel.acquire %resident_weights : channel<tile<2x[%input_size]xbf16>> -> (read<tile<2x[%input_size]xbf16>>, view<2x[%input_size]xbf16>)
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    scf.for %record = [%begin to %record_count step %step] {
+      %input_read, %input_values = channel.acquire %inputs : channel<tile<[%input_size]xbf16>> -> (read<tile<[%input_size]xbf16>>, view<[%input_size]xbf16>)
+      %output_write, %output_values = channel.reserve %outputs : channel<tile<1xf32>> -> (write<tile<1xf32>>, view<1xf32>)
+      func.call @gate_up_tile(%input_size, %input_values, %weight_values, %output_values) : (index, view<[%input_size]xbf16>, view<2x[%input_size]xbf16>, view<1xf32>)
+      channel.publish %output_write : write<tile<1xf32>>
+      channel.release %input_read : read<tile<[%input_size]xbf16>>
+    }
+    channel.release %weight_read : read<tile<2x[%input_size]xbf16>>
+  }
 }

@@ -1,10 +1,9 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/memory_wide_carriers.loom-test
-// RUN: with-checks emit source-low target=wasm:simd128 output=low
+// RUN: emit source-low target=wasm:simd128 output=low
 
 func.def @copy_wide_origin_vectors(%input: buffer, %output: buffer, %byte_offset_input: i64) {
   %source = buffer.assume.alignment %input {minimum_alignment = 64} : buffer
   %destination = buffer.assume.alignment %output {minimum_alignment = 64} : buffer
-  %byte_offset = scalar.assume %byte_offset_input [range(%byte_offset_input, 0, 4096), mul(%byte_offset_input, 64)] : i64
+  %byte_offset = scalar.assume %byte_offset_input [range(%byte_offset_input, 0, 4096), multiple_of(%byte_offset_input, 64)] : i64
   %prefix = scalar.constant 64 : i64
   %source_origin = scalar.addi %byte_offset, %prefix : i64
   %source_offset = index.cast %source_origin : i64 to offset
@@ -17,17 +16,27 @@ func.def @copy_wide_origin_vectors(%input: buffer, %output: buffer, %byte_offset
 }
 
 // ----
-CHECK: * = i32.wrap_i64 %byte_offset
-CHECK: * = i32.load * {offset = 64}
-CHECK: * = i32.load * {offset = 124}
-CHECK: i32.store * {offset = 60}
+low.func.def target<wasm.core.simd128> abi(wasm_function) @copy_wide_origin_vectors(%source: reg<wasm.i32>, %destination: reg<wasm.i32>, %byte_offset: reg<wasm.i64>) asm {
+  %25 = i32.wrap_i64 %byte_offset
+  %26 = i32.add %source, %25
+  %27 = v128.load %26 {offset = 64}
+  %29 = v128.load %26 {offset = 80}
+  %31 = v128.load %26 {offset = 96}
+  %33 = v128.load %26 {offset = 112}
+  %34 = i32.add %destination, %25
+  v128.store %34, %27
+  v128.store %34, %29 {offset = 16}
+  v128.store %34, %31 {offset = 32}
+  v128.store %34, %33 {offset = 48}
+  return
+}
 
 // ====
 
 func.def @copy_wide_origin_scalar(%input: buffer, %output: buffer, %byte_offset_input: i64) {
   %source = buffer.assume.alignment %input {minimum_alignment = 64} : buffer
   %destination = buffer.assume.alignment %output {minimum_alignment = 64} : buffer
-  %byte_offset = scalar.assume %byte_offset_input [range(%byte_offset_input, 0, 4096), mul(%byte_offset_input, 64)] : i64
+  %byte_offset = scalar.assume %byte_offset_input [range(%byte_offset_input, 0, 4096), multiple_of(%byte_offset_input, 64)] : i64
   %prefix = scalar.constant 64 : i64
   %source_origin = scalar.addi %byte_offset, %prefix : i64
   %source_offset = index.cast %source_origin : i64 to offset
@@ -40,15 +49,20 @@ func.def @copy_wide_origin_scalar(%input: buffer, %output: buffer, %byte_offset_
 }
 
 // ----
-CHECK: * = i32.wrap_i64 %byte_offset
-CHECK: * = i32.load * {offset = 64}
-CHECK: i32.store *, %value
+low.func.def target<wasm.core.simd128> abi(wasm_function) @copy_wide_origin_scalar(%source: reg<wasm.i32>, %destination: reg<wasm.i32>, %byte_offset: reg<wasm.i64>) asm {
+  %21 = i32.wrap_i64 %byte_offset
+  %22 = i32.add %source, %21
+  %value = i32.load %22 {offset = 64}
+  %24 = i32.add %destination, %21
+  i32.store %24, %value
+  return
+}
 
 // ====
 
 func.def @exchange_wide_origin(%buffer: buffer, %base_input: i64, %position_input: index, %value: i32) -> (i32) {
   %aligned_buffer = buffer.assume.alignment %buffer {minimum_alignment = 8} : buffer
-  %wide_base = scalar.assume %base_input [range(%base_input, 0, 128), mul(%base_input, 8)] : i64
+  %wide_base = scalar.assume %base_input [range(%base_input, 0, 128), multiple_of(%base_input, 8)] : i64
   %base = index.cast %wide_base : i64 to offset
   %position = index.assume %position_input [range(%position_input, 0, 7)] : index
   %prefix = index.constant 16 : offset
@@ -60,15 +74,22 @@ func.def @exchange_wide_origin(%buffer: buffer, %base_input: i64, %position_inpu
 }
 
 // ----
-CHECK: * = i32.wrap_i64 %wide_base
-CHECK: %previous = i32.load * {offset = 16}
-CHECK: i32.store *, %value {offset = 16}
+low.func.def target<wasm.core.simd128> abi(wasm_function) @exchange_wide_origin(%aligned_buffer: reg<wasm.i32>, %wide_base: reg<wasm.i64>, %position: reg<wasm.i32>, %value: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
+  %18 = i32.wrap_i64 %wide_base
+  %19 = i32.const 4
+  %20 = i32.mul %position, %19
+  %21 = i32.add %18, %20
+  %22 = i32.add %aligned_buffer, %21
+  %previous = i32.load %22 {offset = 16}
+  i32.store %22, %value {offset = 16}
+  return %previous
+}
 
 // ====
 
 func.def @exchange_signed_coordinate(%buffer: buffer, %base_input: offset, %position_input: i32, %value: i32) -> (i32) {
   %aligned_buffer = buffer.assume.alignment %buffer {minimum_alignment = 8} : buffer
-  %base = index.assume %base_input [range(%base_input, 64, 128), mul(%base_input, 8)] : offset
+  %base = index.assume %base_input [range(%base_input, 64, 128), multiple_of(%base_input, 8)] : offset
   %signed_position = scalar.assume %position_input [range(%position_input, -8, -1)] : i32
   %coordinate = index.cast %signed_position : i32 to index
   %bias = index.constant 8 : index
@@ -82,6 +103,12 @@ func.def @exchange_signed_coordinate(%buffer: buffer, %base_input: offset, %posi
 }
 
 // ----
-CHECK: * = i32.mul %signed_position, *
-CHECK: %previous = i32.load * {offset = 48}
-CHECK: i32.store *, %value {offset = 48}
+low.func.def target<wasm.core.simd128> abi(wasm_function) @exchange_signed_coordinate(%aligned_buffer: reg<wasm.i32>, %base: reg<wasm.i32>, %signed_position: reg<wasm.i32>, %value: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
+  %20 = i32.const 4
+  %21 = i32.mul %signed_position, %20
+  %22 = i32.add %base, %21
+  %23 = i32.add %aligned_buffer, %22
+  %previous = i32.load %23 {offset = 48}
+  i32.store %23, %value {offset = 48}
+  return %previous
+}

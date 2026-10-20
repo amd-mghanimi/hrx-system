@@ -106,7 +106,7 @@ template <unsigned Alignment>
     // ERROR@+1: LOWERING/059 "assume_aligned requires one positive power-of-two integer constant without calls or mutation"
     [[loom::assume_aligned(Alignment)]] unsigned* output) {}
 LOOM_CHECK_CASE(invalid_template_alignment) {
-  const auto output = loom::check::fill<unsigned, 16>(0u);
+  const auto output = loom::check::fill<16, unsigned>(0u);
   loom::check::launch<invalid_instance<48>>(output);
 }
 
@@ -119,7 +119,7 @@ template <unsigned Alignment>
   static_assert(Alignment != 64, "instantiated kernel diagnosis");
 }
 LOOM_CHECK_CASE(instantiation_error) {
-  const auto output = loom::check::fill<unsigned, 16>(0u);
+  const auto output = loom::check::fill<16, unsigned>(0u);
   loom::check::launch<diagnosed<64>>(output);
 }
 
@@ -142,4 +142,18 @@ LOOM_CHECK_CASE(instantiation_error) {
 LOOM_CHECK_CASE(check_statement_attribute) {
   // ERROR@+1: LOWERING/059 "assume_aligned requires a leading pointer parameter attribute"
   [[loom::assume_aligned(64)]] loom::check::expect_equal(1, 1);
+}
+
+// ====
+#include <loomcxx/buffer.h>
+[[loom::kernel]] void invalid_scoped_alignment(unsigned* input) {
+  // ERROR@+1: LOWERING/059 "buffer alignment must be a positive power-of-two byte count"
+  auto* aligned = loom::buffer::assume::alignment<48>(input);
+}
+
+// ====
+#include <loomcxx/buffer.h>
+[[loom::kernel]] void interior_scoped_alignment(unsigned* input) {
+  // ERROR@+1: LOWERING/059 "buffer alignment assumption requires a zero-origin pointer"
+  auto* aligned = loom::buffer::assume::alignment<16>(input + 1);
 }

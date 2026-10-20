@@ -9,66 +9,67 @@
 
 iree_add_all_subdirs()
 
-if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 loom_cc_library(
   NAME
-    artifact_provider
+    loom_check
   HDRS
-    "artifact_provider.h"
+    "check/loom_check.h"
   SRCS
-    "artifact_provider.c"
+    "check/loom_check.c"
   DEPS
     iree::base
-    loom::target::arch::spirv::descriptors::low_registry
-    loom::target::arch::spirv::profile
-    loom::target::emit::spirv::module_builder
-    loom::target::emit::spirv::module_emitter
-    loom::target::entry_selection
-    loom::target::function_contract
-    loom::target::low_descriptor_registry
-    loom::target::reporting::artifact_manifest_collect
-    loom::target::reporting::report
-    loom::target::types
-    loom::tooling::compile::artifact
+    loom::target::tool::spirv
+    loom::tools::loom-check::execute
   PUBLIC
 )
 endif()
 
-if(LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 loom_cc_library(
   NAME
-    device_provider
+    check_source_low
   HDRS
-    "device_provider.h"
+    "check/source_low.h"
   SRCS
-    "device_provider.c"
+    "check/source_low.c"
   DEPS
-    ::artifact_provider
-    ::vulkan_profile
     iree::base
-    loom::target::arch::spirv::facts
-    loom::target::arch::spirv::profile
-    loom::tooling::execution::hal::device_provider
-    loom::tooling::execution::hal::runtime
+    loom::binding::c::loomc
+    loom::binding::c::target::spirv
+    loom::tools::loom-check::execute
+    loom::tools::loom-check::source_low
   PUBLIC
 )
 endif()
 
-if(LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 loom_cc_library(
   NAME
-    execution_provider
+    check_provider
   HDRS
-    "execution_provider.h"
+    "check/provider.h"
   SRCS
-    "execution_provider.c"
+    "check/provider.c"
   DEPS
-    ::device_provider
+    ::check_source_low
+    ::loom_check
     iree::base
-    loom::target::arch::spirv::provider
-    loom::tooling::execution::execution_provider
-    loom::tooling::execution::hal::execution_backend
+    loom::tools::loom-check::provider
   PUBLIC
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+iree_execution_test_suite(
+  NAME
+    check_source_low_test
+  MANIFESTS
+    "check/source_low.test.json"
+  TOOLS
+    "loom-check=loom::tools::loom-check"
+  LABELS
+    "hostonly"
 )
 endif()
 
@@ -81,145 +82,13 @@ loom_cc_library(
   SRCS
     "testbench_requirements.c"
   DEPS
-    ::vulkan_profile
     iree::base
     iree::hal::drivers::vulkan::device_spec
+    loom::binding::c::loomc
+    loom::binding::c::target::spirv
     loom::tooling::execution::hal::testbench_actual
     loom::tooling::testbench::requirements
   PUBLIC
-)
-endif()
-
-if(IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_library(
-  NAME
-    vulkan_profile
-  HDRS
-    "vulkan_profile.h"
-  SRCS
-    "vulkan_profile.c"
-  DEPS
-    iree::base
-    iree::hal
-    iree::hal::drivers::vulkan
-    iree::hal::drivers::vulkan::api
-    iree::hal::drivers::vulkan::device_spec
-    loom::target::arch::spirv::cooperative_properties
-    loom::target::arch::spirv::features
-    loom::target::arch::spirv::profile
-    loom::target::arch::spirv::records::target_records
-    loom::target::types
-  PUBLIC
-)
-endif()
-
-if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_test(
-  NAME
-    artifact_provider_test
-  SRCS
-    "artifact_provider_test.cc"
-  DEPS
-    ::artifact_provider
-    iree::base
-    iree::base::internal::arena
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::codegen::low::text_asm
-    loom::format::text::parser
-    loom::ir
-    loom::ops::op_registry
-    loom::target::arch::spirv::descriptors::low_registry
-    loom::target::arch::spirv::ops
-    loom::testing::byte_sequence
-    loom::testing::module_ptr
-  LABELS
-    "iree-build-requirement=loom.target.arch.spirv"
-    "iree-build-requirement=loom.emit.spirv"
-)
-endif()
-
-if(LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_test(
-  NAME
-    device_provider_test
-  SRCS
-    "device_provider_test.cc"
-  DEPS
-    ::device_provider
-    ::vulkan_profile
-    iree::base
-    iree::hal
-    iree::hal::drivers::vulkan::device_spec
-    iree::hal::utils::device_spec_builder
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::target::arch::spirv::profile
-    loom::tooling::execution::hal::runtime
-  LABELS
-    "iree-build-requirement=loom.target.arch.spirv"
-    "iree-build-requirement=loom.emit.spirv"
-)
-endif()
-
-if(IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_test(
-  NAME
-    module_emitter_test
-  SRCS
-    "module_emitter_test.cc"
-  DEPS
-    ::vulkan_profile
-    iree::base::internal::arena
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::analysis::symbol_facts
-    loom::codegen::low::text_asm
-    loom::format::text::parser
-    loom::ir
-    loom::ops::func_symbol_facts
-    loom::ops::op_defs
-    loom::ops::op_registry
-    loom::ops::target
-    loom::target::arch::spirv::descriptors::low_registry
-    loom::target::arch::spirv::features
-    loom::target::arch::spirv::ops
-    loom::target::arch::spirv::profile
-    loom::target::emit::spirv::module_emitter
-    loom::target::facts_builder
-    loom::target::function_contract
-    loom::target::function_version
-    loom::target::profile
-    loom::target::types
-    loom::testing::module_ptr
-  LABELS
-    "iree-build-requirement=loom.target.arch.spirv"
-    "iree-build-requirement=loom.emit.spirv"
-)
-endif()
-
-if(IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_test(
-  NAME
-    vulkan_profile_test
-  SRCS
-    "vulkan_profile_test.cc"
-  DEPS
-    ::vulkan_profile
-    iree::base
-    iree::hal
-    iree::hal::drivers::vulkan::api
-    iree::hal::drivers::vulkan::device_spec
-    iree::hal::utils::device_spec_builder
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::target::arch::spirv::cooperative_properties
-    loom::target::arch::spirv::features
-    loom::target::arch::spirv::profile
-    loom::target::types
-  LABELS
-    "iree-build-requirement=loom.target.arch.spirv"
-    "iree-build-requirement=loom.emit.spirv"
 )
 endif()
 
@@ -267,6 +136,118 @@ loom_check_compile_tests(
   TARGETS
     loom::target::spirv::vulkan1.3+bda
 )
+endif()
+
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cxx_configured_workgroup_storage_test_four_stages_execute_spirv_vulkan_hardware_test
+  CORRECTNESS_ONLY
+  MODULE
+    "loom::import::cxx::test::configured_workgroup_storage_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+    "--config=test.buffer.stage_count=4"
+    "--case=configured_workgroup_four_stages"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cxx_configured_workgroup_storage_test_one_stage_execute_spirv_vulkan_hardware_test
+  CORRECTNESS_ONLY
+  MODULE
+    "loom::import::cxx::test::configured_workgroup_storage_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+    "--config=test.buffer.stage_count=1"
+    "--case=configured_workgroup_one_stage"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+endif()
+
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cxx_barrier_helpers_test_execute_spirv_vulkan_hardware_test
+  MODULE
+    "loom::import::cxx::test::barrier_helpers_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+endif()
+
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cxx_borrowed_storage_test_execute_spirv_vulkan_hardware_test
+  MODULE
+    "loom::import::cxx::test::borrowed_storage_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
 endif()
 
 if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
@@ -327,6 +308,33 @@ if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
 loom_execution_test(
   NAME
+    cxx_pointer_origins_test_execute_spirv_vulkan_hardware_test
+  MODULE
+    "loom::import::cxx::test::pointer_origins_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+endif()
+
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
     cxx_vector_lookup_test_execute_spirv_vulkan_hardware_test
   MODULE
     "loom::import::cxx::test::vector_lookup_module"
@@ -350,22 +358,13 @@ loom_execution_test(
 endif()
 endif()
 
-if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_test_module(
-  NAME
-    buffer_selection_test_module
-  SRCS
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/source_low/buffer_selection.loom"
-)
-endif()
-
-if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
 loom_execution_test(
   NAME
-    buffer_selection_test_execute_spirv_vulkan_hardware_test
+    cxx_workload_configuration_test_execute_spirv_vulkan_hardware_test
   MODULE
-    "::buffer_selection_test_module"
+    "loom::import::cxx::test::workload_configuration_module"
   RUNNER_ARGS
     "--device=vulkan"
     "--vulkan_validation_layers=false"
@@ -384,15 +383,33 @@ loom_execution_test(
     "gpu-device"
 )
 endif()
+endif()
 
-loom_check_compile_tests(
+if(LOOM_IMPORT_CXX AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
   NAME
-    "buffer_selection_test"
-  SRC
-    "::buffer_selection_test_module"
-  TARGETS
-    loom::target::spirv::vulkan1.3+bda
+    cxx_collective_scans_test_execute_spirv_vulkan_hardware_test
+  MODULE
+    "loom::import::cxx::test::collective_scans_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
 )
+endif()
 endif()
 
 if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
@@ -400,20 +417,19 @@ loom_test_module(
   NAME
     vulkan_tests_module
   SRCS
+    "test/cooperative_integer.loom"
     "test/multiple_entries.loom"
     "test/spirv_vulkan_atomic_hal_actual.loom"
     "test/spirv_vulkan_coop_hal_actual.loom"
+    "test/spirv_vulkan_coop_memory.loom"
     "test/spirv_vulkan_coop_u8_hal_actual.loom"
     "test/spirv_vulkan_hal_actual.loom"
     "test/spirv_vulkan_integer_hal_actual.loom"
     "test/spirv_vulkan_quantized_hal_actual.loom"
+    "test/spirv_vulkan_scalar_abi.loom"
     "test/spirv_vulkan_vector_float.loom"
     "test/spirv_vulkan_workgroup_offsets.loom"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/checked_benchmarks/moe_routed_combine_loop_f32.loom"
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/conformance/atomic_add_f32_subnormals.loom"
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/conformance/global_atomic_add_f32.loom"
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/conformance/loop_rotating_values.loom"
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/conformance/loop_rotating_views.loom"
 )
 endif()
 
@@ -444,6 +460,119 @@ loom_execution_test(
 endif()
 endif()
 
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_test_module(
+  NAME
+    cooperative_initializer_tests_module
+  SRCS
+    "test/cooperative_initializers.loom"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cooperative_initializer_tests_carrier_1_execute_spirv_vulkan_hardware_test
+  CORRECTNESS_ONLY
+  MODULE
+    "::cooperative_initializer_tests_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+    "--config=initializer.carrier_width=1"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cooperative_initializer_tests_carrier_4_execute_spirv_vulkan_hardware_test
+  CORRECTNESS_ONLY
+  MODULE
+    "::cooperative_initializer_tests_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+    "--config=initializer.carrier_width=4"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    cooperative_initializer_tests_carrier_8_execute_spirv_vulkan_hardware_test
+  CORRECTNESS_ONLY
+  MODULE
+    "::cooperative_initializer_tests_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+    "--config=initializer.carrier_width=8"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_test_module(
+  NAME
+    vulkan_extended_types_tests_module
+  SRCS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/checked_benchmarks/split_kv_online_softmax_combine_f32.loom"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/checked_benchmarks/split_kv_online_softmax_combine_f32_benchmark.loom"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_check_compile_tests(
+  NAME
+    "vulkan_extended_types_tests"
+  SRC
+    "::vulkan_extended_types_tests_module"
+  TARGETS
+    loom::target::spirv::vulkan1.3+bda+extended-types
+)
+endif()
+
 if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
 iree_native_test(
   NAME
@@ -452,7 +581,7 @@ iree_native_test(
     "{{${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/spirv/test/multiple_entries.loom}}"
     "--device=vulkan"
     "--vulkan_validation_layers=false"
-    "--function=@combine"
+    "--root=@combine"
     "--kernel-input-buffer=1xi32=6"
     "--kernel-input-buffer=1xi32=10"
     "--kernel-input-buffer=1xi32=0"
@@ -485,7 +614,6 @@ loom_generated_file(
     "--output="
   ARGS
     "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/spirv/test/multiple_entries.loom"
-    "--product=kernel"
     "--target=spirv:vulkan1.3+bda"
   INPUTS
     "test/multiple_entries.loom"
@@ -510,6 +638,41 @@ iree_c_embed_data(
 )
 endif()
 
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_generated_file(
+  NAME
+    subgroup_entries_binary
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "subgroup_entries.spv"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/spirv/test/subgroup_entries.loom"
+  INPUTS
+    "test/subgroup_entries.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+iree_c_embed_data(
+  NAME
+    subgroup_entries_spv
+  SRCS
+    "${CMAKE_CURRENT_BINARY_DIR}/subgroup_entries.spv"
+  C_FILE_OUTPUT
+    "subgroup_entries_spv.c"
+  H_FILE_OUTPUT
+    "subgroup_entries_spv.h"
+  IDENTIFIER
+    "loom_spirv_subgroup_entries"
+  TESTONLY
+  PUBLIC
+)
+endif()
+
 if(IREE_HAL_DRIVER_VULKAN AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
 loom_cc_test(
   NAME
@@ -519,6 +682,7 @@ loom_cc_test(
     "artifact_execution_test.cc"
   DEPS
     ::multiple_entries_spv
+    ::subgroup_entries_spv
     iree::base::tooling::flags
     iree::hal
     iree::hal::cts::util::registry
@@ -548,11 +712,10 @@ loom_generated_file(
   OUTPUT_FLAG
     "--output="
   ARGS
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/source_low/memory_float8_conversion.loom"
-    "--product=kernel"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/spirv/test/float8_memory.loom"
     "--target=spirv:vulkan1.3+bda+extended-types"
   INPUTS
-    "${PROJECT_SOURCE_DIR}/loom/src/loom/test/corpus/source_low/memory_float8_conversion.loom"
+    "test/float8_memory.loom"
   TESTONLY
 )
 endif()

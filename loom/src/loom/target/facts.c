@@ -54,10 +54,14 @@ bool loom_target_facts_are_equivalent(const loom_target_facts_t* lhs,
   if (lhs == rhs) {
     return true;
   }
-  return lhs->fact_type == rhs->fact_type &&
-         lhs->explicit_fields == rhs->explicit_fields &&
-         loom_target_facts_satisfy_specialization_requirement(lhs, rhs) &&
-         loom_target_facts_satisfy_specialization_requirement(rhs, lhs);
+  if (lhs->fact_type != rhs->fact_type ||
+      lhs->explicit_fields != rhs->explicit_fields ||
+      !loom_target_facts_satisfy_specialization_requirement(lhs, rhs) ||
+      !loom_target_facts_satisfy_specialization_requirement(rhs, lhs)) {
+    return false;
+  }
+  return lhs->fact_type->family_state_equivalent == NULL ||
+         lhs->fact_type->family_state_equivalent(lhs, rhs);
 }
 
 bool loom_target_facts_structural_satisfy_specialization_requirement(
@@ -91,6 +95,8 @@ bool loom_target_snapshot_satisfies_specialization_requirement(
              target_requirement->codegen_format &&
          effective_snapshot->artifact_format ==
              target_requirement->artifact_format &&
+         effective_snapshot->subgroup_partition >=
+             target_requirement->subgroup_partition &&
          effective_snapshot->default_pointer_bitwidth ==
              target_requirement->default_pointer_bitwidth &&
          effective_snapshot->index_bitwidth ==

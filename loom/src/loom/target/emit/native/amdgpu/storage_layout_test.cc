@@ -59,8 +59,8 @@ class AmdgpuStorageLayoutTest : public ::testing::Test {
     loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     return loom_symbol_ref_t{
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -77,7 +77,7 @@ class AmdgpuStorageLayoutTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_low_func_def_build(
         &module_builder, LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_TARGET,
         /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-        /*purity=*/0, /*inline_policy=*/0,
+        /*effect_contract=*/0, /*inline_policy=*/0,
         /*allocation=*/0, /*schedule=*/0,
         /*descriptor_set=*/representation_contract, target_ref, /*abi=*/0,
         loom_named_attr_slice_t{}, loom_named_attr_slice_t{},
@@ -112,13 +112,15 @@ class AmdgpuStorageLayoutTest : public ::testing::Test {
     IREE_CHECK_OK(loom_low_storage_view_build(
         &body_builder_, source, byte_offset, byte_length, result_type,
         LOOM_LOCATION_UNKNOWN, &op));
+    IREE_CHECK_OK(loom_low_storage_layout_builder_append(
+        module_, op, &layout_arena_, &source_layout_builder_));
     return loom_low_storage_view_result(op);
   }
 
   iree_status_t BuildLayout(loom_amdgpu_storage_layout_t* out_layout) {
     loom_low_storage_layout_t source_layout = {};
-    loom_low_storage_layout_builder_finish(&source_layout_builder_,
-                                           &source_layout);
+    IREE_RETURN_IF_ERROR(loom_low_storage_layout_builder_finish(
+        &source_layout_builder_, &layout_arena_, &source_layout));
     return loom_amdgpu_storage_layout_build(&source_layout, &layout_arena_,
                                             out_layout);
   }
@@ -130,8 +132,8 @@ class AmdgpuStorageLayoutTest : public ::testing::Test {
                          uint64_t expected_byte_size,
                          uint64_t expected_byte_alignment) {
     loom_amdgpu_storage_layout_reference_t reference = {};
-    loom_amdgpu_storage_layout_lookup_reference(&layout, module_,
-                                                storage_value_id, &reference);
+    loom_amdgpu_storage_layout_lookup_reference(&layout, storage_value_id,
+                                                &reference);
     const loom_amdgpu_storage_layout_reservation_t& reservation =
         reference.reservation;
     EXPECT_EQ(reservation.space, expected_space);
@@ -176,8 +178,7 @@ TEST_F(AmdgpuStorageLayoutTest, ResolvesViewsAgainstProjectedOffsets) {
   loom_amdgpu_storage_layout_t layout = {};
   IREE_EXPECT_OK(BuildLayout(&layout));
   loom_amdgpu_storage_layout_reference_t reference = {};
-  loom_amdgpu_storage_layout_lookup_reference(&layout, module_, view,
-                                              &reference);
+  loom_amdgpu_storage_layout_lookup_reference(&layout, view, &reference);
   EXPECT_EQ(reference.reservation.space, LOOM_STORAGE_SPACE_PRIVATE);
   EXPECT_EQ(reference.reservation.byte_offset, 8u);
   EXPECT_EQ(reference.byte_offset, 2u);

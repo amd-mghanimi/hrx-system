@@ -130,6 +130,54 @@ typedef struct loom_target_residency_model_t {
   loom_target_residency_derived_resource_table_t derived_resources;
 } loom_target_residency_model_t;
 
+// One replacement in a dense direct-resource vector.
+typedef struct loom_target_residency_direct_resource_override_t {
+  // Direct resource ID whose units are replaced.
+  uint16_t resource_id;
+  // Replacement resource units.
+  uint32_t units;
+} loom_target_residency_direct_resource_override_t;
+
+// Function-local view of immutable target curves under fixed residency bounds.
+// Launch shape or resources not being varied by a planner can make upper tiers
+// unattainable, while one indivisible launch unit can require a minimum tier.
+// Neither bound changes the underlying hardware curves.
+typedef struct loom_target_residency_view_t {
+  // Borrowed immutable target policy, or NULL when unavailable.
+  const loom_target_residency_model_t* model;
+  // Highest attainable tier, at most model->best_tier. Zero is a real limit.
+  uint32_t tier_limit;
+  // Minimum tier required by one indivisible launch unit, or zero when the
+  // launch shape is unknown or imposes no requirement.
+  uint32_t required_tier;
+} loom_target_residency_view_t;
+
+// Binds fixed residency bounds to a model. UINT32_MAX selects the model's full
+// upper range. An unavailable model produces an empty view without bounds.
+static inline loom_target_residency_view_t
+loom_target_residency_view_with_bounds(
+    const loom_target_residency_model_t* model, uint32_t tier_limit,
+    uint32_t required_tier) {
+  loom_target_residency_view_t view = {
+      .model = model,
+      .tier_limit = model != NULL ? iree_min(model->best_tier, tier_limit) : 0,
+      .required_tier = model != NULL ? required_tier : 0,
+  };
+  return view;
+}
+
+// Binds a fixed residency ceiling without an indivisible launch requirement.
+static inline loom_target_residency_view_t loom_target_residency_view(
+    const loom_target_residency_model_t* model, uint32_t tier_limit) {
+  return loom_target_residency_view_with_bounds(model, tier_limit, 0);
+}
+
+// Returns true when |tier| admits the view's indivisible launch unit.
+static inline bool loom_target_residency_view_meets_required_tier(
+    loom_target_residency_view_t view, uint32_t tier) {
+  return view.required_tier == 0 || tier >= view.required_tier;
+}
+
 // Flags describing one cliff-chain evaluation.
 typedef uint32_t loom_target_residency_cliff_evaluation_flags_t;
 enum loom_target_residency_cliff_evaluation_flag_bits_e {
@@ -237,6 +285,10 @@ enum loom_target_residency_summary_flag_bits_e {
   LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_INCOMPLETE_RESOURCE_COUNTS = 1u << 4,
   // The fixed workgroup size required for launch accounting is unavailable.
   LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_UNKNOWN_WORKGROUP_SIZE = 1u << 5,
+  // A minimum tier for one indivisible launch unit is available.
+  LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_HAS_REQUIRED_TIER = 1u << 6,
+  // The selected tier cannot admit one indivisible launch unit.
+  LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_REQUIRED_TIER_UNSATISFIED = 1u << 7,
 };
 
 // Compact target-owned summary retained after a full residency query expires.
@@ -253,6 +305,9 @@ typedef struct loom_target_residency_summary_t {
   uint32_t best_tier;
   // Current residency tier selected by exact final resources.
   uint32_t tier;
+  // Minimum tier required by one indivisible launch unit when
+  // HAS_REQUIRED_TIER is set.
+  uint32_t required_tier;
   // First higher whole-model tier reachable by reducing limiting resources
   // without changing the launch shape, when HAS_NEXT_BETTER_TIER is set.
   uint32_t next_better_tier;
@@ -391,26 +446,69 @@ loom_target_residency_derived_resource_member_range(
   return table->member_ranges_by_direct_resource[direct_resource_id];
 }
 
-// Evaluates one complete or suffix residency-cliff chain.
+// Evaluates one actionable residency-cliff chain.
 //
-// |initial_tier| is the tier before the first supplied cliff. This lets an
-// incremental planner evaluate only cliffs that remain actionable. The cliff
-// chain must be strictly ordered, contiguous in tier, and descending.
+// |initial_tier| bounds the tier before the first supplied cliff. Every
+// supplied cliff must lead below that bound. Incremental planners pass their
+// retained actionable suffix; complete model chains use the model's best tier.
+// The chain must be strictly ordered, contiguous and descending. Evaluation
+// does not rediscover the suffix or rewrite the chain to represent a function
+// ceiling.
 void loom_target_residency_evaluate_cliffs(
     const loom_target_residency_cliff_t* cliffs, iree_host_size_t cliff_count,
     uint32_t initial_tier, uint64_t units,
     loom_target_residency_cliff_evaluation_t* out_evaluation);
 
+// Returns the first cliff below |tier_limit|, or |cliff_count| when none can
+// lower it. Incremental planners retain this cursor instead of reconsidering
+// unattainable tiers for each candidate.
+iree_host_size_t loom_target_residency_cliff_start_below_tier(
+    const loom_target_residency_cliff_t* cliffs, iree_host_size_t cliff_count,
+    uint32_t tier_limit);
+
+// Evaluates the complete model and applies the view's fixed ceiling.
+//
+// |direct_resource_units| is dense by direct resource ID and has exactly
+// |direct_resource_unit_count| entries. This trusted hot-path query performs no
+// allocation; the model and resource vector have already crossed their owning
+// validation boundaries.
+uint32_t loom_target_residency_evaluate_tier(
+    loom_target_residency_view_t view, const uint32_t* direct_resource_units,
+    iree_host_size_t direct_resource_unit_count);
+
+// Evaluates the complete model after replacing selected direct resources.
+//
+// Override resource IDs are unique, valid model direct-resource IDs. The base
+// vector follows the same dense contract as
+// loom_target_residency_evaluate_tier. This trusted hot-path query performs no
+// allocation.
+uint32_t loom_target_residency_evaluate_tier_with_direct_resource_overrides(
+    loom_target_residency_view_t view, const uint32_t* direct_resource_units,
+    iree_host_size_t direct_resource_unit_count,
+    const loom_target_residency_direct_resource_override_t* overrides,
+    iree_host_size_t override_count);
+
+// Returns true when any direct or derived resource selects a lower tier in
+// |candidate_direct_resource_units| than in |baseline_direct_resource_units|.
+//
+// Both vectors are dense by direct resource ID and have exactly
+// |direct_resource_unit_count| entries. The view ceiling is applied to each
+// resource before comparison so cliffs above an unattainable tier are ignored.
+bool loom_target_residency_any_resource_tier_decreases(
+    loom_target_residency_view_t view,
+    const uint32_t* baseline_direct_resource_units,
+    const uint32_t* candidate_direct_resource_units,
+    iree_host_size_t direct_resource_unit_count);
+
 // Evaluates the whole-model tier after overriding one direct resource.
 //
-// |direct_resource_units| is a trusted planning vector dense by direct
-// resource ID with the count declared by |model|. The selected resource is
-// evaluated with |override_units| instead of its vector entry. This performs no
-// allocation and is intended for hot-path candidate comparisons.
+// |view.model| is available. |direct_resource_units| is a planning vector dense
+// by direct resource ID with the count declared by |view.model|. The selected
+// resource is evaluated with |override_units| instead of its vector entry. This
+// performs no allocation and is intended for hot-path candidate comparisons.
 uint32_t loom_target_residency_evaluate_tier_with_direct_resource_override(
-    const loom_target_residency_model_t* model,
-    const uint32_t* direct_resource_units, uint16_t direct_resource_id,
-    uint32_t override_units);
+    loom_target_residency_view_t view, const uint32_t* direct_resource_units,
+    uint16_t direct_resource_id, uint32_t override_units);
 
 // Evaluates all resources and the resulting whole-model residency tier.
 //

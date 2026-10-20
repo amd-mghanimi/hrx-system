@@ -34,6 +34,7 @@ loom_cc_library(
   DEPS
     iree::base
     iree::base::core_headers
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -47,7 +48,6 @@ loom_cc_library(
   DEPS
     iree::base
     loom::ir
-    loom::ops::kernel
     loom::ops::op_defs
     loom::target::arch::cmd::lower::program_plan
     loom::target::arch::cmd::lower::serialize
@@ -106,7 +106,7 @@ loom_check_test_suite(
     "test/bytecode.loom-test"
     "test/diagnostics.loom-test"
     "test/low.loom-test"
-    "test/preparation.loom-test"
+    "test/planning.loom-test"
     "test/roundtrip.loom-test"
     "test/scheduling.loom-test"
     "test/storage.loom-test"

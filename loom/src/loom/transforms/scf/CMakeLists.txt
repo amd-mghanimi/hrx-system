@@ -27,6 +27,7 @@ loom_cc_library(
     loom::rewrite::pattern_registry
     loom::rewrite::rewriter
     loom::transforms::cleanup::patterns
+    loom::util::predicate_facts
     loom::util::walk
   PUBLIC
 )
@@ -55,6 +56,7 @@ loom_cc_library(
   DEPS
     iree::base
     iree::base::internal::arena
+    loom::ir
     loom::rewrite::remap
   PUBLIC
 )
@@ -89,7 +91,9 @@ loom_cc_library(
     ::scf_body
     iree::base
     loom::ir
+    loom::ops::index
     loom::ops::op_defs
+    loom::ops::scf
   PUBLIC
 )
 
@@ -107,12 +111,14 @@ loom_cc_library(
     iree::base
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ops::index
     loom::ops::op_defs
     loom::ops::scalar
     loom::ops::scf
+    loom::ops::vector
     loom::pass::report
     loom::pass::types
     loom::pass::value_facts
@@ -136,6 +142,7 @@ loom_cc_library(
   DEPS
     iree::base
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::cfg
     loom::ops::index
@@ -147,6 +154,7 @@ loom_cc_library(
     loom::rewrite::remap
     loom::rewrite::rewriter
     loom::target::function_version
+    loom::util::predicate_facts
   PUBLIC
 )
 
@@ -163,6 +171,7 @@ loom_cc_library(
     iree::base
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ops::index
@@ -193,6 +202,7 @@ loom_cc_library(
     loom::analysis::movement
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::op_defs
     loom::ops::scf

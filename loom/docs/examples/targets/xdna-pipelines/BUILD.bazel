@@ -1,0 +1,30 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#
+# bazel-to-cmake: skip
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],
+)
+
+sh_test(
+    name = "trajectory_test",
+    srcs = [".doc-generate.sh"],
+    data = [
+        "run.sh",
+        "//loom/binding/c/benchmark/kernels:ffn/gate_up_quadratic_bf16_xdna.loom",
+        "//loom/docs/examples:example.shlib",
+        "//loom/src/loom/tools/loom-compile",
+        "//loom/src/loom/tools/loom-format",
+    ],
+    target_compatible_with = select({
+        "//loom/config/target:xdna_artifacts": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

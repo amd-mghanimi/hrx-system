@@ -726,7 +726,7 @@ iree_status_t loom_type_dependencies_collect_immediate(
     default:
       break;
   }
-  if (loom_type_is_shaped(type) || loom_type_is_pool(type)) {
+  if (loom_type_has_dimensions(type)) {
     for (uint8_t i = 0; i < loom_type_rank(type); ++i) {
       if (loom_type_dim_is_dynamic_at(type, i)) {
         IREE_RETURN_IF_ERROR(loom_type_dependencies_add(

@@ -90,7 +90,7 @@ function(loom_check_test_suite)
     _RULE
     ""
     "NAME;RUNNER;TEST_NAME_PREFIX_TO_STRIP;RESOURCE_GROUP;TIMEOUT"
-    "SRCS;DATA;ENV;LABELS"
+    "SRCS;ARGS;DATA;ENV;LABELS"
     ${ARGN}
   )
 
@@ -144,6 +144,7 @@ function(loom_check_test_suite)
         "${_TEST_NAME}"
       WORKING_DIRECTORY "${IREE_ROOT_DIR}"
       ARGS
+        ${_RULE_ARGS}
         "--source-prefix-map=${IREE_ROOT_DIR}/="
         "--source-prefix-map={{${_ABS_SRC}}}=${_LOGICAL_SRC}"
         "{{${_ABS_SRC}}}"

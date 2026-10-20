@@ -7,9 +7,9 @@
 // Shared proof helpers for scalar.cmpi and scalar.cmpf.
 //
 // These helpers centralize comparison facts used by fact inference and
-// structural canonicalization. Integer range proofs use signed fact intervals
-// directly and only reuse them for unsigned predicates when both ranges are
-// proven non-negative.
+// structural canonicalization. Integer facts use signed intervals. Unsigned
+// proofs preserve ordering on each side of zero and use the full unsigned
+// envelope when a signed interval crosses zero.
 
 #ifndef LOOM_OPS_SCALAR_COMPARE_H_
 #define LOOM_OPS_SCALAR_COMPARE_H_

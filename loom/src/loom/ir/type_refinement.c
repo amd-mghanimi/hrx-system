@@ -9,7 +9,7 @@
 #include <string.h>
 
 static bool loom_type_refinement_has_dimensions(loom_type_t type) {
-  return loom_type_is_shaped(type) || loom_type_is_pool(type);
+  return loom_type_has_dimensions(type);
 }
 
 static bool loom_type_refinement_has_element_or_role(loom_type_t type) {

@@ -102,13 +102,17 @@ function(iree_cc_test)
   endif()
 
   set_target_properties(${_NAME} PROPERTIES OUTPUT_NAME "${_RULE_NAME}")
-  target_sources(${_NAME}
-    PRIVATE
-      ${_RULE_SRCS}
-  )
-  foreach(_SOURCE IN LISTS _RULE_SRCS)
-    iree_generated_output_add_consumer("${_SOURCE}" "${_NAME}")
-  endforeach()
+  if(_RULE_SRCS)
+    target_sources(${_NAME}
+      PRIVATE
+        ${_RULE_SRCS}
+    )
+    foreach(_SOURCE IN LISTS _RULE_SRCS)
+      iree_generated_output_add_consumer("${_SOURCE}" "${_NAME}")
+    endforeach()
+  else()
+    iree_add_empty_object(${_NAME})
+  endif()
   target_include_directories(${_NAME} SYSTEM
     PUBLIC
       "$<BUILD_INTERFACE:${IREE_SOURCE_DIR};${IREE_BINARY_DIR}>"
@@ -136,6 +140,7 @@ function(iree_cc_test)
     PUBLIC
       ${_RULE_DEPS}
       ${IREE_DEFAULT_LINK_LIBRARIES}
+      ${IREE_DEFAULT_EXECUTABLE_LINK_LIBRARIES}
   )
 
   # Add all IREE targets to a folder in the IDE for organization.

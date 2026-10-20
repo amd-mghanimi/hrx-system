@@ -1,0 +1,58 @@
+// RUN: pass inline-callables,cse
+
+// Composition stays in the same invocation. Queries can be commoned, but the
+// child allocations remain distinct even when they select the same memory.
+func.decl @use(%storage: buffer)
+
+pipeline.def @scratch(%memory: pool, %bytes: offset) run() {
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @use(%storage) : (buffer)
+  }
+}
+
+pipeline.def<kernel> public @same_invocation() run() {
+  %first = pipeline.memory<workgroup>[0, 2] : pool
+  %second = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 128 : offset
+  pipeline.compose @scratch[%first, %bytes]() : [pool, offset]()
+  pipeline.compose @scratch[%second, %bytes]() : [pool, offset]()
+}
+
+// ----
+func.decl @use(%storage: buffer)
+
+pipeline.def<kernel> public @same_invocation() run() {
+  %first = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 128 : offset
+  %storage$7 = buffer.alloca<workgroup> pool(%first) align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @use(%storage$7) : (buffer)
+  }
+  %storage$3 = buffer.alloca<workgroup> pool(%first) align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @use(%storage$3) : (buffer)
+  }
+}
+
+// ====
+// RUN: pass inline-callables,cse
+
+// A device-local query cannot lose its execution boundary when composed into
+// a heterogeneous owner. Generic construction receives the selected pool.
+target.decl @npu
+
+func.decl @use(%storage: buffer)
+
+pipeline.def<kernel> target(@npu) @device_work(%column: index) run() {
+  %memory = pipeline.memory<workgroup>[%column, 2] : pool
+  %bytes = index.constant 128 : offset
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+    func.call @use(%storage) : (buffer)
+  }
+}
+
+pipeline.def public @heterogeneous(%column: index) run() {
+  pipeline.compose @device_work[%column]() : [index]()
+}

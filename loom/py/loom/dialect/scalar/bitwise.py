@@ -17,6 +17,7 @@ from loom.dsl import (
     AttrDef,
     BitRangeWithinElementWidth,
     ElementWidthAtLeastAttr,
+    ExecutionCondition,
     Op,
     Operand,
     OpPhase,
@@ -43,6 +44,7 @@ scalar_andi = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_andi_canonicalize",
     examples=["%result = scalar.andi %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 scalar_ori = binary_op(
     "scalar.ori",
@@ -55,6 +57,7 @@ scalar_ori = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_ori_canonicalize",
     examples=["%result = scalar.ori %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 scalar_xori = binary_op(
     "scalar.xori",
@@ -67,6 +70,7 @@ scalar_xori = binary_op(
     traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     canonicalize="loom_scalar_xori_canonicalize",
     examples=["%result = scalar.xori %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -80,10 +84,12 @@ scalar_shli = binary_op(
     type_constraint=INTEGER,
     doc="Left shift.",
     flags=("overflow", IntOverflowFlags),
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_LEFT,
     facts="loom_scalar_shli_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_shli_canonicalize",
     examples=["%result = scalar.shli %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 scalar_shrsi = binary_op(
     "scalar.shrsi",
@@ -91,10 +97,12 @@ scalar_shrsi = binary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
     doc="Arithmetic right shift (sign-extending).",
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_RIGHT,
     facts="loom_scalar_shrsi_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_shrsi_canonicalize",
     examples=["%result = scalar.shrsi %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 scalar_shrui = binary_op(
     "scalar.shrui",
@@ -102,10 +110,12 @@ scalar_shrui = binary_op(
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
     doc="Logical right shift (zero-extending).",
+    execution_condition=ExecutionCondition.INTEGER_SHIFT_RIGHT,
     facts="loom_scalar_shrui_facts",
     traits=[DISTRIBUTION_TRANSFER],
     canonicalize="loom_scalar_shrui_canonicalize",
     examples=["%result = scalar.shrui %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -117,20 +127,24 @@ scalar_rotli = binary_op(
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Left rotate.",
+    doc="Rotate bits left by the count modulo the integer width. One-bit rotation is identity.",
     facts="loom_scalar_rotli_facts",
     canonicalize="loom_scalar_rotli_canonicalize",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.rotli %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 scalar_rotri = binary_op(
     "scalar.rotri",
     group=scalar_ops,
     phase=OpPhase.EXECUTABLE,
     type_constraint=INTEGER,
-    doc="Right rotate.",
+    doc="Rotate bits right by the count modulo the integer width. One-bit rotation is identity.",
     facts="loom_scalar_rotri_facts",
     canonicalize="loom_scalar_rotri_canonicalize",
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.rotri %lhs, %rhs : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -144,8 +158,9 @@ scalar_ctlzi = unary_op(
     type_constraint=INTEGER,
     doc="Count leading zeros.",
     facts="loom_scalar_ctlzi_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.ctlzi %input : i32"],
+    eager_execution_cost=1,
 )
 scalar_cttzi = unary_op(
     "scalar.cttzi",
@@ -154,8 +169,9 @@ scalar_cttzi = unary_op(
     type_constraint=INTEGER,
     doc="Count trailing zeros.",
     facts="loom_scalar_cttzi_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.cttzi %input : i32"],
+    eager_execution_cost=1,
 )
 scalar_ctpopi = unary_op(
     "scalar.ctpopi",
@@ -164,8 +180,9 @@ scalar_ctpopi = unary_op(
     type_constraint=INTEGER,
     doc="Population count (number of set bits).",
     facts="loom_scalar_ctpopi_facts",
-    traits=[DISTRIBUTION_TRANSFER],
+    traits=[DISTRIBUTION_TRANSFER, SAFE_TO_SPECULATE],
     examples=["%result = scalar.ctpopi %input : i32"],
+    eager_execution_cost=1,
 )
 
 # ============================================================================
@@ -214,6 +231,7 @@ scalar_bitfield_extractu = Op(
     examples=[
         "%byte = scalar.bitfield.extractu %word {offset = 8, width = 8} : i32 -> i32",
     ],
+    eager_execution_cost=1,
 )
 
 scalar_bitfield_extracts = Op(
@@ -242,6 +260,7 @@ scalar_bitfield_extracts = Op(
     examples=[
         "%signed_byte = scalar.bitfield.extracts %word {offset = 24, width = 8} : i32 -> i32",
     ],
+    eager_execution_cost=1,
 )
 
 # ============================================================================

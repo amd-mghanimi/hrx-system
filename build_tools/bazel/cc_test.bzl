@@ -32,6 +32,18 @@ load(":cc_opts.bzl", "cc_opts")
 cc_test = rule(
     implementation = cc_execution_impl,
     attrs = cc_execution_attrs,
+    # rules_cc replaces Bazel's implicit test group with its optional C++
+    # runner. Keep that runner and restore the standard target-platform
+    # qualification so cross-compiled tests cannot run on an incompatible host.
+    exec_groups = {
+        "test": exec_group(toolchains = [
+            "@bazel_tools//tools/test:default_test_toolchain_type",
+            config_common.toolchain_type(
+                "@bazel_tools//tools/cpp:test_runner_toolchain_type",
+                mandatory = False,
+            ),
+        ]),
+    },
     initializer = cc_execution_initializer,
     parent = rules_cc_test,
 )

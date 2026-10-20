@@ -13,12 +13,19 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ValueMaterializer:
-    """Callback pair referenced by materialized source value refs."""
+    """Selection, carrier, and emission contracts for a materialized value.
+
+    A prepare callback retains source-dependent choices in the function plan.
+    Its materialize callback consumes that recipe after source analysis ends.
+    Without prepare, materialize consumes only the emitted Low carrier.
+    """
 
     name: str
     can_materialize: str
+    result_type: str
     materialize: str
     header: str
+    prepare: str | None = None
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -27,5 +34,7 @@ class ValueMaterializer:
             raise ValueError(f"value materializer '{self.name}' needs a predicate")
         if not self.materialize:
             raise ValueError(f"value materializer '{self.name}' needs an emitter")
+        if not self.result_type:
+            raise ValueError(f"value materializer '{self.name}' needs a native type")
         if not self.header:
             raise ValueError(f"value materializer '{self.name}' needs a C header")

@@ -23,6 +23,8 @@ typedef struct loom_link_module_index_name_map_entry_t {
   iree_host_size_t last_symbol_ordinal;
   // First global symbol in canonical enumeration order, or INVALID_ORDINAL.
   iree_host_size_t first_global_ordinal;
+  // First global link-once definition in canonical order, or INVALID_ORDINAL.
+  iree_host_size_t first_link_once_definition_ordinal;
   // Dense template family ordinal for this global name, or invalid when this
   // name has not been used as a family identity.
   loom_link_template_family_ordinal_t template_family_ordinal;
@@ -344,6 +346,8 @@ static void loom_link_index_name_map_initialize(
         .first_symbol_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
         .last_symbol_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
         .first_global_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
+        .first_link_once_definition_ordinal =
+            LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
         .template_family_ordinal = LOOM_LINK_TEMPLATE_FAMILY_ORDINAL_INVALID,
         .family_extension_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
     };
@@ -526,6 +530,8 @@ static iree_status_t loom_link_index_insert_symbol_name(
         .first_symbol_ordinal = symbol_ordinal,
         .last_symbol_ordinal = symbol_ordinal,
         .first_global_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
+        .first_link_once_definition_ordinal =
+            LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
         .template_family_ordinal = LOOM_LINK_TEMPLATE_FAMILY_ORDINAL_INVALID,
         .family_extension_ordinal = LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL,
     };
@@ -541,6 +547,16 @@ static iree_status_t loom_link_index_insert_symbol_name(
        loom_link_index_symbol_canonically_precedes(
            index, symbol_ordinal, entry->first_global_ordinal))) {
     entry->first_global_ordinal = symbol_ordinal;
+  }
+  if (symbol->identity == LOOM_LINK_SYMBOL_IDENTITY_GLOBAL &&
+      iree_all_bits_set(symbol->flags,
+                        LOOM_LINK_SYMBOL_FLAG_CONCRETE_DEFINITION |
+                            LOOM_LINK_SYMBOL_FLAG_LINK_ONCE) &&
+      (entry->first_link_once_definition_ordinal ==
+           LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL ||
+       loom_link_index_symbol_canonically_precedes(
+           index, symbol_ordinal, entry->first_link_once_definition_ordinal))) {
+    entry->first_link_once_definition_ordinal = symbol_ordinal;
   }
   return iree_ok_status();
 }
@@ -763,6 +779,7 @@ static iree_status_t loom_link_index_append_module(
       .name = name,
       .materialized_module = materialized_module,
       .owns_materialized_module = owns_materialized_module,
+      .primary_source_id = LOOM_SOURCE_ID_INVALID,
       .symbol_start_ordinal = loom_link_module_index_symbol_count(index),
       .symbol_count = 0,
   };
@@ -945,6 +962,9 @@ static loom_link_symbol_flags_t loom_link_materialized_symbol_flags(
   if (iree_any_bit_set(symbol->flags, LOOM_SYMBOL_FLAG_RETAIN)) {
     flags |= LOOM_LINK_SYMBOL_FLAG_RETAIN;
   }
+  if (iree_any_bit_set(symbol->flags, LOOM_SYMBOL_FLAG_LINK_ONCE)) {
+    flags |= LOOM_LINK_SYMBOL_FLAG_LINK_ONCE;
+  }
   loom_func_like_t func = loom_func_like_cast(module, symbol->defining_op);
   const bool has_import =
       loom_func_like_isa(func) &&
@@ -1019,6 +1039,9 @@ static loom_link_symbol_flags_t loom_link_bytecode_symbol_flags(
   }
   if (iree_any_bit_set(symbol->flags, LOOM_BYTECODE_SYMBOL_FLAG_RETAIN)) {
     flags |= LOOM_LINK_SYMBOL_FLAG_RETAIN;
+  }
+  if (iree_any_bit_set(symbol->flags, LOOM_BYTECODE_SYMBOL_FLAG_LINK_ONCE)) {
+    flags |= LOOM_LINK_SYMBOL_FLAG_LINK_ONCE;
   }
   return flags;
 }
@@ -1167,7 +1190,7 @@ static uint32_t loom_link_index_count_dependency_occurrences(
 static void loom_link_index_copy_dependency_occurrences(
     const loom_symbol_reference_table_t* table,
     loom_symbol_reference_occurrence_id_t first_occurrence_id, uint32_t* values,
-    loom_symbol_interface_flags_t* target_interfaces,
+    loom_symbol_reference_contract_t* contracts,
     uint8_t* source_root_region_indices_plus_one, iree_host_size_t* position) {
   loom_symbol_reference_occurrence_id_t occurrence_id = first_occurrence_id;
   while (occurrence_id != LOOM_SYMBOL_REFERENCE_OCCURRENCE_ID_INVALID) {
@@ -1175,7 +1198,8 @@ static void loom_link_index_copy_dependency_occurrences(
         loom_symbol_reference_table_occurrence(table, occurrence_id);
     if (loom_symbol_reference_occurrence_is_dependency(occurrence)) {
       values[*position] = occurrence->target_symbol_id;
-      target_interfaces[*position] = occurrence->target_interfaces;
+      contracts[*position] = loom_symbol_reference_contract_make(
+          occurrence->target_interfaces, occurrence->role);
       source_root_region_indices_plus_one[*position] =
           occurrence->source_root_region_index_plus_one;
       ++*position;
@@ -1188,7 +1212,7 @@ static iree_status_t loom_link_index_project_symbol_references(
     loom_link_module_index_t* index, loom_link_module_index_module_t* module,
     const loom_symbol_reference_table_t* table) {
   uint32_t* dependency_values = NULL;
-  loom_symbol_interface_flags_t* dependency_target_interfaces = NULL;
+  loom_symbol_reference_contract_t* dependency_contracts = NULL;
   uint8_t* dependency_source_root_region_indices_plus_one = NULL;
   loom_link_template_family_ordinal_t* template_demand_values = NULL;
   uint8_t* template_demand_source_root_region_indices_plus_one = NULL;
@@ -1211,9 +1235,9 @@ static iree_status_t loom_link_index_project_symbol_references(
     module->dependencies.values = dependency_values;
     if (iree_status_is_ok(status)) {
       status = iree_arena_allocate_array(&index->arena, dependency_count,
-                                         sizeof(*dependency_target_interfaces),
-                                         (void**)&dependency_target_interfaces);
-      module->dependencies.target_interfaces = dependency_target_interfaces;
+                                         sizeof(*dependency_contracts),
+                                         (void**)&dependency_contracts);
+      module->dependencies.contracts = dependency_contracts;
     }
     if (iree_status_is_ok(status)) {
       status = iree_arena_allocate_array(
@@ -1248,26 +1272,27 @@ static iree_status_t loom_link_index_project_symbol_references(
   if (iree_status_is_ok(status)) {
     loom_link_index_copy_dependency_occurrences(
         table, table->first_module_occurrence_id, dependency_values,
-        dependency_target_interfaces,
-        dependency_source_root_region_indices_plus_one, &dependency_position);
+        dependency_contracts, dependency_source_root_region_indices_plus_one,
+        &dependency_position);
     for (iree_host_size_t symbol_index = 0;
          symbol_index < table->symbol_count && iree_status_is_ok(status);
          ++symbol_index) {
       loom_link_module_index_symbol_t* symbol = loom_link_index_local_symbol_at(
           index, module->symbol_start_ordinal + symbol_index);
-      const loom_symbol_reference_symbol_occurrences_t* source =
-          &table->symbols[symbol_index];
+      const loom_symbol_reference_symbol_occurrences_t source =
+          loom_symbol_reference_table_symbol(table,
+                                             (loom_symbol_id_t)symbol_index);
       symbol->dependencies.first = (uint32_t)dependency_position;
       symbol->dependencies.count = loom_link_index_count_dependency_occurrences(
-          table, source->first_outgoing_occurrence_id);
+          table, source.first_outgoing_occurrence_id);
       loom_link_index_copy_dependency_occurrences(
-          table, source->first_outgoing_occurrence_id, dependency_values,
-          dependency_target_interfaces,
-          dependency_source_root_region_indices_plus_one, &dependency_position);
+          table, source.first_outgoing_occurrence_id, dependency_values,
+          dependency_contracts, dependency_source_root_region_indices_plus_one,
+          &dependency_position);
 
       symbol->template_demands.first = (uint32_t)template_demand_position;
-      symbol->template_demands.count = source->template_demand_count;
-      loom_template_demand_id_t demand_id = source->first_template_demand_id;
+      symbol->template_demands.count = source.template_demand_count;
+      loom_template_demand_id_t demand_id = source.first_template_demand_id;
       while (demand_id != LOOM_TEMPLATE_DEMAND_ID_INVALID &&
              iree_status_is_ok(status)) {
         const loom_template_demand_t* demand =
@@ -1333,8 +1358,7 @@ static iree_status_t loom_link_index_project_bytecode_references(
   module->dependencies.root_count = bytecode_module->module_dependency_count;
   module->dependencies.count = bytecode_module->dependency_count;
   module->dependencies.values = bytecode_module->dependency_symbol_indices;
-  module->dependencies.target_interfaces =
-      bytecode_module->dependency_target_interfaces;
+  module->dependencies.contracts = bytecode_module->dependency_contracts;
   module->dependencies.source_root_region_indices_plus_one =
       bytecode_module->dependency_source_root_region_indices_plus_one;
   module->template_demands.count = bytecode_module->template_demand_count;
@@ -1592,6 +1616,14 @@ iree_status_t loom_link_module_index_add_text(
         loom_link_materialized_module_name(module), module,
         /*owns_materialized_module=*/true, &indexed_module);
     module_owned_by_index = iree_status_is_ok(status);
+    if (iree_status_is_ok(status) && !iree_string_view_is_empty(filename)) {
+      // The text parser registers its primary filename before parsing any
+      // authored or aliased locations. Preserve that producer-assigned ID so
+      // source projection never has to recover it by filename later.
+      IREE_ASSERT(module->sources.count != 0);
+      IREE_ASSERT(iree_string_view_equal(module->sources.entries[0], filename));
+      indexed_module->primary_source_id = 0;
+    }
     if (iree_status_is_ok(status)) {
       status = loom_link_index_module_materialized_symbols(
           index, indexed_module, module);
@@ -1754,6 +1786,37 @@ const loom_link_module_index_symbol_t* loom_link_module_index_lookup_global(
                                  LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL
           ? loom_link_module_index_symbol_at(index,
                                              local_entry->first_global_ordinal)
+          : NULL;
+  if (base_symbol == NULL) {
+    return local_symbol;
+  }
+  if (local_symbol == NULL) {
+    return base_symbol;
+  }
+  return loom_link_index_symbol_canonically_precedes(
+             index, local_symbol->ordinal, base_symbol->ordinal)
+             ? local_symbol
+             : base_symbol;
+}
+
+const loom_link_module_index_symbol_t*
+loom_link_module_index_lookup_link_once_definition(
+    const loom_link_module_index_t* index, iree_string_view_t name) {
+  if (!index) {
+    return NULL;
+  }
+  const loom_link_module_index_symbol_t* base_symbol =
+      index->base.index != NULL
+          ? loom_link_module_index_lookup_link_once_definition(
+                index->base.index, name)
+          : NULL;
+  const loom_link_module_index_name_map_entry_t* local_entry =
+      loom_link_index_lookup_local_name_entry(index, name);
+  const loom_link_module_index_symbol_t* local_symbol =
+      local_entry != NULL && local_entry->first_link_once_definition_ordinal !=
+                                 LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL
+          ? loom_link_module_index_symbol_at(
+                index, local_entry->first_link_once_definition_ordinal)
           : NULL;
   if (base_symbol == NULL) {
     return local_symbol;

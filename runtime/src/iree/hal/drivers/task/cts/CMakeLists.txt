@@ -40,8 +40,6 @@ iree_cc_library(
 iree_cc_test(
   NAME
     queue_dispatch_concurrency_tests
-  SRCS
-    "${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/cts/util/test_main.cc"
   DEPS
     ::backends
     ::executable_testdata
@@ -49,6 +47,43 @@ iree_cc_test(
     iree::hal::cts::queue::queue_dispatch_concurrency_test
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::testing::gtest
+)
+
+iree_cc_test(
+  NAME
+    buffer_access_tests
+  SRCS
+    "buffer_access_test.cc"
+  DEPS
+    ::backends
+    ::executable_testdata
+    iree::hal
+    iree::hal::cts::util::registry
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::hal::memory::passthrough_pool
+    iree::testing::gtest
+)
+
+iree_cc_test(
+  NAME
+    slab_pool_tests
+  SRCS
+    "slab_pool_test.cc"
+  DEPS
+    ::backends
+    ::executable_testdata
+    iree::async
+    iree::hal
+    iree::hal::cts::util::pool_test_util
+    iree::hal::cts::util::registry
+    iree::hal::cts::util::test_base
+    iree::hal::cts::util::test_main
+    iree::hal::memory::fixed_block_pool
+    iree::hal::memory::slab_cache
+    iree::hal::memory::tlsf_pool
     iree::testing::gtest
 )
 

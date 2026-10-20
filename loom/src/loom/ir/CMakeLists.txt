@@ -17,6 +17,8 @@ loom_cc_library(
     "float_facts.h"
   SRCS
     "facts.c"
+    "facts_bitwise.c"
+    "facts_division.c"
     "float_facts.c"
   DEPS
     ::ir
@@ -31,13 +33,52 @@ loom_cc_test(
     facts_test
   SRCS
     "facts_bitwise_test.cc"
+    "facts_bitwise_test_util.cc"
+    "facts_bitwise_test_util.h"
+    "facts_division_test.cc"
+    "facts_division_test_util.cc"
+    "facts_division_test_util.h"
+    "facts_refinement_test.cc"
     "facts_test.cc"
     "float_facts_test.cc"
   DEPS
     ::facts
+    iree::base::internal
     iree::base::internal::fpu_state
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    facts_bitwise_stress_test
+  SRCS
+    "facts_bitwise_stress.cc"
+    "facts_bitwise_test_util.cc"
+    "facts_bitwise_test_util.h"
+  DEPS
+    ::facts
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "manual"
+    "stress"
+)
+
+loom_cc_test(
+  NAME
+    facts_division_stress_test
+  SRCS
+    "facts_division_stress.cc"
+    "facts_division_test_util.cc"
+    "facts_division_test_util.h"
+  DEPS
+    ::facts
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "manual"
+    "stress"
 )
 
 loom_cc_library(
@@ -54,6 +95,7 @@ loom_cc_library(
     "ir.h"
     "local_value_domain.h"
     "location.h"
+    "memory_space.h"
     "module.h"
     "module_record.h"
     "module_source.h"
@@ -210,7 +252,9 @@ loom_cc_test(
     module_test
   SRCS
     "intern_table_test.cc"
+    "module_block_order_test.cc"
     "module_dictionary_test.cc"
+    "module_encoding_test.cc"
     "module_location_test.cc"
     "module_source_test.cc"
     "module_string_test.cc"
@@ -222,6 +266,7 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::ops::encoding
     loom::ops::test
     loom::ops::type_registry
 )
@@ -299,6 +344,19 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+loom_cc_benchmark(
+  NAME
+    block_order_benchmark
+  SRCS
+    "block_order_benchmark.cc"
+  DEPS
+    ::ir
+    iree::base
+    iree::base::internal::arena
+    iree::testing::benchmark_main
+  TESTONLY
 )
 
 loom_cc_benchmark(

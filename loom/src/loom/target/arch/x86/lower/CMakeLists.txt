@@ -16,21 +16,34 @@ loom_cc_library(
   HDRS
     "contraction.h"
     "lower.h"
+    "predicate_representation.h"
+    "vector_construct.h"
   TEXTUAL_HDRS
     "${IREE_BINARY_DIR}/loom/src/loom/target/arch/x86/contracts/tables.inl"
   SRCS
     "contraction.c"
+    "predicate_representation.c"
     "registry.c"
+    "vector_construct.c"
   DEPS
     iree::base
     loom::codegen::low::descriptors
     loom::codegen::low::lower
+    loom::codegen::low::lower::representation_observer
+    loom::codegen::low::lower::task_abi
     loom::error::error_defs
     loom::ir
+    loom::ops::kernel
+    loom::ops::low
+    loom::ops::vector
+    loom::target::abi::task::parameter_layout
     loom::target::arch::x86::contracts
+    loom::target::arch::x86::descriptors::vector_construct
+    loom::target::arch::x86::feature_bits
     loom::target::arch::x86::packed_dot_contract
     loom::target::arch::x86::packed_dot_contract_projection
     loom::target::arch::x86::register_classes
+    loom::util::fact_table
   PUBLIC
 )
 endif()

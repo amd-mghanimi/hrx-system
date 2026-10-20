@@ -471,6 +471,7 @@ static iree_status_t loom_ir_clone_op_impl(
   }
   target_op->instance_flags = source_op->instance_flags;
   target_op->traits = source_op->traits;
+  target_op->intrinsic_write_spaces = source_op->intrinsic_write_spaces;
   target_op->flags |= source_op->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   if (source_op->operand_count > 0) {
     memcpy(
@@ -511,6 +512,10 @@ static iree_status_t loom_ir_clone_op_impl(
                sizeof(loom_attribute_t));
   }
 
+  if (remap->clone_observer.fn != NULL) {
+    IREE_RETURN_IF_ERROR(remap->clone_observer.fn(
+        remap->clone_observer.user_data, source_op, target_op));
+  }
   if (source_op->region_count > 0) {
     loom_builder_ip_t saved_ip = loom_builder_save(builder);
     builder->ip.parent_op = target_op;
@@ -529,6 +534,10 @@ static iree_status_t loom_ir_clone_op_impl(
   IREE_RETURN_IF_ERROR(loom_builder_finalize_op(builder, target_op));
   IREE_RETURN_IF_ERROR(loom_ir_clone_op_comments(remap, source_op, target_op));
   loom_ir_remap_record_cloned_op(remap, source_op, target_op);
+  if (remap->clone_observer.finish_fn != NULL) {
+    remap->clone_observer.finish_fn(remap->clone_observer.user_data, source_op,
+                                    target_op);
+  }
   *out_cloned_op = target_op;
   return iree_ok_status();
 }
@@ -1041,6 +1050,7 @@ static iree_status_t loom_ir_move_attr_is_available(
     case LOOM_ATTR_I64:
     case LOOM_ATTR_F64:
     case LOOM_ATTR_STRING:
+    case LOOM_ATTR_STRING_ARRAY:
     case LOOM_ATTR_BOOL:
     case LOOM_ATTR_ENUM:
     case LOOM_ATTR_SCOPED_ENUM:

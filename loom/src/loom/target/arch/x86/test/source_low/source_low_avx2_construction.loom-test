@@ -1,0 +1,273 @@
+// RUN: emit source-low output=low
+
+// Narrow storage values and both integer widths share bitwise broadcast
+// families instead of growing type-specific lowering paths.
+x86.target<avx2> @target
+
+func.def target(@target) @construct_full_vectors(%i16_value: i16, %bf16_value: bf16) -> (vector<32xi8>, vector<8xi16>, vector<4xi64>, vector<16xf8E4M3>, vector<16xbf16>, vector<4xf64>) {
+  %i8_constant = vector.constant -7 : vector<32xi8>
+  %i16_splat = vector.splat %i16_value : vector<8xi16>
+  %i64_constant = vector.constant 81985529216486895 : vector<4xi64>
+  %f8_constant = vector.constant 1.5 : vector<16xf8E4M3>
+  %bf16_splat = vector.splat %bf16_value : vector<16xbf16>
+  %f64_constant = vector.constant -2.5 : vector<4xf64>
+  func.return %i8_constant, %i16_splat, %i64_constant, %f8_constant, %bf16_splat, %f64_constant : vector<32xi8>, vector<8xi16>, vector<4xi64>, vector<16xf8E4M3>, vector<16xbf16>, vector<4xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i16, bf16) -> (vector<32xi8>, vector<8xi16>, vector<4xi64>, vector<16xf8E4M3>, vector<16xbf16>, vector<4xf64>)}) @construct_full_vectors(%i16_value: reg<x86.gpr32>, %bf16_value: reg<x86.gpr32>) -> (reg<x86.ymm>, reg<x86.xmm>, reg<x86.ymm>, reg<x86.xmm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %22 = mov.imm32 -7
+  %23 = vmovd.xmm.gpr32 %22
+  %i8_constant = vpbroadcastb.ymm %23
+  %25 = vmovd.xmm.gpr32 %i16_value
+  %i16_splat = vpbroadcastw.xmm %25
+  %27 = mov.imm64 81985529216486895
+  %28 = vmovq.xmm.gpr64 %27
+  %i64_constant = vpbroadcastq.ymm %28
+  %30 = mov.imm32 60
+  %31 = vmovd.xmm.gpr32 %30
+  %f8_constant = vpbroadcastb.xmm %31
+  %33 = vmovd.xmm.gpr32 %bf16_value
+  %bf16_splat = vpbroadcastw.ymm %33
+  %35 = mov.imm64 -4610560118520545280
+  %36 = vmovq.xmm.gpr64 %35
+  %f64_constant = vpbroadcastq.ymm %36
+  return %i8_constant, %i16_splat, %i64_constant, %f8_constant, %bf16_splat, %f64_constant
+}
+
+// ====
+
+// Constant lane access projects a YMM lane into its 128-bit half and local
+// lane once, then reuses the complete XMM lane-movement family.
+x86.target<avx2> @target
+
+func.def target(@target) @move_ymm_lanes(%i8s: vector<32xi8>, %f16s: vector<16xf16>, %i32s: vector<8xi32>, %i64s: vector<4xi64>, %f32s: vector<8xf32>, %f64s: vector<4xf64>) -> (vector<32xi8>, vector<16xf16>, vector<8xi32>, vector<4xi64>, vector<8xf32>, vector<4xf64>) {
+  %i8 = vector.extract %i8s[29] : vector<32xi8> -> i8
+  %i8_result = vector.insert %i8 into %i8s[2] : i8, vector<32xi8>
+  %f16 = vector.extract %f16s[13] : vector<16xf16> -> f16
+  %f16_result = vector.insert %f16 into %f16s[1] : f16, vector<16xf16>
+  %i32 = vector.extract %i32s[6] : vector<8xi32> -> i32
+  %i32_result = vector.insert %i32 into %i32s[1] : i32, vector<8xi32>
+  %i64 = vector.extract %i64s[3] : vector<4xi64> -> i64
+  %i64_result = vector.insert %i64 into %i64s[0] : i64, vector<4xi64>
+  %f32 = vector.extract %f32s[5] : vector<8xf32> -> f32
+  %f32_result = vector.insert %f32 into %f32s[3] : f32, vector<8xf32>
+  %f64 = vector.extract %f64s[3] : vector<4xf64> -> f64
+  %f64_result = vector.insert %f64 into %f64s[0] : f64, vector<4xf64>
+  func.return %i8_result, %f16_result, %i32_result, %i64_result, %f32_result, %f64_result : vector<32xi8>, vector<16xf16>, vector<8xi32>, vector<4xi64>, vector<8xf32>, vector<4xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<32xi8>, vector<16xf16>, vector<8xi32>, vector<4xi64>, vector<8xf32>, vector<4xf64>) -> (vector<32xi8>, vector<16xf16>, vector<8xi32>, vector<4xi64>, vector<8xf32>, vector<4xf64>)}) @move_ymm_lanes(%i8s: reg<x86.ymm>, %f16s: reg<x86.ymm>, %i32s: reg<x86.ymm>, %i64s: reg<x86.ymm>, %f32s: reg<x86.ymm>, %f64s: reg<x86.ymm>) -> (reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %36 = vextractf128.xmm %i8s, 1
+  %i8 = vpextrb.xmm %36, 13
+  %38 = vextractf128.xmm %i8s, 0
+  %39 = vpinsrb.xmm %38, %i8, 2
+  %i8_result = vinsertf128.ymm.xmm %i8s, %39, 0
+  %41 = vextractf128.xmm %f16s, 1
+  %f16 = vpextrw.xmm %41, 5
+  %43 = vextractf128.xmm %f16s, 0
+  %44 = vpinsrw.xmm %43, %f16, 1
+  %f16_result = vinsertf128.ymm.xmm %f16s, %44, 0
+  %46 = vextractf128.xmm %i32s, 1
+  %i32 = vpextrd.xmm %46, 2
+  %48 = vextractf128.xmm %i32s, 0
+  %49 = vpinsrd.xmm %48, %i32, 1
+  %i32_result = vinsertf128.ymm.xmm %i32s, %49, 0
+  %51 = vextractf128.xmm %i64s, 1
+  %i64 = vpextrq.xmm %51, 1
+  %53 = vextractf128.xmm %i64s, 0
+  %54 = vpinsrq.xmm %53, %i64, 0
+  %i64_result = vinsertf128.ymm.xmm %i64s, %54, 0
+  %56 = vextractf128.xmm %f32s, 1
+  %f32 = vpermilps.xmm %56, 1
+  %58 = vextractf128.xmm %f32s, 0
+  %59 = vinsertps.xmm %58, %f32, 48
+  %f32_result = vinsertf128.ymm.xmm %f32s, %59, 0
+  %61 = vextractf128.xmm %f64s, 1
+  %f64 = vpermilpd.xmm %61, 1
+  %63 = vextractf128.xmm %f64s, 0
+  %64 = vmovq.gpr64.xmm %f64
+  %65 = vpinsrq.xmm %63, %64, 0
+  %f64_result = vinsertf128.ymm.xmm %f64s, %65, 0
+  return %i8_result, %f16_result, %i32_result, %i64_result, %f32_result, %f64_result
+}
+
+// ====
+
+// The unit-step i8 path adds a packed ordinal seed directly instead of paying
+// for the general byte multiplication composition.
+x86.target<avx2> @target
+
+func.def target(@target) @i8x32_unit_iota(%base: i8) -> (vector<32xi8>) {
+  %step = scalar.constant 1 : i8
+  %result = vector.iota %base step %step : vector<32xi8>
+  func.return %result : vector<32xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i8) -> (vector<32xi8>)}) @i8x32_unit_iota(%base: reg<x86.gpr32>) -> (reg<x86.ymm>) asm {
+  %6 = mov.imm64 506097522914230528
+  %7 = vmovq.xmm.gpr64 %6
+  %8 = mov.imm64 1084818905618843912
+  %9 = vmovq.xmm.gpr64 %8
+  %10 = vpunpcklqdq.xmm %7, %9
+  %11 = mov.imm64 1663540288323457296
+  %12 = vmovq.xmm.gpr64 %11
+  %13 = mov.imm64 2242261671028070680
+  %14 = vmovq.xmm.gpr64 %13
+  %15 = vpunpcklqdq.xmm %12, %14
+  %16 = vxorps.zero.ymm
+  %17 = vinsertf128.ymm.xmm %16, %10, 0
+  %18 = vinsertf128.ymm.xmm %17, %15, 1
+  %19 = vmovd.xmm.gpr32 %base
+  %20 = vpbroadcastb.ymm %19
+  %result = vpaddb.ymm %20, %18
+  return %result
+}
+
+// ====
+
+// General integer iotas share packed ordinal seeds. Native word/dword
+// multiplication and composed byte/qword scaling cover every AVX2 width.
+x86.target<avx2> @target
+
+func.def target(@target) @strided_iota_families(%i8_base: i8, %i8_step: i8, %i16_base: i16, %i16_step: i16, %i32_base: i32, %i32_step: i32, %i64_base: i64, %i64_step: i64) -> (vector<16xi8>, vector<16xi16>, vector<4xi32>, vector<4xi64>) {
+  %i8 = vector.iota %i8_base step %i8_step : vector<16xi8>
+  %i16 = vector.iota %i16_base step %i16_step : vector<16xi16>
+  %i32 = vector.iota %i32_base step %i32_step : vector<4xi32>
+  %i64 = vector.iota %i64_base step %i64_step : vector<4xi64>
+  func.return %i8, %i16, %i32, %i64 : vector<16xi8>, vector<16xi16>, vector<4xi32>, vector<4xi64>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i8, i8, i16, i16, i32, i32, i64, i64) -> (vector<16xi8>, vector<16xi16>, vector<4xi32>, vector<4xi64>)}) @strided_iota_families(%i8_base: reg<x86.gpr32>, %i8_step: reg<x86.gpr32>, %i16_base: reg<x86.gpr32>, %i16_step: reg<x86.gpr32>, %i32_base: reg<x86.gpr32>, %i32_step: reg<x86.gpr32>, %i64_base: reg<x86.gpr64>, %i64_step: reg<x86.gpr64>) -> (reg<x86.xmm>, reg<x86.ymm>, reg<x86.xmm>, reg<x86.ymm>) asm {
+  %28 = mov.imm64 506097522914230528
+  %29 = vmovq.xmm.gpr64 %28
+  %30 = mov.imm64 1084818905618843912
+  %31 = vmovq.xmm.gpr64 %30
+  %32 = vpunpcklqdq.xmm %29, %31
+  %33 = vmovd.xmm.gpr32 %i8_step
+  %34 = vpbroadcastw.xmm %33
+  %35 = mov.imm32 255
+  %36 = vmovd.xmm.gpr32 %35
+  %37 = vpbroadcastw.xmm %36
+  %38 = vpsrldq.xmm %32, 8
+  %39 = vpmovzxbw.xmm %32
+  %40 = vpmovzxbw.xmm %38
+  %41 = vpmullw.xmm %39, %34
+  %42 = vpmullw.xmm %40, %34
+  %43 = vpand.xmm %41, %37
+  %44 = vpand.xmm %42, %37
+  %45 = vpackuswb.xmm %43, %44
+  %46 = vmovd.xmm.gpr32 %i8_base
+  %47 = vpbroadcastb.xmm %46
+  %i8 = vpaddb.xmm %47, %45
+  %54 = vpmovzxbw.ymm %32
+  %55 = vmovd.xmm.gpr32 %i16_step
+  %56 = vpbroadcastw.ymm %55
+  %57 = vpmullw.ymm %54, %56
+  %58 = vmovd.xmm.gpr32 %i16_base
+  %59 = vpbroadcastw.ymm %58
+  %i16 = vpaddw.ymm %59, %57
+  %61 = mov.imm32 50462976
+  %62 = vmovd.xmm.gpr32 %61
+  %63 = vpmovzxbd.xmm %62
+  %64 = vmovd.xmm.gpr32 %i32_step
+  %65 = avx2.vpbroadcastd.xmm %64
+  %66 = vpmulld.xmm %63, %65
+  %67 = vmovd.xmm.gpr32 %i32_base
+  %68 = avx2.vpbroadcastd.xmm %67
+  %i32 = vpaddd.xmm %68, %66
+  %72 = vpmovzxbq.ymm %62
+  %73 = vmovq.xmm.gpr64 %i64_step
+  %74 = vpbroadcastq.ymm %73
+  %75 = mov.imm64 1
+  %76 = vmovq.xmm.gpr64 %75
+  %77 = vpbroadcastq.ymm %76
+  %78 = vxorps.zero.ymm
+  %79 = vpand.ymm %72, %77
+  %80 = vpsubq.ymm %78, %79
+  %81 = vpsrlq.ymm %72, 1
+  %82 = vpsubq.ymm %78, %81
+  %83 = vpand.ymm %74, %80
+  %84 = vpaddq.ymm %74, %74
+  %85 = vpand.ymm %84, %82
+  %86 = vpaddq.ymm %83, %85
+  %87 = vmovq.xmm.gpr64 %i64_base
+  %88 = vpbroadcastq.ymm %87
+  %i64 = vpaddq.ymm %88, %86
+  return %i8, %i16, %i32, %i64
+}
+
+// ====
+
+// Narrow scalar constants share the GPR32 immediate family used by vector
+// construction without weakening the exact i1 boolean contract.
+x86.target<avx2> @target
+
+func.def target(@target) @narrow_scalar_constants() -> (i1, i8, i16, i32) {
+  %i1_value = scalar.constant 1 : i1
+  %i8_value = scalar.constant -128 : i8
+  %i16_value = scalar.constant -32768 : i16
+  %i32_value = scalar.constant -2147483648 : i32
+  func.return %i1_value, %i8_value, %i16_value, %i32_value : i1, i8, i16, i32
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = () -> (i1, i8, i16, i32)}) @narrow_scalar_constants() -> (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>) asm {
+  %i1_value = mov.imm32 1
+  %i8_value = mov.imm32 -128
+  %i16_value = mov.imm32 -32768
+  %i32_value = mov.imm32 -2147483648
+  return %i1_value, %i8_value, %i16_value, %i32_value
+}
+
+// ====
+
+// Immediate shuffles cover 32/64-bit lane families directly. Byte and word
+// shuffles load shared controls from read-only data.
+x86.target<avx2> @target
+
+func.def target(@target) @shuffle_families(%i8x16: vector<16xi8>, %f64x4: vector<4xf64>) -> (vector<16xi8>, vector<4xf64>) {
+  %i8 = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %i8x16 : vector<16xi8>
+  %f64 = vector.shuffle<[3, 0, 2, 1]> %f64x4 : vector<4xf64>
+  func.return %i8, %f64 : vector<16xi8>, vector<4xf64>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi8>, vector<4xf64>) -> (vector<16xi8>, vector<4xf64>)}) @shuffle_families(%i8x16: reg<x86.xmm>, %f64x4: reg<x86.ymm>) -> (reg<x86.xmm>, reg<x86.ymm>) asm {
+  %10 = avx2.vmovdqu.rodata.xmm @__low_rodata_81a9947f
+  %i8 = vpshufb.xmm %i8x16, %10
+  %f64 = vpermq.ymm %f64x4, 99
+  return %i8, %f64
+}
+
+// ====
+
+// YMM byte masks select from both 128-bit source halves, while dword shuffles
+// use the direct variable-permute form.
+x86.target<avx2> @target
+
+func.def target(@target) @shuffle_wide_families(%i16x8: vector<8xi16>, %bf16x16: vector<16xbf16>, %f32x8: vector<8xf32>) -> (vector<8xi16>, vector<16xbf16>, vector<8xf32>) {
+  %i16 = vector.shuffle<[7, 6, 5, 4, 3, 2, 1, 0]> %i16x8 : vector<8xi16>
+  %bf16 = vector.shuffle<[15, 0, 14, 1, 13, 2, 12, 3, 11, 4, 10, 5, 9, 6, 8, 7]> %bf16x16 : vector<16xbf16>
+  %f32 = vector.shuffle<[7, 0, 6, 1, 5, 2, 4, 3]> %f32x8 : vector<8xf32>
+  func.return %i16, %bf16, %f32 : vector<8xi16>, vector<16xbf16>, vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi16>, vector<16xbf16>, vector<8xf32>) -> (vector<8xi16>, vector<16xbf16>, vector<8xf32>)}) @shuffle_wide_families(%i16x8: reg<x86.xmm>, %bf16x16: reg<x86.ymm>, %f32x8: reg<x86.ymm>) -> (reg<x86.xmm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %15 = avx2.vmovdqu.rodata.xmm @__low_rodata_6f02e92f
+  %i16 = vpshufb.xmm %i16x8, %15
+  %17 = avx2.vmovdqu.rodata.ymm @__low_rodata_5fe74fdf
+  %18 = vpermq.ymm %bf16x16, 68
+  %19 = vpshufb.ymm %18, %17
+  %20 = avx2.vmovdqu.rodata.ymm @__low_rodata_d6020cbf
+  %21 = vpermq.ymm %bf16x16, 238
+  %22 = vpshufb.ymm %21, %20
+  %bf16 = vpor.ymm %19, %22
+  %24 = avx2.vmovdqu.rodata.ymm @__low_rodata_7cb0971f
+  %f32 = vpermps.ymm %24, %f32x8
+  return %i16, %bf16, %f32
+}

@@ -40,50 +40,50 @@ using ::loom::testing::FindDiagnostic;
 using ::loom::testing::GetStringParam;
 
 static const loom_encoding_family_descriptor_t kDenseEncodingDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(5, "dense"),
-    /*.role=*/LOOM_ENCODING_ROLE_ADDRESS_LAYOUT,
+    .name = LOOM_BSTRING_REF(5, "dense"),
+    .role = LOOM_ENCODING_ROLE_ADDRESS_LAYOUT,
 };
 static const loom_encoding_vtable_t kDenseEncodingVtable = {
-    /*.descriptor=*/&kDenseEncodingDescriptor,
+    .descriptor = &kDenseEncodingDescriptor,
 };
 
 static const loom_attr_descriptor_t kQ8_0EncodingParameters[] = {{
-    /*.name=*/LOOM_BSTRING_REF(5, "block"),
-    /*.attr_kind=*/LOOM_ATTR_I64,
-    /*.flags=*/LOOM_ATTR_OPTIONAL,
+    .name = LOOM_BSTRING_REF(5, "block"),
+    .attr_kind = LOOM_ATTR_I64,
+    .flags = LOOM_ATTR_OPTIONAL,
 }};
 static const loom_encoding_family_descriptor_t kQ8_0EncodingDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(4, "q8_0"),
-    /*.role=*/LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
-    /*.family_flags=*/{},
-    /*.parameter_count=*/IREE_ARRAYSIZE(kQ8_0EncodingParameters),
-    /*.parameter_descriptors=*/kQ8_0EncodingParameters,
+    .name = LOOM_BSTRING_REF(4, "q8_0"),
+    .role = LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
+    .family_flags = {},
+    .parameter_count = IREE_ARRAYSIZE(kQ8_0EncodingParameters),
+    .parameter_descriptors = kQ8_0EncodingParameters,
 };
 static const loom_encoding_vtable_t kQ8_0EncodingVtable = {
-    /*.descriptor=*/&kQ8_0EncodingDescriptor,
+    .descriptor = &kQ8_0EncodingDescriptor,
 };
 
 static const loom_encoding_family_descriptor_t kQ6KEncodingDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(4, "q6_k"),
-    /*.role=*/LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
+    .name = LOOM_BSTRING_REF(4, "q6_k"),
+    .role = LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
 };
 static const loom_encoding_vtable_t kQ6KEncodingVtable = {
-    /*.descriptor=*/&kQ6KEncodingDescriptor,
+    .descriptor = &kQ6KEncodingDescriptor,
 };
 
 static const loom_attr_descriptor_t kQuantizationEncodingParameters[] = {{
-    /*.name=*/LOOM_BSTRING_REF(4, "bits"),
-    /*.attr_kind=*/LOOM_ATTR_I64,
+    .name = LOOM_BSTRING_REF(4, "bits"),
+    .attr_kind = LOOM_ATTR_I64,
 }};
 static const loom_encoding_family_descriptor_t kQuantizationDescriptor = {
-    /*.name=*/LOOM_BSTRING_REF(12, "quantization"),
-    /*.role=*/LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
-    /*.family_flags=*/{},
-    /*.parameter_count=*/IREE_ARRAYSIZE(kQuantizationEncodingParameters),
-    /*.parameter_descriptors=*/kQuantizationEncodingParameters,
+    .name = LOOM_BSTRING_REF(12, "quantization"),
+    .role = LOOM_ENCODING_ROLE_STORAGE_SCHEMA,
+    .family_flags = {},
+    .parameter_count = IREE_ARRAYSIZE(kQuantizationEncodingParameters),
+    .parameter_descriptors = kQuantizationEncodingParameters,
 };
 static const loom_encoding_vtable_t kQuantizationEncodingVtable = {
-    /*.descriptor=*/&kQuantizationDescriptor,
+    .descriptor = &kQuantizationDescriptor,
 };
 
 class ParserTest : public ::testing::Test {
@@ -154,7 +154,7 @@ class ParserTest : public ::testing::Test {
   // Parses source text and expects parse errors (diagnostics emitted,
   // module is NULL, but status is ok — parse errors are not infrastructure
   // failures).
-  const std::vector<CapturedDiagnostic>& ParseExpectErrors(const char* source) {
+  const std::deque<CapturedDiagnostic>& ParseExpectErrors(const char* source) {
     loom_module_t* module = nullptr;
     IREE_EXPECT_OK(Parse(source, &module));
     EXPECT_EQ(module, nullptr);
@@ -390,19 +390,10 @@ TEST_F(ParserTest, ParsedOpScratchFrameRejectsStorageOverflow) {
                                      (loom_tied_result_t){0}));
 
   loom_parsed_op_reset(scratch);
-  scratch->field_span_count = UINT16_MAX;
-  scratch->field_span_capacity = UINT16_MAX;
+  scratch->field_span_count = LOOM_LOCATION_FIELD_SPAN_COUNT_MAX;
+  scratch->compact_field_span_capacity = LOOM_LOCATION_FIELD_SPAN_COUNT_MAX;
   loom_token_t token = loom_token_none();
   token.kind = LOOM_TOKEN_BARE_IDENT;
-  IREE_EXPECT_STATUS_IS(
-      IREE_STATUS_RESOURCE_EXHAUSTED,
-      loom_parsed_op_add_field_span(scratch, &parser.parser_arena,
-                                    LOOM_LOCATION_FIELD_OPERAND, 0, token,
-                                    /*end_line=*/1, /*end_column=*/1));
-
-  loom_parsed_op_reset(scratch);
-  token.line = (uint32_t)UINT16_MAX + 1;
-  token.column = 1;
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_RESOURCE_EXHAUSTED,
       loom_parsed_op_add_field_span(scratch, &parser.parser_arena,
@@ -414,6 +405,73 @@ TEST_F(ParserTest, ParsedOpScratchFrameRejectsStorageOverflow) {
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_RESOURCE_EXHAUSTED,
       loom_parser_add_pending_block_arg(&parser, 0, loom_token_none()));
+
+  loom_parser_release_parsed_op(&parser, scratch);
+  iree_arena_deinitialize(&parser.parser_arena);
+}
+
+TEST_F(ParserTest, ParsedOpScratchFramePromotesAndReusesWideSpans) {
+  loom_parser_t parser = {};
+  iree_arena_initialize(&block_pool_, &parser.parser_arena);
+  loom_parsed_op_t* scratch = nullptr;
+  IREE_ASSERT_OK(loom_parser_acquire_parsed_op(&parser, &scratch));
+
+  loom_token_t token = loom_token_none();
+  token.kind = LOOM_TOKEN_BARE_IDENT;
+  token.line = 4;
+  token.column = 5;
+  IREE_ASSERT_OK(loom_parsed_op_add_field_span(
+      scratch, &parser.parser_arena, LOOM_LOCATION_FIELD_OPERAND, 0, token,
+      /*end_line=*/4, /*end_column=*/9));
+  token.line = 4;
+  token.column = 80000;
+  IREE_ASSERT_OK(loom_parsed_op_add_field_span(
+      scratch, &parser.parser_arena, LOOM_LOCATION_FIELD_ATTRIBUTE, 2, token,
+      /*end_line=*/4, /*end_column=*/100000));
+  token.line = 5;
+  token.column = 1;
+  IREE_ASSERT_OK(loom_parsed_op_add_field_span(
+      scratch, &parser.parser_arena, LOOM_LOCATION_FIELD_RESULT, 3, token,
+      /*end_line=*/5, /*end_column=*/7));
+
+  const auto wide_spans = loom_parsed_op_field_span_array(scratch);
+  ASSERT_EQ(wide_spans.format, LOOM_LOCATION_FIELD_SPAN_FORMAT_WIDE);
+  ASSERT_EQ(wide_spans.count, 3u);
+  const auto* spans =
+      static_cast<const loom_location_field_span_t*>(wide_spans.data);
+  EXPECT_EQ(spans[0].start_line, 4u);
+  EXPECT_EQ(spans[0].end_col, 9u);
+  EXPECT_EQ(spans[1].kind, LOOM_LOCATION_FIELD_ATTRIBUTE);
+  EXPECT_EQ(spans[1].index, 2u);
+  EXPECT_EQ(spans[1].start_line, 4u);
+  EXPECT_EQ(spans[1].start_col, 80000u);
+  EXPECT_EQ(spans[1].end_line, 4u);
+  EXPECT_EQ(spans[1].end_col, 100000u);
+  EXPECT_EQ(spans[2].start_line, 5u);
+  EXPECT_EQ(spans[2].start_col, 1u);
+  EXPECT_EQ(spans[2].end_line, 5u);
+  EXPECT_EQ(spans[2].end_col, 7u);
+
+  auto* wide_storage = scratch->wide_field_spans;
+  const iree_host_size_t allocation_size =
+      parser.parser_arena.total_allocation_size;
+  loom_parsed_op_reset(scratch);
+  token.line = 6;
+  token.column = 7;
+  IREE_ASSERT_OK(loom_parsed_op_add_field_span(
+      scratch, &parser.parser_arena, LOOM_LOCATION_FIELD_RESULT, 1, token,
+      /*end_line=*/6, /*end_column=*/11));
+  EXPECT_EQ(loom_parsed_op_field_span_array(scratch).format,
+            LOOM_LOCATION_FIELD_SPAN_FORMAT_COMPACT);
+
+  loom_parsed_op_reset(scratch);
+  token.line = 70001;
+  token.column = 80001;
+  IREE_ASSERT_OK(loom_parsed_op_add_field_span(
+      scratch, &parser.parser_arena, LOOM_LOCATION_FIELD_REGION, 3, token,
+      /*end_line=*/90001, /*end_column=*/100001));
+  EXPECT_EQ(scratch->wide_field_spans, wide_storage);
+  EXPECT_EQ(parser.parser_arena.total_allocation_size, allocation_size);
 
   loom_parser_release_parsed_op(&parser, scratch);
   iree_arena_deinitialize(&parser.parser_arena);
@@ -459,8 +517,7 @@ TEST_F(ParserTest, ParsedOpScratchFramesStayDepthSafeWhileParentIsActive) {
 
 TEST_F(ParserTest, ScopeFramesReuseHashStorageAcrossSiblingScopes) {
   loom_parser_scope_t root_scope = {};
-  loom_parser_t parser = {};
-  parser.scope = &root_scope;
+  loom_parser_t parser = {.scope = &root_scope};
   iree_arena_initialize(&block_pool_, &parser.parser_arena);
 
   IREE_ASSERT_OK(loom_parser_scope_push(&parser, &root_scope, &parser.scope));
@@ -514,8 +571,7 @@ TEST_F(ParserTest, ScopeFramesReuseHashStorageAcrossSiblingScopes) {
 
 TEST_F(ParserTest, ScopeFramesPreserveParentLookupAndRejectLocalDuplicates) {
   loom_parser_scope_t root_scope = {};
-  loom_parser_t parser = {};
-  parser.scope = &root_scope;
+  loom_parser_t parser = {.scope = &root_scope};
   iree_arena_initialize(&block_pool_, &parser.parser_arena);
 
   bool duplicate = true;
@@ -579,10 +635,11 @@ TEST_F(ParserTest, FunctionTypeScratchAndModulePayloadAreReusedOnInternHits) {
                                       /*hints=*/nullptr,
                                       iree_allocator_system(), &module));
   loom_parser_scope_t root_scope = {};
-  loom_parser_t parser = {};
-  parser.module = module;
-  parser.context = &context_;
-  parser.scope = &root_scope;
+  loom_parser_t parser = {
+      .module = module,
+      .context = &context_,
+      .scope = &root_scope,
+  };
   parser.definition_scope.pop_at = UINT16_MAX;
   iree_arena_initialize(&block_pool_, &parser.parser_arena);
 
@@ -636,10 +693,11 @@ TEST_F(ParserTest, RegisterTypeRequiresTargetLowDescriptorContext) {
                                       /*hints=*/nullptr,
                                       iree_allocator_system(), &module));
   loom_parser_scope_t root_scope = {};
-  loom_parser_t parser = {};
-  parser.module = module;
-  parser.context = &context_;
-  parser.scope = &root_scope;
+  loom_parser_t parser = {
+      .module = module,
+      .context = &context_,
+      .scope = &root_scope,
+  };
   parser.definition_scope.pop_at = UINT16_MAX;
   iree_arena_initialize(&block_pool_, &parser.parser_arena);
   loom_tokenizer_initialize(IREE_SV("reg<test.ptr x4>"), IREE_SV("test.loom"),
@@ -1096,8 +1154,8 @@ TEST_F(ParserTest, ReturnsSymbolReferencesFromParsedSnapshot) {
       "test.record @dependency\n";
   capture_.Reset();
   loom_text_parse_options_t options = {
-      /*.diagnostic_sink=*/capture_.sink(),
-      /*.max_errors=*/100,
+      .diagnostic_sink = capture_.sink(),
+      .max_errors = 100,
   };
   iree_arena_allocator_t symbol_reference_arena;
   iree_arena_initialize(&block_pool_, &symbol_reference_arena);
@@ -1120,9 +1178,11 @@ TEST_F(ParserTest, ReturnsSymbolReferencesFromParsedSnapshot) {
   ASSERT_NE(provider_id, LOOM_SYMBOL_ID_INVALID);
 
   const loom_symbol_reference_occurrence_id_t dependency_occurrence_id =
-      symbol_references.symbols[dependency_id].first_incoming_occurrence_id;
+      loom_symbol_reference_table_symbol(&symbol_references, dependency_id)
+          .first_incoming_occurrence_id;
   const loom_symbol_reference_occurrence_id_t availability_occurrence_id =
-      symbol_references.symbols[provider_id].first_incoming_occurrence_id;
+      loom_symbol_reference_table_symbol(&symbol_references, provider_id)
+          .first_incoming_occurrence_id;
   ASSERT_NE(dependency_occurrence_id,
             LOOM_SYMBOL_REFERENCE_OCCURRENCE_ID_INVALID);
   ASSERT_NE(availability_occurrence_id,
@@ -1660,11 +1720,11 @@ TEST_F(ParserTest, PredicateListBeyondInlineCapacityRoundTrips) {
 TEST_F(ParserTest, PredicateArityMismatchEmitsStructuredDiagnostic) {
   const auto& diagnostics = ParseExpectErrors(
       "%x = test.constant 0 : index\n"
-      "%y = test.assume %x [pow2(%x, 16)] : index\n");
+      "%y = test.assume %x [power_of_two(%x, 16)] : index\n");
   ASSERT_GE(diagnostics.size(), 1u);
   ExpectError(diagnostics[0],
               loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 31));
-  EXPECT_EQ(GetStringParam(diagnostics[0], 0), "pow2");
+  EXPECT_EQ(GetStringParam(diagnostics[0], 0), "power_of_two");
   ExpectU32Param(diagnostics[0], 1, 1u);
   ExpectU32Param(diagnostics[0], 2, 2u);
 }
@@ -3180,6 +3240,15 @@ TEST_F(ParserTest, TrailingFileLocationOverridesParserSourceFallback) {
   loom_module_free(module);
 }
 
+TEST_F(ParserTest, TrailingFileLocationPreservesMaximumCoordinate) {
+  const char* source =
+      "%c = test.constant 42 : i32 "
+      "loc(\"model.loom\":4294967295:80000 to 4294967295:100000)\n";
+  EXPECT_EQ(
+      RoundTrip(source, LOOM_TEXT_PRINT_DEFAULT | LOOM_TEXT_PRINT_LOCATIONS),
+      source);
+}
+
 TEST_F(ParserTest, CommentSurvivesTrailingLocation) {
   std::string text = RoundTrip(
       "// located constant\n"
@@ -3289,6 +3358,53 @@ TEST_F(ParserTest, FallbackParserLocationPrintedWhenNoExplicitLoc) {
   loom_module_free(module);
 }
 
+TEST_F(ParserTest, FallbackLocationPreservesWideLineColumnAndFieldSpans) {
+  std::string source(LOOM_LOCATION_COMPACT_COORDINATE_MAX, '\n');
+  source.append(LOOM_LOCATION_COMPACT_COORDINATE_MAX, ' ');
+  source += "%c = test.constant 42 : i32\n";
+  loom_module_t* module = ParseOk(source.c_str());
+  ASSERT_NE(module, nullptr);
+  const loom_op_t* op = loom_block_const_op(loom_module_block(module), 0);
+  ASSERT_NE(op, nullptr);
+  const auto* location =
+      loom_location_table_const_entry(&module->locations, op->location);
+  ASSERT_EQ(location->kind, LOOM_LOCATION_FILE);
+  EXPECT_EQ(location->file.start_line,
+            LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(location->file.start_col, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(location->file.field_span_format,
+            LOOM_LOCATION_FIELD_SPAN_FORMAT_WIDE);
+
+  bool found_result = false;
+  for (uint16_t i = 0; i < location->file.field_span_count; ++i) {
+    const auto span = loom_location_file_field_span_at(location, i);
+    if (span.kind == LOOM_LOCATION_FIELD_RESULT) {
+      found_result = true;
+      EXPECT_EQ(span.start_line, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+      EXPECT_EQ(span.start_col, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+      EXPECT_GT(span.end_col, LOOM_LOCATION_COMPACT_COORDINATE_MAX);
+    }
+  }
+  EXPECT_TRUE(found_result);
+  loom_module_free(module);
+}
+
+TEST_F(ParserTest, ErrorLocationPreservesWideLineAndColumn) {
+  std::string source(LOOM_LOCATION_COMPACT_COORDINATE_MAX, '\n');
+  source.append(LOOM_LOCATION_COMPACT_COORDINATE_MAX, ' ');
+  source += "mystery.op\n";
+  const auto& diagnostics = ParseExpectErrors(source.c_str());
+  ASSERT_FALSE(diagnostics.empty());
+  EXPECT_EQ(diagnostics[0].origin_line,
+            LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(diagnostics[0].origin_column,
+            LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(diagnostics[0].source_location.start_line,
+            LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(diagnostics[0].source_location.start_column,
+            LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+}
+
 TEST_F(ParserTest, TrailingLocationRejectsUnknownBodyKeyword) {
   const auto& diagnostics =
       ParseExpectErrors("%c = test.constant 42 : i32 loc(mystery<\"x\">)\n");
@@ -3323,12 +3439,12 @@ TEST_F(ParserTest, TrailingTaggedLocationRejectsInvalidTagZero) {
 
 TEST_F(ParserTest, TrailingLocationRejectsOutOfRangeCoordinates) {
   const auto& diagnostics = ParseExpectErrors(
-      "%c = test.constant 42 : i32 loc(\"model.loom\":65536:1)\n");
+      "%c = test.constant 42 : i32 loc(\"model.loom\":4294967296:1)\n");
   ASSERT_GE(diagnostics.size(), 1u);
   ExpectError(diagnostics[0],
               loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 11));
   EXPECT_EQ(GetStringParam(diagnostics[0], 0),
-            "line/column must be an integer in [0, 65535]");
+            "line/column must be an integer in [0, 4294967295]");
 }
 
 TEST_F(ParserTest, TrailingLocationRejectsMissingRangeEndColumn) {
@@ -3425,16 +3541,16 @@ TEST_F(ParserTest, UndefinedDimSecondPositionIsDistinct) {
   EXPECT_EQ(GetStringParam(diagnostics[0], 0), "BAD");
 }
 
-TEST_F(ParserTest, PoolDimReportsRealPosition) {
-  // pool<bad> — BARE_IDENT "bad" at column 26 (after "pool<").
-  // Line 2: %r = test.cast %x : pool<bad> to i32
-  //                              21   2526
+TEST_F(ParserTest, GroupDimReportsRealPosition) {
+  // group<bad> — BARE_IDENT "bad" at column 27 (after "group<").
+  // Line 2: %r = test.cast %x : group<bad> to i32
+  //                              21   2627
   const auto& diagnostics = ParseExpectErrors(
       "%x = test.constant 0 : i32\n"
-      "%r = test.cast %x : pool<bad> to i32\n");
+      "%r = test.cast %x : group<bad> to i32\n");
   ASSERT_GE(diagnostics.size(), 1u);
   EXPECT_EQ(diagnostics[0].origin_line, 2u);
-  EXPECT_EQ(diagnostics[0].origin_column, 26u);
+  EXPECT_EQ(diagnostics[0].origin_column, 27u);
 }
 
 //===----------------------------------------------------------------------===//

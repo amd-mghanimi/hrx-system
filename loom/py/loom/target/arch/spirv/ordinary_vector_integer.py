@@ -27,8 +27,8 @@ from loom.target.arch.spirv.scalar_alu import (
     SIGNED_INTEGER_COMPARE_PREDICATES,
     UNSIGNED_INTEGER_BINARY_OPERATIONS,
     UNSIGNED_ORDERED_INTEGER_COMPARE_PREDICATES,
+    ComparePredicate,
     IntegerAluTypePair,
-    IntegerComparePredicate,
     ScalarBinaryOperation,
 )
 
@@ -134,7 +134,7 @@ def _binary_instruction(
         key=f"spirv.op_{operation.descriptor_suffix}.{value_type.suffix}",
         mnemonic=f"{operation.mnemonic}.{value_type.suffix}",
         opcode=operation.opcode,
-        packet_form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+        packet_form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
         result_type=value_type,
         operand_names=("lhs", "rhs"),
         operand_types=(value_type, value_type),
@@ -158,7 +158,7 @@ def _integer_view_instruction(
 
 def _compare_instruction(
     operand_type: OrdinaryVectorType,
-    predicate: IntegerComparePredicate,
+    predicate: ComparePredicate,
 ) -> OrdinaryVectorInstruction:
     result_type = OrdinaryVectorType(
         BOOLEAN_ORDINARY_VECTOR_COMPONENT_TYPE,
@@ -187,7 +187,7 @@ def _boolean_binary_instruction(
         key=f"spirv.op_{operation.descriptor_suffix}.{value_type.suffix}",
         mnemonic=f"{operation.mnemonic}.{value_type.suffix}",
         opcode=operation.opcode,
-        packet_form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+        packet_form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
         result_type=value_type,
         operand_names=("lhs", "rhs"),
         operand_types=(value_type, value_type),
@@ -243,4 +243,21 @@ ORDINARY_VECTOR_INTEGER_INSTRUCTIONS = (
     *SIGNED_ORDINARY_VECTOR_INTEGER_COMPARE_INSTRUCTIONS,
     *UNSIGNED_ORDINARY_VECTOR_INTEGER_COMPARE_INSTRUCTIONS,
     *ORDINARY_VECTOR_BOOLEAN_BINARY_INSTRUCTIONS,
+)
+
+# Population counts retain the input width and shape, including scalar inputs.
+INTEGER_BIT_COUNT_INSTRUCTIONS = tuple(
+    OrdinaryVectorInstruction(
+        key=f"spirv.op_bit_count.{value_type.suffix}",
+        mnemonic=f"OpBitCount.{value_type.suffix}",
+        opcode="LOOM_SPIRV_OP_BIT_COUNT",
+        packet_form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
+        result_type=value_type,
+        operand_names=("input",),
+        operand_types=(value_type,),
+    )
+    for value_type in (
+        *SIGNED_INTEGER_ORDINARY_VECTOR_COMPONENT_TYPES,
+        *(pair.signed for pair in ORDINARY_VECTOR_INTEGER_TYPE_PAIRS),
+    )
 )

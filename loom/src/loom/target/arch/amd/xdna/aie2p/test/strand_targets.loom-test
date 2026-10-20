@@ -1,0 +1,64 @@
+// The strand inherits its deployment profile, while calls in its body execute
+// on a core. Both an inherited device and an explicitly selected device use
+// the core contract; repeated specialization must preserve the selected helper.
+// RUN: pass specialize-target-callgraph,specialize-target-callgraph,canonicalize
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def target<amd.xdna.aie2p.core>(@core) @cycles() -> (reg<aie2p.er>) asm {
+  %pair = mov.cycles
+  %cycles = slice %pair[0] : reg<aie2p.er x2> -> reg<aie2p.er>
+  return %cycles
+}
+
+func.def @read_cycles() -> (i32) {
+  %cycles = low.invoke @cycles() : () -> (i32)
+  func.return %cycles : i32
+}
+
+pipeline.def public target(@device) @sample_cycles() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %cycles = func.call @read_cycles() : () -> (i32)
+    view.store %cycles, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand target(@device) workers([0, 3], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %cycles = func.call @read_cycles() : () -> (i32)
+    view.store %cycles, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ----
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def target<amd.xdna.aie2p.core>(@core) @cycles() -> (reg<aie2p.er>) asm {
+  %pair = mov.cycles
+  %cycles = slice %pair[0] : reg<aie2p.er x2> -> reg<aie2p.er>
+  return %cycles
+}
+
+func.def @read_cycles() -> (i32) {
+  %cycles = low.invoke @cycles() : () -> (i32)
+  func.return %cycles : i32
+}
+
+pipeline.def public target(@device) @sample_cycles() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %cycles = func.call @read_cycles() : () -> (i32)
+    view.store %cycles, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand target(@device) workers([0, 3], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %cycles = func.call @read_cycles() : () -> (i32)
+    view.store %cycles, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}

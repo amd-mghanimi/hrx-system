@@ -1,7 +1,6 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/callable_values.loom-test
 // RUN: emit source-low target=spirv:vulkan1.3+bda output=low control-flow=structured-low
 
-// ERROR@+1: TARGET/033 {op_name="func.def", field_name="argument", actual_type="vector<1xi32>"}
+// ERROR@+1: TARGET/031 {actual_type="vector<1xi32>", type_constraint="vector.target_carrier"}
 func.def public @call_mixed_i32(%input: vector<1xi32>, %delta: i32) -> (i32, i32) {
   %value = vector.extract %input[0] : vector<1xi32> -> i32
   %mixed = func.call @add_i32(%value, %delta) : (i32, i32) -> (i32)
@@ -19,7 +18,7 @@ func.def @add_i32(%value: i32, %delta: i32) -> (i32) {
 
 // ====
 
-// ERROR@+1: TARGET/033 {op_name="func.def", field_name="argument", actual_type="vector<1xi64>"}
+// ERROR@+1: TARGET/031 {actual_type="vector<1xi64>", type_constraint="vector.target_carrier"}
 func.def public @call_mixed_i64(%input: vector<1xi64>, %delta: i64) -> (i64, i64) {
   %value = vector.extract %input[0] : vector<1xi64> -> i64
   %mixed = func.call @add_i64(%value, %delta) : (i64, i64) -> (i64)
@@ -39,12 +38,14 @@ func.def public @call_vector_result(%input: i32, %lane: index) -> (i32) where [r
   %c2 = scalar.constant 2 : i32
   %c3 = scalar.constant 3 : i32
   %values = vector.from_elements %input, %c1, %c2, %c3 : vector<4xi32>
-  %result = func.call @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
+  %result = func.call inline @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
   func.return %result : i32
 }
 
 func.def @select_lane(%values: vector<4xi32>, %lane: index) -> (i32) where [range(%lane, 0, 3)] {
-  %result = vector.extract %values[%lane] : vector<4xi32> -> i32
+  %replacement = vector.extract %values[0] : vector<4xi32> -> i32
+  %updated = vector.insert %replacement into %values[%lane] : i32, vector<4xi32>
+  %result = vector.extract %updated[%lane] : vector<4xi32> -> i32
   func.return %result : i32
 }
 
@@ -53,21 +54,15 @@ low.func.def public target<spirv.logical.core> abi(shader_entry_point) @call_vec
   %c1 = OpConstant.i32 1
   %c2 = OpConstant.i32 2
   %c3 = OpConstant.i32 3
-  %27 = OpConstant.i32 0 : reg<spirv.id : index>
-  %28 = OpIEqual %lane, %27
-  %29 = OpSelect %28, %input, %c3
-  %30 = OpConstant.i32 1 : reg<spirv.id : index>
-  %31 = OpIEqual %lane, %30
-  %32 = OpSelect %31, %c1, %29
-  %33 = OpConstant.i32 2 : reg<spirv.id : index>
-  %34 = OpIEqual %lane, %33
-  %result = OpSelect %34, %c2, %32
+  %values = OpCompositeConstruct.v4i32 %input, %c1, %c2, %c3
+  %updated = OpVectorInsertDynamic.i32.v4i32 %values, %input, %lane
+  %result = OpVectorExtractDynamic.v4i32.i32 %updated, %lane
   return %result
 }
 
 // ====
 
-// ERROR@+1: TARGET/033 {op_name="func.def", field_name="argument", actual_type="vector<1xi32>"}
+// ERROR@+1: TARGET/031 {actual_type="vector<1xi32>", type_constraint="vector.target_carrier"}
 func.def public @call_loop(%input: vector<1xi32>, %delta: i32, %count: index) -> (i32) {
   %value = vector.extract %input[0] : vector<1xi32> -> i32
   %result = func.call @repeat_add(%value, %delta, %count) : (i32, i32, index) -> (i32)
@@ -109,6 +104,19 @@ low.func.def public target<spirv.logical.core> abi(shader_entry_point) @call_sca
 
 // ====
 
+// Callable contracts retain argument and result identities across source-to-Low
+// boundary mapping. Results are signature values rather than body-local values.
+func.def public @preserve_contracts(%limit: index, %value: i32) -> (%bounded: index, %echo: i32) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] {
+  func.return %limit, %value : index, i32
+}
+
+// ----
+low.func.def public target<spirv.logical.core> abi(shader_entry_point) @preserve_contracts(%limit: reg<spirv.id : index>, %value: reg<spirv.id : i32>) -> (%bounded: reg<spirv.id : index>, %echo: reg<spirv.id : i32>) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] asm {
+  return %limit, %value
+}
+
+// ====
+
 // A separately compiled definition must use the same signature as its caller's
 // declaration. The declaration is resolved by IR linking, not a runtime import.
 func.def public @call_external(%value: i32) -> (i32) {
@@ -117,4 +125,4 @@ func.def public @call_external(%value: i32) -> (i32) {
   func.return %result : i32
 }
 
-func.decl @increment(%value: i32) -> (i32)
+func.decl @increment(%value: i32) -> (%result: i32) where [eq(%result, %value)]

@@ -14,6 +14,7 @@ class KernelBuilder(DialectBuilder):
     def def_(
         self,
         *,
+        linkage: str | None = ...,
         retain: str | None = ...,
         target: str | None = ...,
         export_symbol: str | None = ...,
@@ -324,6 +325,7 @@ class KernelBuilder(DialectBuilder):
         self,
         *,
         kind: str,
+        math: str = ...,
         value: ValueRef,
         cluster_size: int | None = ...,
         cluster_stride: int | None = ...,
@@ -337,6 +339,7 @@ class KernelBuilder(DialectBuilder):
         self,
         *,
         kind: str,
+        math: str = ...,
         value: ValueRef,
         cluster_size: int | None = ...,
         cluster_stride: int | None = ...,
@@ -409,17 +412,19 @@ class KernelBuilder(DialectBuilder):
         self,
         *,
         kind: str,
-        value: ValueRef,
+        math: str = ...,
+        values: list[ValueRef] = ...,
         results: list[Type | TiedResultSpec],
         name: str | None = ...,
         names: Sequence[str] | None = ...,
         result_names: Sequence[str] | None = ...,
         location_id: int | None = ...,
-    ) -> ValueRef: ...
+    ) -> list[ValueRef]: ...
     def workgroup_scan(
         self,
         *,
         kind: str,
+        math: str = ...,
         value: ValueRef,
         mode: str,
         direction: str,
@@ -567,5 +572,23 @@ class KernelBuilder(DialectBuilder):
         self,
         *,
         body: Region | None = ...,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def barrier_arrive(
+        self,
+        *,
+        memory_space: str,
+        scope: str,
+        ordering: str,
+        results: list[Type | TiedResultSpec],
+        name: str | None = ...,
+        names: Sequence[str] | None = ...,
+        result_names: Sequence[str] | None = ...,
+        location_id: int | None = ...,
+    ) -> ValueRef: ...
+    def barrier_wait(
+        self,
+        *,
+        phase: ValueRef,
         location_id: int | None = ...,
     ) -> None: ...

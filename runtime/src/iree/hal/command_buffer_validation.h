@@ -11,15 +11,24 @@
 #include "iree/hal/command_buffer.h"
 
 // Requirements for a buffer resource used within a command buffer.
-// Buffers bound to must have all bits set from the included bitfields and
-// support the given min/max byte offsets as in-range.
+// Bound buffers must satisfy the exact uses and access permissions, the
+// optional storage-class requirement, and the recorded range/alignment.
 typedef struct iree_hal_buffer_binding_requirements_t {
-  iree_hal_buffer_compatibility_t required_compatibility;
+  // Buffer uses declared by commands referencing this binding.
   iree_hal_buffer_usage_t usage;
+  // Known accesses performed by commands. NONE contributes no requirement;
+  // opaque executable bindings cannot infer permissions from the dispatch ABI.
   iree_hal_memory_access_t access;
+  // An opaque dispatch requires at least one STORAGE usage bit. This remains
+  // separate from exact uses so combining a dispatch with an atomic or transfer
+  // command cannot weaken that command's requirements.
+  bool requires_storage;
+  // Required memory properties for the recorded operations.
   iree_hal_memory_type_t type;
-  // Maximum offset in the binding referenced by any command.
-  iree_device_size_t max_byte_offset;
+  // Minimum binding length containing every recorded reference. A fixed range
+  // contributes offset + length; a whole-buffer range contributes only offset
+  // because its length is the remaining bound range at execution time.
+  iree_device_size_t min_byte_length;
   // Minimum required alignment by at least one command.
   iree_device_size_t min_byte_alignment;
   // Minimum alignment requested by commands that classify only target
@@ -30,9 +39,6 @@ typedef struct iree_hal_buffer_binding_requirements_t {
 // Storage for command buffer validation state.
 // Designed to be embedded in concrete implementations that want validation.
 typedef struct iree_hal_command_buffer_validation_state_t {
-  // Allocator from the device the command buffer is targeting.
-  // Used to verify buffer compatibility.
-  iree_hal_allocator_t* device_allocator;
   // 1 when begin has been called.
   int32_t has_began : 1;
   // 1 when end has been called.
@@ -42,13 +48,11 @@ typedef struct iree_hal_command_buffer_validation_state_t {
   // TODO(benvanik): current pipeline layout/descriptor set layout info.
   // TODO(benvanik): valid push constant bit ranges.
   // Requirements for each binding table entry.
-  // Unused slots in the binding table will have IREE_HAL_BUFFER_USAGE_NONE and
-  // are ignored if set when executed.
+  // Unused slots have zeroed requirements and are ignored when executed.
   iree_hal_buffer_binding_requirements_t binding_requirements[0];
 } iree_hal_command_buffer_validation_state_t;
 
 void iree_hal_command_buffer_initialize_validation(
-    iree_hal_allocator_t* device_allocator,
     iree_hal_command_buffer_t* command_buffer,
     iree_hal_command_buffer_validation_state_t* out_validation_state);
 
@@ -70,16 +74,10 @@ iree_status_t iree_hal_command_buffer_end_debug_group_validation(
     iree_hal_command_buffer_t* command_buffer,
     iree_hal_command_buffer_validation_state_t* validation_state);
 
-iree_status_t iree_hal_command_buffer_execution_barrier_validation(
+iree_status_t iree_hal_command_buffer_barrier_validation(
     iree_hal_command_buffer_t* command_buffer,
     iree_hal_command_buffer_validation_state_t* validation_state,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers);
+    const iree_hal_barrier_t* barrier);
 
 iree_status_t iree_hal_command_buffer_atomic_wait_validation(
     iree_hal_command_buffer_t* command_buffer,

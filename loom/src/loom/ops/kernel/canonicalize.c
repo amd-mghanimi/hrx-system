@@ -66,7 +66,7 @@ static iree_status_t loom_kernel_replace_single_result_with_index_constant(
       op, rewriter, loom_index_constant_result(constant_op), value_checkpoint);
 }
 
-static iree_status_t loom_kernel_replace_cluster_id_with_workgroup_id(
+static iree_status_t loom_kernel_replace_with_workgroup_id(
     loom_op_t* op, loom_rewriter_t* rewriter,
     loom_kernel_dimension_t dimension) {
   loom_builder_set_before(&rewriter->builder, op);
@@ -105,8 +105,21 @@ iree_status_t loom_kernel_cluster_id_canonicalize(loom_op_t* op,
   if (!loom_kernel_has_trivial_workgroup_cluster(op, rewriter)) {
     return iree_ok_status();
   }
-  return loom_kernel_replace_cluster_id_with_workgroup_id(
+  return loom_kernel_replace_with_workgroup_id(
       op, rewriter, loom_kernel_cluster_id_dimension(op));
+}
+
+iree_status_t loom_kernel_workitem_dispatch_id_canonicalize(
+    loom_op_t* op, loom_rewriter_t* rewriter) {
+  const loom_value_fact_topology_domain_t* domain =
+      loom_value_facts_topology_domain(loom_rewriter_value_facts(
+          rewriter, loom_kernel_workitem_dispatch_id_result(op)));
+  if (!domain ||
+      domain->value_kind != LOOM_VALUE_FACT_TOPOLOGY_VALUE_WORKGROUP_ID) {
+    return iree_ok_status();
+  }
+  return loom_kernel_replace_with_workgroup_id(
+      op, rewriter, loom_kernel_workitem_dispatch_id_dimension(op));
 }
 
 iree_status_t loom_kernel_cluster_workgroup_id_canonicalize(

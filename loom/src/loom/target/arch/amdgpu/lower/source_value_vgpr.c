@@ -72,12 +72,15 @@ static bool loom_amdgpu_source_memory_access_prefers_vgpr(
   }
   loom_low_source_memory_access_plan_t plan = {0};
   loom_low_source_memory_access_diagnostic_t diagnostic = {0};
-  if (!loom_low_source_memory_access_plan_build(view_regions, source_op, &plan,
-                                                &diagnostic)) {
+  if (!loom_low_source_memory_access_plan_build(view_regions, source_op,
+                                                /*axis_byte_strides=*/NULL,
+                                                &plan, &diagnostic)) {
     return true;
   }
   if (plan.operation_kind != LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD ||
       (uint64_t)plan.element_byte_count * plan.vector_lane_count < 4 ||
+      (plan.vector_lane_byte_stride != plan.element_byte_count &&
+       plan.element_byte_count < 4) ||
       plan.minimum_alignment < 4 ||
       (plan.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL &&
        plan.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_CONSTANT) ||
@@ -120,7 +123,8 @@ static bool loom_amdgpu_source_value_naturally_prefers_vgpr(
     return true;
   }
   loom_amdgpu_vector_storage_t vector_storage = {0};
-  return loom_amdgpu_type_vector_storage(source_type, &vector_storage) &&
+  return loom_amdgpu_type_vector_register_storage(source_type,
+                                                  &vector_storage) &&
          !iree_any_bit_set(
              loom_amdgpu_vector_storage_kind_flags(vector_storage.kind),
              LOOM_AMDGPU_VECTOR_STORAGE_KIND_FLAG_SGPR_MASK);
@@ -203,7 +207,7 @@ static const loom_amdgpu_source_producer_flags_t
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_KERNEL_SUBGROUP_SCAN)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_VGPR,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_KERNEL_WORKGROUP_REDUCE)] =
-            LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_VGPR,
+            LOOM_AMDGPU_SOURCE_PRODUCER_ALWAYS_VGPR,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_KERNEL_WORKGROUP_SCAN)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_VGPR,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_KERNEL_SUBGROUP_SHUFFLE)] =
@@ -271,6 +275,8 @@ static const loom_amdgpu_source_producer_flags_t
             LOOM_AMDGPU_SOURCE_PRODUCER_VECTOR_EXTRACT,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_VECTOR_LOAD)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_MEMORY_ACCESS,
+        [LOOM_AMDGPU_OP_INDEX(LOOM_OP_VECTOR_LOAD_MASK)] =
+            LOOM_AMDGPU_SOURCE_PRODUCER_VECTOR_STORAGE,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_VECTOR_MMA)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_VECTOR_STORAGE,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_VECTOR_REDUCE)] =
@@ -347,6 +353,12 @@ static const loom_amdgpu_source_producer_flags_t
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_CMPF)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_I1_COMPARE |
             LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_FLOAT_COMPARE,
+        [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_ISNANF)] =
+            LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_NATIVE_I1_MASK,
+        [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_ISINFF)] =
+            LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_NATIVE_I1_MASK,
+        [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_ISFINITEF)] =
+            LOOM_AMDGPU_SOURCE_PRODUCER_RESULT0_NATIVE_I1_MASK,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_ANDI)] =
             LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_LOGICAL_BINARY,
         [LOOM_AMDGPU_OP_INDEX(LOOM_OP_SCALAR_ORI)] =
@@ -437,34 +449,48 @@ static bool loom_amdgpu_source_scalar_float_conversion_is_native(
   }
 }
 
-static bool loom_amdgpu_source_scalar_float_result_follows_operands(
+typedef enum loom_amdgpu_scalar_float_result_policy_e {
+  LOOM_AMDGPU_SCALAR_FLOAT_RESULT_DEFAULT = 0,
+  LOOM_AMDGPU_SCALAR_FLOAT_RESULT_FOLLOWS_OPERANDS,
+  LOOM_AMDGPU_SCALAR_FLOAT_RESULT_REQUIRES_VGPR,
+} loom_amdgpu_scalar_float_result_policy_t;
+
+static loom_amdgpu_scalar_float_result_policy_t
+loom_amdgpu_source_scalar_float_result_policy(
     const loom_module_t* module,
     const loom_amdgpu_source_value_analysis_t* analysis,
     loom_value_id_t source_value_id, const loom_op_t* defining_op,
     loom_amdgpu_source_producer_flags_t producer_flags) {
-  if (analysis == NULL ||
-      loom_value_def_index(loom_module_value(module, source_value_id)) != 0) {
-    return false;
+  if (loom_value_def_index(loom_module_value(module, source_value_id)) != 0) {
+    return LOOM_AMDGPU_SCALAR_FLOAT_RESULT_DEFAULT;
   }
   const loom_type_t result_type =
       loom_module_value_type(module, source_value_id);
   if (iree_any_bit_set(producer_flags,
-                       LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_FLOAT_ARITHMETIC)) {
-    return iree_all_bits_set(
-               analysis->descriptor_set_info_flags,
-               LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_ARITHMETIC) &&
-           (loom_amdgpu_type_is_f32(result_type) ||
-            (loom_type_is_scalar(result_type) &&
-             loom_type_element_type(result_type) == LOOM_SCALAR_TYPE_F16));
+                       LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_FLOAT_CONVERSION)) {
+    const bool has_native_conversion =
+        analysis != NULL &&
+        iree_all_bits_set(
+            analysis->descriptor_set_info_flags,
+            LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION) &&
+        loom_amdgpu_source_scalar_float_conversion_is_native(
+            module, defining_op, result_type);
+    return has_native_conversion
+               ? LOOM_AMDGPU_SCALAR_FLOAT_RESULT_FOLLOWS_OPERANDS
+               : LOOM_AMDGPU_SCALAR_FLOAT_RESULT_REQUIRES_VGPR;
   }
-  return iree_any_bit_set(
-             producer_flags,
-             LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_FLOAT_CONVERSION) &&
-         iree_all_bits_set(
-             analysis->descriptor_set_info_flags,
-             LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION) &&
-         loom_amdgpu_source_scalar_float_conversion_is_native(
-             module, defining_op, result_type);
+  if (iree_any_bit_set(producer_flags,
+                       LOOM_AMDGPU_SOURCE_PRODUCER_SCALAR_FLOAT_ARITHMETIC) &&
+      analysis != NULL &&
+      iree_all_bits_set(
+          analysis->descriptor_set_info_flags,
+          LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_ARITHMETIC) &&
+      (loom_amdgpu_type_is_f32(result_type) ||
+       (loom_type_is_scalar(result_type) &&
+        loom_type_element_type(result_type) == LOOM_SCALAR_TYPE_F16))) {
+    return LOOM_AMDGPU_SCALAR_FLOAT_RESULT_FOLLOWS_OPERANDS;
+  }
+  return LOOM_AMDGPU_SCALAR_FLOAT_RESULT_DEFAULT;
 }
 
 static bool loom_amdgpu_distribution_transfer_result_prefers_vgpr(
@@ -507,7 +533,8 @@ static bool loom_amdgpu_source_producer_result_requires_vgpr(
       loom_module_value_type(module, source_value_id);
   return loom_amdgpu_type_is_i8(value_type) ||
          loom_amdgpu_type_is_i16(value_type) ||
-         loom_amdgpu_type_is_i32(value_type);
+         loom_amdgpu_type_is_i32(value_type) ||
+         loom_amdgpu_type_is_i64(value_type);
 }
 
 static bool loom_amdgpu_source_producer_result_follows_operand_vgpr(
@@ -817,7 +844,11 @@ static bool loom_amdgpu_branch_arg_payload_prefers_vgpr(
   const loom_value_t* incoming_value =
       loom_module_value(module, incoming_value_id);
   if (loom_value_is_block_arg(incoming_value)) {
-    return false;
+    // Following CFG carriers is recursive and requires the cycle-aware query
+    // cache. Contract-only queries may intentionally omit that cache.
+    return analysis != NULL &&
+           loom_amdgpu_analyzed_source_value_prefers_vgpr(
+               module, fact_table, view_regions, analysis, incoming_value_id);
   }
   const loom_op_t* defining_op = loom_value_def_op(incoming_value);
   if (defining_op == NULL) {
@@ -982,8 +1013,13 @@ static bool loom_amdgpu_source_value_prefers_vgpr_impl(
         module, fact_table, view_regions, analysis, input_value_id);
   }
 
-  if (loom_amdgpu_source_scalar_float_result_follows_operands(
-          module, analysis, source_value_id, defining_op, producer_flags)) {
+  const loom_amdgpu_scalar_float_result_policy_t scalar_float_policy =
+      loom_amdgpu_source_scalar_float_result_policy(
+          module, analysis, source_value_id, defining_op, producer_flags);
+  if (scalar_float_policy == LOOM_AMDGPU_SCALAR_FLOAT_RESULT_REQUIRES_VGPR) {
+    return true;
+  }
+  if (scalar_float_policy == LOOM_AMDGPU_SCALAR_FLOAT_RESULT_FOLLOWS_OPERANDS) {
     const loom_value_id_t* operands = loom_op_const_operands(defining_op);
     for (uint16_t i = 0; i < defining_op->operand_count; ++i) {
       if (loom_amdgpu_analyzed_source_value_prefers_vgpr(
@@ -1047,7 +1083,7 @@ static bool loom_amdgpu_source_value_prefers_vgpr_impl(
                        LOOM_AMDGPU_SOURCE_PRODUCER_VECTOR_STORAGE)) {
     loom_amdgpu_vector_storage_t storage = {0};
     return loom_value_def_index(value) == 0 &&
-           loom_amdgpu_type_vector_storage(source_type, &storage) &&
+           loom_amdgpu_type_vector_register_storage(source_type, &storage) &&
            !iree_any_bit_set(
                loom_amdgpu_vector_storage_kind_flags(storage.kind),
                LOOM_AMDGPU_VECTOR_STORAGE_KIND_FLAG_SGPR_MASK);

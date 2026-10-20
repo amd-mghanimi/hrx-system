@@ -7,13 +7,13 @@
 #include "loom/import/cxx/control/analysis.h"
 
 #include <cxx/ast.h>
-#include <cxx/initialization.h>
 #include <cxx/names.h>
 #include <cxx/symbols.h>
 
 #include <algorithm>
 
 #include "iree/testing/gtest.h"
+#include "loom/import/cxx/source/expressions.h"
 #include "loom/import/cxx/source/source.h"
 
 namespace loom::cxx_import {
@@ -43,6 +43,18 @@ TEST(ControlFlowTest, CountedAdmissionRetainsTheNonwrappingIntervalProof) {
   };
   const Case cases[] = {
       {"unsigned n", "for (unsigned i=0; i<n; ++i) {}", 1},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) ;", 1},
+      {"unsigned n", "for (unsigned i=0; i<16u; i+=4u) n += i;", 4, 16},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) ++i;", 0},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) --n;", 0},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) (void)&i;", 0},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) sizeof(++i);", 1},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) unsigned value = ++i;", 0},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) if constexpr(false) ++i;",
+       1},
+      {"unsigned n", "for (unsigned i=0; i<n; ++i) if constexpr(true) ++i;", 0},
+      {"unsigned n",
+       "for (unsigned i=0; i<n; ++i) for (unsigned j=0; j<4u; ++j) ++i;", 0},
       {"unsigned n", "for (unsigned i=0; i<16u; i+=4u) {}", 4, 16},
       {"unsigned n", "for (unsigned i=0; i<4294967292u; i+=4u) {}", 4,
        4294967292u},
@@ -124,12 +136,13 @@ TEST(ControlFlowTest, CountedAdmissionRetainsTheNonwrappingIntervalProof) {
     auto* counted = analysis.counted(loop);
     ASSERT_EQ(counted != nullptr, test.step != 0);
     if (counted) {
-      EXPECT_EQ(counted->step, test.step);
+      const auto& range = std::get<CountedLoop::UnsignedRange>(counted->range);
+      EXPECT_EQ(range.step, test.step);
       EXPECT_EQ(cxx::to_string(counted->induction->name()), "i");
       if (test.upper) {
-        EXPECT_EQ(std::get<unsigned>(counted->upper), *test.upper);
+        EXPECT_EQ(std::get<unsigned>(range.upper), *test.upper);
       } else {
-        const auto& bound = std::get<CountedLoop::Bound>(counted->upper);
+        const auto& bound = std::get<CountedLoop::Bound>(range.upper);
         EXPECT_EQ(bound.binding, function->symbol->parameters()[0]);
         auto* condition =
             cxx::ast_cast<cxx::BinaryExpressionAST>(loop->condition);
@@ -137,6 +150,96 @@ TEST(ControlFlowTest, CountedAdmissionRetainsTheNonwrappingIntervalProof) {
       }
       EXPECT_EQ(analysis.counted(loop), counted);
     }
+  }
+}
+
+TEST(ControlFlowTest, AddressAdmissionRetainsNativeUnitStepIntervals) {
+  struct Case {
+    // Fully qualified native address type used by the source loop.
+    const char* type;
+    // Standalone source loop whose classification is under test.
+    const char* loop;
+    // Expected native range, or no value for general while semantics.
+    std::optional<CountedLoop::AddressDomain> domain;
+  };
+  const Case cases[] = {
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=i+loom::type::index{1}) {}",
+       CountedLoop::AddressDomain::Index},
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=loom::type::index(1)+i) {}",
+       CountedLoop::AddressDomain::Index},
+      {"loom::type::offset",
+       "for (auto i=begin; i<end; i=i+loom::type::offset{1}) {}",
+       CountedLoop::AddressDomain::Offset},
+      {"loom::type::offset",
+       "for (auto i=begin; i<end; i=loom::type::offset{1}+i) {}",
+       CountedLoop::AddressDomain::Offset},
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=i+loom::type::index{2}) {}", std::nullopt},
+      {"loom::type::offset",
+       "for (auto i=begin; i<end; i=i+loom::type::offset{2}) {}", std::nullopt},
+      {"loom::type::index",
+       "for (auto i=begin; loom::index::ult(i,end); "
+       "i=i+loom::type::index{1}) {}",
+       std::nullopt},
+      {"loom::type::offset",
+       "for (auto i=begin; loom::offset::slt(i,end); "
+       "i=i+loom::type::offset{1}) {}",
+       std::nullopt},
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=i+loom::type::index{1}) "
+       "end=loom::type::index{4};",
+       std::nullopt},
+      {"loom::type::offset",
+       "for (auto i=begin; i<end; i=i+loom::type::offset{1}) "
+       "i=loom::type::offset{4};",
+       std::nullopt},
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=i+loom::type::index{1}) (void)&end;",
+       std::nullopt},
+      {"loom::type::index",
+       "for (auto i=begin; i<end; i=i+loom::type::index{1}) {} (void)&end;",
+       std::nullopt},
+      {"loom::type::offset",
+       "for (auto i=begin; i<end; i=i+loom::type::offset{1}) (void)&i;",
+       std::nullopt},
+  };
+  loom_cxx_import_options_t options;
+  loom_cxx_import_options_initialize(&options);
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.loop);
+    std::string text = std::string("#include <loomcxx/index.h>\nvoid entry(") +
+                       test.type + " begin, " + test.type + " end) {" +
+                       test.loop + "}";
+    Source source(view(text), IREE_SV("address_loops.cxx"), options);
+    auto* function = definition(source);
+    ASSERT_NE(function, nullptr);
+    auto* body = cxx::ast_cast<cxx::CompoundStatementFunctionBodyAST>(
+                     function->functionBody)
+                     ->statement;
+    auto* loop =
+        cxx::ast_cast<cxx::ForStatementAST>(body->statementList->value);
+    ASSERT_NE(loop, nullptr);
+    Types types(source.unit(), source.diagnostics());
+    ControlFlow analysis(source.unit(), source.diagnostics(), types, body);
+    auto* counted = analysis.counted(loop);
+    ASSERT_EQ(counted != nullptr, test.domain.has_value());
+    if (!counted) {
+      continue;
+    }
+    EXPECT_EQ(counted->induction,
+              cxx::ast_cast<cxx::SimpleDeclarationAST>(
+                  cxx::ast_cast<cxx::DeclarationStatementAST>(loop->initializer)
+                      ->declaration)
+                  ->initDeclaratorList->value->symbol);
+    const auto& range = std::get<CountedLoop::AddressRange>(counted->range);
+    EXPECT_EQ(range.domain, *test.domain);
+    EXPECT_EQ(range.upper.binding, function->symbol->parameters()[1]);
+    EXPECT_EQ(range.upper.expression,
+              cxx::ast_cast<cxx::BinaryExpressionAST>(loop->condition)
+                  ->rightExpression);
+    EXPECT_EQ(analysis.counted(loop), counted);
   }
 }
 
@@ -178,12 +281,10 @@ TEST(ControlFlowTest, DecisionSyntaxAndInitializerWritesStayWithTheBinding) {
   for (auto* statement : cxx::ListView{body->statementList}) {
     auto* branch = cxx::ast_cast<cxx::IfStatementAST>(statement);
     ASSERT_NE(branch, nullptr);
-    auto* declaration =
-        analysis.condition_declaration(branch->decisionVariable);
+    auto* declaration = condition_declaration(branch->condition);
     ASSERT_NE(declaration, nullptr);
-    EXPECT_EQ(declaration->symbol, branch->decisionVariable);
-    EXPECT_EQ(declaration->initializer,
-              branch->decisionVariable->initializer());
+    ASSERT_NE(declaration->symbol, nullptr);
+    EXPECT_EQ(declaration->initializer, declaration->symbol->initializer());
     auto writes = analysis.written(branch);
     ASSERT_FALSE(writes.empty());
     EXPECT_EQ(writes.front(), function->symbol->parameters()[0]);
@@ -273,6 +374,54 @@ TEST(ControlFlowTest, NestedMemberWritesRetainTheOwningBindingAndSlice) {
   EXPECT_EQ(pointer->binding, writes[0]);
   EXPECT_EQ(pointer->component_offset, 2u);
   EXPECT_EQ(pointer->member, &kPointerPartition);
+}
+
+TEST(ControlFlowTest, VectorLaneWritesRetainTheOwningVectorSlice) {
+  loom_cxx_import_options_t options;
+  loom_cxx_import_options_initialize(&options);
+  Source source(IREE_SV(R"(
+    using Lanes = unsigned __attribute__((ext_vector_type(4)));
+    struct Packet { unsigned prefix; Lanes lanes; };
+    void entry(Packet packet, Packet* memory, unsigned index) {
+      if (index < 4) {
+        packet.lanes[index++] += 1;
+        memory[index].lanes[index] = 2;
+      }
+    }
+  )"),
+                IREE_SV("vector_lane_writes.cpp"), options);
+  auto* function = definition(source);
+  ASSERT_NE(function, nullptr);
+  auto* body = cxx::ast_cast<cxx::CompoundStatementFunctionBodyAST>(
+                   function->functionBody)
+                   ->statement;
+  auto* branch = cxx::ast_cast<cxx::IfStatementAST>(body->statementList->value);
+  ASSERT_NE(branch, nullptr);
+  auto* arm = cxx::ast_cast<cxx::CompoundStatementAST>(branch->statement);
+  ASSERT_NE(arm, nullptr);
+  auto* automatic_statement =
+      cxx::ast_cast<cxx::ExpressionStatementAST>(arm->statementList->value);
+  auto* automatic = cxx::ast_cast<cxx::CompoundAssignmentExpressionAST>(
+      automatic_statement->expression);
+  ASSERT_NE(automatic, nullptr);
+  auto* memory_statement = cxx::ast_cast<cxx::ExpressionStatementAST>(
+      arm->statementList->next->value);
+  auto* memory =
+      cxx::ast_cast<cxx::AssignmentExpressionAST>(memory_statement->expression);
+  ASSERT_NE(memory, nullptr);
+
+  Types types(source.unit(), source.diagnostics());
+  ControlFlow analysis(source.unit(), source.diagnostics(), types, body);
+  auto writes = analysis.written(branch);
+  ASSERT_EQ(writes.size(), 2u);
+  EXPECT_EQ(writes[0], function->symbol->parameters()[0]);
+  EXPECT_EQ(writes[1], function->symbol->parameters()[2]);
+  auto lane = analysis.destination(automatic->targetExpression);
+  ASSERT_TRUE(lane.has_value());
+  EXPECT_EQ(lane->binding, function->symbol->parameters()[0]);
+  EXPECT_EQ(lane->component_offset, 1u);
+  EXPECT_EQ(lane->member, &kSSAPartition);
+  EXPECT_FALSE(analysis.destination(memory->leftExpression).has_value());
 }
 
 TEST(ControlFlowTest, MemoryMembersRetainStorageIdentityAndAddressSideEffects) {
@@ -372,7 +521,7 @@ TEST(ControlFlowTest, ConditionalValuesRetainOrderedBindingMutations) {
       cxx::ast_cast<cxx::ReturnStatementAST>(body->statementList->value);
   ASSERT_NE(ret, nullptr);
   auto* select = cxx::ast_cast<cxx::ConditionalExpressionAST>(
-      cxx::Initializer::stripImplicitCasts(ret->expression));
+      strip_implicit_casts(ret->expression));
   ASSERT_NE(select, nullptr);
   Types types(source.unit(), source.diagnostics());
   ControlFlow analysis(source.unit(), source.diagnostics(), types, body);
@@ -383,8 +532,8 @@ TEST(ControlFlowTest, ConditionalValuesRetainOrderedBindingMutations) {
   EXPECT_EQ(writes[1], parameters[0]);
   EXPECT_EQ(writes[2], parameters[1]);
   for (auto* arm : {select->iftrueExpression, select->iffalseExpression}) {
-    auto* nested = cxx::ast_cast<cxx::NestedExpressionAST>(
-        cxx::Initializer::stripImplicitCasts(arm));
+    auto* nested =
+        cxx::ast_cast<cxx::NestedExpressionAST>(strip_implicit_casts(arm));
     ASSERT_NE(nested, nullptr);
     auto arm_writes = analysis.written(nested->expression);
     ASSERT_EQ(arm_writes.size(), 2u);
@@ -399,33 +548,52 @@ TEST(ControlFlowTest, IterationExitsStopAtTheirLoopAndExcludeUnreachablePaths) {
     const char* body;
     // Paths that continue the outer loop.
     ExitFlow continues;
+    // Paths that break from the outer loop.
+    ExitFlow breaks;
+    // Paths that leave the current iteration by either transfer.
+    ExitFlow iteration_exits;
     // Paths that return from the enclosing function.
     ExitFlow returns;
   };
   const Case cases[] = {
-      {"", ExitFlow::None, ExitFlow::None},
-      {"continue;", ExitFlow::All, ExitFlow::None},
-      {"if (x) continue;", ExitFlow::Some, ExitFlow::None},
-      {"if (x) continue; else continue;", ExitFlow::All, ExitFlow::None},
-      {"if constexpr(true) continue; else return;", ExitFlow::All,
+      {"", ExitFlow::None, ExitFlow::None, ExitFlow::None, ExitFlow::None},
+      {"continue;", ExitFlow::All, ExitFlow::None, ExitFlow::All,
        ExitFlow::None},
-      {"if constexpr(false) continue; else return;", ExitFlow::None,
-       ExitFlow::All},
-      {"if constexpr(false) continue;", ExitFlow::None, ExitFlow::None},
-      {"if constexpr(true) { if (x) continue; } else return;", ExitFlow::Some,
+      {"break;", ExitFlow::None, ExitFlow::All, ExitFlow::All, ExitFlow::None},
+      {"if (x) continue;", ExitFlow::Some, ExitFlow::None, ExitFlow::Some,
        ExitFlow::None},
-      {"if (x) { if (y) continue; } else { if (y) continue; }", ExitFlow::Some,
+      {"if (x) break;", ExitFlow::None, ExitFlow::Some, ExitFlow::Some,
        ExitFlow::None},
-      {"if (x) continue; return;", ExitFlow::Some, ExitFlow::Some},
-      {"continue; return;", ExitFlow::All, ExitFlow::None},
-      {"return; continue;", ExitFlow::None, ExitFlow::All},
-      {"while (x) { --x; continue; }", ExitFlow::None, ExitFlow::None},
-      {"do { --x; continue; } while (x);", ExitFlow::None, ExitFlow::None},
-      {"for (unsigned j=0; j<4u; ++j) { if (y) continue; }", ExitFlow::None,
-       ExitFlow::None},
-      {"while (x) { continue; return; }", ExitFlow::None, ExitFlow::None},
-      {"do { if (x) continue; return; } while (y);", ExitFlow::None,
+      {"if (x) break; else continue;", ExitFlow::Some, ExitFlow::Some,
+       ExitFlow::All, ExitFlow::None},
+      {"if (x) break; else break;", ExitFlow::None, ExitFlow::All,
+       ExitFlow::All, ExitFlow::None},
+      {"if constexpr(true) break; else continue;", ExitFlow::None,
+       ExitFlow::All, ExitFlow::All, ExitFlow::None},
+      {"if constexpr(false) break; else return;", ExitFlow::None,
+       ExitFlow::None, ExitFlow::None, ExitFlow::All},
+      {"if constexpr(false) break;", ExitFlow::None, ExitFlow::None,
+       ExitFlow::None, ExitFlow::None},
+      {"if constexpr(true) { if (x) break; } else return;", ExitFlow::None,
+       ExitFlow::Some, ExitFlow::Some, ExitFlow::None},
+      {"if (x) { if (y) continue; } else { if (y) break; }", ExitFlow::Some,
+       ExitFlow::Some, ExitFlow::Some, ExitFlow::None},
+      {"if (x) break; return;", ExitFlow::None, ExitFlow::Some, ExitFlow::Some,
        ExitFlow::Some},
+      {"break; return;", ExitFlow::None, ExitFlow::All, ExitFlow::All,
+       ExitFlow::None},
+      {"return; break;", ExitFlow::None, ExitFlow::None, ExitFlow::None,
+       ExitFlow::All},
+      {"while (x) { --x; continue; }", ExitFlow::None, ExitFlow::None,
+       ExitFlow::None, ExitFlow::None},
+      {"do { --x; break; } while (x);", ExitFlow::None, ExitFlow::None,
+       ExitFlow::None, ExitFlow::None},
+      {"for (unsigned j=0; j<4u; ++j) { if (y) break; }", ExitFlow::None,
+       ExitFlow::None, ExitFlow::None, ExitFlow::None},
+      {"while (x) { break; return; }", ExitFlow::None, ExitFlow::None,
+       ExitFlow::None, ExitFlow::None},
+      {"do { if (x) break; return; } while (y);", ExitFlow::None,
+       ExitFlow::None, ExitFlow::None, ExitFlow::Some},
   };
   loom_cxx_import_options_t options;
   loom_cxx_import_options_initialize(&options);
@@ -445,9 +613,15 @@ TEST(ControlFlowTest, IterationExitsStopAtTheirLoopAndExcludeUnreachablePaths) {
     Types types(source.unit(), source.diagnostics());
     ControlFlow analysis(source.unit(), source.diagnostics(), types, body);
     EXPECT_EQ(analysis.continues(loop->statement), test.continues);
+    EXPECT_EQ(analysis.breaks(loop->statement), test.breaks);
+    EXPECT_EQ(analysis.iteration_exits(loop->statement), test.iteration_exits);
     EXPECT_EQ(analysis.returns(loop->statement), test.returns);
     EXPECT_EQ(analysis.continues(loop), ExitFlow::None);
+    EXPECT_EQ(analysis.breaks(loop), ExitFlow::None);
+    EXPECT_EQ(analysis.iteration_exits(loop), ExitFlow::None);
     EXPECT_EQ(analysis.continues(body), ExitFlow::None);
+    EXPECT_EQ(analysis.breaks(body), ExitFlow::None);
+    EXPECT_EQ(analysis.iteration_exits(body), ExitFlow::None);
     EXPECT_NE(analysis.counted(loop), nullptr);
   }
 }

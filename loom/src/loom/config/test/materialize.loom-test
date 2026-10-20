@@ -1,0 +1,152 @@
+// RUN: emit config-materialize model36.model.hidden_size=4096
+
+// Text materialization replaces a constrained declaration while preserving all
+// uses of its result.
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
+
+func.def @read_hidden_size() -> (index) {
+  %hidden_size = config.get @model36.model.hidden_size : index
+  func.return %hidden_size : index
+}
+
+// ----
+applied @model36.model.hidden_size = 4096
+status: OK
+materialized: 1
+ignored: 0
+config.def @model36.model.hidden_size = 4096 : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
+
+func.def @read_hidden_size() -> (index) {
+  %hidden_size = config.get @model36.model.hidden_size : index
+  func.return %hidden_size : index
+}
+
+// ====
+
+// RUN: emit config-materialize depth=004
+
+// Scalar text is parsed against the existing config type and reported with its
+// canonical typed spelling.
+config.def @depth = 1 : index
+
+// ----
+applied @depth = 4
+status: OK
+materialized: 1
+ignored: 0
+config.def @depth = 4 : index
+
+// ====
+
+// RUN: emit config-materialize enabled=true
+
+config.def @enabled = false : i1
+
+// ----
+applied @enabled = true
+status: OK
+materialized: 1
+ignored: 0
+config.def @enabled = true : i1
+
+// ====
+
+// RUN: emit config-materialize scale=0.5
+
+config.def @scale = 1.0 : f32
+
+// ----
+applied @scale = 0.5
+status: OK
+materialized: 1
+ignored: 0
+config.def @scale = 0.5 : f32
+
+// ====
+
+// RUN: emit config-materialize model36.layout=#encoding.layout.dense
+
+// Encoding attributes use the same role-aware parser as authored config.def.
+config.decl @model36.layout : encoding<layout>
+
+// ----
+applied @model36.layout = #encoding.layout.dense
+status: OK
+materialized: 1
+ignored: 0
+config.def @model36.layout = #encoding.layout.dense : encoding<layout>
+
+// ====
+
+// RUN: emit config-materialize unused={not_parsed}
+
+// Unknown bindings are ignored before value parsing so reusable config sets can
+// cover related programs with different symbol subsets.
+func.def @identity(%value: i32) -> (i32) {
+  func.return %value : i32
+}
+
+// ----
+status: OK
+materialized: 0
+ignored: 1
+func.def @identity(%value: i32) -> (i32) {
+  func.return %value : i32
+}
+
+// ====
+
+// RUN: emit config-materialize model36.model.hidden_size=4103
+
+// Contract failures leave the declaration and its constraints intact.
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
+
+// ----
+status: INVALID_ARGUMENT
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
+
+// ====
+
+// RUN: emit config-materialize model36.layout=#ggml.q4_0
+
+// Parsed encoding attributes must match the role declared by the config type.
+config.decl @model36.layout : encoding<layout>
+
+// ----
+status: INVALID_ARGUMENT
+config.decl @model36.layout : encoding<layout>
+
+// ====
+
+// RUN: emit config-materialize lanes=128
+
+// Scalar text is rejected when it cannot be represented by the declared type.
+config.decl @lanes : i8
+
+// ----
+status: OUT_OF_RANGE
+config.decl @lanes : i8
+
+// ====
+
+// RUN: emit config-materialize lanes=64
+
+// Previously resolved values retain their domain through later overrides.
+config.def @lanes = 32 : %value: index where [range(%value, 16, 128), multiple_of(%value, 16)]
+
+// ----
+applied @lanes = 64
+status: OK
+materialized: 1
+ignored: 0
+config.def @lanes = 64 : %value: index where [range(%value, 16, 128), multiple_of(%value, 16)]
+
+// ====
+
+// RUN: emit config-materialize lanes=65
+
+config.def @lanes = 32 : %value: index where [range(%value, 16, 128), multiple_of(%value, 16)]
+
+// ----
+status: INVALID_ARGUMENT
+config.def @lanes = 32 : %value: index where [range(%value, 16, 128), multiple_of(%value, 16)]

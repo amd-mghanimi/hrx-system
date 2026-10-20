@@ -4,12 +4,18 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+load("//build_tools/bazel:executable.bzl", "iree_executable_test")
+load("//build_tools/bazel:test_resources.bzl", "GPU_DEVICE_RESOURCE_GROUP")
+load("//build_tools/testing:build_defs.bzl", "iree_execution_test_suite")
 load(
     "//loom/build_tools/bazel:build_defs.bzl",
-    "loom_cc_library",
+    "loom_cc_binary",
     "loom_config_compatible_with",
+    "loom_generated_file",
 )
+load("//loom/build_tools/bazel:defs.bzl", "loom_execution_profile", "loom_test")
 load("//loom/build_tools/bazel:loom_check.bzl", "loom_check_test")
+load("//loom/target/amd/xdna:execution_profiles.bzl", "XDNA_HARDWARE_PROFILE")
 
 package(
     default_visibility = ["//visibility:private"],
@@ -21,9 +27,176 @@ _XDNA_COMPILE_COMPATIBLE_WITH = loom_config_compatible_with([
     "//loom/config/target:xdna_artifacts",
 ])
 
+iree_execution_test_suite(
+    name = "loom_compile_execution_test",
+    data = ["test/resident_xdna.loom"],
+    manifests = ["test/loom-compile.test.json"],
+    tags = ["hostonly"],
+    target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH,
+    tools = {
+        "loom-compile": "//loom/src/loom/tools/loom-compile",
+    },
+)
+
+iree_execution_test_suite(
+    name = "loom_opt_trace",
+    data = ["test/resident_publication.loom"],
+    manifests = ["test/loom-opt.test.json"],
+    tags = ["hostonly"],
+    target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH,
+    tools = {
+        "loom-opt": "//loom/src/loom/tools/loom-opt",
+    },
+)
+
+iree_execution_test_suite(
+    name = "hal_execution_test",
+    data = [
+        "test/channel_lifetime.loom",
+        "test/dma_reuse.loom",
+        "test/hal_execution.loom",
+    ],
+    manifests = ["test/hal_execution.test.json"],
+    resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    tags = [
+        "iree-run-requirement=libamdf.resource.xdna",
+        "runtime-resource=amd-xdna",
+    ],
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/execute:xdna_hal",
+        "//loom/config/target/arch:vm",
+    ]),
+    tools = {
+        "iree-benchmark-loom": "//loom/src/loom/tools/iree-benchmark-loom",
+        "iree-test-loom": "//loom/src/loom/tools/iree-test-loom",
+    },
+)
+
+iree_execution_test_suite(
+    name = "channel_fanout_execution_test",
+    data = [
+        "test/channel_fanout.loom",
+        "test/channel_sram.loom",
+        "test/finite_ingress.loom",
+    ],
+    manifests = ["test/channel_fanout.test.json"],
+    resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    tags = [
+        "iree-run-requirement=libamdf.resource.xdna",
+        "runtime-resource=amd-xdna",
+    ],
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/execute:xdna_hal",
+        "//loom/config/target/arch:vm",
+    ]),
+    tools = {"iree-test-loom": "//loom/src/loom/tools/iree-test-loom"},
+)
+
+# This topology reserves all eight columns of the Strix Halo array.
+_XDNA_EIGHT_COLUMN_PROFILE = loom_execution_profile(
+    name = "xdna_eight_columns",
+    build_requirements = XDNA_HARDWARE_PROFILE.build_requirements,
+    executor = XDNA_HARDWARE_PROFILE.executor,
+    resource_group = XDNA_HARDWARE_PROFILE.resource_group,
+    run_requirements = XDNA_HARDWARE_PROFILE.run_requirements,
+    runner_args = ["--device=xdna://0?columns=8"],
+    target_class = XDNA_HARDWARE_PROFILE.target_class,
+    target_family = XDNA_HARDWARE_PROFILE.target_family,
+)
+
+loom_test(
+    name = "multicast_execution_test",
+    srcs = ["test/channel_multicast.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [_XDNA_EIGHT_COLUMN_PROFILE],
+    tags = ["manual"],
+)
+
+loom_test(
+    name = "dma_wrap_execution_test",
+    srcs = ["test/dma_wrap.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+)
+
+loom_test(
+    name = "staging_stress",
+    srcs = ["test/staging_stress.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    tags = [
+        "manual",
+        "stress",
+    ],
+)
+
+[
+    loom_generated_file(
+        name = "temporal_fold_image_" + suffix,
+        testonly = True,
+        args = [
+            "$(location test/temporal_fold.loom)",
+            "--target=amd.xdna.aie2p:" + profile,
+        ],
+        generator = "//loom/src/loom/tools/loom-compile",
+        inputs = ["test/temporal_fold.loom"],
+        output = "temporal_fold_" + suffix + ".xdna",
+        output_flag = "--output=",
+        target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH,
+    )
+    for suffix, profile in [
+        ("npu4", "amd.xdna.strix.17f0_10"),
+        ("npu5", "amd.xdna.strix_halo.17f0_11"),
+    ]
+]
+
+loom_cc_binary(
+    name = "temporal_fold_test_bin",
+    testonly = True,
+    srcs = ["temporal_fold_test.cc"],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/execute:xdna_hal"]),
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/tooling:flags",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/cts/util:registry",
+        "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/cts/util:test_main",
+        "//runtime/src/iree/hal/drivers/amd:driver",
+        "//runtime/src/iree/testing:gtest",
+    ],
+)
+
+iree_executable_test(
+    name = "temporal_fold_execution_test",
+    src = ":temporal_fold_test_bin",
+    args = [
+        "--executable_file_npu4=$(rootpath :temporal_fold_image_npu4)",
+        "--executable_file_npu5=$(rootpath :temporal_fold_image_npu5)",
+    ],
+    data = [
+        ":temporal_fold_image_npu4",
+        ":temporal_fold_image_npu5",
+    ],
+    resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    tags = [
+        "iree-run-requirement=libamdf.resource.xdna",
+        "runtime-resource=amd-xdna",
+    ],
+    target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH + loom_config_compatible_with(["//loom/config/execute:xdna_hal"]),
+)
+
 loom_check_test(
     name = "assembly_lowering",
     src = "test/assembly.cxx-test",
+    runner = "//loom/src/loom/tools/loom-check",
+    target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH + loom_config_compatible_with(["//loom/config/import:cxx"]),
+)
+
+loom_check_test(
+    name = "boolean_storage_lowering",
+    src = "test/boolean_storage.cxx-test",
+    data = ["//loom/src/loom/import/cxx/test:boolean_storage.cxx"],
     runner = "//loom/src/loom/tools/loom-check",
     target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH + loom_config_compatible_with(["//loom/config/import:cxx"]),
 )
@@ -36,20 +209,51 @@ loom_check_test(
     target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH + loom_config_compatible_with(["//loom/config/import:cxx"]),
 )
 
-loom_cc_library(
-    name = "artifact_provider",
-    srcs = ["artifact_provider.c"],
-    hdrs = ["artifact_provider.h"],
-    target_compatible_with = _XDNA_COMPILE_COMPATIBLE_WITH,
-    visibility = ["//loom/src/loom/tooling/compile:__pkg__"],
-    deps = [
-        "//loom/src/loom/target:entry_selection",
-        "//loom/src/loom/target/arch/amd/xdna/aie2p:artifact",
-        "//loom/src/loom/target/arch/amd/xdna/aie2p:low_registry",
-        "//loom/src/loom/target/arch/amd/xdna/aie2p:target_profile",
-        "//loom/src/loom/target/arch/amd/xdna/aie2p:target_records",
-        "//loom/src/loom/tooling/compile:artifact",
-        "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal:arena",
+loom_test(
+    name = "assembly_pack_execution_test",
+    srcs = [
+        "test/assembly_pack.cxx",
+        "test/assembly_pack.loom",
     ],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
+)
+
+loom_test(
+    name = "bitcast_execution_test",
+    srcs = ["test/bitcast.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
+    deps = ["//loom/src/loom/import/cxx/test:vector_memory_library"],
+)
+
+loom_test(
+    name = "buffer_selection_execution_test",
+    srcs = ["test/buffer_selection.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
+    deps = ["//loom/src/loom/import/cxx/test:vector_memory_library"],
+)
+
+loom_test(
+    name = "vector_copy_execution_test",
+    srcs = ["test/vector_copy.loom"],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
+    deps = ["//loom/src/loom/import/cxx/test:vector_memory_library"],
+)
+
+loom_test(
+    name = "packed_memory_execution_test",
+    srcs = [
+        "test/packed_memory.loom",
+        "//loom/src/loom/import/cxx/test:packed_memory.cxx",
+    ],
+    benchmark_smoke = False,
+    execution_profiles = [XDNA_HARDWARE_PROFILE],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
 )

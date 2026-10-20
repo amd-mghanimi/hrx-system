@@ -10,15 +10,21 @@
 #include "amdf/amdf.h"
 #include "libamdf/src/memory_pair.h"
 
+// Construction-only import of a fresh export of platform-owned pages. This
+// native consumer role is never a public backing profile or foreign import
+// capability: every attachment receives an independently closeable transport.
+#define AMDF_MEMORY_NATIVE_PROFILE_ROLE_HOST_IMPORT (UINT32_C(1) << 31)
+
 // Properties of physical backing, independent of a consumer's access.
-#define AMDF_MEMORY_BACKING_FLAGS                                  \
-  (AMDF_MEMORY_FLAG_HOST_VISIBLE | AMDF_MEMORY_FLAG_DEVICE_LOCAL | \
-   AMDF_MEMORY_FLAG_SHAREABLE)
+#define AMDF_MEMORY_BACKING_FLAGS                                      \
+  (AMDF_MEMORY_FLAG_HOST_VISIBLE | AMDF_MEMORY_FLAG_DEVICE_LOCAL |     \
+   AMDF_MEMORY_FLAG_SHAREABLE | AMDF_MEMORY_FLAG_HOST_MAPPING_SOURCE | \
+   AMDF_MEMORY_FLAG_HOST_FILE_IO)
 
 // Properties established separately for each device consumer.
 #define AMDF_MEMORY_ACCESS_FLAGS                                     \
   (AMDF_MEMORY_FLAG_QUEUE_STORAGE | AMDF_MEMORY_FLAG_HOST_COHERENT | \
-   AMDF_MEMORY_FLAG_DEVICE_ADDRESS)
+   AMDF_MEMORY_FLAG_DEVICE_ADDRESS | AMDF_MEMORY_FLAG_MAPPING_SOURCE)
 
 // One native placement/acquisition contract for a single consumer. Scope
 // selection composes these native facts into backing and access capabilities;
@@ -34,6 +40,9 @@ typedef struct amdf_memory_native_profile_t {
   amdf_memory_flags_t guaranteed_flags;
   // Backing and access properties the native operation can establish.
   amdf_memory_flags_t supported_flags;
+  // Cached optional-provider prerequisite status; construction is
+  // authoritative.
+  amdf_status_t availability;
   // Permissions unconditionally established by this native operation.
   amdf_memory_access_t guaranteed_device_access;
   // Permissions that can be requested from this native operation.
@@ -114,12 +123,23 @@ typedef struct amdf_memory_native_create_info_t {
   void* registered_host_pointer;
 } amdf_memory_native_create_info_t;
 
+// Cache-ownership boundary of a native backing attachment.
+typedef enum amdf_memory_native_import_origin_e {
+  // External producers retain their explicit publication/synchronization duty.
+  AMDF_MEMORY_NATIVE_IMPORT_ORIGIN_EXTERNAL = 0,
+  // The common memory_create transaction owns first-device-writer readiness.
+  // It exclusively owns all affected cache lines until public publication.
+  AMDF_MEMORY_NATIVE_IMPORT_ORIGIN_CONSTRUCTION = 1,
+} amdf_memory_native_import_origin_t;
+
 // Validated permissions passed to one native external-backing preparer.
 typedef struct amdf_memory_native_import_info_t {
   // Exact permissions for the native consumer.
   amdf_memory_access_t device_access;
   // Required backing and native access properties.
   amdf_memory_flags_t required_flags;
+  // Whether initial cache readiness belongs to this unpublished construction.
+  amdf_memory_native_import_origin_t origin;
   // Requested power-of-two minimum alignment, or zero for profile policy.
   uint64_t minimum_alignment;
 } amdf_memory_native_import_info_t;

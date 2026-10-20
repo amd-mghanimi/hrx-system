@@ -119,6 +119,7 @@ static iree_status_t loom_spirv_target_profile_project_facts(
   IREE_ASSERT(profile != NULL);
   loom_spirv_target_facts_t* facts = (loom_spirv_target_facts_t*)base_facts;
   facts->base.selector = LOOM_SPIRV_TARGET_KIND_VULKAN1_3;
+  facts->subgroup = profile->subgroup;
   if (profile->cooperative_properties != NULL) {
     return loom_spirv_target_profile_copy_cooperative_properties(
         profile->cooperative_properties, arena, &facts->cooperative_properties);
@@ -165,9 +166,49 @@ static const loom_spirv_target_profile_t kSpirvHalKernelProfile = {
         },
 };
 
+static const loom_spirv_target_profile_t kSpirvSubgroup32BallotHalProfile = {
+    .base =
+        {
+            .type = &loom_spirv_target_profile_type,
+            .target_bundle =
+                &loom_spirv_low_target_bundle_subgroup32_ballot_hal,
+            .explicit_fields =
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_SUBGROUP_SIZE) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_ABI) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_CONTRACT_FEATURE_BITS),
+        },
+};
+
+static const loom_spirv_target_profile_t kSpirvSubgroup32PredicateHalProfile = {
+    .base =
+        {
+            .type = &loom_spirv_target_profile_type,
+            .target_bundle =
+                &loom_spirv_low_target_bundle_subgroup32_predicate_hal,
+            .explicit_fields =
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_SUBGROUP_SIZE) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_ABI) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_CONTRACT_FEATURE_BITS),
+        },
+};
+
+static const loom_spirv_target_profile_t kSpirvSubgroup32ReductionHalProfile = {
+    .base =
+        {
+            .type = &loom_spirv_target_profile_type,
+            .target_bundle =
+                &loom_spirv_low_target_bundle_subgroup32_reduction_hal,
+            .explicit_fields =
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_SUBGROUP_SIZE) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_ABI) |
+                (UINT64_C(1) << LOOM_TARGET_FACT_FIELD_CONTRACT_FEATURE_BITS),
+        },
+};
+
 void loom_spirv_target_profile_initialize(
     const loom_target_bundle_t* target_bundle,
     loom_target_fact_field_set_t explicit_fields,
+    loom_spirv_subgroup_properties_t subgroup,
     const loom_spirv_cooperative_property_set_t* cooperative_properties,
     loom_spirv_target_profile_t* out_profile) {
   IREE_ASSERT_ARGUMENT(out_profile);
@@ -178,6 +219,7 @@ void loom_spirv_target_profile_initialize(
               .target_bundle = target_bundle,
               .explicit_fields = explicit_fields,
           },
+      .subgroup = subgroup,
       .cooperative_properties = cooperative_properties,
   };
 }
@@ -194,11 +236,25 @@ iree_status_t loom_spirv_target_profile_select(
     *out_profile = &kSpirvExtendedTypesProfile;
   } else if (iree_string_view_equal(selector, IREE_SV("vulkan1.3+bda+hal"))) {
     *out_profile = &kSpirvHalKernelProfile;
+  } else if (iree_string_view_equal(
+                 selector, IREE_SV("vulkan1.3+bda+subgroup32+ballot+hal"))) {
+    *out_profile = &kSpirvSubgroup32BallotHalProfile;
+  } else if (iree_string_view_equal(
+                 selector,
+                 IREE_SV("vulkan1.3+bda+subgroup32+ballot+vote+hal"))) {
+    *out_profile = &kSpirvSubgroup32PredicateHalProfile;
+  } else if (iree_string_view_equal(
+                 selector,
+                 IREE_SV("vulkan1.3+bda+subgroup32+reductions+hal"))) {
+    *out_profile = &kSpirvSubgroup32ReductionHalProfile;
   } else {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "unknown SPIR-V target selector '%.*s'; expected vulkan1.3+bda, "
-        "vulkan1.3+bda+extended-types, or vulkan1.3+bda+hal",
+        "vulkan1.3+bda+extended-types, vulkan1.3+bda+hal, "
+        "vulkan1.3+bda+subgroup32+ballot+hal, "
+        "vulkan1.3+bda+subgroup32+ballot+vote+hal, or "
+        "vulkan1.3+bda+subgroup32+reductions+hal",
         (int)selector.size, selector.data);
   }
   return iree_ok_status();

@@ -121,6 +121,170 @@ TEST(OpSemantics, DialectTablesAreDenseAndQueryable) {
   EXPECT_EQ(wrong_dialect.contract_families, 0u);
 }
 
+TEST(OpSemantics, IntegerArithmeticConditionsCoverEveryDialectForm) {
+  loom_context_t context;
+  loom_context_initialize(iree_allocator_system(), &context);
+  IREE_ASSERT_OK(loom_op_registry_register_all_dialects(&context));
+  IREE_ASSERT_OK(loom_context_finalize(&context));
+
+  struct ExpectedCondition {
+    loom_op_kind_t kind;
+    loom_execution_condition_t condition;
+  };
+  static constexpr ExpectedCondition kExpectedConditions[] = {
+      {LOOM_OP_SCALAR_ADDI, LOOM_EXECUTION_CONDITION_INTEGER_ADD},
+      {LOOM_OP_VECTOR_ADDI, LOOM_EXECUTION_CONDITION_INTEGER_ADD},
+      {LOOM_OP_INDEX_ADD, LOOM_EXECUTION_CONDITION_INTEGER_ADD},
+      {LOOM_OP_SCALAR_SUBI, LOOM_EXECUTION_CONDITION_INTEGER_SUBTRACT},
+      {LOOM_OP_VECTOR_SUBI, LOOM_EXECUTION_CONDITION_INTEGER_SUBTRACT},
+      {LOOM_OP_INDEX_SUB, LOOM_EXECUTION_CONDITION_INTEGER_SUBTRACT},
+      {LOOM_OP_SCALAR_MULI, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY},
+      {LOOM_OP_VECTOR_MULI, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY},
+      {LOOM_OP_INDEX_MUL, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY},
+      {LOOM_OP_SCALAR_FMAI, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY_ADD},
+      {LOOM_OP_VECTOR_FMAI, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY_ADD},
+      {LOOM_OP_INDEX_MADD, LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY_ADD},
+  };
+  for (const auto& expected : kExpectedConditions) {
+    EXPECT_EQ(loom_context_resolve_op_semantics(&context, expected.kind)
+                  .execution_condition,
+              expected.condition);
+  }
+
+  loom_context_deinitialize(&context);
+}
+
+TEST(OpSemantics, NumericSpeculationDistinguishesTotalAndPartialFamilies) {
+  loom_context_t context;
+  loom_context_initialize(iree_allocator_system(), &context);
+  IREE_ASSERT_OK(loom_op_registry_register_all_dialects(&context));
+  IREE_ASSERT_OK(loom_context_finalize(&context));
+
+  // These families are total for every type accepted by their verifier. Keep
+  // the complete cross-dialect matrix together so a new spelling cannot
+  // silently lose LICM and if-conversion legality.
+  static constexpr loom_op_kind_t kTotalNumericOps[] = {
+      // Integer extrema.
+      LOOM_OP_SCALAR_MINSI,
+      LOOM_OP_SCALAR_MAXSI,
+      LOOM_OP_SCALAR_MINUI,
+      LOOM_OP_SCALAR_MAXUI,
+      LOOM_OP_VECTOR_MINSI,
+      LOOM_OP_VECTOR_MAXSI,
+      LOOM_OP_VECTOR_MINUI,
+      LOOM_OP_VECTOR_MAXUI,
+      LOOM_OP_INDEX_MIN,
+      LOOM_OP_INDEX_MAX,
+      // Bitwise logic.
+      LOOM_OP_SCALAR_ANDI,
+      LOOM_OP_SCALAR_ORI,
+      LOOM_OP_SCALAR_XORI,
+      LOOM_OP_VECTOR_ANDI,
+      LOOM_OP_VECTOR_ORI,
+      LOOM_OP_VECTOR_XORI,
+      LOOM_OP_INDEX_ANDI,
+      LOOM_OP_INDEX_ORI,
+      LOOM_OP_INDEX_XORI,
+      // Modulo-width rotates.
+      LOOM_OP_SCALAR_ROTLI,
+      LOOM_OP_SCALAR_ROTRI,
+      LOOM_OP_VECTOR_ROTLI,
+      LOOM_OP_VECTOR_ROTRI,
+      LOOM_OP_INDEX_ROTLI,
+      LOOM_OP_INDEX_ROTRI,
+      // Bit counts, including zero inputs.
+      LOOM_OP_SCALAR_CTLZI,
+      LOOM_OP_SCALAR_CTTZI,
+      LOOM_OP_SCALAR_CTPOPI,
+      LOOM_OP_VECTOR_CTLZI,
+      LOOM_OP_VECTOR_CTTZI,
+      LOOM_OP_VECTOR_CTPOPI,
+      LOOM_OP_INDEX_CTLZI,
+      LOOM_OP_INDEX_CTTZI,
+      LOOM_OP_INDEX_CTPOPI,
+      // Comparisons and selection.
+      LOOM_OP_SCALAR_CMPI,
+      LOOM_OP_SCALAR_CMPF,
+      LOOM_OP_VECTOR_CMPI,
+      LOOM_OP_VECTOR_CMPF,
+      LOOM_OP_VECTOR_SELECT,
+      LOOM_OP_INDEX_CMP,
+      // Width and numeric conversions.
+      LOOM_OP_SCALAR_SITOFP,
+      LOOM_OP_SCALAR_UITOFP,
+      LOOM_OP_SCALAR_EXTF,
+      LOOM_OP_SCALAR_FPTRUNC,
+      LOOM_OP_SCALAR_EXTSI,
+      LOOM_OP_SCALAR_EXTUI,
+      LOOM_OP_SCALAR_TRUNCI,
+      LOOM_OP_SCALAR_BITCAST,
+      LOOM_OP_VECTOR_SITOFP,
+      LOOM_OP_VECTOR_UITOFP,
+      LOOM_OP_VECTOR_EXTF,
+      LOOM_OP_VECTOR_FPTRUNC,
+      LOOM_OP_VECTOR_EXTSI,
+      LOOM_OP_VECTOR_EXTUI,
+      LOOM_OP_VECTOR_TRUNCI,
+      LOOM_OP_VECTOR_BITCAST,
+  };
+  for (loom_op_kind_t kind : kTotalNumericOps) {
+    SCOPED_TRACE(kind);
+    const loom_op_vtable_t* vtable = loom_context_resolve_op(&context, kind);
+    ASSERT_NE(vtable, nullptr);
+    EXPECT_TRUE(loom_traits_are_safe_to_speculate(vtable->traits));
+  }
+
+  // Neighboring partial operations require operand facts or target-carrier
+  // proofs. A family-wide annotation must not erase that distinction.
+  static constexpr loom_op_kind_t kPartialNumericOps[] = {
+      LOOM_OP_SCALAR_FPTOSI, LOOM_OP_SCALAR_FPTOUI, LOOM_OP_VECTOR_FPTOSI,
+      LOOM_OP_VECTOR_FPTOUI, LOOM_OP_INDEX_CAST,    LOOM_OP_SCALAR_SHLI,
+      LOOM_OP_SCALAR_SHRSI,  LOOM_OP_SCALAR_SHRUI,  LOOM_OP_VECTOR_SHLI,
+      LOOM_OP_VECTOR_SHRSI,  LOOM_OP_VECTOR_SHRUI,  LOOM_OP_INDEX_SHLI,
+      LOOM_OP_INDEX_SHRSI,   LOOM_OP_INDEX_SHRUI,   LOOM_OP_SCALAR_DIVSI,
+      LOOM_OP_SCALAR_DIVUI,  LOOM_OP_SCALAR_REMSI,  LOOM_OP_SCALAR_REMUI,
+      LOOM_OP_VECTOR_DIVSI,  LOOM_OP_VECTOR_DIVUI,  LOOM_OP_VECTOR_REMSI,
+      LOOM_OP_VECTOR_REMUI,  LOOM_OP_INDEX_DIV,     LOOM_OP_INDEX_REM,
+  };
+  for (loom_op_kind_t kind : kPartialNumericOps) {
+    SCOPED_TRACE(kind);
+    const loom_op_vtable_t* vtable = loom_context_resolve_op(&context, kind);
+    ASSERT_NE(vtable, nullptr);
+    EXPECT_FALSE(loom_traits_are_safe_to_speculate(vtable->traits));
+  }
+
+  loom_context_deinitialize(&context);
+}
+
+TEST(OpSemantics, EagerExecutionCostSeparatesLegalityFromProfitability) {
+  loom_context_t context;
+  loom_context_initialize(iree_allocator_system(), &context);
+  IREE_ASSERT_OK(loom_op_registry_register_all_dialects(&context));
+  IREE_ASSERT_OK(loom_context_finalize(&context));
+
+  struct ExpectedCost {
+    loom_op_kind_t kind;
+    uint8_t cost;
+  };
+  static constexpr ExpectedCost kExpectedCosts[] = {
+      {LOOM_OP_SCALAR_FMAF, 1},   {LOOM_OP_VECTOR_ROUNDEVENF, 1},
+      {LOOM_OP_SCALAR_SILUF, 0},  {LOOM_OP_VECTOR_MMA, 0},
+      {LOOM_OP_VECTOR_REDUCE, 0},
+  };
+  for (const auto& expected : kExpectedCosts) {
+    SCOPED_TRACE(expected.kind);
+    const loom_op_vtable_t* vtable =
+        loom_context_resolve_op(&context, expected.kind);
+    ASSERT_NE(vtable, nullptr);
+    EXPECT_TRUE(loom_traits_are_safe_to_speculate(vtable->traits));
+    EXPECT_EQ(loom_context_resolve_op_semantics(&context, expected.kind)
+                  .eager_execution_cost,
+              expected.cost);
+  }
+
+  loom_context_deinitialize(&context);
+}
+
 TEST(TypeRegistry, DescriptorsCarrySemantics) {
   const loom_type_descriptor_t* token = loom_type_registry_lookup(
       nullptr, iree_make_cstring_view("kernel.async.token"));
@@ -505,7 +669,9 @@ TEST(TypeRegistry, LookupBuiltinTypes) {
   desc = loom_type_registry_lookup(nullptr, iree_make_cstring_view("pool"));
   ASSERT_NE(desc, nullptr);
   EXPECT_EQ(desc->ir_kind, LOOM_TYPE_POOL);
-  EXPECT_EQ(desc->param_count, 1);
+  EXPECT_EQ(desc->param_count, 0);
+  EXPECT_EQ(desc->format_elements, nullptr);
+  EXPECT_EQ(desc->format_element_count, 0);
 
   desc = loom_type_registry_lookup(nullptr, iree_make_cstring_view("encoding"));
   ASSERT_NE(desc, nullptr);

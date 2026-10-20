@@ -13,6 +13,26 @@ package(
 )
 
 loom_cc_library(
+    name = "index_set",
+    srcs = ["index_set.c"],
+    hdrs = ["index_set.h"],
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+    ],
+)
+
+loom_cc_test(
+    name = "index_set_test",
+    srcs = ["index_set_test.cc"],
+    deps = [
+        ":index_set",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_library(
     name = "bstring",
     hdrs = ["bstring.h"],
     deps = [
@@ -89,6 +109,8 @@ loom_cc_library(
     name = "json",
     srcs = ["json.c"],
     hdrs = ["json.h"],
+    # JSON formatting writes to the caller-provided stream.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
         ":stream",
         "//runtime/src/iree/base",
@@ -148,11 +170,37 @@ loom_cc_library(
     ],
 )
 
+loom_cc_library(
+    name = "segmented_storage_test_util",
+    testonly = True,
+    srcs = ["segmented_storage_test_util.cc"],
+    hdrs = ["segmented_storage_test_util.h"],
+    deps = [
+        ":segmented_storage",
+        "//runtime/src/iree/testing:gtest",
+    ],
+)
+
 loom_cc_test(
     name = "segmented_storage_test",
     srcs = ["segmented_storage_test.cc"],
     deps = [
         ":segmented_storage",
+        ":segmented_storage_test_util",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "segmented_storage_stress_test",
+    srcs = ["segmented_storage_stress.cc"],
+    tags = [
+        "manual",
+        "stress",
+    ],
+    deps = [
+        ":segmented_storage_test_util",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -200,24 +248,61 @@ loom_cc_test(
 )
 
 loom_cc_library(
+    name = "fact_table_api",
+    hdrs = [
+        "fact_extensions.h",
+        "fact_identity.h",
+        "fact_layout.h",
+        "fact_table.h",
+    ],
+    deps = [
+        ":numeric_format",
+        ":reference_facts",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:facts",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "fact_ordinal_map",
+    srcs = ["fact_ordinal_map.c"],
+    hdrs = ["fact_ordinal_map.h"],
+    deps = [
+        ":fact_table_api",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
     name = "fact_table",
     srcs = [
         "fact_cfg.c",
         "fact_extensions.c",
+        "fact_identity.c",
         "fact_induction.c",
         "fact_layout.c",
         "fact_loop.c",
+        "fact_recurrence.c",
+        "fact_relation.c",
         "fact_table.c",
         "fact_table_compute.c",
+        "fact_vector_partition.c",
         "reference_transfer.c",
     ],
     hdrs = [
         "fact_cfg.h",
         "fact_extensions.h",
+        "fact_identity.h",
         "fact_induction.h",
         "fact_layout.h",
         "fact_loop.h",
+        "fact_recurrence.h",
+        "fact_relation.h",
         "fact_table.h",
+        "fact_vector_partition.h",
         "reference_transfer.h",
     ],
     deps = [
@@ -227,16 +312,24 @@ loom_cc_library(
         ":cfg_loop_nest",
         ":cfg_regions",
         ":fact_control",
+        ":fact_ordinal_map",
+        ":fact_table_api",
         ":numeric_format",
         ":reference_facts",
+        "//loom/src/loom/analysis:condition_edge_projection",
+        "//loom/src/loom/analysis:condition_facts",
+        "//loom/src/loom/analysis:integer_relation",
         "//loom/src/loom/analysis:loop_domain",
         "//loom/src/loom/analysis:scc",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/cfg:op_defs",
+        "//loom/src/loom/ops/index:comparison",
         "//loom/src/loom/ops/index:op_defs",
+        "//loom/src/loom/ops/scalar:op_defs",
         "//loom/src/loom/target:facts",
+        "//loom/src/loom/target:facts_builder",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
@@ -248,6 +341,29 @@ loom_cc_test(
     srcs = ["fact_layout_test.cc"],
     deps = [
         ":fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "fact_vector_partition_test",
+    srcs = ["fact_vector_partition_test.cc"],
+    deps = [
+        ":fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "fact_extensions_test",
+    srcs = ["fact_extensions_test.cc"],
+    deps = [
+        ":fact_table",
+        "//loom/src/loom/ir:facts",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -267,12 +383,42 @@ loom_cc_test(
 )
 
 loom_cc_test(
+    name = "fact_identity_test",
+    srcs = ["fact_identity_test.cc"],
+    deps = [
+        ":fact_table",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "fact_relation_test",
+    srcs = ["fact_relation_test.cc"],
+    deps = [
+        ":fact_table",
+        ":predicate_facts",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
     name = "fact_table_compute_test",
     srcs = ["fact_table_compute_test.cc"],
     deps = [
         ":fact_table",
+        "//loom/src/loom/analysis:condition_edge_projection",
+        "//loom/src/loom/analysis:condition_facts",
         "//loom/src/loom/ir",
+        "//loom/src/loom/ops/cfg",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/test",
         "//runtime/src/iree/base/internal:arena",
@@ -286,7 +432,11 @@ loom_cc_library(
     srcs = ["predicate_facts.c"],
     hdrs = ["predicate_facts.h"],
     deps = [
+        ":fact_ordinal_map",
         ":fact_table",
+        "//loom/src/loom/analysis:integer_relation",
+        "//loom/src/loom/decision:predicate",
+        "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
@@ -308,6 +458,8 @@ loom_cc_library(
     name = "stream",
     srcs = ["stream.c"],
     hdrs = ["stream.h"],
+    # Streams carry caller-owned callbacks and state.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
         "//runtime/src/iree/base",
     ],
@@ -367,6 +519,31 @@ loom_cc_test(
 )
 
 loom_cc_library(
+    name = "cfg_dataflow",
+    srcs = ["cfg_dataflow.c"],
+    hdrs = ["cfg_dataflow.h"],
+    deps = [
+        ":cfg_graph",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_dataflow_test",
+    srcs = ["cfg_dataflow_test.cc"],
+    deps = [
+        ":cfg_dataflow",
+        ":cfg_graph",
+        ":cfg_graph_test_util",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_library(
     name = "cfg_loop",
     srcs = ["cfg_loop.c"],
     hdrs = ["cfg_loop.h"],
@@ -415,14 +592,39 @@ loom_cc_library(
     ],
 )
 
-loom_cc_test(
-    name = "cfg_regions_test",
-    srcs = ["cfg_regions_test.cc"],
+loom_cc_library(
+    name = "cfg_regions_test_util",
+    testonly = True,
+    srcs = ["cfg_regions_test_util.cc"],
+    hdrs = ["cfg_regions_test_util.h"],
     deps = [
         ":cfg_dominance",
         ":cfg_graph_test_util",
         ":cfg_regions",
         "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_regions_test",
+    srcs = ["cfg_regions_test.cc"],
+    deps = [
+        ":cfg_graph_test_util",
+        ":cfg_regions_test_util",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_regions_stress_test",
+    srcs = ["cfg_regions_stress_test.cc"],
+    tags = [
+        "manual",
+        "stress",
+    ],
+    deps = [
+        ":cfg_regions_test_util",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -496,6 +698,17 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "cfg_execution",
+    srcs = ["cfg_execution.c"],
+    hdrs = ["cfg_execution.h"],
+    deps = [
+        ":cfg_control",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
     name = "cfg_graph_test_util",
     testonly = True,
     hdrs = ["cfg_graph_test_util.h"],
@@ -517,13 +730,56 @@ loom_cc_library(
     ],
 )
 
+loom_cc_library(
+    name = "cfg_control_test_harness",
+    testonly = True,
+    srcs = ["cfg_control_test_harness.cc"],
+    hdrs = ["cfg_control_test_harness.h"],
+    deps = [
+        ":cfg_control",
+        ":cfg_control_test_util",
+        ":cfg_graph_test_util",
+        ":cfg_postdominance",
+        ":fact_control",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
 loom_cc_test(
     name = "cfg_control_test",
     srcs = ["cfg_control_test.cc"],
     deps = [
         ":cfg_control",
-        ":cfg_control_test_util",
+        ":cfg_control_test_harness",
         ":cfg_graph_test_util",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_control_stress_test",
+    srcs = ["cfg_control_stress_test.cc"],
+    tags = [
+        "manual",
+        "stress",
+    ],
+    deps = [
+        ":cfg_control_test_harness",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "cfg_execution_test",
+    srcs = ["cfg_execution_test.cc"],
+    deps = [
+        ":cfg_control",
+        ":cfg_execution",
+        ":cfg_graph_test_util",
+        "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -547,6 +803,7 @@ loom_cc_test(
     srcs = ["fact_control_test.cc"],
     deps = [
         ":cfg_control",
+        ":cfg_control_test_harness",
         ":cfg_control_test_util",
         ":cfg_graph_test_util",
         ":fact_control",
@@ -582,7 +839,7 @@ loom_cc_test(
     name = "cfg_postdominance_test",
     srcs = ["cfg_postdominance_test.cc"],
     deps = [
-        ":cfg_control_test_util",
+        ":cfg_control_test_harness",
         ":cfg_graph",
         ":cfg_graph_test_util",
         ":cfg_postdominance",

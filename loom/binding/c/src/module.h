@@ -10,6 +10,7 @@
 #include "config.h"
 #include "iree/base/internal/arena.h"
 #include "loom/error/diagnostic.h"
+#include "loom/error/source.h"
 #include "loom/ir/function_version.h"
 #include "loom/ir/module.h"
 #include "loomc/context.h"
@@ -41,6 +42,8 @@ typedef struct loomc_module_resolved_serialize_options_t {
 
   // Text presentation policy for textual output.
   loomc_module_text_presentation_t text_presentation;
+  // Whether textual output includes operation source locations.
+  bool print_locations;
 } loomc_module_resolved_serialize_options_t;
 
 // Decodes one resolved source format into internal module storage.
@@ -73,6 +76,11 @@ LOOMC_API_PRIVATE loomc_context_t* loomc_module_context(
 LOOMC_API_PRIVATE iree_arena_block_pool_t* loomc_module_block_pool(
     loomc_module_t* module);
 
+// Copies an exact source snapshot at its producer-assigned module source ID.
+LOOMC_API_PRIVATE loomc_status_t loomc_module_insert_source_snapshot(
+    loomc_module_t* module, loom_source_id_t source_id,
+    iree_string_view_t filename, iree_string_view_t source);
+
 // Structural admission already established by the native producer.
 typedef enum loomc_module_input_state_e {
   LOOMC_MODULE_INPUT_UNVERIFIED = 0,
@@ -86,6 +94,13 @@ LOOMC_API_PRIVATE void loomc_module_set_loom_module(
     loomc_module_t* module, loom_module_t* internal_module,
     loomc_module_input_state_t input_state);
 
+// Adopts the pointer returned by an internal replacing transform. The
+// transform owns the previous pointer's release contract; this only updates
+// the public handle and its verification state.
+LOOMC_API_PRIVATE void loomc_module_adopt_loom_module_replacement(
+    loomc_module_t* module, loom_module_t* internal_module,
+    loomc_module_input_state_t input_state);
+
 // Returns the internal module owned by a public module handle.
 LOOMC_API_PRIVATE loom_module_t* loomc_module_loom_module(
     loomc_module_t* module);
@@ -94,18 +109,43 @@ LOOMC_API_PRIVATE loom_module_t* loomc_module_loom_module(
 LOOMC_API_PRIVATE const loom_module_t* loomc_module_const_loom_module(
     const loomc_module_t* module);
 
-// Establishes structural and target-Low input invariants before compilation or
-// direct emission. Successful verification against the module context is
-// retained across trusted compiler transforms. Other target environments are
-// checked without retaining their lifetime. Diagnostics mark |result| failed;
-// status is reserved for infrastructure failures.
+// Returns the exact-source resolver owned by |module|.
+LOOMC_API_PRIVATE loom_source_resolver_t
+loomc_module_source_resolver(const loomc_module_t* module);
+
+// Returns source snapshots indexed by the current internal module's source IDs.
+LOOMC_API_PRIVATE const loom_source_table_resolver_t* loomc_module_source_table(
+    const loomc_module_t* module);
+
+// Replaces owned snapshots with a copied source table for |internal_module|.
+LOOMC_API_PRIVATE loomc_status_t loomc_module_replace_source_table(
+    loomc_module_t* module, const loom_module_t* internal_module,
+    const loom_source_table_resolver_t* source_table);
+
+// Clears exact source snapshots after an unsuccessful replacing mutation.
+LOOMC_API_PRIVATE void loomc_module_clear_sources(
+    loomc_module_t* module, const loom_module_t* internal_module);
+
+// Establishes target-independent structural input invariants. Diagnostics mark
+// |result| failed; status is reserved for infrastructure failures.
 LOOMC_API_PRIVATE loomc_status_t
-loomc_module_verify(loomc_module_t* module,
-                    const loomc_target_environment_t* target_environment,
-                    loomc_result_t* result);
+loomc_module_admit_structural(loomc_module_t* module, loomc_result_t* result);
+
+// Establishes structural and target-Low input invariants before compilation or
+// direct emission. Other target environments are checked without retaining
+// their lifetime. Diagnostics mark |result| failed; status is reserved for
+// infrastructure failures.
+LOOMC_API_PRIVATE loomc_status_t
+loomc_module_admit(loomc_module_t* module,
+                   const loomc_target_environment_t* target_environment,
+                   loomc_result_t* result);
 
 // Invalidates input verification after an unsuccessful mutating operation.
 LOOMC_API_PRIVATE void loomc_module_invalidate_verification(
+    loomc_module_t* module);
+
+// Invalidates target-Low verification after a trusted structural transform.
+LOOMC_API_PRIVATE void loomc_module_invalidate_target_verification(
     loomc_module_t* module);
 
 // Validates source deserialization options without selecting a format.
@@ -139,26 +179,23 @@ LOOMC_API_PRIVATE loomc_status_t loomc_module_serialize_explicit_source(
     loomc_module_source_encoder_fn_t encoder, loomc_allocator_t allocator,
     loomc_source_t** out_source);
 
-// Clears prior compiler products and returns their module-owned arena.
-//
-// The returned arena remains live until the next compilation or module
-// destruction. Compilation retains applied configuration and function versions
-// here for later loomc_emit_module calls.
-LOOMC_API_PRIVATE iree_arena_allocator_t* loomc_module_prepare_compilation(
+// Returns the owner carried by continuing compiler invocations on this module.
+// Its products live until a failed mutation or module destruction.
+LOOMC_API_PRIVATE loom_function_version_owner_t*
+loomc_module_function_version_owner(loomc_module_t* module);
+
+// Clears products after a failed mutation invalidates their construction.
+LOOMC_API_PRIVATE void loomc_module_invalidate_compilation(
     loomc_module_t* module);
 
 // Captures applied invocation bindings into the module's compiler storage.
-LOOMC_API_PRIVATE loom_tooling_config_binding_sink_t
-loomc_module_config_binding_sink(loomc_module_t* module);
+LOOMC_API_PRIVATE loom_config_applied_value_sink_t
+loomc_module_config_applied_value_sink(loomc_module_t* module);
 
-// Returns the last compilation's bindings, valid for the module's lifetime or
-// until another compilation replaces its invocation products.
+// Returns accumulated applied bindings, valid until a failed mutation or
+// module destruction.
 LOOMC_API_PRIVATE const loomc_config_binding_list_t*
 loomc_module_config_bindings(const loomc_module_t* module);
-
-// Publishes function versions produced by a successful compilation.
-LOOMC_API_PRIVATE void loomc_module_publish_function_versions(
-    loomc_module_t* module, loom_function_version_owner_t function_versions);
 
 // Returns function versions from the last successful compilation, or NULL.
 LOOMC_API_PRIVATE const loom_function_version_list_t*

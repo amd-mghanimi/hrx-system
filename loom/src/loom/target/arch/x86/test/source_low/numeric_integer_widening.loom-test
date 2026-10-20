@@ -1,0 +1,271 @@
+// RUN: emit source-low target=x86:avx2 output=low
+
+func.def @widen_signed_word(%value: i32) -> (i64) {
+  %result = scalar.extsi %value : i32 to i64
+  func.return %result : i64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @widen_signed_word(%value: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
+  %result = movsxd.gpr64.gpr32 %value
+  return %result
+}
+
+// ====
+
+func.def @widen_unsigned_word(%value: i32) -> (i64) {
+  %result = scalar.extui %value : i32 to i64
+  func.return %result : i64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @widen_unsigned_word(%value: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
+  %result = movzx.gpr64.gpr32 %value
+  return %result
+}
+
+// ====
+
+func.def @add_signed_word(%base: i64, %delta: i32) -> (i64) {
+  %wide_delta = scalar.extsi %delta : i32 to i64
+  %result = scalar.addi %base, %wide_delta : i64
+  func.return %result : i64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @add_signed_word(%base: reg<x86.gpr64>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
+  %wide_delta = movsxd.gpr64.gpr32 %delta
+  %9 = copy %base : reg<x86.gpr64> -> reg<x86.gpr64>
+  %result = add.gpr64 %9, %wide_delta
+  return %result
+}
+
+// ====
+
+func.def @assemble_wide_word(%low: i32, %high: i32) -> (i64) {
+  %low_word = scalar.extui %low : i32 to i64
+  %high_word = scalar.extui %high : i32 to i64
+  %word_bits = scalar.constant 32 : i64
+  %high_half = scalar.shli %high_word, %word_bits : i64
+  %result = scalar.ori %low_word, %high_half : i64
+  func.return %result : i64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @assemble_wide_word(%low: reg<x86.gpr32>, %high: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
+  %low_word = movzx.gpr64.gpr32 %low
+  %high_word = movzx.gpr64.gpr32 %high
+  %13 = copy %high_word : reg<x86.gpr64> -> reg<x86.gpr64>
+  %high_half = shl.imm.gpr64 %13 {shift = 32}
+  %15 = copy %low_word : reg<x86.gpr64> -> reg<x86.gpr64>
+  %result = or.gpr64 %15, %high_half
+  return %result
+}
+
+// ====
+
+func.def @exchange_signed_position(%buffer: buffer, %position: i32, %replacement: i32) -> (i32) {
+  %bounded_position = scalar.assume %position [range(%position, -4, 4)] : i32
+  %wide_position = scalar.extsi %bounded_position : i32 to i64
+  %element_bytes = scalar.constant 4 : i64
+  %displacement = scalar.muli %wide_position, %element_bytes : i64
+  %center = scalar.constant 16 : i64
+  %wide_origin = scalar.addi %center, %displacement : i64
+  %origin = index.cast %wide_origin : i64 to offset
+  %view = buffer.view %buffer[%origin] : buffer -> view<1xi32>
+  %previous = view.load %view[0] : view<1xi32> -> i32
+  view.store %replacement, %view[0] : i32, view<1xi32>
+  func.return %previous : i32
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @exchange_signed_position(%buffer: reg<x86.gpr64>, %bounded_position: reg<x86.gpr32>, %replacement: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %20 = movsxd.gpr64.gpr32 %bounded_position
+  %21 = mov.imm64 4
+  %22 = copy %20 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %23 = imul.gpr64 %22, %21
+  %previous = mov.load.indexed.gpr32 %buffer, %23 {disp32 = 16, scale = 1}
+  mov.store.indexed.gpr32 %replacement, %buffer, %23 {disp32 = 16, scale = 1}
+  return %previous
+}
+
+// ====
+// RUN: emit source-low output=low
+
+x86.target<avx2> @target
+
+func.def target(@target) @widen_vector_subregister(%source: vector<1xi8>) -> (vector<1xi16>, vector<1xi16>) {
+  %signed = vector.extsi %source : vector<1xi8> to vector<1xi16>
+  %unsigned = vector.extui %source : vector<1xi8> to vector<1xi16>
+  func.return %signed, %unsigned : vector<1xi16>, vector<1xi16>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<1xi8>) -> (vector<1xi16>, vector<1xi16>)}) @widen_vector_subregister(%source: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %signed = vpmovsxbw.xmm %source
+  %unsigned = vpmovzxbw.xmm %source
+  return %signed, %unsigned
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @widen_vector_ymm(%source: vector<8xi16>) -> (vector<8xi32>, vector<8xi32>) {
+  %signed = vector.extsi %source : vector<8xi16> to vector<8xi32>
+  %unsigned = vector.extui %source : vector<8xi16> to vector<8xi32>
+  func.return %signed, %unsigned : vector<8xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi16>) -> (vector<8xi32>, vector<8xi32>)}) @widen_vector_ymm(%source: reg<x86.xmm>) -> (reg<x86.ymm>, reg<x86.ymm>) asm {
+  %signed = vpmovsxwd.ymm %source
+  %unsigned = vpmovzxwd.ymm %source
+  return %signed, %unsigned
+}
+
+// ====
+// RUN: emit source-low output=low
+
+x86.target<avx512> @target
+
+func.def target(@target) @widen_vector_avx512_subregister(%source: vector<1xi32>) -> (vector<1xi64>, vector<1xi64>) {
+  %signed = vector.extsi %source : vector<1xi32> to vector<1xi64>
+  %unsigned = vector.extui %source : vector<1xi32> to vector<1xi64>
+  func.return %signed, %unsigned : vector<1xi64>, vector<1xi64>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<1xi32>) -> (vector<1xi64>, vector<1xi64>)}) @widen_vector_avx512_subregister(%source: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %signed = vpmovsxdq.xmm %source
+  %unsigned = vpmovzxdq.xmm %source
+  return %signed, %unsigned
+}
+
+// ====
+// RUN: emit source-low output=low
+
+x86.target<avx512> @target
+
+func.def target(@target) @widen_vector_zmm_smallest(%source: vector<8xi8>) -> (vector<8xi64>, vector<8xi64>) {
+  %signed = vector.extsi %source : vector<8xi8> to vector<8xi64>
+  %unsigned = vector.extui %source : vector<8xi8> to vector<8xi64>
+  func.return %signed, %unsigned : vector<8xi64>, vector<8xi64>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi8>) -> (vector<8xi64>, vector<8xi64>)}) @widen_vector_zmm_smallest(%source: reg<x86.xmm>) -> (reg<x86.zmm>, reg<x86.zmm>) asm {
+  %signed = avx512.vpmovsxbq.zmm.xmm %source
+  %unsigned = avx512.vpmovzxbq.zmm.xmm %source
+  return %signed, %unsigned
+}
+
+// ====
+// RUN: emit source-low output=low
+
+x86.target<avx512> @target
+
+func.def target(@target) @widen_vector_zmm_widest_source(%source: vector<32xi8>) -> (vector<32xi16>, vector<32xi16>) {
+  %signed = vector.extsi %source : vector<32xi8> to vector<32xi16>
+  %unsigned = vector.extui %source : vector<32xi8> to vector<32xi16>
+  func.return %signed, %unsigned : vector<32xi16>, vector<32xi16>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<32xi8>) -> (vector<32xi16>, vector<32xi16>)}) @widen_vector_zmm_widest_source(%source: reg<x86.ymm>) -> (reg<x86.zmm>, reg<x86.zmm>) asm {
+  %signed = avx512.vpmovsxbw.zmm.ymm %source
+  %unsigned = avx512.vpmovzxbw.zmm.ymm %source
+  return %signed, %unsigned
+}
+
+// ====
+// RUN: emit source-low output=low
+
+x86.target<avx2> @avx2
+
+x86.target<avx512> @avx512
+
+func.def public target(@avx2) @widen_loaded_vectors_avx2(%input: buffer, %output32: buffer, %output64: buffer) {
+  %c0 = index.constant 0 : offset
+  %inputs = buffer.view %input[%c0] : buffer -> view<32xi8>
+  %outputs32 = buffer.view %output32[%c0] : buffer -> view<32xi32>
+  %outputs64 = buffer.view %output64[%c0] : buffer -> view<32xi64>
+  %values = vector.load %inputs[0] : view<32xi8> -> vector<32xi8>
+  %signed32 = vector.extsi %values : vector<32xi8> to vector<32xi32>
+  %unsigned64 = vector.extui %values : vector<32xi8> to vector<32xi64>
+  vector.store %signed32, %outputs32[0] : vector<32xi32>, view<32xi32>
+  vector.store %unsigned64, %outputs64[0] : vector<32xi64>, view<32xi64>
+  func.return
+}
+
+func.def public target(@avx512) @widen_loaded_vectors_avx512(%input: buffer, %output32: buffer, %output64: buffer) {
+  %c0 = index.constant 0 : offset
+  %inputs = buffer.view %input[%c0] : buffer -> view<16xi16>
+  %outputs32 = buffer.view %output32[%c0] : buffer -> view<16xi32>
+  %outputs64 = buffer.view %output64[%c0] : buffer -> view<16xi64>
+  %values = vector.load %inputs[0] : view<16xi16> -> vector<16xi16>
+  %signed32 = vector.extsi %values : vector<16xi16> to vector<16xi32>
+  %unsigned64 = vector.extui %values : vector<16xi16> to vector<16xi64>
+  vector.store %signed32, %outputs32[0] : vector<16xi32>, view<16xi32>
+  vector.store %unsigned64, %outputs64[0] : vector<16xi64>, view<16xi64>
+  func.return
+}
+
+// ----
+low.func.def public target<x86.avx2.core>(@avx2) abi(object_function) @widen_loaded_vectors_avx2(%input: reg<x86.gpr64>, %output32: reg<x86.gpr64>, %output64: reg<x86.gpr64>) asm {
+  %59 = vmovss.load.xmm %input {disp32 = 0}
+  %60 = vmovss.load.xmm %input {disp32 = 4}
+  %61 = vmovss.load.xmm %input {disp32 = 8}
+  %62 = vmovss.load.xmm %input {disp32 = 12}
+  %63 = vmovss.load.xmm %input {disp32 = 16}
+  %64 = vmovss.load.xmm %input {disp32 = 20}
+  %65 = vmovss.load.xmm %input {disp32 = 24}
+  %66 = vmovss.load.xmm %input {disp32 = 28}
+  %67 = vpmovsxbd.xmm %59
+  %68 = vpmovsxbd.xmm %60
+  %69 = vpmovsxbd.xmm %61
+  %70 = vpmovsxbd.xmm %62
+  %71 = vpmovsxbd.xmm %63
+  %72 = vpmovsxbd.xmm %64
+  %73 = vpmovsxbd.xmm %65
+  %74 = vpmovsxbd.xmm %66
+  %75 = vpmovzxbq.ymm %59
+  %76 = vpmovzxbq.ymm %60
+  %77 = vpmovzxbq.ymm %61
+  %78 = vpmovzxbq.ymm %62
+  %79 = vpmovzxbq.ymm %63
+  %80 = vpmovzxbq.ymm %64
+  %81 = vpmovzxbq.ymm %65
+  %82 = vpmovzxbq.ymm %66
+  vmovdqu32.store.xmm %67, %output32 {disp32 = 0}
+  vmovdqu32.store.xmm %68, %output32 {disp32 = 16}
+  vmovdqu32.store.xmm %69, %output32 {disp32 = 32}
+  vmovdqu32.store.xmm %70, %output32 {disp32 = 48}
+  vmovdqu32.store.xmm %71, %output32 {disp32 = 64}
+  vmovdqu32.store.xmm %72, %output32 {disp32 = 80}
+  vmovdqu32.store.xmm %73, %output32 {disp32 = 96}
+  vmovdqu32.store.xmm %74, %output32 {disp32 = 112}
+  vmovdqu32.store.ymm %75, %output64 {disp32 = 0}
+  vmovdqu32.store.ymm %76, %output64 {disp32 = 32}
+  vmovdqu32.store.ymm %77, %output64 {disp32 = 64}
+  vmovdqu32.store.ymm %78, %output64 {disp32 = 96}
+  vmovdqu32.store.ymm %79, %output64 {disp32 = 128}
+  vmovdqu32.store.ymm %80, %output64 {disp32 = 160}
+  vmovdqu32.store.ymm %81, %output64 {disp32 = 192}
+  vmovdqu32.store.ymm %82, %output64 {disp32 = 224}
+  return
+}
+
+low.func.def public target<x86.avx512.core>(@avx512) abi(object_function) @widen_loaded_vectors_avx512(%input: reg<x86.gpr64>, %output32: reg<x86.gpr64>, %output64: reg<x86.gpr64>) asm {
+  %86 = vmovdqu32.load.xmm %input {disp32 = 0}
+  %87 = vmovdqu32.load.xmm %input {disp32 = 16}
+  %88 = vpmovsxwd.ymm %86
+  %89 = vpmovsxwd.ymm %87
+  %90 = avx512.vpmovzxwq.zmm.xmm %86
+  %91 = avx512.vpmovzxwq.zmm.xmm %87
+  vmovdqu32.store.ymm %88, %output32 {disp32 = 0}
+  vmovdqu32.store.ymm %89, %output32 {disp32 = 32}
+  vmovdqu32.store %90, %output64 {disp32 = 0}
+  vmovdqu32.store %91, %output64 {disp32 = 64}
+  return
+}

@@ -3,7 +3,7 @@
 // Specializing a dynamic extent with divisibility facts removes the tail path
 // while keeping the main block-count computation dynamic.
 func.def @tail_branch_pruned_by_divisibility(%n: index) -> (index) {
-  %n_aligned = index.assume %n [range(%n, 16, 4096), mul(%n, 16)] : index
+  %n_aligned = index.assume %n [range(%n, 16, 4096), multiple_of(%n, 16)] : index
   %tile = index.constant 16 : index
   %no_remainder = index.constant 0 : index
   %remainder = index.rem %n_aligned, %tile : index
@@ -20,7 +20,7 @@ func.def @tail_branch_pruned_by_divisibility(%n: index) -> (index) {
 
 // ----
 func.def @tail_branch_pruned_by_divisibility(%n: index) -> (index) {
-  %n_aligned = index.assume %n [range(%n, 16, 4096), mul(%n, 16)] : index
+  %n_aligned = index.assume %n [range(%n, 16, 4096), multiple_of(%n, 16)] : index
   %11 = index.constant 4 : index
   %blocks = index.shrui %n_aligned, %11 : index
   func.return %blocks : index

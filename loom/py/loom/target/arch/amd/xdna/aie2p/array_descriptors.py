@@ -14,6 +14,8 @@ from loom.dialect.combining import CombiningKind
 from loom.target.low_descriptors import (
     AsmForm,
     AsmImmediate,
+    Constraint,
+    ConstraintKind,
     Descriptor,
     DescriptorFlag,
     DescriptorOpKind,
@@ -413,6 +415,10 @@ _DESCRIPTORS = (
             "channel",
             results=("result",),
             operands=("sender", "receiver", "capacity", "records"),
+        ),
+        constraints=(
+            Constraint(ConstraintKind.SAME_REGISTER_VALUE_TYPE, 0, 1),
+            Constraint(ConstraintKind.SAME_REGISTER_VALUE_TYPE, 0, 2),
         ),
         effects=(_TOPOLOGY_EFFECT,),
         schedule_class=_SCHEDULE_GRAPH,

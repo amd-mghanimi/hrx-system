@@ -5,6 +5,9 @@ Compiler behavior is authored in `.cxx-test` files and checked through the same
 Each `//====` case supplies C++ source; `//----` introduces its expected Loom
 output. `// ERROR` annotations check source diagnostics. `// INPUT:` selects
 import options such as the language standard, data model, or exported roots.
+`// RUN: emit cxx` instead places canonical exported C++ after `//----`; these
+files declare `// REQUIRES: loom-export-cxx` and can grow through ordinary
+`//====` cases without adding process-level JSON fixtures.
 The [loom-check guide](../../../tools/loom-check/README.md) describes the format
 and `--update` workflow.
 
@@ -19,21 +22,18 @@ binding identity, and retained analysis facts.
 
 ## Source execution tests
 
-Executable importer inputs use `.cxx`, including handwritten cases, shared
-kernel implementations, and generated host reference cases. Compiler fixtures
-use `.cxx-test`; native API test implementations use `.cc`. The repository's
-normal clang-format checks include `.cxx` sources.
+Executable importer inputs use `.cxx`, including handwritten cases and shared
+kernel implementations. Compiler fixtures use `.cxx-test`; native API test
+implementations use `.cc`. The repository's normal clang-format checks include
+`.cxx` sources.
 
 These programs exercise the full source path: C++ import, ordinary Loom
 bytecode linking, config specialization, AMDGPU compilation, and GPU execution.
-The existing `iree-test-loom` runner compares outputs against independent
-double-precision references and checks both output guards bitwise. Ordinary
-integer functions also execute through the VM with exact scalar references.
-Host references generate C++ translation units containing `LOOM_CHECK_CASE`
-bodies and include the implementation under test. Each kernel source file and
-its generated Loom references form one reusable `loom_test_module` here, with
-its runtime arrays and import options. AMDGPU qualification consumes these
-modules through `loom_test` in the
+Authored `check.scenario` modules generate directed inputs, execute source
+functions or kernels, and compare their complete outputs with independent Loom
+oracles. Numerical kernels use independent double-precision references. Every
+native scenario checks both allocation guards bitwise. AMDGPU qualification
+consumes the reusable modules through `loom_test` in the
 [target test package](../../../tooling/target/amdgpu/test/cxx/BUILD.bazel).
 The [source authoring guide](../README.md#executable-checks-and-benchmarks)
 shows handwritten cases and benchmarks.
@@ -51,12 +51,12 @@ iree-bazel-test --config=asan --config=loom-importer-cxx \
   //loom/src/loom/import/cxx/test:functions_test
 ```
 
-Build declarations list source files; host reference selection and test names
-follow each filename. GPU sources pair with their reference module and fixture
-directory. All kernels in a source file share that module; the cases select the
-entries they exercise. Import uses the normal facade headers without per-kernel
-root flags or header-path overrides. Generated directories are declared action
-outputs and retained as test data, with NPY paths relative to the check source.
+Build declarations pair each source with its authored scenario module. All
+kernels in a source file share that module; the cases select the entries they
+exercise. Import uses the normal facade headers without per-kernel root flags or
+header-path overrides. Scenario generators construct their inputs at runtime,
+and comparison trials run independent oracle functions before transferring the
+same physical inputs to the selected target.
 Schedule variants are named C++ entry points, and the reference code exercises
 each entry against the same numerical oracle. Numerical reference modules bind
 three workgroups with ordinary `config.def` values. The source semantics kernels
@@ -68,8 +68,8 @@ compatibility with complete upstream libraries.
 
 `functions_test` here aggregates scalar-result VM cases. The AMDGPU package's
 `kernels_test` qualifies its selected source modules normally and with device
-access sanitization. Every case checks for zero access reports. Individual
-targets such as `integer_functions_test` here, and
+access sanitization, where any sanitizer report fails the test automatically.
+Individual targets such as `integer_functions_test` here, and
 `structured_continue_test_execute_amdgpu_test` and
 `structured_continue_test_execute_amdgpu_access_test` in the target package,
 can be run directly. Both native profiles share one imported and linked module,
@@ -88,26 +88,31 @@ JSON fixtures under
 | `flash_attention.cxx` | Online softmax, shared key/value tiles, shuffle reductions, partial query/key tiles, and large score differences. | Original standalone f32 attention implementation, head dimension 64 and 16-key tiles. |
 | `llama_rms_norm.cxx` | Two 32-lane reductions, shared reduction storage, and columns of length 1, 33, and 129. | [llama.cpp norm.cu](https://github.com/ggml-org/llama.cpp/blob/972d2313bc0bf0a45f634f77d95c9fb03aeab12c/ggml/src/ggml-cuda/norm.cu), MIT. |
 | `aiter_swiglu_f16.cxx` | FP16 storage with f32 arithmetic, clamp extremes, reciprocal/exponential calls, and columns of length 1, 31, 65, and 129. | [aiter activation_kernels.cu](https://github.com/ROCm/aiter/blob/df95f04b703bfd7c520f072fcf2560092ec9d5ac/csrc/kernels/activation_kernels.cu), MIT. |
+| `constant_loops.cxx` | Constant-expression bounds, unsigned edge conditions, wrapped constants, mutable bounds and scheduled loop templates execute in 29 function trials with 55 exact observations on VM and AMDGPU. Thirteen native trials check all 64 lanes, complete guarded outputs and unchanged inputs under normal and access-instrumented execution. | Original source constant-loop witness. |
 | `control_flow.cxx` | Pre-test, post-test, and nested loops; final scalar values and effectful helper calls in conditions. Seven trip counts including zero are checked bitwise. | Original source-language semantics witness. |
 | `scheduled_sum.cxx` | Unroll factors 1/3 and pipeline depths 1/2 with linear ordering. Exact integer sums for 0, 1, 2, 5, 17, and 33 columns cover startup, tails, and drain under all four schedules. | Original scheduling-contract witness. |
-| `short_circuit.cxx` | Bounds-guarded reads, exact conditional call-order traces through seven-comparison chains, discarded boolean expressions and scalar truth conversions across 64 lanes. Lengths 0, 1, 17, 33 and 64 run normally and with device access sanitization and zero expected access reports. | Original source-language semantics witness. |
+| `schedule_values.cxx` | Calls, snapshots, wide and narrow counters, signed counters, unevaluated expressions, initializers and serial loops execute in 10 directed trials with 80 exact observations on VM. | Original source scheduling-semantics witness. |
+| `short_circuit.cxx` | Bounds-guarded reads, exact conditional call-order traces through seven-comparison chains, discarded boolean expressions and scalar truth conversions across 64 lanes. Lengths 0, 1, 17, 33 and 64 run normally and with device access sanitization. | Original source-language semantics witness. |
 | `early_returns.cxx` | Per-lane kernel exits, guarded helper returns inside a counted loop, nested return trees, void calls in returns, and local state across continuing paths. Lengths 0, 1, 17, 33 and 64 run normally and with device access sanitization; exited lanes retain their sentinel values. | Original source-language semantics witness. |
-| `integer_functions.cxx` | Exact VM results for fixed-point multiply/rescale, byte increment/decrement, signed short decrement, 64-bit wrap and independently promoted shift counts. The 162 cases include negative rescaling, sign boundaries and counts 0/31/32/63. | Original source-language semantics witness using ordinary exported functions. |
-| `enum_values.cxx` | Named constants, signed and unsigned casts, comparisons, boolean enums, inferred 64-bit storage, packed enum promotion, and template-dependent definitions execute in 881 exact VM cases. Twelve AMDGPU cases exercise 8/16/32/64-bit enum parameters and pointer storage through ordinary helper calls, including high bits and wraparound, with unchanged inputs and output guards checked normally and with device access sanitization. | Original source-language representation witness. |
-| `comparison_functions.cxx` | Seven unparenthesized comparisons execute on the VM for all 128 truth combinations, zero inputs, and each argument at the unsigned maximum. | Original source-language parser and execution witness. |
+| `integer_functions.cxx` | Fixed-point multiply/rescale, byte increment/decrement, signed short decrement, 64-bit wrap and independently promoted shift counts execute in 84 directed trials with 162 exact observations on VM. Inputs include negative rescaling, sign boundaries and counts 0/31/32/63. | Original source-language semantics witness using ordinary exported functions. |
+| `enum_values.cxx` | Named constants, signed and unsigned casts, comparisons, boolean enums, inferred 64-bit storage, packed enum promotion, and template-dependent definitions execute in 578 directed trials with 1,130 exact scalar observations on VM and AMDGPU. All 256 signed-byte bit patterns are covered. Twelve additional AMDGPU trials exercise 8/16/32/64-bit enum parameters and pointer storage through ordinary helper calls, including high bits and wraparound, with unchanged inputs and complete guarded allocations checked normally and with device access sanitization. | Original source-language representation witness. |
+| `comparison_functions.cxx` | Seven unparenthesized comparisons execute in 136 directed trials on VM: all 128 truth combinations, zero inputs, and each argument at the unsigned maximum. | Original source-language parser and execution witness. |
 | `constexpr_values.cxx` | Source-selected returns and continues, discarded unsupported statements and loop-bound writes, zero-trip loops, and ordinary/constexpr initializers execute on the VM with exact scalar expectations. | Original source-selection and sequencing witness. |
-| `assumptions.cxx` | Conjunctive and repeated bounds, capacity/stride constant expressions, templates, casts, unsigned wrap, unevaluated `sizeof`, scoped refinements and wide values. VM checks include every byte value; AMDGPU checks all outputs and guards, normally and with device access sanitization. | Original source-contract witness. |
-| `vector_initializers.cxx` | Typed vector temporaries in returns, arguments, templates and nested expressions. VM lane checks and complete AMDGPU buffers cover empty/single/partial forms, narrow conversions, signed zero, zero-filled lanes and left-to-right initializer effects. | Original source-language initialization witness. |
+| `assumptions.cxx` | Conjunctive and repeated bounds, capacity/stride constant expressions, templates, casts, unsigned wrap, unevaluated `sizeof`, scoped refinements, and wide values execute in 346 directed trials with 350 exact scalar observations on VM and AMDGPU. Nine additional native trials check all 64 lanes and both output guards, normally and with device access sanitization. | Original source-contract witness. |
+| `vector_initializers.cxx` | Typed vector temporaries in returns, arguments, templates and nested expressions execute in eight directed trials with 288 exact scalar observations on VM and AMDGPU. Eight additional native trials check complete vector storage, narrow packing, signed zero, zero-filled lanes, left-to-right initializer effects, and both allocation guards under normal and access-instrumented execution. | Original source-language initialization witness. |
+| `vector_values.cxx` | Unsigned arithmetic, narrow signed division and remainder, comparisons, float bitcasts, NaN predicates, splats, and vector control execute in 42 directed trials with 760 exact scalar observations on VM. AMDGPU executes the supported function trials and tracks signed division and remainder as a strict target xfail. Fifteen native trials check complete control and mask vectors, immutable inputs, and both allocation guards under normal and access-instrumented execution. | Original source-language vector-semantics witness. |
 | `integer_increment.cxx` | Uniform and lane-varying byte/64-bit increments execute on AMDGPU, including byte wrap, low-word carry, bit 63 and full-width wrap. Fifteen input cases check all 64 lanes and both output guards. | Original source-language semantics witness. |
-| `increment_values.cxx` | Prefix/postfix results, byte/64-bit wrap, short-circuit and conditional mutations, and loop-condition updates. Exact VM oracles cover 532 scalar cases; native checks include complete pointer streams, skipped updates, unchanged inputs and output guards, normally and with device access sanitization. | Original source-language sequencing witness. |
-| `structured_continue.cxx` | Conditional iteration exits, shared tails, nested loop targets, shadowed bindings, for increments and pre/post-test conditions. Exact VM references cover 350 scalar cases. Native cases preserve sparse destinations, compacted pointer streams, vector recurrences and filtered reads under four unroll/pipeline schedules, with unchanged inputs and output guards checked normally and with device access sanitization. | Original source-language control witness. |
+| `increment_values.cxx` | Prefix/postfix results, byte/64-bit wrap, short-circuit and conditional mutations, and loop-condition updates execute in 502 directed trials with 532 exact scalar observations on VM and AMDGPU. Seventeen additional native trials cover complete pointer streams, skipped updates, dynamic physical extents, unchanged inputs, and allocation guards, normally and with device access sanitization. | Original source-language sequencing witness. |
+| `structured_continue.cxx` | Conditional iteration exits, shared tails, nested loop targets, shadowed bindings, for increments and pre/post-test conditions execute in 49 function trials with 392 exact observations on VM and AMDGPU. Fifty-five native trials preserve sparse destinations, compacted pointer streams, vector recurrences and filtered reads under four unroll/pipeline schedules, with unchanged inputs and output guards checked normally and with access instrumentation. | Original source-language control witness. |
+| `pointer_origins.cxx` | ILP32 pointer roots compose with nonzero origins, static member/helper displacements, signed dynamic reads and signed exchange coordinates. An independent Loom oracle checks every returned value, complete mutations, unchanged inputs and allocation guards across VM, hosted Wasm and applicable device profiles. | Original source pointer-ABI witness. |
 | `pointer_walk.cxx` | Interior pointers through helper returns, conditional origins and counted/pre-test/post-test loops. Signed backward displacements, zero-trip behavior and final pointer positions are checked for seven lane-specific trip counts under three starting positions, normally and with device access sanitization. Inputs and output guards remain unchanged. | Original source storage-semantics witness. |
-| `shaped_intrinsics.cxx` | Register-table lookups preserve integer values and floating-point bits, including signed zero, infinities and NaNs. Mixed-width dots cover all four byte-signedness pairs and wrapping i32 accumulators. The VM checks 264 scalar-return cases; AMDGPU checks complete buffers and guards for zero and nonzero group counts, normally and with device access sanitization. | Original shaped operation-binding witness. |
-| `record_values.cxx` | Empty, nested, scalar, vector and pointer records through construction, member mutation, independent copies, helpers, conditional values and loop state. Twenty-four exact VM cases and sixty AMDGPU cases include modular overflow, zero trips, defaults/designators and sequencing. Native cases preserve input buffers and output guards, normally and with access sanitization. Record and explicit-leaf controls express the same algorithm for code/resource comparison. | Original source value and callable-boundary witness. |
+| `shaped_intrinsics.cxx` | Register-table lookups preserve integer values and floating-point bits, including signed zero, infinities and NaNs. Mixed-width dots cover all four byte-signedness pairs and wrapping i32 accumulators. Sixty-six directed trials check 264 exact function observations on VM and AMDGPU. Twelve native trials preserve the original zero and nonzero physical extents while checking complete outputs, unchanged inputs, and allocation guards under normal and access-instrumented execution. | Original shaped operation-binding witness. |
+| `record_values.cxx` | Empty, nested, scalar, vector and pointer records through construction, member mutation, independent copies, helpers, conditional values and loop state. Twelve function trials check 36 exact observations on VM and AMDGPU; 60 native trials cover modular overflow, zero trips, defaults/designators and sequencing. Native cases preserve input buffers and output guards, normally and with access sanitization. Record and explicit-leaf controls express the same algorithm for code/resource comparison. | Original source value and callable-boundary witness. |
 | `symbol_exports.cxx` | A kernel and helper use explicit Loom names inherited through source redeclarations. Authored Loom links and launches the renamed kernel for 32 exact modular integer cases, with unchanged inputs and output guards checked normally and with device access sanitization. | Original source-symbol identity witness. |
-| `typed_views.cxx` | A dynamic-row/static-column source view preserves a runtime row stride and nonzero pointer origin through a by-value helper, then copies into a dense view at another interior origin. Constexpr specializations also deduce distinct static/dynamic shape types and dense/strided layouts through generic readers. Zero and positive shapes, row padding, unchanged inputs, internal sentinels, outer guards, and device access reports are checked independently. | Original typed-view descriptor and source-lifetime witness. |
-| `storage_updates.cxx` | Guarded storage executes bitmap compound assignment, RHS/address sequencing, pointer and element increments, narrow signed/unsigned conversion and floating arithmetic through both the ordinary VM callable ABI and native kernel launches. Volatile updates use the same helper specializations. Native cases assert exact results, input/output guards and zero device access reports. | Original source read/modify/write witness. |
-| `volatile_memory.cxx` | Qualified pointers, pointer members, helpers, vector storage, workgroup arrays and typed subviews execute on AMDGPU with exact results, unchanged inputs, guards and access checking. The ordinary-access control uses the same algorithm. A VM caller supplies real object storage to the same C++ helper and verifies results, input preservation and guards. Compiler fixtures independently check repeated and discarded observations through cleanup. | Original source memory-observation witness. |
+| `typed_views.cxx` | Rank-generic source views preserve dynamic/static shape types and dense/strided layouts through generic readers and by-value helpers. A rank-three FP8 view composes a dense layout with a storage schema and copies its payload through native AMDGPU lowering. Zero and positive shapes, row padding, pointer origins, unchanged inputs, internal sentinels, outer guards, and device access reports are checked independently. | Original typed-view descriptor and source-lifetime witness. |
+| `storage_updates.cxx` | Guarded storage executes bitmap compound assignment, RHS/address sequencing, pointer and element increments, narrow signed/unsigned conversion and floating arithmetic through both the ordinary VM callable ABI and native kernel launches. Volatile updates use the same helper specializations. Native cases assert exact results and input/output guards under normal and access-instrumented execution. | Original source read/modify/write witness. |
+| `boolean_storage.cxx` | Addressed parameters, aliases, output-only initialization, conditional updates, Boolean arrays, Boolean enums and volatile observations execute on the VM. Native kernels check exact 0/1 bytes, record offsets, array strides and workgroup storage, with unchanged inputs and every output guard checked normally and with device access sanitization. | Original Boolean value and object-layout witness. |
+| `volatile_memory.cxx` | Qualified pointers, pointer members, helpers, vector storage, workgroup arrays and typed subviews execute on AMDGPU with exact results, unchanged inputs, guards and access checking. Top-level volatile scalar and vector parameter objects use unqualified callable ABIs while retaining observable initialization and reads on VM and AMDGPU. The ordinary-access control uses the same algorithm. Compiler fixtures independently check repeated and discarded observations through cleanup. | Original source memory-observation witness. |
 | `atomics.cxx` | Contended device and workgroup ticket allocation, signed and unsigned combining operations, and CAS success/failure with exact old values, final storage and guards. The VM exercises every integer kind at 32 and 64 bits; native cases select the target's implemented widths and kinds, normally and with access sanitization. Interior and volatile pointers retain their storage identity. | Original source atomic-memory witness. |
 | `atomic_builtins.cxx` | GCC exchange, old/new fetch results, signed wraparound, and 32/64-bit CAS. Independent argument counters and aliased expected storage expose duplicate evaluation or an erroneous store on successful CAS. VM and native execution check results, expected storage, and guards; native also runs with access sanitization. | Header-free integer atomic witness. |
 
@@ -128,12 +133,11 @@ wrappers are omitted from both extractions. Launch annotations
 supply the Loom configuration contract. The upstream licenses are included
 beside the source files.
 
-`loom/py/loom/gen/test/cxx_kernel_cases.py` generates deterministic, quantized
-inputs and reference fixtures using only Python's standard library. Attention
-uses a materialized score matrix and double-precision softmax reference; RMSNorm
-uses a direct row sum of squares. These references are independent of the
-source kernels' reduction and staging algorithms. Python runs only to prepare
-test fixtures; the importer, CLI, and public C extension are native.
+Quantized scenarios generate serialized Q4_K, Q8_1, and IQ4_XS records in their
+owning C++ sources. Their scalar oracles use logical scales and codes or decode
+records without sharing the kernels' vector addressing and reduction
+algorithms. This keeps the physical format and full workload geometry under
+test without generated Loom modules or NPY payloads.
 
 The integer references use unbounded integer multiplication/division and
 explicit modular conversion into the source width. Shift counts remain within

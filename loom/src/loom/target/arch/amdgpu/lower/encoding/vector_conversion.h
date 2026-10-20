@@ -23,6 +23,11 @@ iree_status_t loom_amdgpu_select_vector_16bit_float_conversion_plan(
     loom_amdgpu_vector_16bit_float_conversion_plan_t* out_plan,
     bool* out_selected);
 
+// Publishes the conversion result or its retained storage origin's carrier.
+iree_status_t loom_amdgpu_finalize_vector_16bit_float_conversion_plan(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_vector_16bit_float_conversion_plan_t* plan);
+
 // Lowers an AMDGPU vector narrow-float conversion plan.
 iree_status_t loom_amdgpu_lower_vector_16bit_float_conversion(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
@@ -31,7 +36,6 @@ iree_status_t loom_amdgpu_lower_vector_16bit_float_conversion(
 // Returns the stable compile-report strategy key for a selected narrow-float
 // vector conversion plan.
 iree_string_view_t loom_amdgpu_vector_16bit_float_conversion_plan_key(
-    loom_low_lower_context_t* context,
     const loom_amdgpu_vector_16bit_float_conversion_plan_t* plan);
 
 // Returns true when an explicit vector.decode is a dense FP8 conversion that

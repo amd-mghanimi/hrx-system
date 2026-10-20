@@ -1,0 +1,53 @@
+// Readonly symbol loads retain identity while address and element indexing
+// use the ordinary scalar memory contract.
+// RUN: emit source-low target=x86:scalar output=module
+global.rodata.def @table = align(32) bytes("1122334480ff007e")
+
+func.def public @read_table(%input: index) -> (i32) {
+  %position = index.assume %input [range(%input, 0, 1)] : index
+  %table = global.load @table : buffer
+  %origin = index.constant 0 : offset
+  %view = buffer.view %table[%origin] : buffer -> view<2xi32>
+  %value = view.load %view[%position] : view<2xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+global.rodata.def @table = align(32) bytes("1122334480ff007e")
+
+low.func.def public target<x86.scalar.core>(@__loom_target_context_0_0) abi(object_function) @read_table(%position: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
+  %table = lea.symbol.gpr64 @table
+  %value = mov.load.indexed.gpr32 %table, %position {disp32 = 0, scale = 4}
+  return %value
+}
+
+x86.target<scalar> @__loom_target_context_0_0
+
+// ====
+
+// The same scalar address descriptor feeds vector memory selection without
+// copying the data into mutable storage or scalarizing the load.
+// RUN: emit source-low target=x86:avx2 output=module
+global.rodata.def @table = align(16) bytes("0000803f000000400000404000008040")
+
+func.def public @copy_table(%output: buffer) {
+  %table = global.load @table : buffer
+  %origin = index.constant 0 : offset
+  %source = buffer.view %table[%origin] : buffer -> view<4xf32>
+  %target = buffer.view %output[%origin] : buffer -> view<4xf32>
+  %values = vector.load %source[0] : view<4xf32> -> vector<4xf32>
+  vector.store %values, %target[0] : vector<4xf32>, view<4xf32>
+  func.return
+}
+
+// ----
+global.rodata.def @table = align(16) bytes("0000803f000000400000404000008040")
+
+low.func.def public target<x86.avx2.core>(@__loom_target_context_0_0) abi(object_function) @copy_table(%output: reg<x86.gpr64>) asm {
+  %table = lea.symbol.gpr64 @table
+  %values = vmovdqu32.load.xmm %table {disp32 = 0}
+  vmovdqu32.store.xmm %values, %output {disp32 = 0}
+  return
+}
+
+x86.target<avx2> @__loom_target_context_0_0

@@ -93,6 +93,14 @@ iree_status_t iree_hal_amdgpu_atomic_memory_select_source_cells(
     const iree_hal_amdgpu_atomic_memory_source_selection_t* selection,
     iree_hal_amdgpu_atomic_memory_cell_flags_t* out_cell_flags);
 
+// The pool flags and access mode are facts already queried from HSA; this
+// queries the remaining link properties for one source agent.
+iree_status_t iree_hal_amdgpu_atomic_memory_query_source_cells(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t source_agent,
+    hsa_amd_memory_pool_t memory_pool, uint32_t global_flags,
+    uint32_t allocation_flags, hsa_amd_memory_pool_access_t access,
+    iree_hal_amdgpu_atomic_memory_cell_flags_t* out_cell_flags);
+
 // Queries immutable source GPU masks for allocations from |memory_pool|.
 iree_status_t iree_hal_amdgpu_atomic_memory_query_source_masks(
     const iree_hal_amdgpu_libhsa_t* libhsa,
@@ -146,6 +154,13 @@ iree_status_t iree_hal_amdgpu_atomic_memory_validate_required_cells(
 iree_hal_atomic_operation_capabilities_t
 iree_hal_amdgpu_atomic_memory_expand_capabilities(
     iree_hal_amdgpu_atomic_memory_cell_flags_t cell_flags);
+
+// Collapses complete public operation families into compact memory cells.
+// Partial families contribute no cell: this representation cannot distinguish
+// support for individual operations within a width and coherence domain.
+iree_hal_amdgpu_atomic_memory_cell_flags_t
+iree_hal_amdgpu_atomic_memory_collapse_capabilities(
+    iree_hal_atomic_operation_capabilities_t capabilities);
 
 #ifdef __cplusplus
 }  // extern "C"

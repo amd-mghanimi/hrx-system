@@ -6,25 +6,35 @@
 
 #include "loom/target/arch/spirv/provider.h"
 
+#include <string>
+
 #include "iree/base/internal/arena.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 #include "loom/analysis/symbol_facts.h"
+#include "loom/codegen/low/text_asm.h"
+#include "loom/codegen/low/verify.h"
 #include "loom/format/text/parser.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/op_registry.h"
 #include "loom/ops/target/facts.h"
+#include "loom/target/arch/spirv/bda_abi.h"
+#include "loom/target/arch/spirv/error_catalog.h"
 #include "loom/target/arch/spirv/features.h"
 #include "loom/target/arch/spirv/profile.h"
 #include "loom/target/arch/spirv/records/target_records.h"
+#include "loom/testing/diagnostic_matchers.h"
 #include "loom/testing/module_ptr.h"
 
 namespace loom {
 namespace {
 
 using ModulePtr = ::loom::testing::ModulePtr;
+using ::loom::testing::CapturedDiagnosticEmission;
+using ::loom::testing::DiagnosticCapture;
+using ::loom::testing::DiagnosticEmissionCapture;
 
 class SpirvProviderTest : public ::testing::Test {
  protected:
@@ -51,16 +61,69 @@ class SpirvProviderTest : public ::testing::Test {
   }
 
   ModulePtr Parse(iree_string_view_t source) {
+    DiagnosticCapture capture;
     loom_text_parse_options_t parse_options = {
-        /*.diagnostic_sink=*/{},
-        /*.max_errors=*/20,
+        .diagnostic_sink = capture.sink(),
+        .max_errors = 20,
     };
+    const loom_target_low_descriptor_registry_t registry =
+        loom_target_environment_low_descriptor_registry(&target_environment_);
+    loom_low_descriptor_text_asm_environment_initialize(
+        &registry.registry, &parse_options.low_asm_environment);
     loom_module_t* module = nullptr;
     IREE_CHECK_OK(loom_text_parse(source, IREE_SV("spirv_provider_test.loom"),
                                   &context_, &block_pool_, &parse_options,
                                   &module));
+    for (const auto& diagnostic : capture.diagnostics) {
+      ADD_FAILURE() << loom_error_def_summary(diagnostic.error) << " at line "
+                    << diagnostic.origin_line << ", column "
+                    << diagnostic.origin_column;
+    }
     IREE_ASSERT(module != nullptr);
     return ModulePtr(module);
+  }
+
+  void VerifyLow(loom_module_t* module, DiagnosticEmissionCapture* capture,
+                 loom_low_verify_result_t* out_result) {
+    const loom_target_low_descriptor_registry_t registry =
+        loom_target_environment_low_descriptor_registry(&target_environment_);
+    const loom_low_verify_options_t options = {
+        .descriptor_registry = &registry.registry,
+        .function_versions = nullptr,
+        .emitter = capture->emitter(),
+        .provider_list = loom_target_environment_low_verify_provider_list(
+            &target_environment_),
+        .max_errors = 20,
+    };
+    loom_low_verify_scratch_t scratch =
+        loom_low_verify_scratch_for_module(module);
+    IREE_ASSERT_OK(
+        loom_low_verify_module(module, &options, &scratch, out_result));
+  }
+
+  std::string BuildLogicalRawBdaKernel(uint32_t argument_count) {
+    std::string source =
+        "spirv.target<vulkan1_3> @target {abi = hal_kernel}\n"
+        "low.kernel.def target<spirv.logical.core>(@target) "
+        "abi_layout({signature = (";
+    source.reserve(256 + argument_count * 48u);
+    for (uint32_t i = 0; i < argument_count; ++i) {
+      if (i != 0) {
+        source.append(",\n");
+      }
+      source.append("i32");
+    }
+    source.append(") -> ()}) workgroup_size(1, 1, 1) @many_parameters(");
+    for (uint32_t i = 0; i < argument_count; ++i) {
+      if (i != 0) {
+        source.append(",\n");
+      }
+      source.append("%arg");
+      source.append(std::to_string(i));
+      source.append(": reg<spirv.id : i32>");
+    }
+    source.append(") asm {\n  return\n}\n");
+    return source;
   }
 
   loom_symbol_ref_t FindSymbolRef(const loom_module_t* module,
@@ -69,9 +132,9 @@ class SpirvProviderTest : public ::testing::Test {
     IREE_ASSERT(name_id != LOOM_STRING_ID_INVALID);
     const uint16_t symbol_id = loom_module_find_symbol(module, name_id);
     IREE_ASSERT(symbol_id != LOOM_SYMBOL_ID_INVALID);
-    return (loom_symbol_ref_t){
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+    return loom_symbol_ref_t{
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -121,13 +184,47 @@ class SpirvProviderTest : public ::testing::Test {
   loom_symbol_fact_table_t requirement_fact_table_;
 };
 
+TEST_F(SpirvProviderTest, VerifiesReflectedRawBdaParameterOffsetBoundary) {
+  const uint32_t maximum_argument_count =
+      LOOM_SPIRV_BDA_MAX_REFLECTED_CONSTANT_WORD_OFFSET + 1u;
+  {
+    const std::string source = BuildLogicalRawBdaKernel(maximum_argument_count);
+    ModulePtr module =
+        Parse(iree_make_string_view(source.data(), source.size()));
+    DiagnosticEmissionCapture capture;
+    loom_low_verify_result_t result = {};
+    VerifyLow(module.get(), &capture, &result);
+    EXPECT_EQ(result.error_count, 0u);
+    EXPECT_TRUE(capture.emissions.empty());
+  }
+
+  const std::string source =
+      BuildLogicalRawBdaKernel(maximum_argument_count + 1u);
+  ModulePtr module = Parse(iree_make_string_view(source.data(), source.size()));
+  DiagnosticEmissionCapture capture;
+  loom_low_verify_result_t result = {};
+  VerifyLow(module.get(), &capture, &result);
+  EXPECT_EQ(result.error_count, 1u);
+  ASSERT_EQ(capture.emissions.size(), 1u);
+  const CapturedDiagnosticEmission& emission = capture.emissions[0];
+  EXPECT_EQ(emission.error, LOOM_ERR_SPIRV_031);
+  ASSERT_EQ(emission.string_params.size(), 2u);
+  EXPECT_EQ(emission.string_params[0], "many_parameters");
+  EXPECT_EQ(emission.string_params[1], "arg16376");
+  ASSERT_EQ(emission.u32_params.size(), 2u);
+  EXPECT_EQ(emission.u32_params[0], 65504u);
+  EXPECT_EQ(emission.u32_params[1], 65536u);
+}
+
 TEST_F(SpirvProviderTest, RequiresLowCallsInline) {
   EXPECT_EQ(loom_spirv_target_provider.target_fact_type,
             &loom_spirv_target_fact_type);
-  ASSERT_NE(loom_spirv_target_provider.select_low_call_policy, nullptr);
+  ASSERT_NE(loom_spirv_target_provider.select_call_policy, nullptr);
   const loom_resolved_target_t resolved_target = {};
-  EXPECT_EQ(loom_spirv_target_provider.select_low_call_policy(&resolved_target),
-            LOOM_TARGET_LOW_CALL_POLICY_REQUIRE_INLINE);
+  EXPECT_EQ(loom_spirv_target_provider.select_call_policy(
+                &resolved_target, nullptr, LOOM_CALL_LIKE_KIND_LOW_INTERNAL,
+                loom_call_like_t{}, loom_func_like_t{}),
+            LOOM_TARGET_CALL_POLICY_REQUIRE_INLINE);
 }
 
 TEST_F(SpirvProviderTest, MaterializesAuthoredRefinements) {
@@ -152,15 +249,15 @@ TEST_F(SpirvProviderTest, MaterializesAuthoredRefinements) {
   IREE_ASSERT_OK(
       loom_module_add_symbol(materialized.get(), symbol_name_id, &symbol_id));
   const loom_symbol_ref_t symbol = {
-      /*.module_id=*/0,
-      /*.symbol_id=*/symbol_id,
+      .module_id = 0,
+      .symbol_id = symbol_id,
   };
   loom_builder_t builder;
   loom_builder_initialize(materialized.get(), &materialized->arena,
                           loom_module_block(materialized.get()), &builder);
   const loom_resolved_target_t resolved_target = {
-      /*.provider=*/&loom_spirv_target_provider,
-      /*.facts=*/source_symbol_facts->projection,
+      .provider = &loom_spirv_target_provider,
+      .facts = source_symbol_facts->projection,
   };
   ASSERT_NE(loom_spirv_target_provider.materialize_definition, nullptr);
   IREE_ASSERT_OK(loom_spirv_target_provider.materialize_definition(
@@ -175,11 +272,12 @@ TEST_F(SpirvProviderTest, MaterializesAuthoredRefinements) {
 
 TEST_F(SpirvProviderTest, MaterializesStructuredProfileOverrides) {
   const auto& preset = loom_spirv_low_target_bundle_vulkan1_3;
-  loom_target_bundle_storage_t storage = {};
-  storage.snapshot = *preset.snapshot;
-  storage.export_plan = *preset.export_plan;
-  storage.config = *preset.config;
-  storage.bundle = preset;
+  loom_target_bundle_storage_t storage = {
+      .snapshot = *preset.snapshot,
+      .export_plan = *preset.export_plan,
+      .config = *preset.config,
+      .bundle = preset,
+  };
   loom_target_bundle_storage_rebind(&storage);
   storage.snapshot.subgroup_size = 32;
   storage.snapshot.max_workgroup_size.x = 128;
@@ -194,7 +292,7 @@ TEST_F(SpirvProviderTest, MaterializesStructuredProfileOverrides) {
     loom_target_fact_field_set_insert(&explicit_fields, field);
   }
   loom_spirv_target_profile_t profile = {};
-  loom_spirv_target_profile_initialize(&storage.bundle, explicit_fields,
+  loom_spirv_target_profile_initialize(&storage.bundle, explicit_fields, {},
                                        nullptr, &profile);
   loom_target_facts_t* profile_facts = nullptr;
   IREE_ASSERT_OK(loom_target_profile_project_facts(
@@ -248,24 +346,24 @@ TEST_F(SpirvProviderTest, ProjectedProfileSatisfiesStructuredRequirements) {
                     "spirv.target<vulkan1_3> @float64 "
                     "{contract_feature_bits = 16}\n"));
   loom_target_bundle_storage_t live_storage = {
-      /*.snapshot=*/*loom_spirv_low_target_bundle_vulkan1_3.snapshot,
-      /*.export_plan=*/*loom_spirv_low_target_bundle_vulkan1_3.export_plan,
-      /*.config=*/*loom_spirv_low_target_bundle_vulkan1_3.config,
-      /*.bundle=*/loom_spirv_low_target_bundle_vulkan1_3,
+      .snapshot = *loom_spirv_low_target_bundle_vulkan1_3.snapshot,
+      .export_plan = *loom_spirv_low_target_bundle_vulkan1_3.export_plan,
+      .config = *loom_spirv_low_target_bundle_vulkan1_3.config,
+      .bundle = loom_spirv_low_target_bundle_vulkan1_3,
   };
   loom_target_bundle_storage_rebind(&live_storage);
   live_storage.bundle.name = IREE_SV("live-vulkan-device");
   live_storage.snapshot.max_workgroup_size = {
-      /*.x=*/256,
-      /*.y=*/128,
-      /*.z=*/64,
+      .x = 256,
+      .y = 128,
+      .z = 64,
   };
   live_storage.snapshot.max_flat_workgroup_size = 256;
   live_storage.snapshot.subgroup_size = 32;
   live_storage.snapshot.max_workgroup_count = {
-      /*.x=*/65535,
-      /*.y=*/65535,
-      /*.z=*/65535,
+      .x = 65535,
+      .y = 65535,
+      .z = 65535,
   };
   live_storage.export_plan.abi_kind = LOOM_TARGET_ABI_HAL_KERNEL;
   live_storage.config.contract_feature_bits |= LOOM_SPIRV_FEATURE_FLOAT16;
@@ -284,9 +382,9 @@ TEST_F(SpirvProviderTest, ProjectedProfileSatisfiesStructuredRequirements) {
     loom_target_fact_field_set_insert(&explicit_fields, field);
   }
   loom_spirv_target_profile_t profile = {};
-  loom_spirv_target_profile_initialize(&live_storage.bundle, explicit_fields,
-                                       /*cooperative_properties=*/nullptr,
-                                       &profile);
+  loom_spirv_target_profile_initialize(
+      &live_storage.bundle, explicit_fields, {},
+      /*cooperative_properties=*/nullptr, &profile);
   loom_target_facts_t* effective = nullptr;
   IREE_ASSERT_OK(loom_target_profile_project_facts(
       &profile.base, &analysis_arena_, &effective));

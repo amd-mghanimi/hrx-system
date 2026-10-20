@@ -15,15 +15,36 @@
 #include "loom/ops/op_defs.h"
 #include "loom/target/math_policy.h"
 #include "loom/util/fact_cfg.h"
+#include "loom/util/fact_loop.h"
+#include "loom/util/fact_vector_partition.h"
 
 #define LOOM_REWRITER_INITIAL_WORKLIST_CAPACITY 64
 #define LOOM_REWRITER_INITIAL_REGION_STACK_CAPACITY 8
 
+loom_op_t* loom_rewriter_value_defining_op(const loom_rewriter_t* rewriter,
+                                           loom_value_id_t value_id) {
+  const loom_value_id_t identity =
+      loom_rewriter_value_identity(rewriter, value_id);
+  if (identity != value_id &&
+      !loom_type_equal(loom_module_value_type(rewriter->module, identity),
+                       loom_module_value_type(rewriter->module, value_id))) {
+    return NULL;
+  }
+  const loom_value_t* value = loom_module_value(rewriter->module, identity);
+  if (loom_value_is_block_arg(value)) {
+    return NULL;
+  }
+  loom_op_t* definition = loom_value_def_op(value);
+  return definition && !iree_any_bit_set(definition->flags, LOOM_OP_FLAG_DEAD)
+             ? definition
+             : NULL;
+}
+
 bool loom_rewriter_prefers_fma(const loom_rewriter_t* rewriter,
                                loom_type_t value_type, uint8_t fastmath_flags) {
-  const loom_target_math_policy_t* policy = rewriter->math_policy;
-  return policy && policy->prefer_fma &&
-         policy->prefer_fma(policy, value_type, fastmath_flags);
+  return loom_target_math_policy_prefers_fma(rewriter->math_policy,
+                                             rewriter->math_target_bundle,
+                                             value_type, fastmath_flags);
 }
 
 typedef enum loom_rewriter_user_change_flag_bits_e {
@@ -63,8 +84,8 @@ static bool loom_rewriter_summary_region_is_ready(
   if (!terminator) {
     return false;
   }
-  return descriptor->terminator == LOOM_OP_KIND_UNKNOWN ||
-         terminator->kind == descriptor->terminator;
+  return loom_region_descriptor_matches_terminator(descriptor,
+                                                   terminator->kind);
 }
 
 static bool loom_rewriter_nested_region_summary_is_ready(
@@ -127,18 +148,29 @@ static iree_status_t loom_rewriter_recompute_op_facts(loom_rewriter_t* rewriter,
 
 // Region owners publish inherited context before their children are built or
 // revisited. Cyclic summaries refresh it again when control facts change.
-static iree_status_t loom_rewriter_seed_nested_temporal_scope(
+static iree_status_t loom_rewriter_seed_nested_execution_facts(
     loom_rewriter_t* rewriter, loom_op_t* op) {
   if (!rewriter->fact_table || !op->region_count) {
     return iree_ok_status();
   }
+  IREE_RETURN_IF_ERROR(loom_value_fact_table_seed_nested_target_scopes(
+      rewriter->fact_table, rewriter->module, op));
   const loom_value_facts_t scope = loom_value_fact_table_block_temporal_scope(
       rewriter->fact_table, op->parent_block);
+  const bool may_repeat =
+      loom_loop_like_isa(loom_loop_like_cast(rewriter->module, op)) ||
+      loom_value_fact_table_block_may_repeat(rewriter->fact_table,
+                                             op->parent_block);
   loom_region_t** regions = loom_op_regions(op);
   for (uint8_t i = 0; i < op->region_count; ++i) {
     if (regions[i]) {
       IREE_RETURN_IF_ERROR(loom_value_fact_table_set_region_temporal_scope(
-          rewriter->fact_table, regions[i], scope));
+          rewriter->fact_table, regions[i], scope, may_repeat));
+      if (regions[i]->block_count) {
+        IREE_RETURN_IF_ERROR(loom_value_fact_table_seed_loop_iv_arg(
+            rewriter->fact_table, rewriter->module,
+            loom_region_entry_block(regions[i]), op));
+      }
     }
   }
   return iree_ok_status();
@@ -155,7 +187,7 @@ static iree_status_t loom_rewriter_on_op_finalized(void* user_data,
   loom_rewriter_t* rewriter = (loom_rewriter_t*)user_data;
   ++rewriter->created_op_count;
   IREE_RETURN_IF_ERROR(loom_rewriter_add_to_worklist(rewriter, op));
-  IREE_RETURN_IF_ERROR(loom_rewriter_seed_nested_temporal_scope(rewriter, op));
+  IREE_RETURN_IF_ERROR(loom_rewriter_seed_nested_execution_facts(rewriter, op));
   // Newly defined results have no users yet. Only a terminator changes an
   // existing control or payload equation before its results are connected.
   if (iree_any_bit_set(op->traits, LOOM_TRAIT_TERMINATOR)) {
@@ -164,6 +196,12 @@ static iree_status_t loom_rewriter_on_op_finalized(void* user_data,
   } else {
     IREE_RETURN_IF_ERROR(
         loom_rewriter_add_parent_summary_ops_to_worklist(rewriter, op));
+  }
+  if (rewriter->operation_creation.source != NULL &&
+      rewriter->operation_creation.callback.fn != NULL) {
+    IREE_RETURN_IF_ERROR(rewriter->operation_creation.callback.fn(
+        rewriter->operation_creation.callback.user_data,
+        rewriter->operation_creation.source, op));
   }
   const loom_op_vtable_t* vtable = loom_op_vtable(rewriter->module, op);
   if (!loom_rewriter_nested_region_summary_is_ready(rewriter, op, vtable)) {
@@ -178,7 +216,7 @@ static iree_status_t loom_rewriter_on_op_finalized(void* user_data,
 static iree_status_t loom_rewriter_record_subtree(loom_rewriter_t* rewriter,
                                                   loom_op_t* op) {
   loom_module_record_op_summaries(rewriter->module, op);
-  IREE_RETURN_IF_ERROR(loom_rewriter_seed_nested_temporal_scope(rewriter, op));
+  IREE_RETURN_IF_ERROR(loom_rewriter_seed_nested_execution_facts(rewriter, op));
   loom_region_t** regions = loom_op_regions(op);
   for (uint8_t region_index = 0; region_index < op->region_count;
        ++region_index) {
@@ -309,6 +347,17 @@ void loom_rewriter_deinitialize(loom_rewriter_t* rewriter) {
   memset(rewriter, 0, sizeof(*rewriter));
 }
 
+void loom_rewriter_set_operation_creation_callback(
+    loom_rewriter_t* rewriter,
+    loom_rewriter_operation_creation_callback_t callback) {
+  rewriter->operation_creation.callback = callback;
+}
+
+void loom_rewriter_set_operation_creation_source(loom_rewriter_t* rewriter,
+                                                 const loom_op_t* source_op) {
+  rewriter->operation_creation.source = source_op;
+}
+
 iree_status_t loom_rewriter_enable_worklist(loom_rewriter_t* rewriter) {
   if (rewriter->worklist) {
     return iree_ok_status();
@@ -422,10 +471,14 @@ static iree_status_t loom_rewriter_update_cfg_block_facts(
       if (iree_status_is_ok(status)) {
         status = loom_rewriter_publish_cfg_control_changes(rewriter, structure);
       }
-      structure->control_flow
-          .dirty[structure->graph.blocks[block_index].component] = false;
+      iree_bitmap_reset(structure->control_flow.dirty,
+                        structure->graph.blocks[block_index].component);
       return status;
     }
+  }
+  if (loom_cfg_graph_block_is_reachable(&structure->graph, block_index)) {
+    iree_bitmap_reset(structure->control_flow.dirty,
+                      structure->graph.blocks[block_index].component);
   }
   return loom_value_fact_table_update_cfg_block_args(
       rewriter->fact_table, rewriter->module, structure, block_index,
@@ -537,9 +590,9 @@ static iree_status_t loom_rewriter_refresh_cfg_block_facts(
         if (old_indices[i] != IREE_HOST_SIZE_MAX &&
             old_structure->control_flow.components.count &&
             old_structure->graph.blocks[old_indices[i]].reachable) {
-          was_dirty =
-              old_structure->control_flow
-                  .dirty[old_structure->graph.blocks[old_indices[i]].component];
+          was_dirty = iree_bitmap_test(
+              old_structure->control_flow.dirty,
+              old_structure->graph.blocks[old_indices[i]].component);
         }
         if (!was_dirty && old_indices[i] != IREE_HOST_SIZE_MAX &&
             loom_rewriter_cfg_predecessors_equal(old_structure, old_indices[i],
@@ -610,7 +663,7 @@ static iree_status_t loom_rewriter_update_successor_facts(
     const iree_host_size_t component_index =
         structure->graph.blocks[block_index].component;
     if (structure->control_flow.anchors[component_index] == op &&
-        structure->control_flow.dirty[component_index]) {
+        iree_bitmap_test(structure->control_flow.dirty, component_index)) {
       IREE_RETURN_IF_ERROR(loom_rewriter_update_cfg_block_facts(
           rewriter, structure, block_index));
     }
@@ -622,14 +675,12 @@ static iree_status_t loom_rewriter_update_successor_facts(
   if (!successor->arg_count) {
     return iree_ok_status();
   }
-  if (structure->control_flow.components.count &&
-      structure->graph.blocks[successor->region_index].reachable) {
-    iree_host_size_t component_index =
-        structure->graph.blocks[successor->region_index].component;
-    if (structure->control_flow.components.values[component_index].is_cycle &&
-        !structure->control_flow.dirty[component_index]) {
-      return iree_ok_status();
-    }
+  const loom_cfg_block_info_t* successor_info =
+      &structure->graph.blocks[successor->region_index];
+  if (!successor_info->reachable ||
+      !iree_bitmap_test(structure->control_flow.dirty,
+                        successor_info->component)) {
+    return iree_ok_status();
   }
   return loom_rewriter_update_cfg_block_facts(rewriter, structure,
                                               successor->region_index);
@@ -708,12 +759,15 @@ iree_status_t loom_rewriter_try_fold(loom_rewriter_t* rewriter, loom_op_t* op,
   if (!vtable->infer_facts) {
     return iree_ok_status();
   }
-  if (loom_traits_has_side_effects(
-          loom_op_effective_traits(rewriter->module, op))) {
+  const loom_trait_flags_t traits =
+      loom_op_effective_traits(rewriter->module, op);
+  if (loom_traits_has_side_effects(traits)) {
     return iree_ok_status();
   }
 
-  // Check if all results are now exact constants.
+  // Dense exact facts describe scalar values. An aggregate may carry the
+  // same numeric envelope for every element without being a scalar constant;
+  // its dialect-owned patterns materialize the aggregate representation.
   const loom_value_id_t* results = loom_op_const_results(op);
   for (uint16_t i = 0; i < op->result_count; ++i) {
     if (results[i] == LOOM_VALUE_ID_INVALID) {
@@ -721,12 +775,21 @@ iree_status_t loom_rewriter_try_fold(loom_rewriter_t* rewriter, loom_op_t* op,
     }
     loom_value_facts_t facts =
         loom_value_fact_table_lookup(rewriter->fact_table, results[i]);
-    if (!loom_value_facts_is_exact(facts)) {
+    if (!loom_value_facts_is_exact(facts) ||
+        !loom_type_is_scalar(
+            loom_module_value_type(rewriter->module, results[i]))) {
       return iree_ok_status();
     }
   }
   if (op->result_count == 0) {
     return iree_ok_status();
+  }
+
+  if (loom_traits_are_fact_identity(traits) &&
+      rewriter->pending_exact_relations_callback.fn &&
+      loom_value_fact_table_has_pending_exact_relations(rewriter->fact_table)) {
+    IREE_RETURN_IF_ERROR(rewriter->pending_exact_relations_callback.fn(
+        rewriter->pending_exact_relations_callback.user_data, rewriter));
   }
 
   // All results are exact. Materialize constants in the same block
@@ -838,6 +901,42 @@ iree_status_t loom_rewriter_try_set_derived_value_name(
 // Mini-DCE
 //===----------------------------------------------------------------------===//
 
+// SSA identities and materializations borrow live definitions, unlike facts
+// that remain meaningful after their producer is removed. The erasing mutation
+// owns withdrawal for the complete removed subtree.
+static void loom_rewriter_erase_value_facts(loom_rewriter_t* rewriter,
+                                            loom_op_t* op) {
+  if (!rewriter->fact_table || (!rewriter->fact_table->identities.nodes &&
+                                !rewriter->fact_table->vector_partitions)) {
+    return;
+  }
+  const loom_value_id_t* results = loom_op_const_results(op);
+  for (uint16_t i = 0; i < op->result_count; ++i) {
+    loom_value_fact_table_erase_identity_value(rewriter->fact_table,
+                                               results[i]);
+    loom_value_fact_table_invalidate_vector_partition_value(
+        rewriter->fact_table, results[i]);
+  }
+  for (uint8_t i = 0; i < op->region_count; ++i) {
+    loom_region_t* region = loom_op_regions(op)[i];
+    if (!region) {
+      continue;
+    }
+    loom_block_t* block = NULL;
+    loom_region_for_each_block(region, block) {
+      for (uint16_t j = 0; j < block->arg_count; ++j) {
+        loom_value_fact_table_erase_identity_value(rewriter->fact_table,
+                                                   block->arg_ids[j]);
+        loom_value_fact_table_invalidate_vector_partition_value(
+            rewriter->fact_table, block->arg_ids[j]);
+      }
+      for (loom_op_t* child = block->first_op; child; child = child->next_op) {
+        loom_rewriter_erase_value_facts(rewriter, child);
+      }
+    }
+  }
+}
+
 bool loom_rewriter_is_trivially_dead(const loom_rewriter_t* rewriter,
                                      const loom_op_t* op) {
   return loom_op_is_trivially_dead(rewriter->module, op);
@@ -885,14 +984,15 @@ iree_status_t loom_rewriter_add_to_worklist(loom_rewriter_t* rewriter,
 }
 
 static iree_status_t loom_rewriter_add_cfg_summary_to_worklist(
-    loom_rewriter_t* rewriter, const loom_block_t* block) {
+    loom_rewriter_t* rewriter, const loom_block_t* block,
+    bool arguments_changed) {
   if (!rewriter->fact_table || !block || !block->parent_region) {
     return iree_ok_status();
   }
   const loom_value_fact_cfg_region_t* structure =
       loom_value_fact_table_lookup_cfg_region(rewriter->fact_table,
                                               block->parent_region);
-  if (!structure || !structure->control_flow.components.count) {
+  if (!structure) {
     return iree_ok_status();
   }
   iree_host_size_t block_index =
@@ -903,9 +1003,17 @@ static iree_status_t loom_rewriter_add_cfg_summary_to_worklist(
   }
   iree_host_size_t component_index =
       structure->graph.blocks[block_index].component;
+  if (!structure->graph.blocks[block_index].component_is_cyclic) {
+    // Incoming terminators are already queued by the mutation or control
+    // publication. Their first visit rejoins all inputs; the rest reuse it.
+    if (arguments_changed && block->arg_count) {
+      iree_bitmap_set(structure->control_flow.dirty, component_index);
+    }
+    return iree_ok_status();
+  }
   loom_op_t* anchor = structure->control_flow.anchors[component_index];
   if (anchor) {
-    structure->control_flow.dirty[component_index] = true;
+    iree_bitmap_set(structure->control_flow.dirty, component_index);
     IREE_RETURN_IF_ERROR(loom_rewriter_add_to_worklist(rewriter, anchor));
   }
   return iree_ok_status();
@@ -953,7 +1061,7 @@ static iree_status_t loom_rewriter_add_parent_summary_ops_to_worklist(
        parent = parent->parent_op) {
     if (has_cfg_facts) {
       IREE_RETURN_IF_ERROR(loom_rewriter_add_cfg_summary_to_worklist(
-          rewriter, parent->parent_block));
+          rewriter, parent->parent_block, /*arguments_changed=*/false));
     }
     const loom_op_vtable_t* vtable = loom_op_vtable(rewriter->module, parent);
     if (loom_rewriter_op_summarizes_nested_regions(vtable)) {
@@ -975,11 +1083,11 @@ static iree_status_t loom_rewriter_add_summary_ops_to_worklist(
         loom_rewriter_op_summarizes_nested_regions(vtable) ||
         iree_any_bit_set(op->traits, LOOM_TRAIT_TERMINATOR)) {
       IREE_RETURN_IF_ERROR(loom_rewriter_add_cfg_summary_to_worklist(
-          rewriter, op->parent_block));
+          rewriter, op->parent_block, /*arguments_changed=*/false));
     }
     for (uint8_t i = 0; i < op->successor_count; ++i) {
       IREE_RETURN_IF_ERROR(loom_rewriter_add_cfg_summary_to_worklist(
-          rewriter, loom_op_successors(op)[i]));
+          rewriter, loom_op_successors(op)[i], /*arguments_changed=*/true));
     }
   }
   return loom_rewriter_add_parent_summary_ops_to_worklist(rewriter, op);
@@ -1138,6 +1246,7 @@ iree_status_t loom_rewriter_replace_all_uses_and_erase(
       loom_rewriter_add_subtree_providers_to_worklist(rewriter, op));
   IREE_RETURN_IF_ERROR(
       loom_rewriter_add_parent_summary_ops_to_worklist(rewriter, op));
+  loom_rewriter_erase_value_facts(rewriter, op);
   IREE_RETURN_IF_ERROR(loom_op_erase(rewriter->module, op));
   ++rewriter->erased_op_count;
   rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
@@ -1159,6 +1268,20 @@ iree_status_t loom_rewriter_replace_all_uses_with(loom_rewriter_t* rewriter,
       rewriter, old_value, LOOM_REWRITER_USER_CHANGE_FLAG_REPLACED));
   IREE_RETURN_IF_ERROR(
       loom_value_replace_all_uses_with(rewriter->module, old_value, new_value));
+  if (rewriter->fact_table) {
+    IREE_RETURN_IF_ERROR(loom_value_fact_table_replace_identity_value(
+        rewriter->fact_table, old_value, new_value));
+  }
+  if (rewriter->fact_table && rewriter->fact_table->vector_partitions) {
+    if (loom_type_equal(loom_module_value_type(rewriter->module, old_value),
+                        loom_module_value_type(rewriter->module, new_value))) {
+      IREE_RETURN_IF_ERROR(loom_value_fact_table_replace_vector_partition_value(
+          rewriter->fact_table, old_value, new_value));
+    } else {
+      loom_value_fact_table_invalidate_vector_partition_value(
+          rewriter->fact_table, old_value);
+    }
+  }
   rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
   return iree_ok_status();
 }
@@ -1219,10 +1342,84 @@ iree_status_t loom_rewriter_erase(loom_rewriter_t* rewriter, loom_op_t* op) {
       loom_rewriter_add_subtree_providers_to_worklist(rewriter, op));
   IREE_RETURN_IF_ERROR(
       loom_rewriter_add_parent_summary_ops_to_worklist(rewriter, op));
+  loom_rewriter_erase_value_facts(rewriter, op);
   IREE_RETURN_IF_ERROR(loom_op_erase(rewriter->module, op));
   ++rewriter->erased_op_count;
   rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
   return iree_ok_status();
+}
+
+iree_status_t loom_rewriter_erase_closed_set(loom_rewriter_t* rewriter,
+                                             loom_op_t* const* ops,
+                                             iree_host_size_t count) {
+  for (iree_host_size_t i = 0; i < count; ++i) {
+    IREE_RETURN_IF_ERROR(
+        loom_rewriter_add_subtree_providers_to_worklist(rewriter, ops[i]));
+    IREE_RETURN_IF_ERROR(
+        loom_rewriter_add_parent_summary_ops_to_worklist(rewriter, ops[i]));
+    loom_rewriter_erase_value_facts(rewriter, ops[i]);
+  }
+  loom_op_erase_closed_set(rewriter->module, ops, count);
+  rewriter->erased_op_count += count;
+  if (count) {
+    rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
+  }
+  return iree_ok_status();
+}
+
+iree_status_t loom_rewriter_remove_blocks(loom_rewriter_t* rewriter,
+                                          loom_region_t* region,
+                                          const bool* remove_blocks,
+                                          uint16_t remove_block_count,
+                                          iree_arena_allocator_t* scratch_arena,
+                                          uint16_t* out_removed_count) {
+  if (rewriter->fact_table) {
+    for (uint16_t i = 0; i < remove_block_count; ++i) {
+      if (!remove_blocks[i]) {
+        continue;
+      }
+      loom_block_t* block = region->blocks[i];
+      for (uint16_t j = 0; j < block->arg_count; ++j) {
+        loom_value_fact_table_erase_identity_value(rewriter->fact_table,
+                                                   block->arg_ids[j]);
+        loom_value_fact_table_invalidate_vector_partition_value(
+            rewriter->fact_table, block->arg_ids[j]);
+      }
+      loom_op_t* op = NULL;
+      loom_block_for_each_op(block, op) {
+        loom_rewriter_erase_value_facts(rewriter, op);
+      }
+    }
+  }
+  IREE_RETURN_IF_ERROR(loom_region_remove_blocks(
+      rewriter->module, region, remove_blocks, remove_block_count,
+      scratch_arena, out_removed_count));
+  if (*out_removed_count) {
+    rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
+  }
+  return iree_ok_status();
+}
+
+uint16_t loom_rewriter_remove_block_args(loom_rewriter_t* rewriter,
+                                         loom_block_t* block,
+                                         const bool* remove_args,
+                                         uint16_t remove_arg_count) {
+  if (rewriter->fact_table) {
+    for (uint16_t i = 0; i < remove_arg_count; ++i) {
+      if (remove_args[i]) {
+        loom_value_fact_table_erase_identity_value(rewriter->fact_table,
+                                                   block->arg_ids[i]);
+        loom_value_fact_table_invalidate_vector_partition_value(
+            rewriter->fact_table, block->arg_ids[i]);
+      }
+    }
+  }
+  const uint16_t removed = loom_block_remove_args(
+      rewriter->module, block, remove_args, remove_arg_count);
+  if (removed) {
+    rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
+  }
+  return removed;
 }
 
 static bool loom_rewriter_op_is_ancestor_of(const loom_op_t* ancestor,
@@ -1611,11 +1808,9 @@ iree_status_t loom_rewriter_move_to_block_end(loom_rewriter_t* rewriter,
   return iree_ok_status();
 }
 
-iree_status_t loom_rewriter_set_operand(loom_rewriter_t* rewriter,
-                                        loom_op_t* op, uint16_t operand_index,
-                                        loom_value_id_t new_value) {
-  IREE_RETURN_IF_ERROR(
-      loom_op_set_operand(rewriter->module, op, operand_index, new_value));
+// Publishes one complete operand-tuple mutation to the analyses and worklist.
+static iree_status_t loom_rewriter_finish_operand_change(
+    loom_rewriter_t* rewriter, loom_op_t* op) {
   loom_rewriter_invalidate_cfg_forwarding(rewriter, op);
   IREE_RETURN_IF_ERROR(loom_rewriter_add_to_worklist(rewriter, op));
   IREE_RETURN_IF_ERROR(loom_rewriter_add_summary_ops_to_worklist(rewriter, op));
@@ -1624,6 +1819,34 @@ iree_status_t loom_rewriter_set_operand(loom_rewriter_t* rewriter,
       loom_rewriter_add_result_users_to_worklist(rewriter, op));
   rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
   return iree_ok_status();
+}
+
+iree_status_t loom_rewriter_set_operand(loom_rewriter_t* rewriter,
+                                        loom_op_t* op, uint16_t operand_index,
+                                        loom_value_id_t new_value) {
+  if (loom_op_operands(op)[operand_index] == new_value) {
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(
+      loom_op_set_operand(rewriter->module, op, operand_index, new_value));
+  return loom_rewriter_finish_operand_change(rewriter, op);
+}
+
+iree_status_t loom_rewriter_set_operands(loom_rewriter_t* rewriter,
+                                         loom_op_t* op,
+                                         const loom_value_id_t* new_values) {
+  loom_value_id_t* operands = loom_op_operands(op);
+  bool changed = false;
+  for (uint16_t i = 0; i < op->operand_count; ++i) {
+    if (operands[i] == new_values[i]) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(
+        loom_op_set_operand(rewriter->module, op, i, new_values[i]));
+    changed = true;
+  }
+  return changed ? loom_rewriter_finish_operand_change(rewriter, op)
+                 : iree_ok_status();
 }
 
 iree_status_t loom_rewriter_set_value_type(loom_rewriter_t* rewriter,
@@ -1636,6 +1859,10 @@ iree_status_t loom_rewriter_set_value_type(loom_rewriter_t* rewriter,
       loom_rewriter_add_type_ref_providers_to_worklist(rewriter, new_type));
   IREE_RETURN_IF_ERROR(
       loom_module_set_value_type(rewriter->module, value_id, new_type));
+  if (rewriter->fact_table && !loom_type_equal(old_type, new_type)) {
+    loom_value_fact_table_invalidate_vector_partition_value(
+        rewriter->fact_table, value_id);
+  }
   loom_value_t* value = loom_module_value(rewriter->module, value_id);
   if (!loom_value_is_block_arg(value)) {
     loom_op_t* defining_op = loom_value_def_op(value);
@@ -1716,6 +1943,22 @@ iree_status_t loom_rewriter_set_attr(loom_rewriter_t* rewriter, loom_op_t* op,
   IREE_RETURN_IF_ERROR(
       loom_op_set_attr(rewriter->module, op, (uint8_t)attr_index, value));
   IREE_RETURN_IF_ERROR(loom_rewriter_recompute_op_facts(rewriter, op));
+  if (rewriter->fact_table && op->region_count) {
+    const loom_op_vtable_t* vtable = loom_op_vtable(rewriter->module, op);
+    for (uint8_t i = 0; i < op->region_count; ++i) {
+      const loom_region_descriptor_t* descriptor =
+          loom_op_vtable_region_descriptor(vtable, i);
+      if (descriptor &&
+          descriptor->execution_target_attr_index_plus_one == attr_index + 1) {
+        // Target binding can change every fact in the region. Publish the new
+        // facts before any queued user can fold against the old environment.
+        IREE_RETURN_IF_ERROR(loom_value_fact_table_compute_region_tree(
+            rewriter->fact_table, rewriter->module, loom_op_regions(op)[i],
+            op));
+        IREE_RETURN_IF_ERROR(loom_rewriter_record_subtree(rewriter, op));
+      }
+    }
+  }
   IREE_RETURN_IF_ERROR(
       loom_rewriter_add_result_users_to_worklist(rewriter, op));
   IREE_RETURN_IF_ERROR(loom_rewriter_add_summary_ops_to_worklist(rewriter, op));

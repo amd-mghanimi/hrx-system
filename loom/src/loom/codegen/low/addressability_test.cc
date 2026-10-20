@@ -8,7 +8,7 @@
 
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/ops/test/ops.h"
 #include "loom/target/facts_builder.h"
 #include "loom/target/test/target_records.h"
@@ -25,12 +25,12 @@ static const char kAddressabilityStrings[] =
     "src";
 
 enum : loom_string_ref_t {
-  ADDRESSABILITY_STRING_empty = LOOM_STRING_REF(0, 0),
-  ADDRESSABILITY_STRING_set_key = LOOM_STRING_REF(0, 9),
-  ADDRESSABILITY_STRING_reg_gpr = LOOM_STRING_REF(9, 8),
-  ADDRESSABILITY_STRING_descriptor_packet = LOOM_STRING_REF(17, 11),
-  ADDRESSABILITY_STRING_field_dst = LOOM_STRING_REF(28, 3),
-  ADDRESSABILITY_STRING_field_src = LOOM_STRING_REF(31, 3),
+  ADDRESSABILITY_STRING_empty = LOOM_STRING_REF(0, 0, 0),
+  ADDRESSABILITY_STRING_set_key = LOOM_STRING_REF(0, 0, 9),
+  ADDRESSABILITY_STRING_reg_gpr = LOOM_STRING_REF(0, 9, 8),
+  ADDRESSABILITY_STRING_descriptor_packet = LOOM_STRING_REF(0, 17, 11),
+  ADDRESSABILITY_STRING_field_dst = LOOM_STRING_REF(0, 28, 3),
+  ADDRESSABILITY_STRING_field_src = LOOM_STRING_REF(0, 31, 3),
 };
 
 #define ADDRESSABILITY_STRING_REF(field) ADDRESSABILITY_STRING_##field
@@ -40,6 +40,8 @@ struct AddressabilityTestState {
   loom_low_reg_class_alt_t reg_class_alts[1] = {};
   loom_low_operand_t operands[2] = {};
   loom_low_descriptor_t descriptors[1] = {};
+  // Structural metadata owned by this synthetic target.
+  loom_low_descriptor_layout_t descriptor_layouts[1] = {};
   loom_low_descriptor_view_t descriptor_views[1] = {};
   loom_low_descriptor_set_t descriptor_set = {};
   // Complete synthetic target facts borrowed by schedule and allocation state.
@@ -84,8 +86,8 @@ void InitializeAddressabilityTestState(
   *state = {};
   state->descriptor_set.stable_id = 0x1000u;
   state->descriptor_set.key_string_ref = ADDRESSABILITY_STRING_REF(set_key);
-  state->descriptor_set.string_pool.data = kAddressabilityStrings;
-  state->descriptor_set.string_pool.data_length =
+  state->descriptor_set.string_pool.data[0] = kAddressabilityStrings;
+  state->descriptor_set.string_pool.data_length[0] =
       sizeof(kAddressabilityStrings) - 1;
   state->descriptor_set.reg_classes = state->reg_classes;
   state->descriptor_set.reg_class_count = IREE_ARRAYSIZE(state->reg_classes);
@@ -94,67 +96,73 @@ void InitializeAddressabilityTestState(
       IREE_ARRAYSIZE(state->reg_class_alts);
   state->descriptor_set.operands = state->operands;
   state->descriptor_set.operand_count = IREE_ARRAYSIZE(state->operands);
+  static const uint16_t operand_indices[] = {0, 1};
+  state->descriptor_set.operand_indices = operand_indices;
+  state->descriptor_set.operand_index_count = IREE_ARRAYSIZE(operand_indices);
   state->descriptor_set.descriptors = state->descriptors;
   state->descriptor_set.descriptor_views = state->descriptor_views;
   state->descriptor_set.descriptor_count = IREE_ARRAYSIZE(state->descriptors);
+  state->descriptor_set.descriptor_ordinal_count =
+      IREE_ARRAYSIZE(state->descriptors);
   const loom_target_bundle_t* target_bundle = loom_target_bundle_table_lookup(
       &loom_test_target_bundles, LOOM_TEST_TARGET_KIND_LOW_CORE);
   IREE_ASSERT(target_bundle != nullptr);
   loom_target_facts_builder_initialize(&loom_test_target_fact_type,
                                        target_bundle, &state->target_facts);
   const loom_low_resolved_target_t target = {
-      /*.target_facts=*/&state->target_facts,
-      /*.target_name=*/target_bundle->name,
-      /*.descriptor_set_key=*/target_bundle->config->contract_set_key,
-      /*.feature_bits=*/target_bundle->config->contract_feature_bits,
-      /*.descriptor_set=*/&state->descriptor_set,
+      .target_facts = &state->target_facts,
+      .target_name = target_bundle->name,
+      .descriptor_set_key = target_bundle->config->contract_set_key,
+      .feature_bits = target_bundle->config->contract_feature_bits,
+      .descriptor_set = &state->descriptor_set,
   };
 
   state->reg_classes[0].name_string_ref = ADDRESSABILITY_STRING_REF(reg_gpr);
-  state->reg_class_alts[0] = (loom_low_reg_class_alt_t){
-      /*.reg_class_id=*/0,
-      /*.flags=*/LOOM_LOW_REG_CLASS_ALT_FLAG_PREFERRED,
+  state->reg_class_alts[0] = loom_low_reg_class_alt_t{
+      .reg_class_id = 0,
+      .register_part_id = LOOM_LOW_REGISTER_PART_NONE,
+      .flags = LOOM_LOW_REG_CLASS_ALT_FLAG_PREFERRED,
   };
-  state->operands[0] = (loom_low_operand_t){
-      /*.field_name_string_ref=*/ADDRESSABILITY_STRING_REF(field_dst),
-      /*.encoding_field_id=*/{},
-      /*.source_value_index=*/0,
-      /*.role=*/LOOM_LOW_OPERAND_ROLE_RESULT,
-      /*.source_binding=*/LOOM_LOW_OPERAND_SOURCE_BINDING_NONE,
-      /*.reserved0=*/{},
-      /*.flags=*/{},
-      /*.reg_class_alt_start=*/0,
-      /*.reg_class_alt_count=*/1,
-      /*.unit_count=*/1,
-      /*.address_map_kind=*/{},
-      /*.addressable_unit_count=*/{},
-      /*.address_state_slot=*/{},
-      /*.data_format_id=*/{},
-      /*.register_part_id=*/LOOM_LOW_REGISTER_PART_NONE,
+  state->operands[0] = loom_low_operand_t{
+      .field_name_string_ref = ADDRESSABILITY_STRING_REF(field_dst),
+      .encoding_field_id = {},
+      .source_value_index = 0,
+      .role = LOOM_LOW_OPERAND_ROLE_RESULT,
+      .source_binding = LOOM_LOW_OPERAND_SOURCE_BINDING_NONE,
+      .encoding_adapter_id = {},
+      .flags = {},
+      .reg_class_alt_start = 0,
+      .reg_class_alt_count = 1,
+      .unit_count = 1,
+      .address_map_kind = {},
+      .addressable_unit_count = {},
+      .address_state_slot = {},
+      .data_format_id = {},
   };
-  state->operands[1] = (loom_low_operand_t){
-      /*.field_name_string_ref=*/ADDRESSABILITY_STRING_REF(field_src),
-      /*.encoding_field_id=*/{},
-      /*.source_value_index=*/0,
-      /*.role=*/LOOM_LOW_OPERAND_ROLE_OPERAND,
-      /*.source_binding=*/LOOM_LOW_OPERAND_SOURCE_BINDING_NONE,
-      /*.reserved0=*/{},
-      /*.flags=*/{},
-      /*.reg_class_alt_start=*/0,
-      /*.reg_class_alt_count=*/1,
-      /*.unit_count=*/static_cast<uint16_t>(assigned_count),
-      /*.address_map_kind=*/address_map_kind,
-      /*.addressable_unit_count=*/addressable_unit_count,
-      /*.address_state_slot=*/{},
-      /*.data_format_id=*/{},
-      /*.register_part_id=*/LOOM_LOW_REGISTER_PART_NONE,
+  state->operands[1] = loom_low_operand_t{
+      .field_name_string_ref = ADDRESSABILITY_STRING_REF(field_src),
+      .encoding_field_id = {},
+      .source_value_index = 0,
+      .role = LOOM_LOW_OPERAND_ROLE_OPERAND,
+      .source_binding = LOOM_LOW_OPERAND_SOURCE_BINDING_NONE,
+      .encoding_adapter_id = {},
+      .flags = {},
+      .reg_class_alt_start = 0,
+      .reg_class_alt_count = 1,
+      .unit_count = static_cast<uint16_t>(assigned_count),
+      .address_map_kind = address_map_kind,
+      .addressable_unit_count = addressable_unit_count,
+      .address_state_slot = {},
+      .data_format_id = {},
   };
   state->descriptors[0].key_string_ref =
       ADDRESSABILITY_STRING_REF(descriptor_packet);
   state->descriptors[0].operand_start = 0;
   state->descriptors[0].operand_count = IREE_ARRAYSIZE(state->operands);
   state->descriptors[0].result_count = 1;
-  state->descriptors[0].minimum_packet_operand_count = 1;
+  state->descriptor_layouts[0].minimum_packet_operand_count = 1;
+  state->descriptor_set.descriptor_layouts = state->descriptor_layouts;
+  state->descriptor_set.descriptor_layout_count = 1;
 
   state->nodes[0].op = &state->packet_op;
   state->nodes[0].block_index = 0;
@@ -168,12 +176,12 @@ void InitializeAddressabilityTestState(
       loom_low_schedule_node_value_ordinals(&state->nodes[0]);
   value_ordinals[0] = 1;
   value_ordinals[1] = 0;
-  state->blocks[0] = (loom_low_schedule_block_t){
-      /*.block=*/&state->block,
-      /*.node_start=*/0,
-      /*.node_count=*/1,
-      /*.scheduled_node_start=*/0,
-      /*.scheduled_node_count=*/1,
+  state->blocks[0] = loom_low_schedule_block_t{
+      .block = &state->block,
+      .node_start = 0,
+      .node_count = 1,
+      .scheduled_node_start = 0,
+      .scheduled_node_count = 1,
   };
   state->scheduled_node_indices[0] = 0;
   state->schedule.module = &state->module;
@@ -187,43 +195,27 @@ void InitializeAddressabilityTestState(
   state->schedule.scheduled_node_count =
       IREE_ARRAYSIZE(state->scheduled_node_indices);
 
-  state->assignments[0] = (loom_low_allocation_assignment_t){
-      /*.value_id=*/0,
-      /*.value_class=*/
-      {
-          /*.type_kind=*/LOOM_TYPE_REGISTER,
-          /*.element_type=*/{},
-          /*.register_class_id=*/0,
-          /*.register_descriptor_set_stable_id=*/
-          state->descriptor_set.stable_id,
-      },
-      /*.descriptor_reg_class_id=*/0,
-      /*.flags=*/{},
-      /*.start_point=*/{},
-      /*.end_point=*/{},
-      /*.unit_count=*/assigned_count,
-      /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-      /*.location_base=*/0,
-      /*.location_count=*/1,
+  state->assignments[0] = loom_low_allocation_assignment_t{
+      .value_id = 0,
+      .descriptor_reg_class_id = 0,
+      .flags = {},
+      .start_point = {},
+      .end_point = {},
+      .unit_count = assigned_count,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = 0,
+      .location_count = 1,
   };
-  state->assignments[1] = (loom_low_allocation_assignment_t){
-      /*.value_id=*/1,
-      /*.value_class=*/
-      {
-          /*.type_kind=*/LOOM_TYPE_REGISTER,
-          /*.element_type=*/{},
-          /*.register_class_id=*/0,
-          /*.register_descriptor_set_stable_id=*/
-          state->descriptor_set.stable_id,
-      },
-      /*.descriptor_reg_class_id=*/0,
-      /*.flags=*/{},
-      /*.start_point=*/{},
-      /*.end_point=*/{},
-      /*.unit_count=*/assigned_count,
-      /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-      /*.location_base=*/assigned_base,
-      /*.location_count=*/assigned_count,
+  state->assignments[1] = loom_low_allocation_assignment_t{
+      .value_id = 1,
+      .descriptor_reg_class_id = 0,
+      .flags = {},
+      .start_point = {},
+      .end_point = {},
+      .unit_count = assigned_count,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = assigned_base,
+      .location_count = assigned_count,
   };
   state->assignment_indices_by_value_ordinal[0] = 0;
   state->assignment_indices_by_value_ordinal[1] = 1;
@@ -248,8 +240,8 @@ TEST(LowAddressabilityTest, AcceptsDirectAddressMap) {
 
   CapturedDiagnostic captured;
   const iree_diagnostic_emitter_t emitter = {
-      /*.fn=*/CaptureDiagnostic,
-      /*.user_data=*/&captured,
+      .fn = CaptureDiagnostic,
+      .user_data = &captured,
   };
   loom_low_addressability_validation_result_t result = {};
   IREE_ASSERT_OK(loom_low_addressability_validate_allocated_packets(
@@ -280,8 +272,8 @@ TEST(LowAddressabilityTest, ReportsLowSubsetUnaddressableAssignment) {
 
   CapturedDiagnostic captured;
   const iree_diagnostic_emitter_t emitter = {
-      /*.fn=*/CaptureDiagnostic,
-      /*.user_data=*/&captured,
+      .fn = CaptureDiagnostic,
+      .user_data = &captured,
   };
   loom_low_addressability_validation_result_t result = {};
   IREE_ASSERT_OK(loom_low_addressability_validate_allocated_packets(
@@ -316,8 +308,8 @@ TEST(LowAddressabilityTest, ReportsTargetStateAssignmentCrossingWindow) {
 
   CapturedDiagnostic captured;
   const iree_diagnostic_emitter_t emitter = {
-      /*.fn=*/CaptureDiagnostic,
-      /*.user_data=*/&captured,
+      .fn = CaptureDiagnostic,
+      .user_data = &captured,
   };
   loom_low_addressability_validation_result_t result = {};
   IREE_ASSERT_OK(loom_low_addressability_validate_allocated_packets(

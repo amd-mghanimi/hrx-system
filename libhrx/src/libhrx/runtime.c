@@ -119,6 +119,10 @@ hrx_shared_state_t* hrx_get_shared_state(void) { return &g_shared; }
 hrx_gpu_state_t* hrx_get_gpu_state(void) { return &g_gpu; }
 hrx_cpu_state_t* hrx_get_cpu_state(void) { return &g_cpu; }
 
+iree_async_proactor_pool_t* hrx_runtime_proactor_pool(void) {
+  return g_shared.proactor_pool;
+}
+
 static hrx_string_view_t hrx_string_view_from_iree(iree_string_view_t value) {
   hrx_string_view_t view;
   view.data = value.data;
@@ -489,8 +493,7 @@ static hrx_status_t hrx_create_task_device(int group_count,
 
   // Heap allocator for host-accessible buffers.
   iree_hal_allocator_t* device_allocator = NULL;
-  status = iree_hal_allocator_create_heap(iree_make_cstring_view("hrx"), alloc,
-                                          alloc, &device_allocator);
+  status = iree_hal_allocator_create_heap(alloc, &device_allocator);
   if (!iree_status_is_ok(status)) {
     for (iree_host_size_t i = 0; i < loader_count; i++) {
       iree_hal_executable_loader_release(loaders[i]);
@@ -724,8 +727,8 @@ static hrx_status_t hrx_create_iree_amdgpu_driver(
     status = iree_hal_amdgpu_driver_module_register(registry);
   }
   if (iree_status_is_ok(status)) {
-    status = iree_hal_driver_registry_try_create(
-        registry, iree_make_cstring_view("amdgpu"), alloc, out_driver);
+    status = iree_hal_driver_registry_acquire_driver(
+        registry, iree_make_cstring_view("amdgpu"), out_driver);
   }
   iree_hal_driver_registry_free(registry);
   hrx_debug_print_iree_status("amdgpu driver create", status);
@@ -830,6 +833,7 @@ hrx_status_t hrx_cpu_initialize(uint32_t flags) {
   iree_hal_allocator_retain(dev->allocator.hal_allocator);
   iree_atomic_ref_count_init(&dev->allocator.ref_count);
   dev->allocator.device = dev;
+  hrx_mem_pool_backing_initialize(&dev->mem_pool_backing);
   hrx_buffer_table_initialize(&dev->buffer_table);
   iree_arena_block_pool_initialize(/*block_size=*/32 * 1024,
                                    iree_allocator_system(), &dev->block_pool);
@@ -927,7 +931,7 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
   iree_host_size_t device_info_count = 0;
   iree_hal_device_info_t* device_infos = NULL;
   iree_status = iree_hal_driver_query_available_devices(
-      driver, alloc, &device_info_count, &device_infos);
+      driver, IREE_SV("amdgpu"), alloc, &device_info_count, &device_infos);
   hrx_debug_print_iree_status("query available devices", iree_status);
   if (!iree_status_is_ok(iree_status)) {
     iree_hal_driver_release(driver);
@@ -1021,8 +1025,9 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
     }
 
     iree_status = iree_hal_driver_create_device_by_ordinal(
-        driver, info_index, /*param_count=*/0, /*params=*/NULL, &create_params,
-        alloc, &hal_devices[created_device_count]);
+        driver, IREE_SV("amdgpu"), info_index, /*param_count=*/0,
+        /*params=*/NULL, &create_params, alloc,
+        &hal_devices[created_device_count]);
     hrx_debug_print_iree_status("create device by ordinal", iree_status);
     if (iree_status_is_ok(iree_status)) {
       device_info_indices[created_device_count] = info_index;
@@ -1076,6 +1081,7 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
     iree_hal_allocator_retain(dev->allocator.hal_allocator);
     iree_atomic_ref_count_init(&dev->allocator.ref_count);
     dev->allocator.device = dev;
+    hrx_mem_pool_backing_initialize(&dev->mem_pool_backing);
     hrx_buffer_table_initialize(&dev->buffer_table);
     iree_arena_block_pool_initialize(/*block_size=*/32 * 1024,
                                      iree_allocator_system(), &dev->block_pool);

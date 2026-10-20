@@ -31,6 +31,9 @@ typedef struct loom_parameterized_type_descriptor_t {
   // Parameter descriptors in stable declaration order.
   const loom_attr_descriptor_t* parameter_descriptors;
 
+  // Type-owned facts used by joins and transport of this parameterized family.
+  const struct loom_value_fact_domain_t* fact_domain;
+
   // Runtime type kind carrying the parameters. LOOM_TYPE_PARAMETERIZED uses
   // indirect immutable slots; other kinds carry one enum in the header byte.
   loom_type_kind_t ir_kind;
@@ -45,8 +48,9 @@ typedef struct loom_parameterized_type_descriptor_t {
   loom_parameterized_type_flags_t flags;
 } loom_parameterized_type_descriptor_t;
 
-static_assert(sizeof(loom_parameterized_type_descriptor_t) == 24,
-              "parameterized type descriptor must remain 24 bytes");
+static_assert(sizeof(loom_parameterized_type_descriptor_t) ==
+                  (IREE_PTR_SIZE == 8 ? 32 : 16),
+              "parameterized type descriptor must remain compact");
 
 #ifdef __cplusplus
 }  // extern "C"

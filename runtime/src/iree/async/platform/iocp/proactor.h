@@ -186,6 +186,9 @@ typedef struct iree_async_iocp_carrier_t {
       // NtAssociateWaitCompletionPacket path: WaitCompletionPacket HANDLE
       //   for NtCancelWaitCompletionPacket + CloseHandle.
       HANDLE wait_handle;
+
+      // Cleanup failure held until an already-published completion dispatches.
+      iree_status_t cleanup_status;
     } event_wait;
 
     // IREE_ASYNC_IOCP_CARRIER_SOCKET_IO
@@ -209,11 +212,12 @@ typedef struct iree_async_iocp_carrier_t {
       SOCKET accept_socket;
       // Address output buffer. AcceptEx writes both local and remote addresses
       // here. Each address slot needs the maximum address size plus 16 bytes
-      // of padding (AcceptEx requirement). sockaddr_storage (128 bytes) covers
-      // all address families including AF_UNIX (sockaddr_un is 110 bytes).
+      // of padding (AcceptEx requirement). sockaddr_storage covers both IPv4
+      // and IPv6.
       uint8_t address_buffer[2 * (sizeof(struct sockaddr_storage) + 16)];
-      // Address lengths passed to AcceptEx and GetAcceptExSockaddrs.
+      // Local address length passed to AcceptEx and GetAcceptExSockaddrs.
       DWORD local_address_length;
+      // Remote address length passed to AcceptEx and GetAcceptExSockaddrs.
       DWORD remote_address_length;
     } accept;
 
@@ -438,12 +442,42 @@ iree_status_t iree_async_proactor_iocp_cancel_wait_packet(
     iree_async_proactor_iocp_t* proactor, uintptr_t wait_packet_handle,
     bool* out_withdrawn);
 
-// Cancels a native wait registration and joins its publishing callback. A
-// withdrawn completion has no remaining carrier packet; otherwise the normal
-// completion path still owns the carrier. Failure preserves the registration.
+// Result of cancelling a one-shot native wait registration.
+typedef enum iree_async_iocp_wait_cancel_result_e {
+  // Native reachability was not resolved and all ownership must be retained.
+  IREE_ASYNC_IOCP_WAIT_CANCEL_UNRESOLVED = 0,
+
+  // Cancellation withdrew the wait before it could publish a completion.
+  IREE_ASYNC_IOCP_WAIT_CANCEL_WITHDRAWN,
+
+  // A completion was published and retains the carrier until dispatch.
+  IREE_ASYNC_IOCP_WAIT_CANCEL_PUBLISHED,
+} iree_async_iocp_wait_cancel_result_t;
+
+// Finishes a wait cancellation attempt after native reachability and
+// registration cleanup have been attempted. Publishes |result| independently
+// of |cleanup_status| and clears the registration only when cleanup succeeded.
+iree_status_t iree_async_proactor_iocp_finish_wait_cancel_attempt(
+    iree_async_iocp_carrier_t* carrier,
+    iree_async_iocp_wait_cancel_result_t result, iree_status_t cleanup_status,
+    iree_async_iocp_wait_cancel_result_t* out_result);
+
+// Cancels a native wait registration and joins its publishing callback.
+// |out_result| classifies native reachability even when handle cleanup fails.
+// An unresolved result always retains the registration and its owner graph.
 iree_status_t iree_async_proactor_iocp_cancel_wait(
     iree_async_proactor_iocp_t* proactor, iree_async_iocp_carrier_t* carrier,
-    bool* out_withdrawn);
+    iree_async_iocp_wait_cancel_result_t* out_result);
+
+// Unlinks and releases a wait carrier after native reachability is resolved.
+// Clears the operation's carrier link before recycling the carrier.
+void iree_async_proactor_iocp_release_wait_carrier(
+    iree_async_proactor_iocp_t* proactor, iree_async_iocp_carrier_t* carrier);
+
+// Retires all active one-shot waits during final proactor destruction.
+// Failure leaves the unresolved carrier and complete proactor graph intact.
+iree_status_t iree_async_proactor_iocp_deinitialize_waits(
+    iree_async_proactor_iocp_t* proactor);
 
 // Issues a bounded batch of caller-owned cancellation work on the poll owner.
 // Native failures retain the queued request and return through poll.

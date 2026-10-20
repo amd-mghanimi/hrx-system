@@ -11,17 +11,39 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    atomic
+  HDRS
+    "atomic.h"
+  SRCS
+    "atomic.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::atomic
+    loom::ops::cache
+    loom::ops::op_defs
+    loom::ops::scalar
+    loom::ops::scf
+    loom::ops::view
+    loom::rewrite::rewriter
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     combine_patterns
   HDRS
     "combine_patterns.h"
   SRCS
     "combine_patterns.c"
   DEPS
+    ::atomic
     ::load_coalescing
     iree::base
     loom::ops::view
     loom::rewrite::pattern_registry
     loom::transforms::cleanup::patterns
+    loom::util::fact_table
   PUBLIC
 )
 
@@ -33,6 +55,7 @@ loom_cc_library(
   SRCS
     "boundary_projection.c"
   DEPS
+    ::offset_expression
     iree::base
     iree::base::internal::arena
     loom::analysis::symbolic_expr
@@ -40,8 +63,6 @@ loom_cc_library(
     loom::ir
     loom::ir::facts
     loom::ops::buffer
-    loom::ops::index
-    loom::ops::scalar
     loom::ops::scf
     loom::rewrite::rewriter
     loom::target::provider
@@ -111,12 +132,30 @@ loom_cc_library(
 
 loom_cc_library(
   NAME
+    offset_expression
+  HDRS
+    "offset_expression.h"
+  SRCS
+    "offset_expression.c"
+  DEPS
+    iree::base
+    loom::analysis::symbolic_expr
+    loom::ir
+    loom::ops::index
+    loom::ops::op_defs
+    loom::ops::scalar
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     transport
   HDRS
     "transport.h"
   SRCS
     "transport.c"
   DEPS
+    ::offset_expression
     iree::base
     iree::base::internal
     loom::analysis::symbolic_expr
@@ -124,9 +163,7 @@ loom_cc_library(
     loom::ir
     loom::ir::facts
     loom::ops::buffer
-    loom::ops::index
     loom::ops::op_defs
-    loom::ops::scalar
     loom::ops::scf
     loom::pass::types
     loom::pass::value_facts
@@ -146,13 +183,10 @@ loom_cc_library(
   SRCS
     "target_legalization.c"
   DEPS
+    ::atomic
     iree::base
     loom::ir
-    loom::ops::atomic
-    loom::ops::cache
     loom::ops::op_defs
-    loom::ops::scalar
-    loom::ops::scf
     loom::ops::view
     loom::rewrite::rewriter
     loom::target::legalization

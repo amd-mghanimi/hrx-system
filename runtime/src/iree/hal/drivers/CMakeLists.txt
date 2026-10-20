@@ -70,8 +70,19 @@ file(CONFIGURE OUTPUT "${_INIT_EXTERNAL_C_SRC}"
      CONTENT "${_INIT_EXTERNAL_TEMPLATE}")
 
 set(_INIT_INTERNAL_DEPS)
+if(IREE_HAL_DRIVER_XDNA)
+  if(NOT AMDF_BUILD OR NOT AMDF_FAMILY_XDNA)
+    message(FATAL_ERROR
+      "IREE_HAL_DRIVER_XDNA requires AMDF_BUILD and AMDF_FAMILY_XDNA")
+  endif()
+  list(APPEND _INIT_INTERNAL_DEPS iree::hal::drivers::amd::registration)
+endif()
 if(AMDF_BUILD)
   add_subdirectory(amd)
+else()
+  # Portable GPU image and target libraries are used by compiler-side tooling
+  # independently of the libamdf driver.
+  add_subdirectory(amd/gpu)
 endif()
 if(IREE_HAL_DRIVER_AMDGPU)
   add_subdirectory(amdgpu)

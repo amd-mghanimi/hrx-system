@@ -52,6 +52,13 @@ iree_status_t loom_vector_reduce_to_scalar_rewrite_op(loom_pass_t* pass,
                                                       loom_op_t* op,
                                                       bool* out_rewritten);
 
+// Rewrites one vector.reduce op while retaining its input as an aggregate SSA
+// snapshot. Each reduced lane is represented by a terminal vector.extract so
+// target legalization can select the producer and extracts independently.
+iree_status_t loom_vector_reduce_captured_to_scalar_rewrite_op(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    bool* out_rewritten);
+
 // Rewrites one vector.dotf op using scalar reference semantics.
 iree_status_t loom_vector_dotf_to_scalar_rewrite_op(loom_pass_t* pass,
                                                     loom_rewriter_t* rewriter,
@@ -128,6 +135,13 @@ iree_status_t loom_vector_store_to_scalar_rewrite_op(loom_pass_t* pass,
                                                      loom_op_t* op,
                                                      bool* out_rewritten);
 
+// Rewrites one vector.store into scalar view.store loops while retaining its
+// authored value SSA snapshot. Each scalar write consumes a terminal extract
+// instead of rebuilding producer operations.
+iree_status_t loom_vector_store_captured_to_scalar_rewrite_op(
+    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
+    bool* out_rewritten);
+
 // Rewrites one vector.fragment.store into scalar view.store loops over the
 // fragment's logical matrix shape. The source fragment is consumed
 // lane-by-lane so target-shaped producers can be erased without first
@@ -140,12 +154,6 @@ iree_status_t loom_vector_fragment_store_to_scalar_rewrite_op(
 // reference lowering would refuse one vector.fragment.store op.
 uint32_t loom_vector_fragment_store_to_scalar_reference_rejection_bits(
     loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op);
-
-// Rewrites one scalar-result vector.extract over a static multidimensional
-// vector into a linear register-vector extract.
-iree_status_t loom_vector_extract_flatten_static_shape_rewrite_op(
-    loom_pass_t* pass, loom_rewriter_t* rewriter, loom_op_t* op,
-    bool* out_rewritten);
 
 // Rewrites one scalar-result vector.extract when its lane can be rematerialized
 // from the source producer tree. Fixed dense loads that cannot move to the use

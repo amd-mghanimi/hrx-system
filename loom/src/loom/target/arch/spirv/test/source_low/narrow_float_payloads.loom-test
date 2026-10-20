@@ -1,0 +1,77 @@
+// RUN: emit source-low target=spirv:vulkan1.3+bda output=low control-flow=structured-low
+
+// The baseline profile has no native BF16 type. Constants, selection, direct
+// arguments and structured results must share the existing i32 payload type.
+func.def @software_bfloat_payload(%condition: i1, %input: bf16, %output: buffer) -> (bf16) {
+  %fallback = scalar.constant -0.0 : bf16
+  %candidate = scf.select %condition, %input, %fallback : bf16
+  %base = index.constant 0 : offset
+  %marker = buffer.view %output[%base] : buffer -> view<1xi32>
+  %result = scf.if %condition -> (bf16) {
+    %taken = scalar.constant 1 : i32
+    view.store %taken, %marker[0] : i32, view<1xi32>
+    scf.yield %candidate : bf16
+  } else {
+    %not_taken = scalar.constant 0 : i32
+    view.store %not_taken, %marker[0] : i32, view<1xi32>
+    scf.yield %input : bf16
+  }
+  func.return %result : bf16
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @software_bfloat_payload(%condition: reg<spirv.id : i1>, %input: reg<spirv.id : i32>, %output: reg<spirv.ptr.storage_buffer>) -> (reg<spirv.id : i32>) asm {
+  %fallback = OpConstant.i32 32768
+  %candidate = OpSelect %condition, %input, %fallback
+  %result = low.scf.if %condition -> (reg<spirv.id : i32>) {
+    %taken = OpConstant.i32 1
+    %19 = OpConstant.offset64 0
+    %20 = OpPtrAccessChain.storage_buffer.i32.byte_offset %output, %19
+    OpStore.storage_buffer.i32 %20, %taken
+    low.scf.yield %candidate : reg<spirv.id : i32>
+  } else {
+    %not_taken = OpConstant.i32 0
+    %22 = OpConstant.offset64 0
+    %23 = OpPtrAccessChain.storage_buffer.i32.byte_offset %output, %22
+    OpStore.storage_buffer.i32 %23, %not_taken
+    low.scf.yield %input : reg<spirv.id : i32>
+  }
+  return %result
+}
+
+// ====
+
+// RUN: emit source-low target=spirv:vulkan1.3+bda+extended-types output=low control-flow=structured-low
+
+// Both FP8 encodings use signed-byte registers. F16 and native BF16 keep their
+// floating representations; all four preserve negative-zero payloads.
+func.def @native_narrow_payloads(%condition: i1, %e4: f8E4M3, %e5: f8E5M2, %half: f16, %brain: bf16) -> (i8, i8, i16, i16) {
+  %e4_zero = scalar.constant -0.0 : f8E4M3
+  %e5_zero = scalar.constant -0.0 : f8E5M2
+  %half_zero = scalar.constant -0.0 : f16
+  %brain_zero = scalar.constant -0.0 : bf16
+  %e4_selected = scf.select %condition, %e4, %e4_zero : f8E4M3
+  %e5_selected = scf.select %condition, %e5, %e5_zero : f8E5M2
+  %half_selected = scf.select %condition, %half, %half_zero : f16
+  %brain_selected = scf.select %condition, %brain, %brain_zero : bf16
+  %e4_bits = scalar.bitcast %e4_selected : f8E4M3 to i8
+  %e5_bits = scalar.bitcast %e5_selected : f8E5M2 to i8
+  %half_bits = scalar.bitcast %half_selected : f16 to i16
+  %brain_bits = scalar.bitcast %brain_selected : bf16 to i16
+  func.return %e4_bits, %e5_bits, %half_bits, %brain_bits : i8, i8, i16, i16
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @native_narrow_payloads(%condition: reg<spirv.id : i1>, %e4: reg<spirv.id : i8>, %e5: reg<spirv.id : i8>, %half: reg<spirv.id : f16>, %brain: reg<spirv.id : bf16>) -> (reg<spirv.id : i8>, reg<spirv.id : i8>, reg<spirv.id : i16>, reg<spirv.id : i16>) asm {
+  %30 = OpConstant.i32 128
+  %e4_zero = OpSConvert.i32.i8 %30
+  %half_zero = OpConstant.f16 32768
+  %brain_zero = OpConstant.bf16 32768
+  %e4_bits = OpSelect.i8 %condition, %e4, %e4_zero
+  %e5_bits = OpSelect.i8 %condition, %e5, %e4_zero
+  %half_selected = OpSelect.f16 %condition, %half, %half_zero
+  %brain_selected = OpSelect.bf16 %condition, %brain, %brain_zero
+  %half_bits = OpBitcast.f16.i16 %half_selected
+  %brain_bits = OpBitcast.bf16.i16 %brain_selected
+  return %e4_bits, %e5_bits, %half_bits, %brain_bits
+}

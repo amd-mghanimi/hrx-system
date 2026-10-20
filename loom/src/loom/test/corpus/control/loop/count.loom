@@ -1,0 +1,315 @@
+// Unsigned -1 is above four, so no increment executes.
+kernel.def @unsigned_empty_loop() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_unsigned_empty_loop(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_unsigned_empty_loop(%output: buffer) {
+  %begin = index.constant -1 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %position = index.constant 0 : index
+  %initial_count = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %output_view = buffer.view %aligned_output[%base] : buffer -> view<1xi32>
+  cfg.br ^header(%begin: index, %initial_count: i32)
+^header(%counter: index, %count: i32):
+  %more = index.cmp ult, %counter, %end : index
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  %next = index.add %counter, %step : index
+  %next_count = scalar.addi %count, %increment : i32
+  cfg.br ^header(%next: index, %next_count: i32)
+^exit:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  func.return
+}
+
+// Signed -1 reaches four after five increments.
+kernel.def @signed_negative_loop() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_signed_negative_loop(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_signed_negative_loop(%output: buffer) {
+  %begin = index.constant -1 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %position = index.constant 0 : index
+  %initial_count = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %output_view = buffer.view %aligned_output[%base] : buffer -> view<1xi32>
+  cfg.br ^header(%begin: index, %initial_count: i32)
+^header(%counter: index, %count: i32):
+  %more = index.cmp slt, %counter, %end : index
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  %next = index.add %counter, %step : index
+  %next_count = scalar.addi %count, %increment : i32
+  cfg.br ^header(%next: index, %next_count: i32)
+^exit:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  func.return
+}
+
+// A fixed-width unsigned counter crosses its signed boundary without wrapping.
+kernel.def @unsigned_sign_crossing_loop() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_unsigned_sign_crossing_loop(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_unsigned_sign_crossing_loop(%output: buffer) {
+  %begin = scalar.constant 2147483646 : i32
+  %end = scalar.constant -2147483645 : i32
+  %step = scalar.constant 2 : i32
+  %base = index.constant 0 : offset
+  %position = index.constant 0 : index
+  %initial_count = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %output_view = buffer.view %aligned_output[%base] : buffer -> view<1xi32>
+  cfg.br ^header(%begin: i32, %initial_count: i32)
+^header(%counter: i32, %count: i32):
+  %more = scalar.cmpi ult, %counter, %end : i32
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  %next = scalar.addi %counter, %step : i32
+  %next_count = scalar.addi %count, %increment : i32
+  cfg.br ^header(%next: i32, %next_count: i32)
+^exit:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  func.return
+}
+
+// A true guard exits immediately; the comparison is not a continuation test.
+kernel.def @inverted_loop_guard() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_inverted_loop_guard(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_inverted_loop_guard(%output: buffer) {
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %position = index.constant 0 : index
+  %initial_count = scalar.constant 0 : i32
+  %increment = scalar.constant 1 : i32
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
+  %output_view = buffer.view %aligned_output[%base] : buffer -> view<1xi32>
+  cfg.br ^header(%begin: index, %initial_count: i32)
+^header(%counter: index, %count: i32):
+  %more = index.cmp ult, %counter, %end : index
+  cfg.cond_br %more, ^exit, ^body
+^body:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  %next = index.add %counter, %step : index
+  %next_count = scalar.addi %count, %increment : i32
+  cfg.br ^header(%next: index, %next_count: i32)
+^exit:
+  view.store %count, %output_view[%position] : i32, view<1xi32>
+  func.return
+}
+
+// A signed carried counter needs the initializer's lower bound as well as the
+// guard's upper bound to establish every store's memory footprint.
+kernel.def @carried_counter_store() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_carried_counter_store(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_carried_counter_store(%output: buffer) {
+  %loop_begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<4xi32>
+  cfg.br ^preheader
+^preheader:
+  cfg.br ^header(%loop_begin: index)
+^header(%position: index):
+  %more = index.cmp slt, %position, %end : index
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  %value = index.cast %position : index to i32
+  view.store %value, %output_view[%position] : i32, view<4xi32>
+  %next = index.add %position, %step : index
+  cfg.br ^header(%next: index)
+^exit:
+  func.return
+}
+
+func.def @unsigned_empty_loop_oracle(%output: buffer) {
+  func.call @compute_unsigned_empty_loop(%output) : (buffer)
+  func.return
+}
+
+func.def @signed_negative_loop_oracle(%output: buffer) {
+  func.call @compute_signed_negative_loop(%output) : (buffer)
+  func.return
+}
+
+func.def @unsigned_sign_crossing_loop_oracle(%output: buffer) {
+  func.call @compute_unsigned_sign_crossing_loop(%output) : (buffer)
+  func.return
+}
+
+func.def @inverted_loop_guard_oracle(%output: buffer) {
+  func.call @compute_inverted_loop_guard(%output) : (buffer)
+  func.return
+}
+
+func.def @carried_counter_store_oracle(%output: buffer) {
+  func.call @compute_carried_counter_store(%output) : (buffer)
+  func.return
+}
+
+check.scenario @explicit_loop_count_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %unsigned_empty = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@unsigned_empty_loop, @unsigned_empty_loop_oracle>(%unsigned_empty) : (tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%unsigned_empty) expected(%unsigned_empty) : tensor<1xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %signed_negative = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@signed_negative_loop, @signed_negative_loop_oracle>(%signed_negative) : (tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%signed_negative) expected(%signed_negative) : tensor<1xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %unsigned_crossing = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@unsigned_sign_crossing_loop, @unsigned_sign_crossing_loop_oracle>(%unsigned_crossing) : (tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%unsigned_crossing) expected(%unsigned_crossing) : tensor<1xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %inverted_guard = check.generate.fill value(-1) : tensor<1xi32>
+    check.compare<@inverted_loop_guard, @inverted_loop_guard_oracle>(%inverted_guard) : (tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%inverted_guard) expected(%inverted_guard) : tensor<1xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %carried_storage = check.generate.fill value(-1) : tensor<12xi32>
+    %carried_output = check.tensor.view %carried_storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@carried_counter_store, @carried_counter_store_oracle>(%carried_output) : (tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%carried_storage) expected(%carried_storage) : tensor<12xi32>
+    }
+  }
+  check.return
+}
+
+// Forwarded payloads cross two inner loops and an optional bypass before the
+// outer backedge. Counters change independently of the payload, including when
+// either inner loop has zero iterations. The oracle computes the closed form.
+kernel.def @nested_loop_forwarded_state() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%ordinal: index, %seed_bits: i64, %output: buffer) {
+  func.call @compute_nested_loop_forwarded_state(%ordinal, %seed_bits, %output) : (index, i64, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_nested_loop_forwarded_state(%ordinal: index, %seed_bits: i64, %output: buffer) {
+  %bounded_ordinal = index.assume %ordinal [range(%ordinal, 0, 71)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %c12 = index.constant 12 : index
+  %c36 = index.constant 36 : index
+  %outer_limit = index.rem %bounded_ordinal, %c4 : index
+  %inner_selector = index.div %bounded_ordinal, %c4 : index
+  %inner_limit = index.rem %inner_selector, %c3 : index
+  %stage_selector = index.div %bounded_ordinal, %c12 : index
+  %stage_limit = index.rem %stage_selector, %c3 : index
+  %skip = index.cmp sge, %bounded_ordinal, %c36 : index
+  %seed = scalar.trunci %seed_bits : i64 to i32
+  cfg.br ^outer(%seed: i32, %c0: index)
+^outer(%outer_value: i32, %outer_index: index):
+  %outer_more = index.cmp slt, %outer_index, %outer_limit : index
+  cfg.cond_br %outer_more, ^inner_entry, ^exit
+^inner_entry:
+  cfg.br ^inner(%outer_value: i32, %c0: index)
+^inner(%inner_value: i32, %inner_index: index):
+  %inner_more = index.cmp slt, %inner_index, %inner_limit : index
+  cfg.cond_br %inner_more, ^inner_body, ^inner_exit
+^inner_body:
+  %next_inner = index.add %inner_index, %c1 : index
+  cfg.br ^inner(%inner_value: i32, %next_inner: index)
+^inner_exit:
+  cfg.cond_br %skip, ^bypass, ^stage_entry
+^bypass:
+  cfg.br ^latch(%inner_value: i32)
+^stage_entry:
+  cfg.br ^stage(%inner_value: i32, %c0: index)
+^stage(%stage_value: i32, %stage_index: index):
+  %stage_more = index.cmp slt, %stage_index, %stage_limit : index
+  cfg.cond_br %stage_more, ^stage_body, ^stage_exit
+^stage_body:
+  %next_stage = index.add %stage_index, %c1 : index
+  cfg.br ^stage(%stage_value: i32, %next_stage: index)
+^stage_exit:
+  %next_value = scalar.addi %stage_value, %seed : i32
+  cfg.br ^latch(%next_value: i32)
+^latch(%latch_value: i32):
+  %next_outer = index.add %outer_index, %c1 : index
+  cfg.br ^outer(%latch_value: i32, %next_outer: index)
+^exit:
+  %base = index.constant 0 : offset
+  %result = buffer.view %output[%base] : buffer -> view<1xi32>
+  view.store %outer_value, %result[0] : i32, view<1xi32>
+  func.return
+}
+
+func.def @nested_loop_forwarded_state_oracle(%ordinal: index, %seed_bits: i64, %output: buffer) {
+  %bounded_ordinal = index.assume %ordinal [range(%ordinal, 0, 71)] : index
+  %c4 = index.constant 4 : index
+  %c36 = index.constant 36 : index
+  %outer_limit = index.rem %bounded_ordinal, %c4 : index
+  %outer_count = index.cast %outer_limit : index to i32
+  %c1 = scalar.constant 1 : i32
+  %multiplier = scalar.addi %outer_count, %c1 : i32
+  %skip = index.cmp sge, %bounded_ordinal, %c36 : index
+  %seed = scalar.trunci %seed_bits : i64 to i32
+  %updated = scalar.muli %seed, %multiplier : i32
+  %value = scf.select %skip, %seed, %updated : i32
+  %base = index.constant 0 : offset
+  %result = buffer.view %output[%base] : buffer -> view<1xi32>
+  view.store %value, %result[0] : i32, view<1xi32>
+  func.return
+}
+
+check.scenario @nested_loop_forwarded_state_values {
+  check.trial[72](%trial: index, %entropy: check.entropy) {
+    %seed_bits = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %storage = check.generate.fill value(-889275714) : tensor<9xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<9xi32> -> tensor<1xi32>
+    check.compare<@nested_loop_forwarded_state, @nested_loop_forwarded_state_oracle>(%trial, %seed_bits, %output) : (index, i64, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<9xi32>
+    }
+  }
+  check.return
+}

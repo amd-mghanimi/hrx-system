@@ -1,0 +1,444 @@
+// Required expansion makes the carried insertion and extraction positions
+// constant. Five lanes cross an ordinary packet boundary and retain a tail.
+func.def @unrolled_vector_build(%input: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 5 : index
+  %step = index.constant 1 : index
+  %last = index.constant 4 : index
+  %source = buffer.view %input[%origin] : buffer -> view<5xf32>
+  %destination = buffer.view %output[%origin] : buffer -> view<5xf32>
+  %initial = vector.constant 0.0 : vector<5xf32>
+  %values = scf.for %position = [%begin to %end step %step](%current = %initial : vector<5xf32>) -> (vector<5xf32>) unroll {
+    %value = view.load %source[%position] : view<5xf32> -> f32
+    %next = vector.insert %value into %current[%position] : f32, vector<5xf32>
+    scf.yield %next : vector<5xf32>
+  }
+  scf.for %position = [%begin to %end step %step] unroll {
+    %value = vector.extract %values[%position] : vector<5xf32> -> f32
+    %reversed = index.sub %last, %position : index
+    view.store %value, %destination[%reversed] : f32, view<5xf32>
+  }
+  func.return
+}
+
+func.def @unrolled_vector_build_oracle(%input: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 5 : index
+  %step = index.constant 1 : index
+  %last = index.constant 4 : index
+  %source = buffer.view %input[%origin] : buffer -> view<5xf32>
+  %destination = buffer.view %output[%origin] : buffer -> view<5xf32>
+  scf.for %position = [%begin to %end step %step] {
+    %reversed = index.sub %last, %position : index
+    %value = view.load %source[%reversed] : view<5xf32> -> f32
+    view.store %value, %destination[%position] : f32, view<5xf32>
+  }
+  func.return
+}
+
+check.scenario @unrolled_vector_build_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-256.0 to 256.0) : tensor<5xf32>
+    %storage = check.generate.fill value(-1024.0) : tensor<7xf32>
+    %output = check.tensor.view %storage offset(4) : tensor<7xf32> -> tensor<5xf32>
+    check.compare<@unrolled_vector_build, @unrolled_vector_build_oracle>(%input, %output) : (tensor<5xf32>, tensor<5xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<5xf32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<7xf32>
+    }
+  }
+  check.return
+}
+
+// Runtime insertion chooses each byte or word position across successive packets.
+// Scalar integer addressing is independent of the packed-vector implementation.
+func.def @dynamic_byte_lane_values(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 16 : index
+  %lane_mask = index.constant 15 : index
+  %e4_origin = index.constant 256 : offset
+  %e5_origin = index.constant 512 : offset
+  %bytes = buffer.view %input[%base] : buffer -> view<256xi8>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<16xi32>
+  %e4 = buffer.view %input[%base] : buffer -> view<256xf8E4M3>
+  %e5 = buffer.view %input[%base] : buffer -> view<256xf8E5M2>
+  %byte_output = buffer.view %output[%base] : buffer -> view<256xi8>
+  %e4_output = buffer.view %output[%e4_origin] : buffer -> view<256xf8E4M3>
+  %e5_output = buffer.view %output[%e5_origin] : buffer -> view<256xf8E5M2>
+  scf.for %i = [%begin to %end step %step] {
+    %packet = index.div %i, %step : index
+    %position = view.load %lane_positions[%packet] : view<16xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %insertion_lane = index.andi %lane_index, %lane_mask : index
+    %preserve_packet = index.cmp eq, %insertion_lane, %begin : index
+    %byte_packet = vector.load %bytes[%i] : view<256xi8> -> vector<16xi8>
+    %byte_first = vector.extract %byte_packet[0] : vector<16xi8> -> i8
+    %byte_last = vector.extract %byte_packet[15] : vector<16xi8> -> i8
+    %byte_broadcast = scf.if %preserve_packet -> (vector<16xi8>) {
+      %byte_loaded = vector.load %bytes[%i] : view<256xi8> -> vector<16xi8>
+      scf.yield %byte_loaded : vector<16xi8>
+    } else {
+      %byte_splat = vector.splat %byte_last : vector<16xi8>
+      scf.yield %byte_splat : vector<16xi8>
+    }
+    %byte_updated = vector.insert %byte_first into %byte_broadcast[%insertion_lane] : i8, vector<16xi8>
+    vector.store %byte_updated, %byte_output[%i] : vector<16xi8>, view<256xi8>
+    %e4_packet = vector.load %e4[%i] : view<256xf8E4M3> -> vector<16xf8E4M3>
+    %e4_first = vector.extract %e4_packet[0] : vector<16xf8E4M3> -> f8E4M3
+    %e4_last = vector.extract %e4_packet[15] : vector<16xf8E4M3> -> f8E4M3
+    %e4_broadcast = scf.if %preserve_packet -> (vector<16xf8E4M3>) {
+      %e4_loaded = vector.load %e4[%i] : view<256xf8E4M3> -> vector<16xf8E4M3>
+      scf.yield %e4_loaded : vector<16xf8E4M3>
+    } else {
+      %e4_splat = vector.splat %e4_last : vector<16xf8E4M3>
+      scf.yield %e4_splat : vector<16xf8E4M3>
+    }
+    %e4_updated = vector.insert %e4_first into %e4_broadcast[%insertion_lane] : f8E4M3, vector<16xf8E4M3>
+    vector.store %e4_updated, %e4_output[%i] : vector<16xf8E4M3>, view<256xf8E4M3>
+    %e5_packet = vector.load %e5[%i] : view<256xf8E5M2> -> vector<16xf8E5M2>
+    %e5_first = vector.extract %e5_packet[0] : vector<16xf8E5M2> -> f8E5M2
+    %e5_last = vector.extract %e5_packet[15] : vector<16xf8E5M2> -> f8E5M2
+    %e5_broadcast = scf.if %preserve_packet -> (vector<16xf8E5M2>) {
+      %e5_loaded = vector.load %e5[%i] : view<256xf8E5M2> -> vector<16xf8E5M2>
+      scf.yield %e5_loaded : vector<16xf8E5M2>
+    } else {
+      %e5_splat = vector.splat %e5_last : vector<16xf8E5M2>
+      scf.yield %e5_splat : vector<16xf8E5M2>
+    }
+    %e5_updated = vector.insert %e5_first into %e5_broadcast[%insertion_lane] : f8E5M2, vector<16xf8E5M2>
+    vector.store %e5_updated, %e5_output[%i] : vector<16xf8E5M2>, view<256xf8E5M2>
+  }
+  func.return
+}
+
+func.def @dynamic_byte_lane_oracle(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  %lane_mask = index.constant 15 : index
+  %block_mask = index.constant 240 : index
+  %packet_lanes = index.constant 16 : index
+  %second = index.constant 256 : index
+  %third = index.constant 512 : index
+  %source = buffer.view %input[%base] : buffer -> view<256xi8>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<16xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<768xi8>
+  scf.for %i = [%begin to %end step %step] {
+    %lane = index.andi %i, %lane_mask : index
+    %block = index.andi %i, %block_mask : index
+    %packet = index.div %i, %packet_lanes : index
+    %position = view.load %lane_positions[%packet] : view<16xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %insertion_lane = index.andi %lane_index, %lane_mask : index
+    %is_inserted = index.cmp eq, %lane, %insertion_lane : index
+    %last = index.ori %block, %lane_mask : index
+    %preserve_packet = index.cmp eq, %insertion_lane, %begin : index
+    %unchanged_index = scf.select %preserve_packet, %i, %last : index
+    %broadcast_index = scf.select %is_inserted, %block, %unchanged_index : index
+    %value = view.load %source[%broadcast_index] : view<256xi8> -> i8
+    %second_index = index.add %i, %second : index
+    %third_index = index.add %i, %third : index
+    view.store %value, %destination[%i] : i8, view<768xi8>
+    view.store %value, %destination[%second_index] : i8, view<768xi8>
+    view.store %value, %destination[%third_index] : i8, view<768xi8>
+  }
+  func.return
+}
+
+func.def @dynamic_word_lane_values(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 65536 : index
+  %step = index.constant 8 : index
+  %lane_mask = index.constant 7 : index
+  %half_origin = index.constant 131072 : offset
+  %bfloat_origin = index.constant 262144 : offset
+  %words = buffer.view %input[%base] : buffer -> view<65536xi16>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<8xi32>
+  %half = buffer.view %input[%base] : buffer -> view<65536xf16>
+  %bfloat = buffer.view %input[%base] : buffer -> view<65536xbf16>
+  %word_output = buffer.view %output[%base] : buffer -> view<65536xi16>
+  %half_output = buffer.view %output[%half_origin] : buffer -> view<65536xf16>
+  %bfloat_output = buffer.view %output[%bfloat_origin] : buffer -> view<65536xbf16>
+  scf.for %i = [%begin to %end step %step] {
+    %packet = index.div %i, %step : index
+    %position_index = index.andi %packet, %lane_mask : index
+    %position = view.load %lane_positions[%position_index] : view<8xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %insertion_lane = index.andi %lane_index, %lane_mask : index
+    %word_packet = vector.load %words[%i] : view<65536xi16> -> vector<8xi16>
+    %word_first = vector.extract %word_packet[0] : vector<8xi16> -> i16
+    %word_last = vector.extract %word_packet[7] : vector<8xi16> -> i16
+    %word_broadcast = vector.splat %word_last : vector<8xi16>
+    %word_updated = vector.insert %word_first into %word_broadcast[%insertion_lane] : i16, vector<8xi16>
+    vector.store %word_updated, %word_output[%i] : vector<8xi16>, view<65536xi16>
+    %half_packet = vector.load %half[%i] : view<65536xf16> -> vector<8xf16>
+    %half_first = vector.extract %half_packet[0] : vector<8xf16> -> f16
+    %half_last = vector.extract %half_packet[7] : vector<8xf16> -> f16
+    %half_broadcast = vector.splat %half_last : vector<8xf16>
+    %half_updated = vector.insert %half_first into %half_broadcast[%insertion_lane] : f16, vector<8xf16>
+    vector.store %half_updated, %half_output[%i] : vector<8xf16>, view<65536xf16>
+    %bfloat_packet = vector.load %bfloat[%i] : view<65536xbf16> -> vector<8xbf16>
+    %bfloat_first = vector.extract %bfloat_packet[0] : vector<8xbf16> -> bf16
+    %bfloat_last = vector.extract %bfloat_packet[7] : vector<8xbf16> -> bf16
+    %bfloat_broadcast = vector.splat %bfloat_last : vector<8xbf16>
+    %bfloat_updated = vector.insert %bfloat_first into %bfloat_broadcast[%insertion_lane] : bf16, vector<8xbf16>
+    vector.store %bfloat_updated, %bfloat_output[%i] : vector<8xbf16>, view<65536xbf16>
+  }
+  func.return
+}
+
+func.def @dynamic_word_lane_oracle(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 65536 : index
+  %step = index.constant 1 : index
+  %lane_mask = index.constant 7 : index
+  %block_mask = index.constant 65528 : index
+  %packet_lanes = index.constant 8 : index
+  %second = index.constant 65536 : index
+  %third = index.constant 131072 : index
+  %source = buffer.view %input[%base] : buffer -> view<65536xi16>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<8xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<196608xi16>
+  scf.for %i = [%begin to %end step %step] {
+    %lane = index.andi %i, %lane_mask : index
+    %block = index.andi %i, %block_mask : index
+    %packet = index.div %i, %packet_lanes : index
+    %position_index = index.andi %packet, %lane_mask : index
+    %position = view.load %lane_positions[%position_index] : view<8xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %insertion_lane = index.andi %lane_index, %lane_mask : index
+    %is_inserted = index.cmp eq, %lane, %insertion_lane : index
+    %last = index.ori %block, %lane_mask : index
+    %broadcast_index = scf.select %is_inserted, %block, %last : index
+    %value = view.load %source[%broadcast_index] : view<65536xi16> -> i16
+    %second_index = index.add %i, %second : index
+    %third_index = index.add %i, %third : index
+    view.store %value, %destination[%i] : i16, view<196608xi16>
+    view.store %value, %destination[%second_index] : i16, view<196608xi16>
+    view.store %value, %destination[%third_index] : i16, view<196608xi16>
+  }
+  func.return
+}
+
+check.scenario @dynamic_byte_lane_positions {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %positions = check.generate.iota offset(0) step(1) : tensor<16xi32>
+    %output_owner = check.generate.fill value(91) : tensor<776xi8>
+    %output = check.tensor.view %output_owner offset(4) : tensor<776xi8> -> tensor<768xi8>
+    check.compare<@dynamic_byte_lane_values, @dynamic_byte_lane_oracle>(%input, %positions, %output) : (tensor<256xi8>, tensor<16xi32>, tensor<768xi8>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<256xi8>
+      check.expect.bitwise actual(%positions) expected(%positions) : tensor<16xi32>
+      check.expect.bitwise actual(%output_owner) expected(%output_owner) : tensor<776xi8>
+    }
+  }
+  check.return
+}
+
+check.scenario @dynamic_word_lane_positions {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-32768) step(1) : tensor<65536xi16>
+    %positions = check.generate.iota offset(0) step(1) : tensor<8xi32>
+    %output_owner = check.generate.fill value(23130) : tensor<196616xi16>
+    %output = check.tensor.view %output_owner offset(8) : tensor<196616xi16> -> tensor<196608xi16>
+    check.compare<@dynamic_word_lane_values, @dynamic_word_lane_oracle>(%input, %positions, %output) : (tensor<65536xi16>, tensor<8xi32>, tensor<196608xi16>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<65536xi16>
+      check.expect.bitwise actual(%positions) expected(%positions) : tensor<8xi32>
+      check.expect.bitwise actual(%output_owner) expected(%output_owner) : tensor<196616xi16>
+    }
+  }
+  check.return
+}
+
+// Every runtime position receives an independent replacement; untouched lanes
+// retain distinct payloads. Floating lanes are observed as integer bits.
+func.def @dynamic_dword_lane_values(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %lane_mask = index.constant 3 : index
+  %float_region = index.constant 16 : index
+  %source = buffer.view %input[%base] : buffer -> view<8xi32>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<32xi32>
+  %integers = vector.load %source[0] : view<8xi32> -> vector<4xi32>
+  %floats = vector.bitcast %integers : vector<4xi32> to vector<4xf32>
+  scf.for %packet = [%begin to %end step %step] {
+    %position = view.load %lane_positions[%packet] : view<4xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %lane = index.andi %lane_index, %lane_mask : index
+    %replacement_index = index.add %packet, %end : index
+    %replacement = view.load %source[%replacement_index] : view<8xi32> -> i32
+    %replacement_float = scalar.bitcast %replacement : i32 to f32
+    %integer_result = vector.insert %replacement into %integers[%lane] : i32, vector<4xi32>
+    %float_result = vector.insert %replacement_float into %floats[%lane] : f32, vector<4xf32>
+    %float_bits = vector.bitcast %float_result : vector<4xf32> to vector<4xi32>
+    %integer_index = index.mul %packet, %end : index
+    %float_index = index.add %integer_index, %float_region : index
+    vector.store %integer_result, %destination[%integer_index] : vector<4xi32>, view<32xi32>
+    vector.store %float_bits, %destination[%float_index] : vector<4xi32>, view<32xi32>
+  }
+  func.return
+}
+
+func.def @dynamic_dword_lane_oracle(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 16 : index
+  %step = index.constant 1 : index
+  %packet_lanes = index.constant 4 : index
+  %lane_mask = index.constant 3 : index
+  %source = buffer.view %input[%base] : buffer -> view<8xi32>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<32xi32>
+  scf.for %i = [%begin to %end step %step] {
+    %packet = index.div %i, %packet_lanes : index
+    %lane = index.andi %i, %lane_mask : index
+    %position = view.load %lane_positions[%packet] : view<4xi32> -> i32
+    %lane_index = index.cast %position : i32 to index
+    %insertion_lane = index.andi %lane_index, %lane_mask : index
+    %is_inserted = index.cmp eq, %lane, %insertion_lane : index
+    %replacement_index = index.add %packet, %packet_lanes : index
+    %source_index = scf.select %is_inserted, %replacement_index, %lane : index
+    %value = view.load %source[%source_index] : view<8xi32> -> i32
+    %float_index = index.add %i, %end : index
+    view.store %value, %destination[%i] : i32, view<32xi32>
+    view.store %value, %destination[%float_index] : i32, view<32xi32>
+  }
+  func.return
+}
+
+check.scenario @dynamic_dword_lane_positions {
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<8xi32>
+    %positions = check.generate.iota offset(0) step(1) : tensor<4xi32>
+    %output_owner = check.generate.fill value(123) : tensor<40xi32>
+    %output = check.tensor.view %output_owner offset(16) : tensor<40xi32> -> tensor<32xi32>
+    check.compare<@dynamic_dword_lane_values, @dynamic_dword_lane_oracle>(%input, %positions, %output) : (tensor<8xi32>, tensor<4xi32>, tensor<32xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<8xi32>
+      check.expect.bitwise actual(%positions) expected(%positions) : tensor<4xi32>
+      check.expect.bitwise actual(%output_owner) expected(%output_owner) : tensor<40xi32>
+    }
+  }
+  check.return
+}
+
+// Five lanes force a native packet plus a singleton tail. Every runtime
+// position is replaced while integer, floating, address, and rank-two forms
+// retain the same payload bits outside that position.
+func.def @dynamic_tail_values(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %float_base = index.constant 200 : offset
+  %offset_base = index.constant 400 : offset
+  %index_base = index.constant 600 : offset
+  %matrix_base = index.constant 800 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 5 : index
+  %step = index.constant 1 : index
+  %source = buffer.view %input[%base] : buffer -> view<10xi64>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<5xi32>
+  %integer_output = buffer.view %output[%base] : buffer -> view<5x5xi64>
+  %float_output = buffer.view %output[%float_base] : buffer -> view<5x5xf64>
+  %offset_output = buffer.view %output[%offset_base] : buffer -> view<5x5xi64>
+  %index_output = buffer.view %output[%index_base] : buffer -> view<5x5xi64>
+  %matrix_output = buffer.view %output[%matrix_base] : buffer -> view<5x5xi64>
+  %integers = vector.load %source[0] : view<10xi64> -> vector<5xi64>
+  %floats = vector.bitcast %integers : vector<5xi64> to vector<5xf64>
+  %address_mask = vector.constant 4294967295 : vector<5xi64>
+  %address_bits = vector.andi %integers, %address_mask : vector<5xi64>
+  %offsets = vector.index_cast %address_bits : vector<5xi64> to vector<5xoffset>
+  %words = vector.trunci %integers : vector<5xi64> to vector<5xi32>
+  %indices = vector.index_cast %words : vector<5xi32> to vector<5xindex>
+  %matrix = vector.bitcast %integers : vector<5xi64> to vector<1x5xi64>
+  scf.for %packet = [%begin to %end step %step] {
+    %position = view.load %lane_positions[%packet] : view<5xi32> -> i32
+    %coordinate = index.cast %position : i32 to index
+    %lane = index.assume %coordinate [range(%coordinate, 0, 4)] : index
+    %replacement_index = index.add %packet, %end : index
+    %replacement = view.load %source[%replacement_index] : view<10xi64> -> i64
+    %replacement_float = scalar.bitcast %replacement : i64 to f64
+    %scalar_address_mask = scalar.constant 4294967295 : i64
+    %replacement_address = scalar.andi %replacement, %scalar_address_mask : i64
+    %replacement_offset = index.cast %replacement_address : i64 to offset
+    %replacement_word = scalar.trunci %replacement : i64 to i32
+    %replacement_coordinate = index.cast %replacement_word : i32 to index
+    %integer_result = vector.insert %replacement into %integers[%lane] : i64, vector<5xi64>
+    %float_result = vector.insert %replacement_float into %floats[%lane] : f64, vector<5xf64>
+    %offset_result = vector.insert %replacement_offset into %offsets[%lane] : offset, vector<5xoffset>
+    %index_result = vector.insert %replacement_coordinate into %indices[%lane] : index, vector<5xindex>
+    %matrix_result = vector.insert %replacement into %matrix[0, %lane] : i64, vector<1x5xi64>
+    %offset_bits = vector.index_cast %offset_result : vector<5xoffset> to vector<5xi64>
+    %index_bits = vector.index_cast %index_result : vector<5xindex> to vector<5xi64>
+    %matrix_bits = vector.bitcast %matrix_result : vector<1x5xi64> to vector<5xi64>
+    vector.store %integer_result, %integer_output[%packet, 0] : vector<5xi64>, view<5x5xi64>
+    vector.store %float_result, %float_output[%packet, 0] : vector<5xf64>, view<5x5xf64>
+    vector.store %offset_bits, %offset_output[%packet, 0] : vector<5xi64>, view<5x5xi64>
+    vector.store %index_bits, %index_output[%packet, 0] : vector<5xi64>, view<5x5xi64>
+    vector.store %matrix_bits, %matrix_output[%packet, 0] : vector<5xi64>, view<5x5xi64>
+  }
+  func.return
+}
+
+func.def @dynamic_tail_oracle(%input: buffer, %positions: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 25 : index
+  %step = index.constant 1 : index
+  %width = index.constant 5 : index
+  %float_base = index.constant 25 : index
+  %offset_base = index.constant 50 : index
+  %index_base = index.constant 75 : index
+  %matrix_base = index.constant 100 : index
+  %source = buffer.view %input[%base] : buffer -> view<10xi64>
+  %lane_positions = buffer.view %positions[%base] : buffer -> view<5xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<125xi64>
+  scf.for %i = [%begin to %end step %step] {
+    %packet = index.div %i, %width : index
+    %lane = index.rem %i, %width : index
+    %position = view.load %lane_positions[%packet] : view<5xi32> -> i32
+    %coordinate = index.cast %position : i32 to index
+    %is_inserted = index.cmp eq, %lane, %coordinate : index
+    %replacement_index = index.add %packet, %width : index
+    %source_index = scf.select %is_inserted, %replacement_index, %lane : index
+    %value = view.load %source[%source_index] : view<10xi64> -> i64
+    %address_mask = scalar.constant 4294967295 : i64
+    %offset_value = scalar.andi %value, %address_mask : i64
+    %word = scalar.trunci %value : i64 to i32
+    %index_value = scalar.extsi %word : i32 to i64
+    %float_index = index.add %i, %float_base : index
+    %offset_index = index.add %i, %offset_base : index
+    %index_position = index.add %i, %index_base : index
+    %matrix_index = index.add %i, %matrix_base : index
+    view.store %value, %destination[%i] : i64, view<125xi64>
+    view.store %value, %destination[%float_index] : i64, view<125xi64>
+    view.store %offset_value, %destination[%offset_index] : i64, view<125xi64>
+    view.store %index_value, %destination[%index_position] : i64, view<125xi64>
+    view.store %value, %destination[%matrix_index] : i64, view<125xi64>
+  }
+  func.return
+}
+
+check.scenario @dynamic_tail_positions {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-4611686018427387904 to 4611686018427387903) : tensor<10xi64>
+    %positions = check.generate.iota offset(0) step(1) : tensor<5xi32>
+    %storage = check.generate.fill value(123) : tensor<129xi64>
+    %output = check.tensor.view %storage offset(16) : tensor<129xi64> -> tensor<125xi64>
+    check.compare<@dynamic_tail_values, @dynamic_tail_oracle>(%input, %positions, %output) : (tensor<10xi64>, tensor<5xi32>, tensor<125xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<10xi64>
+      check.expect.bitwise actual(%positions) expected(%positions) : tensor<5xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<129xi64>
+    }
+  }
+  check.return
+}

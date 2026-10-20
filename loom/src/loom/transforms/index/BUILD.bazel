@@ -13,6 +13,21 @@ package(
 )
 
 loom_cc_library(
+    name = "combine_patterns",
+    srcs = ["combine_patterns.c"],
+    hdrs = ["combine_patterns.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/rewrite:pattern_registry",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/transforms/scalar:narrowing",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
     name = "cleanup_patterns",
     srcs = ["cleanup_patterns.c"],
     hdrs = ["cleanup_patterns.h"],
@@ -25,6 +40,20 @@ loom_cc_library(
         "//loom/src/loom/rewrite:pattern_registry",
         "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/transforms/cleanup:patterns",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "target_legalization",
+    srcs = ["target_legalization.c"],
+    hdrs = ["target_legalization.h"],
+    deps = [
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scf",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:legalization",
+        "//loom/src/loom/util:predicate_facts",
         "//runtime/src/iree/base",
     ],
 )

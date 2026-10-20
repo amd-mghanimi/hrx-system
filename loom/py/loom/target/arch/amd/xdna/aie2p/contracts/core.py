@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from enum import Enum
 
 from loom.dialect.index import defs as index
 from loom.dialect.scalar import bitwise as scalar_bitwise
@@ -24,6 +25,21 @@ from loom.target.arch.amd.xdna.aie2p.contracts.i64 import (
     AIE2P_PAIR_SCALAR_TYPES,
     AIE2P_PAIR_VECTOR_TYPES,
 )
+from loom.target.arch.amd.xdna.aie2p.contracts.selection import (
+    PredicateUpdate as _PredicateUpdate,
+)
+from loom.target.arch.amd.xdna.aie2p.contracts.selection import (
+    predicate_binary_emits as _predicate_binary_emits,
+)
+from loom.target.arch.amd.xdna.aie2p.contracts.selection import (
+    predicate_select_emits as _predicate_select_emits,
+)
+from loom.target.arch.amd.xdna.aie2p.contracts.selection import (
+    predicate_splat_emits as _vector_predicate_splat_emits,
+)
+from loom.target.arch.amd.xdna.aie2p.contracts.selection import (
+    whole_x_select_emits as _whole_x_select_emits,
+)
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
     AIE2P_CORE_DESCRIPTOR_SET,
 )
@@ -34,6 +50,7 @@ from loom.target.contracts import (
     DescriptorResultType,
     DescriptorRule,
     EmitDescriptorOp,
+    EmitRegisterConcat,
     Guard,
     ResultTypeBinding,
     Scalar,
@@ -58,6 +75,7 @@ _F32 = Scalar("f32")
 _INDEX = Scalar("index")
 _OFFSET = Scalar("offset")
 _I8_VECTOR = Vector("i8", minimum_static_elements=1, maximum_static_elements=64)
+_I8X128_VECTOR = Vector("i8", lanes=128)
 _I8X16_VECTOR = Vector("i8", lanes=16)
 _F8E4M3_VECTOR = Vector("f8E4M3", minimum_static_elements=1, maximum_static_elements=64)
 _F8E5M2_VECTOR = Vector("f8E5M2", minimum_static_elements=1, maximum_static_elements=64)
@@ -66,6 +84,10 @@ _F16_VECTOR = Vector("f16", minimum_static_elements=1, maximum_static_elements=3
 _BF16_VECTOR = Vector("bf16", minimum_static_elements=1, maximum_static_elements=32)
 _I32_VECTOR = Vector("i32", minimum_static_elements=1, maximum_static_elements=16)
 _F32_VECTOR = Vector("f32", minimum_static_elements=1, maximum_static_elements=16)
+_INDEX_VECTOR = Vector("index", minimum_static_elements=1, maximum_static_elements=16)
+_OFFSET_VECTOR = Vector("offset", minimum_static_elements=1, maximum_static_elements=16)
+_ADDRESS_VECTOR_TYPES = (_INDEX_VECTOR, _OFFSET_VECTOR)
+_F32X32_VECTOR = Vector("f32", lanes=32)
 _I32_MATRIX_ACCUMULATOR = Vector("i32", lanes=64)
 _I1_VECTOR = Vector("i1", minimum_static_elements=1, maximum_static_elements=64)
 _I1X2X64_VECTOR = Vector("i1", dims=(2, 64))
@@ -81,6 +103,7 @@ _BITCAST_VECTOR_TYPES = (
     _F32_VECTOR,
     *AIE2P_PAIR_VECTOR_TYPES,
 )
+_WHOLE_VECTOR_SELECT_TYPES = (*_BITCAST_VECTOR_TYPES, *_ADDRESS_VECTOR_TYPES)
 
 _I8_MIN = -(2**7)
 _I8_MAX = (2**7) - 1
@@ -91,6 +114,12 @@ _I32_MAX = (2**31) - 1
 _U32_MAX = (2**32) - 1
 _SHORT_MIN = -1024
 _SHORT_MAX = 1023
+
+
+class _VectorConstantCarrier(Enum):
+    NATIVE = "native"
+    WIDE = "wide"
+    ACCUMULATOR = "accumulator"
 
 
 _I16_ELEMENTWISE_MULTIPLY_CONTROL = vector_data_path_control(
@@ -529,6 +558,8 @@ def _vector_binary_rule(
     source_op: Op,
     type_pattern: TypePattern,
     descriptor_key: str,
+    *,
+    form: DescriptorEmitForm = DescriptorEmitForm.OP,
 ) -> DescriptorRule:
     descriptor = _descriptor(descriptor_key)
     return DescriptorRule(
@@ -536,13 +567,14 @@ def _vector_binary_rule(
         descriptor=descriptor,
         guards=_typed_guards(("lhs", "rhs", "result"), type_pattern),
         emit=(
-            _op_emit(
-                descriptor,
+            EmitDescriptorOp(
+                descriptor=descriptor,
                 operands={
                     "s1": ValueRef.operand("lhs"),
                     "s2": ValueRef.operand("rhs"),
                 },
                 results={"d": ValueRef.result("result")},
+                form=form,
             ),
         ),
     )
@@ -649,40 +681,74 @@ def _vector_splat_rule(
     )
 
 
-def _vector_predicate_splat_rule() -> DescriptorRule:
-    broadcast = _descriptor("amd.xdna.aie2p.splat.i8x64")
-    subtract = _descriptor("amd.xdna.aie2p.sub.i8x64")
-    compare = _descriptor("amd.xdna.aie2p.cmp.lt.unsigned.i8x64")
+def _vector_wide_f32_splat_rule() -> DescriptorRule:
+    """Replicates one F32 value across both native accumulator units."""
+
+    broadcast = _descriptor("amd.xdna.aie2p.splat.i32x16")
+    move_to_accumulator = _descriptor("amd.xdna.aie2p.move.vector512.to.accumulator512")
+    packet = ValueRef.temporary("packet")
+    accumulator_unit = ValueRef.temporary("accumulator_unit")
     return DescriptorRule(
         source_op=vector.vector_splat,
-        descriptor=compare,
+        descriptor=broadcast,
         guards=(
-            Guard.value_type("scalar", _I1),
-            Guard.value_type("result", _I1_VECTOR),
+            Guard.value_type("scalar", _F32),
+            Guard.value_type("result", _F32X32_VECTOR),
         ),
         emit=(
             _op_emit(
                 broadcast,
                 operands={"src": ValueRef.operand("scalar")},
-                results={"dst": ValueRef.temporary("broadcast_condition")},
+                results={"dst": packet},
                 result_types={"dst": DescriptorResultType()},
             ),
             _op_emit(
-                subtract,
-                operands={
-                    "s1": ValueRef.temporary("broadcast_condition"),
-                    "s2": ValueRef.temporary("broadcast_condition"),
-                },
-                results={"d": ValueRef.temporary("zero")},
-                result_types={"d": DescriptorResultType()},
+                move_to_accumulator,
+                operands={"src": packet},
+                results={"dst": accumulator_unit},
+                result_types={"dst": DescriptorResultType()},
             ),
-            _op_emit(
-                compare,
-                operands={
-                    "s1": ValueRef.temporary("zero"),
-                    "s2": ValueRef.temporary("broadcast_condition"),
-                },
-                results={"cmp": ValueRef.result("result")},
+            EmitRegisterConcat(
+                sources=(accumulator_unit, accumulator_unit),
+                result=ValueRef.result("result"),
+            ),
+        ),
+        report_key="f32x32_native_splat",
+    )
+
+
+def _vector_predicate_splat_rule() -> DescriptorRule:
+    return DescriptorRule(
+        source_op=vector.vector_splat,
+        descriptor=_descriptor("amd.xdna.aie2p.cmp.lt.unsigned.i8x64"),
+        guards=(
+            Guard.value_type("scalar", _I1),
+            Guard.value_type("result", _I1_VECTOR),
+        ),
+        emit=_vector_predicate_splat_emits(
+            ValueRef.operand("scalar"), ValueRef.result("result")
+        ),
+    )
+
+
+def _vector_predicate_constant_rule() -> DescriptorRule:
+    return DescriptorRule(
+        source_op=vector.vector_constant,
+        descriptor=_descriptor("amd.xdna.aie2p.cmp.lt.unsigned.i8x64"),
+        guards=(
+            Guard.value_type("result", _I1_VECTOR),
+            Guard.value_exact_i64("result"),
+            Guard.value_i64_range("result", 0, 1),
+        ),
+        emit=(
+            _const_emit(
+                _descriptor("amd.xdna.aie2p.constant.i32.short"),
+                ValueRef.temporary("condition"),
+                ValueProject.exact_i64("result"),
+                result_type=DescriptorResultType(),
+            ),
+            *_vector_predicate_splat_emits(
+                ValueRef.temporary("condition"), ValueRef.result("result")
             ),
         ),
     )
@@ -730,89 +796,64 @@ def _predicate_complete_emit(
     )
 
 
-def _predicate_binary_emits(
-    operation: str,
-    lhs: ValueRef,
-    rhs: ValueRef,
-    result: ValueRef,
-    *,
-    temporary_prefix: str,
-) -> tuple[EmitDescriptorOp, ...]:
-    low = _descriptor(f"amd.xdna.aie2p.predicate.{operation}.low32")
-    high = _descriptor(f"amd.xdna.aie2p.predicate.{operation}.high32")
-    low_result = ValueRef.temporary(f"{temporary_prefix}_low32")
-    return (
-        _op_emit(
-            low,
-            operands={"s0": lhs, "s1": rhs},
-            results={"d0": low_result},
-            result_types={"d0": DescriptorResultType()},
-        ),
-        _op_emit(
-            high,
-            operands={
-                "s0": lhs,
-                "s1": rhs,
-                "storage": low_result,
-            },
-            results={"d0": result},
-            result_types={"d0": DescriptorResultType()},
-        ),
-    )
-
-
-def _vector_predicate_binary_rule(
+def _vector_predicate_binary_rules(
     source_op: Op,
     operation: str,
-) -> DescriptorRule:
-    descriptor = _descriptor(f"amd.xdna.aie2p.predicate.{operation}.high32")
-    return DescriptorRule(
-        source_op=source_op,
-        descriptor=descriptor,
-        guards=_typed_guards(("lhs", "rhs", "result"), _I1_VECTOR),
-        emit=_predicate_binary_emits(
-            operation,
-            ValueRef.operand("lhs"),
-            ValueRef.operand("rhs"),
-            ValueRef.result("result"),
-            temporary_prefix="predicate",
-        ),
+) -> tuple[DescriptorRule, ...]:
+    type_guards = _typed_guards(("lhs", "rhs", "result"), _I1_VECTOR)
+    return tuple(
+        DescriptorRule(
+            source_op=source_op,
+            descriptor=_descriptor(
+                f"amd.xdna.aie2p.predicate.{operation}.high32"
+                f"{'.rhs_tied' if update is not _PredicateUpdate.NONE else ''}"
+            ),
+            guards=(
+                *type_guards,
+                *((Guard.value_no_uses_after(field),) if field is not None else ()),
+            ),
+            emit=_predicate_binary_emits(
+                operation,
+                ValueRef.operand("lhs"),
+                ValueRef.operand("rhs"),
+                ValueRef.result("result"),
+                temporary_prefix="predicate",
+                update=update,
+            ),
+        )
+        for update, field in (
+            (_PredicateUpdate.RHS, "rhs"),
+            (_PredicateUpdate.LHS, "lhs"),
+            (_PredicateUpdate.NONE, None),
+        )
     )
 
 
-def _vector_predicate_select_rule() -> DescriptorRule:
-    difference = ValueRef.temporary("difference")
-    changes = ValueRef.temporary("changes")
-    return DescriptorRule(
-        source_op=vector.vector_select,
-        descriptor=_descriptor("amd.xdna.aie2p.predicate.xor.high32"),
-        guards=_typed_guards(
-            ("condition", "true_value", "false_value", "result"), _I1_VECTOR
-        ),
-        # Select each packed predicate bit without expanding its payload lane.
-        emit=(
-            *_predicate_binary_emits(
-                "xor",
+def _vector_predicate_select_rules() -> tuple[DescriptorRule, ...]:
+    type_guards = _typed_guards(
+        ("condition", "true_value", "false_value", "result"), _I1_VECTOR
+    )
+    return tuple(
+        DescriptorRule(
+            source_op=vector.vector_select,
+            descriptor=_descriptor("amd.xdna.aie2p.predicate.xor.high32.rhs_tied"),
+            guards=(
+                *type_guards,
+                *(
+                    (Guard.value_no_uses_after("true_value"),)
+                    if first_update is _PredicateUpdate.RHS
+                    else ()
+                ),
+            ),
+            emit=_predicate_select_emits(
+                ValueRef.operand("condition"),
                 ValueRef.operand("true_value"),
                 ValueRef.operand("false_value"),
-                difference,
-                temporary_prefix="difference",
-            ),
-            *_predicate_binary_emits(
-                "and",
-                ValueRef.operand("condition"),
-                difference,
-                changes,
-                temporary_prefix="changes",
-            ),
-            *_predicate_binary_emits(
-                "xor",
-                ValueRef.operand("false_value"),
-                changes,
                 ValueRef.result("result"),
-                temporary_prefix="selected",
+                first_update=first_update,
             ),
-        ),
+        )
+        for first_update in (_PredicateUpdate.RHS, _PredicateUpdate.NONE)
     )
 
 
@@ -874,7 +915,6 @@ def _vector_compare_rule(
         )
         forward = ValueRef.temporary("comparison_forward")
         reverse = ValueRef.temporary("comparison_reverse")
-        low = _descriptor("amd.xdna.aie2p.predicate.or.low32")
         emits = (
             _op_emit(
                 compare,
@@ -898,10 +938,12 @@ def _vector_compare_rule(
                     reverse,
                     result,
                     temporary_prefix="comparison",
+                    update=_PredicateUpdate.RHS,
                 ),
             )
-            descriptor = _descriptor("amd.xdna.aie2p.predicate.or.high32")
+            descriptor = _descriptor("amd.xdna.aie2p.predicate.or.high32.rhs_tied")
         else:
+            low = _descriptor("amd.xdna.aie2p.predicate.or.low32")
             comparison = ValueRef.temporary("comparison_low32")
             emits = (
                 *emits,
@@ -949,7 +991,6 @@ def _vector_compare_rule(
 def _whole_vector_select_rule(
     result_type: TypePattern,
 ) -> DescriptorRule:
-    subtract_one = _descriptor("amd.xdna.aie2p.select.mask.i32")
     select = _descriptor("amd.xdna.aie2p.select.i32x16")
     return DescriptorRule(
         source_op=scf.scf_select,
@@ -958,26 +999,104 @@ def _whole_vector_select_rule(
             Guard.value_type("condition", _I1),
             *_typed_guards(("true_value", "false_value", "result"), result_type),
         ),
-        emit=(
-            EmitDescriptorOp(
-                descriptor=subtract_one,
-                operands={"s0": ValueRef.operand("condition")},
-                results={"d0": ValueRef.temporary("hardware_selector")},
-                result_types={"d0": DescriptorResultType()},
-                immediates={"imm": -1},
-                form=DescriptorEmitForm.OP,
-            ),
-            _op_emit(
-                select,
-                operands={
-                    "s1": ValueRef.operand("true_value"),
-                    "s2": ValueRef.operand("false_value"),
-                    "sel": ValueRef.temporary("hardware_selector"),
-                },
-                results={"d": ValueRef.result("result")},
-            ),
+        emit=_whole_x_select_emits(
+            ValueRef.operand("condition"),
+            ValueRef.operand("true_value"),
+            ValueRef.operand("false_value"),
+            ValueRef.result("result"),
         ),
     )
+
+
+def _whole_predicate_select_rules() -> tuple[DescriptorRule, ...]:
+    """Selects one packed predicate packet with a scalar condition."""
+
+    condition_mask = ValueRef.temporary("condition_mask")
+    descriptor = _descriptor("amd.xdna.aie2p.predicate.xor.high32.rhs_tied")
+    return tuple(
+        DescriptorRule(
+            source_op=scf.scf_select,
+            descriptor=descriptor,
+            guards=(
+                Guard.value_type("condition", _I1),
+                *_typed_guards(("true_value", "false_value", "result"), _I1_VECTOR),
+                *(
+                    (Guard.value_no_uses_after("true_value"),)
+                    if first_update is _PredicateUpdate.RHS
+                    else ()
+                ),
+            ),
+            emit=(
+                *_vector_predicate_splat_emits(
+                    ValueRef.operand("condition"),
+                    condition_mask,
+                    result_type=ValueRef.result("result"),
+                ),
+                *_predicate_select_emits(
+                    condition_mask,
+                    ValueRef.operand("true_value"),
+                    ValueRef.operand("false_value"),
+                    ValueRef.result("result"),
+                    first_update=first_update,
+                ),
+            ),
+        )
+        for first_update in (_PredicateUpdate.RHS, _PredicateUpdate.NONE)
+    )
+
+
+def _vector_constant_emits(
+    constant_descriptor_key: str,
+    broadcast_descriptor_key: str,
+    value: AttrProject | ValueProject,
+    carrier: _VectorConstantCarrier,
+    unit_count: int,
+) -> tuple[EmitDescriptorOp | EmitRegisterConcat, ...]:
+    broadcast = _descriptor(broadcast_descriptor_key)
+    scalar = ValueRef.temporary("scalar")
+    packet = (
+        ValueRef.result("result")
+        if carrier is _VectorConstantCarrier.NATIVE
+        else ValueRef.temporary("packet")
+    )
+    emits: list[EmitDescriptorOp | EmitRegisterConcat] = [
+        _const_emit(
+            _descriptor(constant_descriptor_key),
+            scalar,
+            value,
+            result_type=DescriptorResultType(),
+        ),
+        _op_emit(
+            broadcast,
+            operands={"src": scalar},
+            results={"dst": packet},
+            result_types=(
+                None
+                if carrier is _VectorConstantCarrier.NATIVE
+                else {"dst": DescriptorResultType()}
+            ),
+        ),
+    ]
+    if carrier is _VectorConstantCarrier.NATIVE:
+        return tuple(emits)
+    carrier_unit = packet
+    if carrier is _VectorConstantCarrier.ACCUMULATOR:
+        carrier_unit = ValueRef.temporary("accumulator_unit")
+        emits.append(
+            _op_emit(
+                _descriptor("amd.xdna.aie2p.move.vector512.to.accumulator512"),
+                operands={"src": packet},
+                results={"dst": carrier_unit},
+                result_types={"dst": DescriptorResultType()},
+            )
+        )
+    emits.append(
+        EmitRegisterConcat(
+            sources=(carrier_unit,) * unit_count,
+            result=ValueRef.result("result"),
+        )
+    )
+    return tuple(emits)
 
 
 def _vector_constant_rule(
@@ -986,8 +1105,10 @@ def _vector_constant_rule(
     broadcast_descriptor_key: str,
     minimum: int,
     maximum: int,
+    *,
+    carrier: _VectorConstantCarrier = _VectorConstantCarrier.NATIVE,
+    unit_count: int = 1,
 ) -> DescriptorRule:
-    constant = _descriptor(constant_descriptor_key)
     broadcast = _descriptor(broadcast_descriptor_key)
     return DescriptorRule(
         source_op=vector.vector_constant,
@@ -997,18 +1118,47 @@ def _vector_constant_rule(
             Guard.value_type("result", result_type),
             Guard.i64_range("value", minimum, maximum),
         ),
-        emit=(
-            _const_emit(
-                constant,
-                ValueRef.temporary("scalar"),
-                AttrProject.direct("value"),
-                result_type=DescriptorResultType(),
-            ),
-            _op_emit(
-                broadcast,
-                operands={"src": ValueRef.temporary("scalar")},
-                results={"dst": ValueRef.result("result")},
-            ),
+        emit=_vector_constant_emits(
+            constant_descriptor_key,
+            broadcast_descriptor_key,
+            AttrProject.direct("value"),
+            carrier,
+            unit_count,
+        ),
+    )
+
+
+def _address_vector_constant_rule(
+    result_type: TypePattern,
+    constant_descriptor_key: str,
+    minimum: int,
+    maximum: int,
+    *,
+    carrier: _VectorConstantCarrier = _VectorConstantCarrier.NATIVE,
+    unit_count: int = 1,
+) -> DescriptorRule:
+    """Materializes target-width address lanes without changing their domain."""
+
+    immediate = (
+        ValueProject.exact_i64_i32_word("result", word_index=0)
+        if maximum > _I32_MAX
+        else AttrProject.direct("value")
+    )
+    broadcast_descriptor_key = "amd.xdna.aie2p.splat.i32x16"
+    return DescriptorRule(
+        source_op=vector.vector_constant,
+        descriptor=_descriptor(broadcast_descriptor_key),
+        guards=(
+            Guard.attr_kind("value", "i64"),
+            Guard.value_type("result", result_type),
+            Guard.i64_range("value", minimum, maximum),
+        ),
+        emit=_vector_constant_emits(
+            constant_descriptor_key,
+            broadcast_descriptor_key,
+            immediate,
+            carrier,
+            unit_count,
         ),
     )
 
@@ -1017,8 +1167,11 @@ def _float_vector_constant_rule(
     result_type: TypePattern,
     broadcast_descriptor_key: str,
     bits: ValueProject,
+    *,
+    carrier: _VectorConstantCarrier = _VectorConstantCarrier.NATIVE,
+    unit_count: int = 1,
+    extra_guards: Sequence[Guard] = (),
 ) -> DescriptorRule:
-    constant = _descriptor("amd.xdna.aie2p.constant.i32")
     broadcast = _descriptor(broadcast_descriptor_key)
     return DescriptorRule(
         source_op=vector.vector_constant,
@@ -1027,19 +1180,14 @@ def _float_vector_constant_rule(
             Guard.attr_kind("value", "f64"),
             Guard.value_type("result", result_type),
             Guard.value_exact_float("result"),
+            *extra_guards,
         ),
-        emit=(
-            _const_emit(
-                constant,
-                ValueRef.temporary("scalar"),
-                bits,
-                result_type=DescriptorResultType(),
-            ),
-            _op_emit(
-                broadcast,
-                operands={"src": ValueRef.temporary("scalar")},
-                results={"dst": ValueRef.result("result")},
-            ),
+        emit=_vector_constant_emits(
+            "amd.xdna.aie2p.constant.i32",
+            broadcast_descriptor_key,
+            bits,
+            carrier,
+            unit_count,
         ),
     )
 
@@ -1167,17 +1315,60 @@ def _vector_extract_dynamic_rule(
     )
 
 
-def _vector_predicate_extract_rule(*, dynamic_index: bool) -> DescriptorRule:
-    """Materializes predicate bits as byte lanes before scalar extraction."""
+def predicate_boolean_bytes_emits(
+    source: ValueRef,
+    result: ValueRef,
+    *,
+    temporary_prefix: str,
+) -> tuple[tuple[EmitDescriptorOp, ...], ValueRef]:
+    """Materializes one packed predicate packet as canonical 0/1 bytes."""
 
+    one = ValueRef.temporary(f"{temporary_prefix}_one")
+    ones = ValueRef.temporary(f"{temporary_prefix}_ones")
+    zeros = ValueRef.temporary(f"{temporary_prefix}_zeros")
     constant = _descriptor("amd.xdna.aie2p.constant.i32.short")
     splat = _descriptor("amd.xdna.aie2p.splat.i8x64")
     subtract = _descriptor("amd.xdna.aie2p.sub.i8x64")
     select = _descriptor("amd.xdna.aie2p.select.i8x64")
+    return (
+        (
+            _const_emit(constant, one, 1, result_type=_I8),
+            _op_emit(
+                splat,
+                operands={"src": one},
+                results={"dst": ones},
+                result_types={"dst": DescriptorResultType()},
+            ),
+            _op_emit(
+                subtract,
+                operands={"s1": ones, "s2": ones},
+                results={"d": zeros},
+                result_types={"d": DescriptorResultType()},
+            ),
+            _op_emit(
+                select,
+                operands={"s1": zeros, "s2": ones, "sel": source},
+                results={"d": result},
+                result_types={"d": DescriptorResultType()},
+            ),
+        ),
+        zeros,
+    )
+
+
+def _vector_predicate_extract_rule(*, dynamic_index: bool) -> DescriptorRule:
+    """Materializes predicate bits as byte lanes before scalar extraction."""
+
     extract = _descriptor(
         "amd.xdna.aie2p.extract.i8.register"
         if dynamic_index
         else "amd.xdna.aie2p.extract.i8.immediate"
+    )
+    boolean_bytes = ValueRef.temporary("boolean_bytes")
+    materialize_emits, _ = predicate_boolean_bytes_emits(
+        ValueRef.operand("source"),
+        boolean_bytes,
+        temporary_prefix="predicate_extract",
     )
     guards = [
         Guard.value_type("source", _I1_VECTOR),
@@ -1195,7 +1386,7 @@ def _vector_predicate_extract_rule(*, dynamic_index: bool) -> DescriptorRule:
         extract_emit = _op_emit(
             extract,
             operands={
-                "s1": ValueRef.temporary("boolean_bytes"),
+                "s1": boolean_bytes,
                 "idx": ValueRef.operand("indices"),
             },
             results={"dst": ValueRef.result("result")},
@@ -1210,7 +1401,7 @@ def _vector_predicate_extract_rule(*, dynamic_index: bool) -> DescriptorRule:
         )
         extract_emit = EmitDescriptorOp(
             descriptor=extract,
-            operands={"s1": ValueRef.temporary("boolean_bytes")},
+            operands={"s1": boolean_bytes},
             results={"dst": ValueRef.result("result")},
             immediates={
                 "idx": AttrProject.i64_array_element("static_indices", element=0)
@@ -1221,40 +1412,7 @@ def _vector_predicate_extract_rule(*, dynamic_index: bool) -> DescriptorRule:
         source_op=vector.vector_extract,
         descriptor=extract,
         guards=tuple(guards),
-        emit=(
-            _const_emit(
-                constant,
-                ValueRef.temporary("one"),
-                1,
-                result_type=_I8,
-            ),
-            _op_emit(
-                splat,
-                operands={"src": ValueRef.temporary("one")},
-                results={"dst": ValueRef.temporary("ones")},
-                result_types={"dst": DescriptorResultType()},
-            ),
-            _op_emit(
-                subtract,
-                operands={
-                    "s1": ValueRef.temporary("ones"),
-                    "s2": ValueRef.temporary("ones"),
-                },
-                results={"d": ValueRef.temporary("zeros")},
-                result_types={"d": DescriptorResultType()},
-            ),
-            _op_emit(
-                select,
-                operands={
-                    "s1": ValueRef.temporary("zeros"),
-                    "s2": ValueRef.temporary("ones"),
-                    "sel": ValueRef.operand("source"),
-                },
-                results={"d": ValueRef.temporary("boolean_bytes")},
-                result_types={"d": DescriptorResultType()},
-            ),
-            extract_emit,
-        ),
+        emit=(*materialize_emits, extract_emit),
     )
 
 
@@ -1356,6 +1514,94 @@ def _vector_insert_dynamic_rule(
                 },
                 results={"dst": ValueRef.result("result")},
                 copy_operands=("idx",),
+            ),
+        ),
+    )
+
+
+def _vector_predicate_insert_rule(
+    *,
+    dynamic_index: bool,
+    zero_index: bool = False,
+) -> DescriptorRule:
+    """Updates one packed predicate bit through canonical byte lanes."""
+
+    if dynamic_index and zero_index:
+        raise ValueError("a predicate insertion index cannot be dynamic and zero")
+    insert = _descriptor(
+        "amd.xdna.aie2p.insert.i8.zero"
+        if zero_index
+        else "amd.xdna.aie2p.insert.i8.register"
+    )
+    compare = _descriptor("amd.xdna.aie2p.cmp.lt.unsigned.i8x64")
+    boolean_bytes = ValueRef.temporary("predicate_insert_boolean_bytes")
+    updated_bytes = ValueRef.temporary("predicate_insert_updated_bytes")
+    materialize_emits, zeros = predicate_boolean_bytes_emits(
+        ValueRef.operand("dest"),
+        boolean_bytes,
+        temporary_prefix="predicate_insert",
+    )
+    index_emits: tuple[EmitDescriptorOp, ...] = ()
+    insert_operands = {
+        "s1": boolean_bytes,
+        "src": ValueRef.operand("value"),
+    }
+    copy_operands: tuple[str, ...] = ()
+    if dynamic_index:
+        index_guards = (
+            Guard.value_type("indices", _INDEX),
+            Guard.operand_segment_count("indices", 1),
+            Guard.i64_array_count("static_indices", 1),
+            Guard.i64_array_element_range("static_indices", 0, -(2**63), -(2**63)),
+        )
+        insert_operands["idx"] = ValueRef.operand("indices")
+        copy_operands = ("idx",)
+    elif zero_index:
+        index_guards = (
+            Guard.operand_segment_count("indices", 0),
+            Guard.i64_array_count("static_indices", 1),
+            Guard.i64_array_element_range("static_indices", 0, 0, 0),
+        )
+    else:
+        index = ValueRef.temporary("predicate_insert_index")
+        index_guards = (
+            Guard.operand_segment_count("indices", 0),
+            Guard.i64_array_count("static_indices", 1),
+            Guard.i64_array_element_range("static_indices", 0, 1, 63),
+        )
+        index_emits = (
+            _const_emit(
+                _descriptor("amd.xdna.aie2p.constant.i32.short"),
+                index,
+                AttrProject.i64_array_element("static_indices", element=0),
+                result_type=DescriptorResultType(),
+            ),
+        )
+        insert_operands["idx"] = index
+        copy_operands = ("idx",)
+    return DescriptorRule(
+        source_op=vector.vector_insert,
+        descriptor=insert,
+        guards=(
+            Guard.value_type("value", _I1),
+            Guard.value_type("dest", _I1_VECTOR),
+            Guard.value_type("result", _I1_VECTOR),
+            *index_guards,
+        ),
+        emit=(
+            *materialize_emits,
+            *index_emits,
+            _op_emit(
+                insert,
+                operands=insert_operands,
+                results={"dst": updated_bytes},
+                result_types={"dst": DescriptorResultType()},
+                copy_operands=copy_operands,
+            ),
+            _op_emit(
+                compare,
+                operands={"s1": zeros, "s2": updated_bytes},
+                results={"cmp": ValueRef.result("result")},
             ),
         ),
     )

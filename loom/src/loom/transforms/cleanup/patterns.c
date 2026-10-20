@@ -43,6 +43,7 @@ iree_status_t loom_cleanup_pattern_registry_storage_initialize(
         .source_combine = loom_rewrite_pattern_registry_storage_registry(
             &out_storage->source_combine_storage),
         .special_value_policy = provider_set->special_value_policy,
+        .fact_refinement_policy = provider_set->fact_refinement_policy,
     };
   } else {
     loom_cleanup_pattern_registry_storage_deinitialize(out_storage);

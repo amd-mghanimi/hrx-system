@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-load("//build_tools/bazel:python.bzl", "iree_py_library")
+load("//build_tools/bazel:python.bzl", "iree_py_library", "iree_py_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -17,20 +17,340 @@ iree_py_library(
         "__init__.py",
         "avx2.py",
         "avx512.py",
+        "avx512_bf16.py",
+        "avx512_fp16.py",
+        "avx512_predicate.py",
+        "avx_ne_convert.py",
+        "bmi2.py",
+        "constants.py",
+        "f16c.py",
+        "float_conversion.py",
+        "float_integer.py",
+        "float_narrowing.py",
+        "float_roots.py",
+        "floating_extrema.py",
+        "floating_reduction.py",
+        "half_conversion.py",
+        "integer_bits.py",
         "integer_division.py",
+        "integer_float.py",
+        "integer_reduction.py",
+        "integer_rotation.py",
+        "lane_movement.py",
         "memory.py",
         "packed_dot.py",
+        "predicate.py",
+        "rule_builders.py",
         "scalar.py",
+        "scalar_float.py",
+        "scalar_read_memory.py",
+        "shuffle.py",
+        "vector_arithmetic.py",
+        "vector_construction.py",
+        "vector_integer_conversion.py",
+        "vector_integer_count.py",
     ],
     deps = [
         "//loom/py/loom:core",
         "//loom/py/loom/dialect/buffer",
+        "//loom/py/loom/dialect/cfg",
+        "//loom/py/loom/dialect/globals",
         "//loom/py/loom/dialect/index",
         "//loom/py/loom/dialect/scalar",
         "//loom/py/loom/dialect/scf",
         "//loom/py/loom/dialect/vector",
         "//loom/py/loom/dialect/view",
         "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:scalar_families",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+        "//loom/py/loom/target/emit:float_narrowing",
+    ],
+)
+
+iree_py_test(
+    name = "half_conversion_test",
+    srcs = [
+        "half_conversion_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.half_conversion_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/target:low_descriptors",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:target_info",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "float_conversion_test",
+    srcs = [
+        "float_conversion_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.float_conversion_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/target:low_descriptors",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "float_integer_test",
+    srcs = [
+        "float_integer_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.float_integer_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target:low_descriptors",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "integer_float_test",
+    srcs = [
+        "integer_float_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.integer_float_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "avx_ne_convert_test",
+    srcs = [
+        "avx_ne_convert_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.avx_ne_convert_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/dialect/view",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "avx512_bf16_test",
+    srcs = [
+        "avx512_bf16_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.avx512_bf16_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/dialect/view",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "avx512_fp16_test",
+    srcs = [
+        "avx512_fp16_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.avx512_fp16_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/scf",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/dialect/view",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:target_info",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "families_test",
+    srcs = [
+        "families_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.families_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/cfg",
+        "//loom/py/loom/dialect/index",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/scf",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/dialect/view",
+        "//loom/py/loom/target:low_descriptors",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:scalar_families",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "integer_division_test",
+    srcs = [
+        "integer_division_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.integer_division_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/index",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "vector_integer_conversion_test",
+    srcs = [
+        "vector_integer_conversion_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.vector_integer_conversion_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "integer_bits_test",
+    srcs = [
+        "integer_bits_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.integer_bits_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/index",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "integer_rotation_test",
+    srcs = [
+        "integer_rotation_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.integer_rotation_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/index",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "vector_integer_count_test",
+    srcs = [
+        "vector_integer_count_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.vector_integer_count_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "predicate_test",
+    srcs = [
+        "predicate_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.predicate_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/scf",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/arch/x86:vector_families",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "float_narrowing_test",
+    srcs = [
+        "float_narrowing_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.float_narrowing_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+        "//loom/py/loom/target/arch/x86:descriptors",
+        "//loom/py/loom/target/contracts",
+    ],
+)
+
+iree_py_test(
+    name = "float_roots_test",
+    srcs = [
+        "float_roots_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.contracts.float_roots_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":contracts",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
         "//loom/py/loom/target/contracts",
     ],
 )

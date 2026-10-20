@@ -12,11 +12,27 @@
 
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/error/renderer.h"
 
 namespace loom {
 namespace {
+
+std::string FormatDiagnostic(const loom_diagnostic_t* diagnostic) {
+  iree_string_builder_t builder;
+  iree_string_builder_initialize(iree_allocator_system(), &builder);
+  loom_output_stream_t stream;
+  loom_output_stream_for_builder(&builder, &stream);
+  iree_status_t status = loom_diagnostic_format(diagnostic, &stream);
+  std::string result;
+  if (iree_status_is_ok(status)) {
+    result = std::string(iree_string_builder_buffer(&builder),
+                         iree_string_builder_size(&builder));
+  }
+  IREE_EXPECT_OK(status);
+  iree_string_builder_deinitialize(&builder);
+  return result;
+}
 
 // Helper to format a structured diagnostic and return the output string.
 std::string FormatStructured(
@@ -24,11 +40,12 @@ std::string FormatStructured(
     iree_host_size_t param_count, loom_diagnostic_severity_t severity,
     const char* source_text = nullptr, iree_host_size_t start = 0,
     iree_host_size_t end = 0, uint32_t line = 0, uint32_t column = 0) {
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = severity;
-  diagnostic.error = error;
-  diagnostic.params = params;
-  diagnostic.param_count = param_count;
+  loom_diagnostic_t diagnostic = {
+      .severity = severity,
+      .error = error,
+      .params = params,
+      .param_count = param_count,
+  };
   if (source_text) {
     iree_string_view_t source = iree_make_cstring_view(source_text);
     diagnostic.origin.filename = IREE_SV("test.loom");
@@ -41,19 +58,7 @@ std::string FormatStructured(
     diagnostic.origin.end_column = column + (uint32_t)(end - start);
   }
 
-  iree_string_builder_t builder;
-  iree_string_builder_initialize(iree_allocator_system(), &builder);
-  loom_output_stream_t stream;
-  loom_output_stream_for_builder(&builder, &stream);
-  iree_status_t status = loom_diagnostic_format(&diagnostic, &stream);
-  std::string result;
-  if (iree_status_is_ok(status)) {
-    result = std::string(iree_string_builder_buffer(&builder),
-                         iree_string_builder_size(&builder));
-  }
-  IREE_EXPECT_OK(status);
-  iree_string_builder_deinitialize(&builder);
-  return result;
+  return FormatDiagnostic(&diagnostic);
 }
 
 //===----------------------------------------------------------------------===//
@@ -116,12 +121,13 @@ TEST(Diagnostic, OmittedHighlightsFormatAsNote) {
   loom_diagnostic_param_t params[] = {
       loom_param_string(IREE_SV("x")),
   };
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1);
-  diagnostic.params = params;
-  diagnostic.param_count = IREE_ARRAYSIZE(params);
-  diagnostic.highlight_omitted_count = 3;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+      .highlight_omitted_count = 3,
+  };
   diagnostic.origin.filename = IREE_SV("test.loom");
   diagnostic.origin.source = IREE_SV("%x = test.produce : i32");
   diagnostic.origin.start = 0;
@@ -202,11 +208,12 @@ TEST(Diagnostic, NoSource) {
       loom_param_string(IREE_SV("missing")),
   };
 
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1);
-  diagnostic.params = params;
-  diagnostic.param_count = IREE_ARRAYSIZE(params);
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+  };
   diagnostic.origin.filename = IREE_SV("test.loom");
   diagnostic.origin.source = iree_string_view_empty();
 
@@ -225,6 +232,74 @@ TEST(Diagnostic, NoSource) {
   EXPECT_EQ(output.find(" | "), std::string::npos);
 }
 
+TEST(Diagnostic, LocationsDoNotRequireSourceText) {
+  loom_diagnostic_param_t params[] = {loom_param_string(IREE_SV("x"))};
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+  };
+  diagnostic.origin.provenance = LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE;
+  diagnostic.origin.filename = IREE_SV("kernel.cxx");
+  diagnostic.origin.start_line = 7;
+  diagnostic.origin.start_column = 12;
+  loom_diagnostic_related_location_t related = {
+      .label = IREE_SV("declared here"),
+      .source_location = diagnostic.origin,
+  };
+  related.source_location.filename = IREE_SV("header.h");
+  diagnostic.related_locations = &related;
+  diagnostic.related_location_count = 1;
+  auto output = FormatDiagnostic(&diagnostic);
+  EXPECT_EQ(output.find("kernel.cxx:7:12: error [PARSE/001]"), 0u);
+  EXPECT_NE(output.find("  = note[declared here]: header.h:7:12\n"),
+            std::string::npos);
+  EXPECT_EQ(output.find(" | "), std::string::npos);
+  EXPECT_EQ(output.find('^'), std::string::npos);
+
+  diagnostic.origin.start_column = 0;
+  EXPECT_EQ(FormatDiagnostic(&diagnostic).find("kernel.cxx:7: error"), 0u);
+  diagnostic.origin.start_line = 0;
+  EXPECT_EQ(FormatDiagnostic(&diagnostic).find("kernel.cxx: error"), 0u);
+  // Exact empty snapshots and positions at EOF still have a location header.
+  diagnostic.origin.provenance = LOOM_SOURCE_PROVENANCE_EXACT_SOURCE;
+  diagnostic.origin.start_line = 1;
+  diagnostic.origin.start_column = 1;
+  EXPECT_EQ(FormatDiagnostic(&diagnostic).find("kernel.cxx:1:1: error"), 0u);
+  diagnostic.origin.source = IREE_SV("x");
+  diagnostic.origin.start = diagnostic.origin.end = 1;
+  diagnostic.origin.start_column = 2;
+  output = FormatDiagnostic(&diagnostic);
+  EXPECT_EQ(output.find("kernel.cxx:1:2: error"), 0u);
+  EXPECT_EQ(output.find(" | "), std::string::npos);
+}
+
+TEST(Diagnostic, PrintedIrIsSeparateFromOriginalLocation) {
+  loom_diagnostic_param_t params[] = {loom_param_string(IREE_SV("x"))};
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+  };
+  diagnostic.origin.provenance = LOOM_SOURCE_PROVENANCE_PRINTED_IR_FALLBACK;
+  diagnostic.origin.filename = IREE_SV("<verifier>");
+  diagnostic.origin.source = IREE_SV("test.use %x : i32");
+  diagnostic.origin.end = diagnostic.origin.source.size;
+  diagnostic.origin.start_line = diagnostic.origin.start_column = 1;
+  diagnostic.source_location.provenance =
+      LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE;
+  diagnostic.source_location.filename = IREE_SV("kernel.cxx");
+  diagnostic.source_location.start_line = 7;
+  diagnostic.source_location.start_column = 12;
+  auto output = FormatDiagnostic(&diagnostic);
+  EXPECT_EQ(output.find("kernel.cxx:7:12: error [PARSE/001]"), 0u);
+  EXPECT_NE(output.find("  = note: current IR\n 1 | test.use %x : i32\n"),
+            std::string::npos);
+  EXPECT_NE(output.find('^'), std::string::npos);
+}
+
 TEST(Diagnostic, RelatedLocationsFormatAsNotes) {
   const char* source_text =
       "%next = test.invoke @callee(%arg) : (f32) -> (%arg as f32)\n"
@@ -237,19 +312,19 @@ TEST(Diagnostic, RelatedLocationsFormatAsNotes) {
       (iree_host_size_t)(consume_text - source_text);
   iree_host_size_t consume_length = strcspn(consume_text, "\n");
   loom_diagnostic_related_location_t related_locations[] = {{
-      /*.label=*/IREE_SV("consumed here"),
-      /*.source_location=*/
-      {
-          /*.provenance=*/LOOM_SOURCE_PROVENANCE_EXACT_SOURCE,
-          /*.filename=*/IREE_SV("test.loom"),
-          /*.source=*/source,
-          /*.start=*/consume_start,
-          /*.end=*/consume_start + consume_length,
-          /*.start_line=*/1,
-          /*.start_column=*/1,
-          /*.end_line=*/1,
-          /*.end_column=*/1 + (uint32_t)consume_length,
-      },
+      .label = IREE_SV("consumed here"),
+      .source_location =
+          {
+              .provenance = LOOM_SOURCE_PROVENANCE_EXACT_SOURCE,
+              .filename = IREE_SV("test.loom"),
+              .source = source,
+              .start = consume_start,
+              .end = consume_start + consume_length,
+              .start_line = 1,
+              .start_column = 1,
+              .end_line = 1,
+              .end_column = 1 + (uint32_t)consume_length,
+          },
   }};
 
   const char* use_text = strstr(source_text, "test.use %arg : f32");
@@ -260,24 +335,26 @@ TEST(Diagnostic, RelatedLocationsFormatAsNotes) {
       loom_param_string(IREE_SV("arg")),
       loom_param_string(IREE_SV("test.invoke")),
   };
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_DOMINANCE, 2);
-  diagnostic.params = params;
-  diagnostic.param_count = IREE_ARRAYSIZE(params);
-  diagnostic.origin = {
-      /*.provenance=*/LOOM_SOURCE_PROVENANCE_EXACT_SOURCE,
-      /*.filename=*/IREE_SV("test.loom"),
-      /*.source=*/source,
-      /*.start=*/use_start,
-      /*.end=*/use_start + use_length,
-      /*.start_line=*/2,
-      /*.start_column=*/1,
-      /*.end_line=*/2,
-      /*.end_column=*/1 + (uint32_t)use_length,
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_DOMINANCE, 2),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+      .origin =
+          {
+              .provenance = LOOM_SOURCE_PROVENANCE_EXACT_SOURCE,
+              .filename = IREE_SV("test.loom"),
+              .source = source,
+              .start = use_start,
+              .end = use_start + use_length,
+              .start_line = 2,
+              .start_column = 1,
+              .end_line = 2,
+              .end_column = 1 + (uint32_t)use_length,
+          },
+      .related_locations = related_locations,
+      .related_location_count = IREE_ARRAYSIZE(related_locations),
   };
-  diagnostic.related_locations = related_locations;
-  diagnostic.related_location_count = IREE_ARRAYSIZE(related_locations);
 
   iree_string_builder_t builder;
   iree_string_builder_initialize(iree_allocator_system(), &builder);
@@ -307,12 +384,13 @@ TEST(Diagnostic, OmittedRelatedLocationsFormatAsNote) {
       loom_param_string(IREE_SV("arg")),
       loom_param_string(IREE_SV("test.invoke")),
   };
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_DOMINANCE, 2);
-  diagnostic.params = params;
-  diagnostic.param_count = IREE_ARRAYSIZE(params);
-  diagnostic.related_location_omitted_count = 3;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_DOMINANCE, 2),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+      .related_location_omitted_count = 3,
+  };
 
   iree_string_builder_t builder;
   iree_string_builder_initialize(iree_allocator_system(), &builder);
@@ -344,12 +422,13 @@ TEST(Diagnostic, StructuredErrorCodeInOutput) {
       loom_param_type(f32_type),
   };
 
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_TYPE, 1);
-  diagnostic.params = params;
-  diagnostic.param_count = 4;
-  diagnostic.emitter = LOOM_EMITTER_VERIFIER;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_TYPE, 1),
+      .params = params,
+      .param_count = 4,
+      .emitter = LOOM_EMITTER_VERIFIER,
+  };
 
   iree_string_builder_t builder;
   iree_string_builder_initialize(iree_allocator_system(), &builder);
@@ -378,12 +457,13 @@ TEST(Diagnostic, StructuredWithSourceRange) {
       loom_param_u32(2),
   };
 
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_STRUCTURE, 1);
-  diagnostic.params = params;
-  diagnostic.param_count = 3;
-  diagnostic.emitter = LOOM_EMITTER_VERIFIER;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_STRUCTURE, 1),
+      .params = params,
+      .param_count = 3,
+      .emitter = LOOM_EMITTER_VERIFIER,
+  };
   diagnostic.origin.filename = IREE_SV("test.loom");
   diagnostic.origin.source = iree_make_cstring_view(src);
   diagnostic.origin.start = 5;
@@ -420,11 +500,12 @@ TEST(Diagnostic, NoFixHintForNullTemplate) {
       loom_param_u32(1),
   };
 
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_STRUCTURE, 2);
-  diagnostic.params = params;
-  diagnostic.param_count = 3;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_STRUCTURE, 2),
+      .params = params,
+      .param_count = 3,
+  };
 
   iree_string_builder_t builder;
   iree_string_builder_initialize(iree_allocator_system(), &builder);
@@ -480,21 +561,23 @@ TEST(Diagnostic, SinkCollects) {
   loom_diagnostic_param_t params1[] = {
       loom_param_string(IREE_SV("x")),
   };
-  loom_diagnostic_t d1 = {};
-  d1.severity = LOOM_DIAGNOSTIC_ERROR;
-  d1.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1);
-  d1.params = params1;
-  d1.param_count = IREE_ARRAYSIZE(params1);
+  loom_diagnostic_t d1 = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params1,
+      .param_count = IREE_ARRAYSIZE(params1),
+  };
   IREE_ASSERT_OK(loom_diagnostic_emit(&sink, &d1));
 
   loom_diagnostic_param_t params2[] = {
       loom_param_string(IREE_SV("y")),
   };
-  loom_diagnostic_t d2 = {};
-  d2.severity = LOOM_DIAGNOSTIC_WARNING;
-  d2.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1);
-  d2.params = params2;
-  d2.param_count = IREE_ARRAYSIZE(params2);
+  loom_diagnostic_t d2 = {
+      .severity = LOOM_DIAGNOSTIC_WARNING,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params2,
+      .param_count = IREE_ARRAYSIZE(params2),
+  };
   IREE_ASSERT_OK(loom_diagnostic_emit(&sink, &d2));
 
   EXPECT_EQ(collected.size(), 2u);
@@ -511,11 +594,12 @@ TEST(Diagnostic, NullSinkDoesNotCrash) {
   loom_diagnostic_param_t params[] = {
       loom_param_string(IREE_SV("dropped")),
   };
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1);
-  diagnostic.params = params;
-  diagnostic.param_count = IREE_ARRAYSIZE(params);
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 1),
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+  };
   IREE_ASSERT_OK(loom_diagnostic_emit(&null_sink, &diagnostic));
   IREE_ASSERT_OK(loom_diagnostic_emit(NULL, &diagnostic));
 }

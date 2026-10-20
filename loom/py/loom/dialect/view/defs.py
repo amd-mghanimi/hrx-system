@@ -25,6 +25,7 @@ from loom.dsl import (
     ATTR_TYPE_ENUM,
     ATTR_TYPE_FLAGS,
     ATTR_TYPE_I64_ARRAY,
+    BYTE_PATTERN_SCALAR,
     FACT_IDENTITY,
     HINT,
     INDEX,
@@ -32,6 +33,7 @@ from loom.dsl import (
     PURE,
     REFINABLE_RESULT_TYPE_REFS,
     SCALAR,
+    VALUE_ALIAS,
     VIEW,
     AttrDef,
     CachePolicyInterface,
@@ -39,7 +41,6 @@ from loom.dsl import (
     Dialect,
     EnumCase,
     EnumDef,
-    HasBitwiseScalar,
     MemoryAccessInterface,
     Op,
     Operand,
@@ -51,6 +52,7 @@ from loom.dsl import (
     SameElementType,
     SameEncoding,
     SameType,
+    TotalBitCountEqual,
     Writes,
 )
 
@@ -162,7 +164,7 @@ view_subview = Op(
         Operand("source", VIEW, doc="Source view."),
         Operand("offsets", INDEX, doc="Dynamic logical offsets.", variadic=True),
     ],
-    results=[Result("result", VIEW, doc="Subview over the same storage root.")],
+    results=[Result("result", VIEW, doc="Subview over the same storage root.", reference_source="source")],
     attrs=[
         AttrDef(
             "static_offsets",
@@ -213,7 +215,7 @@ view_refine = Op(
     ],
     traits=[PURE, REFINABLE_RESULT_TYPE_REFS, FACT_IDENTITY],
     verify="loom_view_refine_verify",
-    facts="loom_view_refine_facts",
+    facts="loom_view_reinterpret_facts",
     type_transfer="loom_view_refine_type_transfer",
     format=[
         Ref("source"),
@@ -269,6 +271,7 @@ view_load = Op(
         "%x = view.load %view[%row, %col] : view<[%M]x[%N]xf32, %layout> -> f32",
         "%flag = view.load<volatile> %mailbox[%index] : view<16xi32> -> i32",
     ],
+    eager_execution_cost=0,
 )
 
 view_store = Op(
@@ -310,6 +313,7 @@ view_store = Op(
         "view.store %x, %view[%row, %col] : f32, view<[%M]x[%N]xf32, %layout>",
         "view.store<volatile> %flag, %mailbox[%index] : i32, view<16xi32>",
     ],
+    eager_execution_cost=0,
 )
 
 # ============================================================================
@@ -381,7 +385,7 @@ view_atomic_reduce = Op(
         "lowering."
     ),
     operands=[
-        Operand("value", SCALAR, doc="Scalar contribution."),
+        Operand("value", BYTE_PATTERN_SCALAR, doc="Fixed-width byte-addressable scalar contribution."),
         Operand("view", VIEW, doc="Typed destination view."),
         Operand("indices", INDEX, doc="Dynamic logical element indices.", variadic=True),
     ],
@@ -413,7 +417,7 @@ view_atomic_rmw = Op(
     group=view_ops,
     doc=("Atomically read one scalar view element, combine it with a scalar update value, write the combined value back, and return the old value observed by that atomic operation."),
     operands=[
-        Operand("value", SCALAR, doc="Scalar update value."),
+        Operand("value", BYTE_PATTERN_SCALAR, doc="Fixed-width byte-addressable scalar update value."),
         Operand("view", VIEW, doc="Typed destination view."),
         Operand("indices", INDEX, doc="Dynamic logical element indices.", variadic=True),
     ],
@@ -427,6 +431,7 @@ view_atomic_rmw = Op(
     contracts=[ContractFamily.MEMORY_ATOMIC],
     interfaces=[CachePolicyInterface(), _atomic_memory_access_interface(value="value")],
     verify="loom_view_atomic_rmw_verify",
+    facts="loom_view_atomic_observation_facts",
     format=[
         TemplateParamFlags("kind", "memory_flags"),
         Ref("value"),
@@ -456,15 +461,14 @@ view_atomic_cmpxchg = Op(
         "accepted element type."
     ),
     operands=[
-        Operand("expected", SCALAR, doc="Scalar value compared against memory."),
-        Operand("replacement", SCALAR, doc="Scalar value written on success."),
+        Operand("expected", BYTE_PATTERN_SCALAR, doc="Fixed-width byte-addressable scalar compared against memory."),
+        Operand("replacement", SCALAR, doc="Matching scalar value written on success."),
         Operand("view", VIEW, doc="Typed destination view."),
         Operand("indices", INDEX, doc="Dynamic logical element indices.", variadic=True),
     ],
     results=[Result("old", SCALAR, doc="Old memory value observed by the atomic operation.")],
     attrs=_atomic_cmpxchg_memory_attrs(),
     constraints=[
-        HasBitwiseScalar("expected"),
         SameElementType("expected", "replacement", "view", "old"),
         SameType("expected", "replacement", "old"),
     ],
@@ -481,6 +485,7 @@ view_atomic_cmpxchg = Op(
         ),
     ],
     verify="loom_view_atomic_cmpxchg_verify",
+    facts="loom_view_atomic_observation_facts",
     format=[
         Ref("expected"),
         COMMA,
@@ -515,7 +520,7 @@ view_prefetch = Op(
         "explicit hint-stripping pass removes it."
     ),
     operands=[
-        Operand("view", VIEW, doc="Typed view whose address should be prefetched."),
+        Operand("view", VIEW, doc="Typed view whose address should be prefetched.", observes_reference=True),
         Operand("indices", INDEX, doc="Dynamic logical origin indices.", variadic=True),
     ],
     attrs=[
@@ -568,7 +573,7 @@ view_atomic_load = Op(
         Operand("view", VIEW, doc="Typed source view."),
         Operand("indices", INDEX, doc="Dynamic logical element indices.", variadic=True),
     ],
-    results=[Result("result", SCALAR, doc="Scalar value observed by the atomic load.")],
+    results=[Result("result", BYTE_PATTERN_SCALAR, doc="Fixed-width byte-addressable scalar observed by the atomic load.")],
     attrs=_atomic_load_store_attrs(AtomicLoadOrdering),
     constraints=[SameElementType("view", "result")],
     traits=[OBSERVABLE_EFFECT],
@@ -577,10 +582,12 @@ view_atomic_load = Op(
     interfaces=[CachePolicyInterface(), _memory_access_interface(atomic_ordering="ordering", atomic_scope="scope")],
     effective_traits="loom_view_atomic_load_effective_traits",
     verify="loom_view_atomic_load_verify",
+    facts="loom_view_atomic_observation_facts",
     format=[Ref("view"), IndexList("indices", "static_indices"), AttrDict(), COLON, TypeOf("view"), ARROW, ResultType("result")],
     examples=[
         "%generation = view.atomic.load %progress[0] {ordering = acquire, scope = system} : view<1xi32> -> i32",
     ],
+    eager_execution_cost=0,
 )
 
 view_atomic_store = Op(
@@ -593,7 +600,7 @@ view_atomic_store = Op(
         "width and atomicity at the requested scope without an exchange."
     ),
     operands=[
-        Operand("value", SCALAR, doc="Scalar value to publish."),
+        Operand("value", BYTE_PATTERN_SCALAR, doc="Fixed-width byte-addressable scalar to publish."),
         Operand("view", VIEW, doc="Typed destination view."),
         Operand("indices", INDEX, doc="Dynamic logical element indices.", variadic=True),
     ],
@@ -608,6 +615,37 @@ view_atomic_store = Op(
     format=[Ref("value"), COMMA, Ref("view"), IndexList("indices", "static_indices"), AttrDict(), COLON, TypeOf("value"), COMMA, TypeOf("view")],
     examples=[
         "view.atomic.store %generation, %progress[0] {ordering = release, scope = system} : i32, view<1xi32>",
+    ],
+    eager_execution_cost=0,
+)
+
+# ============================================================================
+# view.bitcast — zero-copy storage reinterpretation
+# ============================================================================
+
+view_bitcast = Op(
+    name="view.bitcast",
+    group=view_ops,
+    doc=(
+        "Reinterpret a dense contiguous byte span with another view type. "
+        "Source and result must have no encoding, byte-addressable scalar "
+        "elements, and provably equal total bit counts. Shapes may differ, "
+        "including common SSA dimension factors. The storage root, byte "
+        "origin, memory space, access rights, and borrowed lifetime are "
+        "unchanged; this operation allocates, copies, and synchronizes nothing. "
+        "Element accesses use the target's memory byte order. Result alignment "
+        "qualifiers govern executed accesses and establish no address facts."
+    ),
+    operands=[Operand("source", VIEW, doc="Dense source view to reinterpret.")],
+    results=[Result("result", VIEW, doc="Reinterpreted alias of the same byte span.")],
+    constraints=[TotalBitCountEqual("source", "result")],
+    traits=[PURE, REFINABLE_RESULT_TYPE_REFS, VALUE_ALIAS],
+    verify="loom_view_bitcast_verify",
+    facts="loom_view_reinterpret_facts",
+    format=[Ref("source"), COLON, TypeOf("source"), ARROW, ResultType("result")],
+    examples=[
+        "%bytes = view.bitcast %words : view<7168xi32> -> view<28672xi8>",
+        "%bytes = view.bitcast %words : view<[%count]xi32> -> view<[%count]x4xi8>",
     ],
 )
 
@@ -626,4 +664,5 @@ ALL_VIEW_OPS: tuple[Op, ...] = (
     view_prefetch,
     view_atomic_load,
     view_atomic_store,
+    view_bitcast,
 )

@@ -35,6 +35,7 @@ from loom.format.bytecode.op_decls import (
 from loom.format.bytecode.symbol_references import SymbolReferenceProjectionBuilder
 from loom.ir import (
     ATTR_AGGREGATE_MAX_NESTING_DEPTH,
+    PREDICATE_KINDS,
     REGION_SOURCE_FLAG_MASK,
     Block,
     BufferType,
@@ -47,6 +48,7 @@ from loom.ir import (
     FileLocation,
     FunctionType,
     FusedLocation,
+    GroupType,
     Module,
     NoneType,
     OpaqueLocation,
@@ -65,6 +67,7 @@ from loom.ir import (
     SignedEnumSetAttr,
     StaticDim,
     StorageType,
+    StringArrayAttr,
     Symbol,
     SymbolKind,
     SymbolName,
@@ -89,6 +92,7 @@ _IR_TYPE_CLASSES = (
     ParameterizedType,
     EncodingType,
     PoolType,
+    GroupType,
     NoneType,
 )
 
@@ -157,6 +161,7 @@ ATTR_KIND_PARAMETERIZED_ARRAY = 15
 ATTR_KIND_SIGNED_ENUM_SET = 16
 ATTR_KIND_SYMBOL_ARRAY = 17
 ATTR_KIND_SYMBOL_SET = 18
+ATTR_KIND_STRING_ARRAY = 19
 
 # Type kind bytes. These must match loom_bytecode_type_kind_e, not just the
 # current Python enum spelling.
@@ -175,6 +180,7 @@ BYTECODE_TYPE_KIND_BY_IR_KIND: dict[TypeKind, int] = {
     TypeKind.REGISTER: 12,
     TypeKind.STORAGE: 13,
     TypeKind.PARAMETERIZED: 14,
+    TypeKind.GROUP: 15,
 }
 
 BYTECODE_IR_KIND_BY_TYPE_KIND: dict[int, TypeKind] = {
@@ -183,7 +189,7 @@ BYTECODE_IR_KIND_BY_TYPE_KIND: dict[int, TypeKind] = {
 
 # File magic and version.
 MAGIC = b"LOOM"
-FORMAT_VERSION = 38
+FORMAT_VERSION = 42
 PRODUCER = "loom-py"
 
 SYMBOL_INTERFACE_FLAG_MASK = (1 << 14) - 1
@@ -520,7 +526,7 @@ class BytecodeWriter:
         }
         func_like = func_like_interface_for_op(self._op_decls_by_name, op.name)
         if func_like is not None:
-            for field_name in ("visibility", "cc", "purity", "predicates"):
+            for field_name in ("visibility", "cc", "effect_contract", "predicates"):
                 attr_name = getattr(func_like, field_name, None)
                 if attr_name is not None:
                     keys.add(attr_name)
@@ -812,7 +818,14 @@ class BytecodeWriter:
     ) -> Iterator[Any]:
         """Intern strings referenced by attribute values."""
         attr_type = getattr(attr_def, "attr_type", None)
-        if isinstance(value, SymbolNameArray):
+        if isinstance(value, StringArrayAttr):
+            if attr_type not in (None, "any", "string_array"):
+                raise ValueError(
+                    "string arrays require a string-array or generic field"
+                )
+            for string in value:
+                self._ctx.intern_string(string)
+        elif isinstance(value, SymbolNameArray):
             if attr_type != "symbol_array":
                 raise ValueError("symbol arrays require a descriptor-backed field")
             for name in value:
@@ -1083,22 +1096,29 @@ class BytecodeWriter:
             case EncodingType(role=role):
                 buf.write_u8(BYTECODE_TYPE_KIND_BY_IR_KIND[TypeKind.ENCODING])
                 buf.write_u8(role.value)
-            case PoolType(block_size=block_size):
+            case PoolType():
                 buf.write_u8(BYTECODE_TYPE_KIND_BY_IR_KIND[TypeKind.POOL])
-                if values is not None:
-                    buf.write_varint(
-                        1
-                        + self._value_number_or_error(
-                            values, block_size.value_id, "pool dimension"
-                        )
-                    )
-                    return
-                match block_size:
-                    case StaticDim(size=size):
-                        buf.write_u8(0)  # static
-                        buf.write_varint(size)
-                    case DynamicDim():
-                        buf.write_u8(1)  # dynamic
+            case GroupType(dims=dims):
+                buf.write_u8(BYTECODE_TYPE_KIND_BY_IR_KIND[TypeKind.GROUP])
+                buf.write_u8(len(dims))
+                for dimension in dims:
+                    match dimension:
+                        case StaticDim(size=size):
+                            buf.write_u8(0)
+                            buf.write_varint(size)
+                        case DynamicDim(value_id=value_id):
+                            buf.write_u8(1)
+                            if values is not None:
+                                buf.write_varint(
+                                    0
+                                    if value_id is None
+                                    else 1
+                                    + self._value_number_or_error(
+                                        values,
+                                        value_id,
+                                        "group dimension",
+                                    )
+                                )
             case BufferType():
                 buf.write_u8(BYTECODE_TYPE_KIND_BY_IR_KIND[TypeKind.BUFFER])
             case _:
@@ -1689,6 +1709,21 @@ class BytecodeWriter:
             buf.write_varint(len(data))
             buf.write_bytes(data)
             return
+        if attr_type == "string_array" or isinstance(value, StringArrayAttr):
+            if not isinstance(value, StringArrayAttr):
+                raise TypeError(
+                    "string-array attribute value must be StringArrayAttr, "
+                    f"got {value!r}"
+                )
+            if attr_type not in (None, "any", "string_array"):
+                raise TypeError(
+                    f"string-array attribute does not match field kind {attr_type!r}"
+                )
+            buf.write_u8(ATTR_KIND_STRING_ARRAY)
+            buf.write_varint(len(value))
+            for string in value:
+                buf.write_varint(self._ctx.strings[string])
+            return
         if isinstance(value, SymbolName):
             buf.write_u8(ATTR_KIND_SYMBOL)
             buf.write_varint(self._ctx.strings[str(value)])
@@ -1868,20 +1903,7 @@ class BytecodeWriter:
 
     # Predicate kind name → byte mapping.
     _PRED_KIND_BYTES: ClassVar[dict[str, int]] = {
-        "eq": 0,
-        "ne": 1,
-        "lt": 2,
-        "le": 3,
-        "gt": 4,
-        "ge": 5,
-        "mul": 6,
-        "min": 7,
-        "max": 8,
-        "pow2": 9,
-        "range": 10,
-        "not_nan": 11,
-        "not_inf": 12,
-        "finite": 13,
+        name: kind for kind, name in enumerate(PREDICATE_KINDS)
     }
 
     def _write_predicate_list(
@@ -2060,9 +2082,14 @@ class BytecodeWriter:
                 }
                 cc_byte = _cc_to_byte.get(op.attributes.get("cc", ""), 0)
                 buf.write_u8(cc_byte)
-                _purity_to_byte: dict[str, int] = {"pure": 1}
-                purity_byte = _purity_to_byte.get(op.attributes.get("purity", ""), 0)
-                buf.write_u8(purity_byte)
+                _effect_contract_to_byte: dict[str, int] = {
+                    "pure": 1,
+                    "readonly": 2,
+                }
+                effect_contract_byte = _effect_contract_to_byte.get(
+                    op.attributes.get("effect_contract", ""), 0
+                )
+                buf.write_u8(effect_contract_byte)
 
                 workload_arg_ids = self._kernel_workload_arg_ids(op)
                 arg_ids = self._func_arg_ids(op)
@@ -2251,7 +2278,7 @@ class BytecodeWriter:
         for dependency in self._module_dependencies:
             buf.write_varint(dependency.source_root_region_index_plus_one)
             buf.write_varint(dependency.target_symbol_index)
-            buf.write_varint(dependency.target_interfaces)
+            buf.write_varint(dependency.contract)
         for dependencies, template_demands in zip(
             self._symbol_dependencies,
             self._symbol_template_demands,
@@ -2261,7 +2288,7 @@ class BytecodeWriter:
             for dependency in dependencies:
                 buf.write_varint(dependency.source_root_region_index_plus_one)
                 buf.write_varint(dependency.target_symbol_index)
-                buf.write_varint(dependency.target_interfaces)
+                buf.write_varint(dependency.contract)
             buf.write_varint(len(template_demands))
             for demand in template_demands:
                 buf.write_varint(demand.source_root_region_index_plus_one)

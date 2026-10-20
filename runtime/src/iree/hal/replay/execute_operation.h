@@ -13,9 +13,6 @@
 extern "C" {
 #endif  // __cplusplus
 
-#define IREE_HAL_REPLAY_INLINE_MEMORY_BARRIER_LIST_CAPACITY 8
-#define IREE_HAL_REPLAY_INLINE_BUFFER_BARRIER_LIST_CAPACITY 8
-
 // Executes a successful generic operation record.
 iree_status_t iree_hal_replay_executor_replay_operation(
     iree_hal_replay_executor_t* executor,

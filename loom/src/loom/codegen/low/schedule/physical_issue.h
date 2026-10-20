@@ -18,19 +18,42 @@ typedef struct loom_low_schedule_table_t loom_low_schedule_table_t;
 
 // A concrete instruction, including helpers that have no source descriptor
 // packet. Bindings describe the selected native instruction, not the semantic
-// register class of a source SSA value. The view is borrowed for one query.
+// register class of a source SSA value. Bindings are borrowed for one physical
+// issue group.
 typedef struct loom_low_physical_instruction_t {
   // Selected descriptor in the issue model's descriptor set.
   uint32_t descriptor_ordinal;
+  // Physical schedule-class row resolved for the selected descriptor set.
+  uint16_t schedule_class_row_id;
   // One physical-register ID per descriptor operand, including implicit state.
   const uint16_t* physical_registers;
 } loom_low_physical_instruction_t;
 
+// Forms one physical instruction and resolves its model row once before the
+// admission queries that consume it.
+static inline loom_low_physical_instruction_t
+loom_low_physical_instruction_make(
+    const loom_low_descriptor_set_t* descriptor_set,
+    uint32_t descriptor_ordinal, const uint16_t* physical_registers) {
+  const loom_low_descriptor_view_t* descriptor_view =
+      loom_low_descriptor_set_descriptor_view_at(descriptor_set,
+                                                 descriptor_ordinal);
+  return (loom_low_physical_instruction_t){
+      .descriptor_ordinal = descriptor_ordinal,
+      .schedule_class_row_id = loom_low_descriptor_set_schedule_class_row_id(
+          descriptor_set, descriptor_view->schedule_class_id),
+      .physical_registers = physical_registers,
+  };
+}
+
 // Final issue admission for software-timed register machines. Logical ordering
-// has already established semantic dependencies. This owner carries those
-// deadlines through native expansion, adds the hard dependencies exposed by
+// has already established semantic dependencies. This owner carries their
+// ordering through native expansion, adds the hard dependencies exposed by
 // concrete storage reuse and generated instructions, and admits the collective
-// resource demand of each physical issue group.
+// resource demand of each physical issue group. Physical access publication
+// remains in accepted semantic order while bounded native issue times may
+// precede earlier publications. Semantic dependencies retain nonnegative issue
+// order even when their event separations permit earlier consumers.
 // Targets without software-visible event rules retain their hardware hazard
 // protocol instead of inventing fixed issue delays.
 typedef struct loom_low_physical_issue_t {
@@ -58,11 +81,15 @@ iree_status_t loom_low_physical_issue_initialize(
 uint32_t loom_low_physical_issue_source_ready_cycle(
     const loom_low_physical_issue_t* issue, uint32_t scheduled_packet_index);
 
-// Forwards a source packet's actual issue and payload availability to its
+// Forwards a source packet's actual issue and semantic availability to its
 // same-block consumers through the retained outgoing groups. Call in source
 // schedule order, including coalesced packets without native instructions.
-// Repeat for successive native pieces of one source packet so its last piece
-// establishes consumer deadlines. Cross-block timing belongs to quiescence.
+// Repeat for successive native pieces of one source packet so all its pieces
+// establish consumer deadlines. Storage setup carries producer issue order;
+// the concrete register frontier owns payload timing for both coalesced aliases
+// and generated moves. Other semantic separations are floored to zero; physical
+// storage reuse uses the signed event frontier. Cross-block timing belongs to
+// quiescence.
 void loom_low_physical_issue_commit_source(loom_low_physical_issue_t* issue,
                                            uint32_t scheduled_packet_index,
                                            uint32_t issue_cycle);
@@ -79,13 +106,24 @@ uint32_t loom_low_physical_issue_register_ready_cycle(
     const loom_low_physical_issue_t* issue,
     const loom_low_physical_instruction_t* instructions, uint16_t count);
 
-// Places one intrinsically legal group at or after the proposed cycle and the
-// previously placed group. The caller retains the returned cycle in its native
-// plan; this function neither mutates IR nor grows storage or rescans the plan.
-iree_status_t loom_low_physical_issue_place(
+// Finds the earliest cycle at or after |proposed_cycle| admitted by physical
+// events and retained resource history for one intrinsically legal group.
+// No state is changed; native packet formation may reject a cycle's format
+// and query again before publishing the group's accesses.
+uint32_t loom_low_physical_issue_find_earliest_issue_cycle(
+    const loom_low_physical_issue_t* issue,
+    const loom_low_physical_instruction_t* instructions, uint16_t count,
+    uint32_t proposed_cycle);
+
+// Commits a group at its admitted cycle, with no intervening commit since the
+// query. Groups and their accesses are published in accepted semantic order,
+// not native issue order. Capacity and retained history are proved by
+// admission; the only possible failure is issue-cycle-domain overflow. The
+// caller owns native plan order, source fences and semantic readiness.
+iree_status_t loom_low_physical_issue_commit(
     loom_low_physical_issue_t* issue,
     const loom_low_physical_instruction_t* instructions, uint16_t count,
-    uint32_t proposed_cycle, uint32_t* out_cycle);
+    uint32_t issue_cycle);
 
 // Earliest successor-entry cycle that is independent of predecessor history.
 // A control-flow owner accounts for branch-delay cycles before enforcing this

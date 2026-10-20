@@ -17,9 +17,24 @@ loom_cc_library(
     srcs = ["combine_patterns.c"],
     hdrs = ["combine_patterns.h"],
     deps = [
+        ":narrowing",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/rewrite:pattern_registry",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/transforms/conversion:chain",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "narrowing",
+    srcs = ["narrowing.c"],
+    hdrs = ["narrowing.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/rewrite:rewriter",
         "//runtime/src/iree/base",
     ],
@@ -52,6 +67,8 @@ loom_cc_library(
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/target:legalization",
+        "//loom/src/loom/util:numeric_format",
+        "//loom/src/loom/util:predicate_facts",
         "//runtime/src/iree/base",
     ],
 )

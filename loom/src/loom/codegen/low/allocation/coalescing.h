@@ -25,15 +25,28 @@ extern "C" {
 #endif
 
 struct loom_low_schedule_table_t;
+struct loom_low_allocation_concat_affinity_t;
 
-// Commits a coalesced assignment whose location already fits its register class
-// capacity. Coalescing checks new ranges or inherits an existing same-class
-// assignment; the callback owns liveness, storage leases and active-set
-// updates.
+// Commits an optional coalesced assignment whose location already fits its
+// register class capacity and lifetime. The callback acquires that storage,
+// records required lease releases, and publishes attached leases and active-set
+// state using the retained storage lifetime.
 typedef iree_status_t (*loom_low_allocation_coalescing_append_assignment_fn_t)(
     void* user_data, const loom_low_allocation_assignment_t* assignment,
     const loom_value_id_t* ignored_storage_lease_value_ids,
-    uint16_t ignored_storage_lease_value_count, uint32_t* out_assignment_index);
+    uint16_t ignored_storage_lease_value_count);
+
+// Attempts to relocate the sole active assignment blocking |assignment|
+// without extending the ordinary fallback's register footprint. A true result
+// guarantees that |assignment| is legal; false leaves all assignments
+// unchanged.
+typedef iree_status_t (
+    *loom_low_allocation_coalescing_try_relocate_blocker_fn_t)(
+    void* user_data, const loom_liveness_interval_t* interval,
+    const loom_low_allocation_assignment_t* assignment,
+    const loom_value_id_t* ignored_value_ids, uint16_t ignored_value_count,
+    const loom_value_id_t* ignored_storage_lease_value_ids,
+    uint16_t ignored_storage_lease_value_count, bool* out_relocated);
 
 typedef iree_status_t (*loom_low_allocation_coalescing_consumption_query_fn_t)(
     void* user_data, const loom_region_t* region,
@@ -48,24 +61,23 @@ typedef struct loom_low_allocation_coalescing_context_t {
   const struct loom_low_schedule_table_t* schedule;
   // Function-local placement relations.
   const loom_low_placement_table_t* placement;
+  // Unique concat-chain spans retained after optional alias refinement.
+  const struct loom_low_allocation_concat_affinity_t* concat_affinity;
   // Target storage budgets, fixed values, and reserved ranges.
-  const loom_low_allocation_target_constraints_t* target_constraints;
+  loom_low_allocation_target_constraints_t* target_constraints;
   // Current assignment lookup table.
   const loom_low_allocation_assignment_map_t* assignment_map;
   // Concrete location search context at the current interval.
   loom_low_allocation_search_context_t* search_context;
   // Callback that commits one coalesced assignment.
   loom_low_allocation_coalescing_append_assignment_fn_t append_assignment;
+  // Callback that may relocate one independent blocker for a concat source.
+  loom_low_allocation_coalescing_try_relocate_blocker_fn_t try_relocate_blocker;
   // Callback that lazily returns the function consumption query.
   loom_low_allocation_coalescing_consumption_query_fn_t consumption_query;
   // Opaque caller state passed to callbacks.
   void* user_data;
 } loom_low_allocation_coalescing_context_t;
-
-// Attempts to assign a descriptor tied-result interval to its tied source.
-iree_status_t loom_low_allocation_coalescing_assign_tied_interval(
-    loom_low_allocation_coalescing_context_t* context,
-    const loom_liveness_interval_t* interval, bool* out_assigned);
 
 // Attempts to assign a low.concat source interval using already-known concat,
 // sibling-source, or branch-destination storage.
@@ -73,15 +85,10 @@ iree_status_t loom_low_allocation_coalescing_assign_concat_source_interval(
     loom_low_allocation_coalescing_context_t* context,
     const loom_liveness_interval_t* interval, bool* out_assigned);
 
-// Attempts to assign an interval using result-keyed structural placement
-// relations such as low.copy, low.slice, low.concat, and low.br destinations.
+// Attempts to assign an interval using structural placement relations. Direct
+// transfers prefer their source storage; composite and control-flow results
+// prefer an already assigned edge destination before their incoming storage.
 iree_status_t loom_low_allocation_coalescing_assign_structural_interval(
-    loom_low_allocation_coalescing_context_t* context,
-    const loom_liveness_interval_t* interval, bool* out_assigned);
-
-// Attempts to assign a structural edge source interval using already-assigned
-// destination storage.
-iree_status_t loom_low_allocation_coalescing_assign_edge_source_interval(
     loom_low_allocation_coalescing_context_t* context,
     const loom_liveness_interval_t* interval, bool* out_assigned);
 

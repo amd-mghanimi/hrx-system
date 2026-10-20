@@ -93,7 +93,7 @@ low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @float_
   %total = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<2xf32>>) -> (reg<spirv.id : vector<2xf32>>) do(%iteration: reg<spirv.id : index>, %accumulator: reg<spirv.id : vector<2xf32>>) {
     %add = OpFAdd.v2f32 %accumulator, %divisor
     %sub = OpFSub.v2f32 %add, %divisor
-    %mul = OpFMul.v2f32 %sub, %divisor
+    %mul = OpVectorTimesScalar.v2f32 %sub, %rhs
     %div = OpFDiv.v2f32 %mul, %divisor
     %rem = OpFRem.v2f32 %div, %divisor
     low.scf.yield %rem : reg<spirv.id : vector<2xf32>>
@@ -110,7 +110,7 @@ low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @float_
   %total = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<3xf32>>) -> (reg<spirv.id : vector<3xf32>>) do(%iteration: reg<spirv.id : index>, %accumulator: reg<spirv.id : vector<3xf32>>) {
     %add = OpFAdd.v3f32 %accumulator, %divisor
     %sub = OpFSub.v3f32 %add, %divisor
-    %mul = OpFMul.v3f32 %sub, %divisor
+    %mul = OpVectorTimesScalar.v3f32 %sub, %rhs
     %div = OpFDiv.v3f32 %mul, %divisor
     %rem = OpFRem.v3f32 %div, %divisor
     low.scf.yield %rem : reg<spirv.id : vector<3xf32>>
@@ -127,7 +127,7 @@ low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @float_
   %total = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<4xf32>>) -> (reg<spirv.id : vector<4xf32>>) do(%iteration: reg<spirv.id : index>, %accumulator: reg<spirv.id : vector<4xf32>>) {
     %add = OpFAdd.v4f32 %accumulator, %divisor
     %sub = OpFSub.v4f32 %add, %divisor
-    %mul = OpFMul.v4f32 %sub, %divisor
+    %mul = OpVectorTimesScalar.v4f32 %sub, %rhs
     %div = OpFDiv.v4f32 %mul, %divisor
     %rem = OpFRem.v4f32 %div, %divisor
     low.scf.yield %rem : reg<spirv.id : vector<4xf32>>

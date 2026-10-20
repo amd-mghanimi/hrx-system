@@ -14,6 +14,9 @@ loom_check_test_suite(
     test
   SRCS
     "callgraph_specialization.loom-test"
+    "source_motion.loom-test"
+    "source_tied_carriers.loom-test"
+    "strand_callgraph.loom-test"
 )
 
 loom_low_descriptor_cc_library(
@@ -49,6 +52,22 @@ loom_cc_library(
   DEPS
     iree::base
     loom::target::facts
+    loom::target::facts_builder
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    ir_provider
+  HDRS
+    "ir_provider.h"
+  SRCS
+    "ir_provider.c"
+  DEPS
+    ::target_record_table
+    loom::ops::test
+    loom::target::low_descriptor_registry_core_test
+    loom::target::provider
   PUBLIC
 )
 
@@ -63,6 +82,7 @@ loom_cc_library(
     ::lower
     ::target_record_table
     iree::base
+    loom::ops::test
     loom::pass::test::registry
     loom::target::low_descriptor_registry_core_test
     loom::target::provider

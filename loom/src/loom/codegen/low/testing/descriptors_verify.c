@@ -32,6 +32,25 @@ static iree_status_t loom_low_verify_span(uint32_t start, uint32_t count,
   return iree_ok_status();
 }
 
+static iree_status_t loom_low_verify_operand_has_register_part(
+    const loom_low_descriptor_set_t* descriptor_set,
+    const loom_low_operand_t* operand, bool* out_has_register_part) {
+  *out_has_register_part = false;
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      operand->reg_class_alt_start, operand->reg_class_alt_count,
+      descriptor_set->reg_class_alt_count, "reg_class_alts"));
+  for (uint16_t i = 0; i < operand->reg_class_alt_count; ++i) {
+    const loom_low_reg_class_alt_t* alternative =
+        &descriptor_set
+             ->reg_class_alts[operand->reg_class_alt_start + (uint32_t)i];
+    if (alternative->register_part_id != LOOM_LOW_REGISTER_PART_NONE) {
+      *out_has_register_part = true;
+      break;
+    }
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t loom_low_verify_known_flags(uint16_t flags,
                                                  uint16_t known_mask,
                                                  const char* table_name,
@@ -76,11 +95,12 @@ static iree_status_t loom_low_descriptor_set_string_impl(
                             "required low descriptor string reference is NONE");
   }
   if (!loom_string_pool_contains(&descriptor_set->string_pool, string_ref)) {
-    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                            "low descriptor string reference 0x%08" PRIx32
-                            " exceeds string pool length %" PRIu32,
-                            string_ref,
-                            descriptor_set->string_pool.data_length);
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "low descriptor string reference 0x%08" PRIx32
+        " exceeds string pool length %" PRIu32,
+        string_ref,
+        descriptor_set->string_pool.data_length[(string_ref >> 23) & 1]);
   }
   *out_string = loom_string_pool_get(&descriptor_set->string_pool, string_ref);
   return iree_ok_status();
@@ -161,25 +181,31 @@ static iree_status_t loom_low_verify_stable_id_field(uint64_t actual_id,
 static iree_status_t loom_low_verify_tables_present(
     const loom_low_descriptor_set_t* descriptor_set) {
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
-      descriptor_set->descriptors, descriptor_set->descriptor_count,
+      descriptor_set->descriptors, descriptor_set->descriptor_ordinal_count,
       "descriptors"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
-      descriptor_set->descriptor_views, descriptor_set->descriptor_count,
-      "descriptor_views"));
+      descriptor_set->descriptor_layouts,
+      descriptor_set->descriptor_layout_count, "descriptor_layouts"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
+      descriptor_set->descriptor_views,
+      descriptor_set->descriptor_ordinal_count, "descriptor_views"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->descriptor_refs, descriptor_set->descriptor_ref_count,
       "descriptor_refs"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->asm_forms, descriptor_set->asm_form_count, "asm_forms"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
-      descriptor_set->asm_operand_indices,
-      descriptor_set->asm_operand_index_count, "asm_operand_indices"));
+      descriptor_set->asm_layouts, descriptor_set->asm_layout_count,
+      "asm_layouts"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
+      descriptor_set->asm_tied_results, descriptor_set->asm_tied_result_count,
+      "asm_tied_results"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->asm_operand_segments,
       descriptor_set->asm_operand_segment_count, "asm_operand_segments"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
-      descriptor_set->asm_result_value_types,
-      descriptor_set->asm_result_value_type_count, "asm_result_value_types"));
+      descriptor_set->asm_result_types, descriptor_set->asm_result_type_count,
+      "asm_result_types"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->asm_immediates, descriptor_set->asm_immediate_count,
       "asm_immediates"));
@@ -188,6 +214,9 @@ static iree_status_t loom_low_verify_tables_present(
       "native_asm_values"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->operands, descriptor_set->operand_count, "operands"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
+      descriptor_set->operand_indices, descriptor_set->operand_index_count,
+      "operand_indices"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->immediates, descriptor_set->immediate_count,
       "immediates"));
@@ -237,8 +266,8 @@ static iree_status_t loom_low_verify_tables_present(
       descriptor_set->reg_class_alts, descriptor_set->reg_class_alt_count,
       "reg_class_alts"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
-      descriptor_set->schedule_classes, descriptor_set->schedule_class_count,
-      "schedule_classes"));
+      descriptor_set->schedule_classes,
+      descriptor_set->schedule_class_row_count, "schedule_classes"));
   IREE_RETURN_IF_ERROR(loom_low_verify_pointer_for_count(
       descriptor_set->issue_uses, descriptor_set->issue_use_count,
       "issue_uses"));
@@ -270,52 +299,43 @@ static iree_status_t loom_low_verify_tables_present(
 
 static iree_status_t loom_low_verify_descriptor_refs(
     const loom_low_descriptor_set_t* descriptor_set) {
-  if (descriptor_set->descriptor_ref_count !=
-      descriptor_set->descriptor_count) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "low descriptor reference map count %" PRIu32
-                            " does not match descriptor count %" PRIu32,
-                            descriptor_set->descriptor_ref_count,
-                            descriptor_set->descriptor_count);
+  if (descriptor_set->descriptor_ref_count < descriptor_set->descriptor_count) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "low descriptor reference map count %" PRIu32
+        " is smaller than available descriptor count %" PRIu32,
+        descriptor_set->descriptor_ref_count, descriptor_set->descriptor_count);
   }
-  iree_string_view_t previous_key = iree_string_view_empty();
+  uint64_t previous_id = LOOM_LOW_STABLE_ID_NONE;
+  uint32_t visible_ref_count = 0;
   for (uint32_t i = 0; i < descriptor_set->descriptor_ref_count; ++i) {
-    const loom_low_descriptor_ref_t* descriptor_ref =
-        &descriptor_set->descriptor_refs[i];
-    iree_string_view_t ref_key = iree_string_view_empty();
-    IREE_RETURN_IF_ERROR(loom_low_descriptor_set_string_impl(
-        descriptor_set, descriptor_ref->key_string_ref, /*allow_none=*/false,
-        &ref_key));
-    if (i > 0 && iree_string_view_compare(previous_key, ref_key) >= 0) {
-      return iree_make_status(
-          IREE_STATUS_INVALID_ARGUMENT,
-          "low descriptor reference map is not strictly sorted near '%.*s'",
-          (int)ref_key.size, ref_key.data);
-    }
-    if (descriptor_ref->descriptor_ordinal >=
-        descriptor_set->descriptor_count) {
+    const uint32_t ordinal = descriptor_set->descriptor_refs[i];
+    if (ordinal >= descriptor_set->descriptor_ref_count) {
       return iree_make_status(
           IREE_STATUS_OUT_OF_RANGE,
-          "low descriptor reference '%.*s' points at descriptor ordinal "
-          "%" PRIu32 " but only %" PRIu32 " descriptors exist",
-          (int)ref_key.size, ref_key.data, descriptor_ref->descriptor_ordinal,
-          descriptor_set->descriptor_count);
+          "low descriptor reference %" PRIu32
+          " points at descriptor ordinal "
+          "%" PRIu32 " but backing storage has only %" PRIu32 " descriptors",
+          i, ordinal, descriptor_set->descriptor_ref_count);
     }
-    iree_string_view_t descriptor_key = iree_string_view_empty();
-    IREE_RETURN_IF_ERROR(loom_low_descriptor_set_string_impl(
-        descriptor_set,
-        descriptor_set->descriptors[descriptor_ref->descriptor_ordinal]
-            .key_string_ref,
-        /*allow_none=*/false, &descriptor_key));
-    if (!iree_string_view_equal(ref_key, descriptor_key)) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "low descriptor reference key '%.*s' does not "
-                              "match descriptor %" PRIu32 " key '%.*s'",
-                              (int)ref_key.size, ref_key.data,
-                              descriptor_ref->descriptor_ordinal,
-                              (int)descriptor_key.size, descriptor_key.data);
+    const uint64_t stable_id = descriptor_set->descriptors[ordinal].stable_id;
+    if (stable_id <= previous_id) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low descriptor reference map is not strictly sorted by stable ID "
+          "at reference %" PRIu32,
+          i);
     }
-    previous_key = ref_key;
+    visible_ref_count +=
+        loom_low_descriptor_set_has_descriptor(descriptor_set, ordinal);
+    previous_id = stable_id;
+  }
+  if (visible_ref_count != descriptor_set->descriptor_count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low descriptor reference map exposes %" PRIu32
+                            " of %" PRIu32 " visible descriptors",
+                            visible_ref_count,
+                            descriptor_set->descriptor_count);
   }
   return iree_ok_status();
 }
@@ -350,70 +370,58 @@ static bool loom_low_operand_source_binding_is_valid(
   }
 }
 
-static iree_status_t loom_low_verify_asm_operand_indices(
-    const loom_low_descriptor_set_t* descriptor_set,
-    const loom_low_descriptor_t* descriptor, uint32_t descriptor_index,
-    uint32_t start, uint16_t count, bool expect_result) {
-  for (uint16_t i = 0; i < count; ++i) {
-    const uint16_t operand_index =
-        descriptor_set->asm_operand_indices[start + i];
-    if (operand_index >= descriptor->operand_count) {
-      return iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "low asm form for descriptor %" PRIu32 " references operand %" PRIu16
-          " but descriptor has only %" PRIu16 " operands",
-          descriptor_index, operand_index, descriptor->operand_count);
-    }
-    for (uint16_t j = 0; j < i; ++j) {
-      if (descriptor_set->asm_operand_indices[start + j] == operand_index) {
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "low asm form for descriptor %" PRIu32
-                                " references operand %" PRIu16
-                                " more than once",
-                                descriptor_index, operand_index);
-      }
-    }
-    const loom_low_operand_t* operand =
-        &descriptor_set->operands[descriptor->operand_start + operand_index];
-    if (expect_result) {
-      if (operand_index >= descriptor->result_count ||
-          operand->role != LOOM_LOW_OPERAND_ROLE_RESULT) {
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "low asm form for descriptor %" PRIu32
-                                " result operand %" PRIu16
-                                " does not name a descriptor result",
-                                descriptor_index, operand_index);
-      }
-    } else if (!loom_low_operand_role_is_packet_operand(operand->role)) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "low asm form for descriptor %" PRIu32
-                              " operand %" PRIu16
-                              " does not name an explicit packet operand",
-                              descriptor_index, operand_index);
-    }
-  }
-  return iree_ok_status();
-}
-
 static iree_status_t loom_low_verify_asm_immediates(
     const loom_low_descriptor_set_t* descriptor_set,
-    const loom_low_asm_form_t* asm_form,
+    const loom_low_asm_layout_t* layout,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
-  for (uint16_t i = 0; i < asm_form->immediate_count; ++i) {
-    const uint32_t row_index = asm_form->immediate_start + i;
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  if (layout->explicit_immediate_count > descriptor_layout->immediate_count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low asm form for descriptor %" PRIu32
+                            " has more explicit immediates than fields",
+                            descriptor_index);
+  }
+  bool has_named_immediates = false;
+  bool required_explicit_immediates = false;
+  bool required_implicit_immediates = false;
+  uint16_t previous_implicit_index = 0;
+  for (uint16_t i = 0; i < descriptor_layout->immediate_count; ++i) {
+    const uint32_t row_index = layout->immediate_start + i;
     const loom_low_asm_immediate_t* asm_immediate =
         &descriptor_set->asm_immediates[row_index];
-    if (asm_immediate->immediate_index >= descriptor->immediate_count) {
+    if (asm_immediate->immediate_index >= descriptor_layout->immediate_count) {
       return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                               "low asm form for descriptor %" PRIu32
                               " references immediate %" PRIu16
                               " but descriptor has only %" PRIu16 " immediates",
                               descriptor_index, asm_immediate->immediate_index,
-                              descriptor->immediate_count);
+                              descriptor_layout->immediate_count);
+    }
+    const loom_low_immediate_t* immediate =
+        &descriptor_set->immediates[descriptor_layout->immediate_start +
+                                    asm_immediate->immediate_index];
+    const bool has_default = iree_any_bit_set(
+        immediate->flags, LOOM_LOW_IMMEDIATE_FLAG_DEFAULT_VALUE);
+    if (i < layout->explicit_immediate_count) {
+      required_explicit_immediates |= !has_default;
+      has_named_immediates |=
+          asm_immediate->name_string_ref != LOOM_STRING_REF_NONE || has_default;
+    } else {
+      required_implicit_immediates |= !has_default;
+      if (asm_immediate->name_string_ref != LOOM_STRING_REF_NONE ||
+          (i > layout->explicit_immediate_count &&
+           asm_immediate->immediate_index <= previous_implicit_index)) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "low asm form for descriptor %" PRIu32
+                                " has a named or unordered implicit field",
+                                descriptor_index);
+      }
+      previous_implicit_index = asm_immediate->immediate_index;
     }
     for (uint16_t j = 0; j < i; ++j) {
       const loom_low_asm_immediate_t* previous =
-          &descriptor_set->asm_immediates[asm_form->immediate_start + j];
+          &descriptor_set->asm_immediates[layout->immediate_start + j];
       if (previous->immediate_index == asm_immediate->immediate_index) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
@@ -437,7 +445,7 @@ static iree_status_t loom_low_verify_asm_immediates(
     if (!iree_string_view_is_empty(name)) {
       for (uint16_t j = 0; j < i; ++j) {
         const loom_low_asm_immediate_t* previous =
-            &descriptor_set->asm_immediates[asm_form->immediate_start + j];
+            &descriptor_set->asm_immediates[layout->immediate_start + j];
         iree_string_view_t previous_name = iree_string_view_empty();
         IREE_RETURN_IF_ERROR(loom_low_descriptor_set_string_impl(
             descriptor_set, previous->name_string_ref, /*allow_none=*/true,
@@ -450,6 +458,21 @@ static iree_status_t loom_low_verify_asm_immediates(
         }
       }
     }
+  }
+  const bool requires_named_immediates =
+      required_implicit_immediates ||
+      (has_named_immediates && required_explicit_immediates);
+  if (has_named_immediates !=
+          iree_any_bit_set(layout->flags,
+                           LOOM_LOW_ASM_LAYOUT_FLAG_NAMED_IMMEDIATES) ||
+      requires_named_immediates !=
+          iree_any_bit_set(
+              layout->flags,
+              LOOM_LOW_ASM_LAYOUT_FLAG_REQUIRED_NAMED_IMMEDIATES)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low asm form for descriptor %" PRIu32
+                            " has inconsistent named-immediate syntax",
+                            descriptor_index);
   }
   return iree_ok_status();
 }
@@ -465,6 +488,7 @@ static bool loom_low_native_asm_value_kind_is_valid(
     case LOOM_LOW_NATIVE_ASM_VALUE_KIND_IMMEDIATE_TARGET_FORMAT:
     case LOOM_LOW_NATIVE_ASM_VALUE_KIND_REGISTER_PART:
     case LOOM_LOW_NATIVE_ASM_VALUE_KIND_MODIFIER_LITERAL:
+    case LOOM_LOW_NATIVE_ASM_VALUE_KIND_NEGATED_OPERAND:
       return true;
     default:
       return false;
@@ -473,10 +497,13 @@ static bool loom_low_native_asm_value_kind_is_valid(
 
 static iree_status_t loom_low_verify_native_asm_values(
     const loom_low_descriptor_set_t* descriptor_set,
-    const loom_low_asm_form_t* asm_form,
+    const loom_low_asm_layout_t* layout,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
-  for (uint16_t i = 0; i < asm_form->native_assembly_value_count; ++i) {
-    const uint32_t row_index = asm_form->native_assembly_value_start + i;
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  bool owns_immediate_syntax = false;
+  for (uint16_t i = 0; i < layout->native_assembly_value_count; ++i) {
+    const uint32_t row_index = layout->native_assembly_value_start + i;
     const loom_low_native_asm_value_t* value =
         &descriptor_set->native_asm_values[row_index];
     if (!loom_low_native_asm_value_kind_is_valid(value->kind)) {
@@ -519,8 +546,8 @@ static iree_status_t loom_low_verify_native_asm_values(
               " but descriptor has only %" PRIu16 " operands",
               descriptor_index, value->index, descriptor->operand_count);
         }
-        const loom_low_operand_t* operand =
-            &descriptor_set->operands[descriptor->operand_start + value->index];
+        const loom_low_operand_t* operand = loom_low_descriptor_operand(
+            descriptor_set, descriptor, value->index);
         if (value->index >= descriptor->result_count ||
             operand->role != LOOM_LOW_OPERAND_ROLE_RESULT) {
           return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -543,7 +570,8 @@ static iree_status_t loom_low_verify_native_asm_values(
         }
         break;
       }
-      case LOOM_LOW_NATIVE_ASM_VALUE_KIND_OPERAND: {
+      case LOOM_LOW_NATIVE_ASM_VALUE_KIND_OPERAND:
+      case LOOM_LOW_NATIVE_ASM_VALUE_KIND_NEGATED_OPERAND: {
         if (value->index >= descriptor->operand_count) {
           return iree_make_status(
               IREE_STATUS_OUT_OF_RANGE,
@@ -552,8 +580,8 @@ static iree_status_t loom_low_verify_native_asm_values(
               " but descriptor has only %" PRIu16 " operands",
               descriptor_index, value->index, descriptor->operand_count);
         }
-        const loom_low_operand_t* operand =
-            &descriptor_set->operands[descriptor->operand_start + value->index];
+        const loom_low_operand_t* operand = loom_low_descriptor_operand(
+            descriptor_set, descriptor, value->index);
         if (!loom_low_operand_role_is_packet_operand(operand->role)) {
           return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                   "low asm form for descriptor %" PRIu32
@@ -591,8 +619,8 @@ static iree_status_t loom_low_verify_native_asm_values(
               " but descriptor has only %" PRIu16 " operands",
               descriptor_index, value->index, descriptor->operand_count);
         }
-        const loom_low_operand_t* operand =
-            &descriptor_set->operands[descriptor->operand_start + value->index];
+        const loom_low_operand_t* operand = loom_low_descriptor_operand(
+            descriptor_set, descriptor, value->index);
         if (operand->role != LOOM_LOW_OPERAND_ROLE_RESULT &&
             !loom_low_operand_role_is_packet_operand(operand->role)) {
           return iree_make_status(
@@ -602,12 +630,29 @@ static iree_status_t loom_low_verify_native_asm_values(
               " does not name a result or explicit packet operand",
               descriptor_index, value->index);
         }
-        if (operand->register_part_id == LOOM_LOW_REGISTER_PART_NONE) {
+        bool has_register_part = false;
+        IREE_RETURN_IF_ERROR(loom_low_verify_operand_has_register_part(
+            descriptor_set, operand, &has_register_part));
+        if (!has_register_part) {
           return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                   "low asm form for descriptor %" PRIu32
                                   " native register-part operand %" PRIu16
                                   " names a full-register operand",
                                   descriptor_index, value->index);
+        }
+        for (uint16_t i = 0; i < operand->reg_class_alt_count; ++i) {
+          const loom_low_reg_class_alt_t* alternative =
+              &descriptor_set
+                   ->reg_class_alts[operand->reg_class_alt_start + (uint32_t)i];
+          if (!iree_any_bit_set(alternative->flags,
+                                LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE) &&
+              alternative->register_part_id == LOOM_LOW_REGISTER_PART_NONE) {
+            return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                    "low asm form for descriptor %" PRIu32
+                                    " native register-part operand %" PRIu16
+                                    " names a full-register alternative",
+                                    descriptor_index, value->index);
+          }
         }
         if (value->bit_width != 0 || value->target_format_id != 0) {
           return iree_make_status(
@@ -620,13 +665,15 @@ static iree_status_t loom_low_verify_native_asm_values(
         break;
       }
       case LOOM_LOW_NATIVE_ASM_VALUE_KIND_IMMEDIATE_I64:
-        if (value->index >= descriptor->immediate_count) {
+        owns_immediate_syntax = true;
+        if (value->index >= descriptor_layout->immediate_count) {
           return iree_make_status(
               IREE_STATUS_OUT_OF_RANGE,
               "low asm form for descriptor %" PRIu32
               " native immediate references immediate %" PRIu16
               " but descriptor has only %" PRIu16 " immediates",
-              descriptor_index, value->index, descriptor->immediate_count);
+              descriptor_index, value->index,
+              descriptor_layout->immediate_count);
         }
         if (value->bit_width != 0) {
           return iree_make_status(
@@ -644,13 +691,15 @@ static iree_status_t loom_low_verify_native_asm_values(
         }
         break;
       case LOOM_LOW_NATIVE_ASM_VALUE_KIND_IMMEDIATE_UNSIGNED_HEX:
-        if (value->index >= descriptor->immediate_count) {
+        owns_immediate_syntax = true;
+        if (value->index >= descriptor_layout->immediate_count) {
           return iree_make_status(
               IREE_STATUS_OUT_OF_RANGE,
               "low asm form for descriptor %" PRIu32
               " native immediate references immediate %" PRIu16
               " but descriptor has only %" PRIu16 " immediates",
-              descriptor_index, value->index, descriptor->immediate_count);
+              descriptor_index, value->index,
+              descriptor_layout->immediate_count);
         }
         if (value->bit_width == 0 || value->bit_width > 32) {
           return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -667,13 +716,15 @@ static iree_status_t loom_low_verify_native_asm_values(
         }
         break;
       case LOOM_LOW_NATIVE_ASM_VALUE_KIND_IMMEDIATE_TARGET_FORMAT:
-        if (value->index >= descriptor->immediate_count) {
+        owns_immediate_syntax = true;
+        if (value->index >= descriptor_layout->immediate_count) {
           return iree_make_status(
               IREE_STATUS_OUT_OF_RANGE,
               "low asm form for descriptor %" PRIu32
               " native immediate references immediate %" PRIu16
               " but descriptor has only %" PRIu16 " immediates",
-              descriptor_index, value->index, descriptor->immediate_count);
+              descriptor_index, value->index,
+              descriptor_layout->immediate_count);
         }
         if (value->target_format_id == 0) {
           return iree_make_status(
@@ -695,6 +746,14 @@ static iree_status_t loom_low_verify_native_asm_values(
         break;
     }
   }
+  if (owns_immediate_syntax !=
+      iree_any_bit_set(layout->flags,
+                       LOOM_LOW_ASM_LAYOUT_FLAG_NATIVE_IMMEDIATE_SYNTAX)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low asm form for descriptor %" PRIu32
+                            " has inconsistent native immediate syntax",
+                            descriptor_index);
+  }
   return iree_ok_status();
 }
 
@@ -712,86 +771,133 @@ static iree_status_t loom_low_verify_asm_form(
         descriptor_set, asm_form->native_assembly_mnemonic_string_ref,
         "asm_form.native_assembly_mnemonic", NULL));
   }
-  if (asm_form->descriptor_ordinal >= descriptor_set->descriptor_count) {
+  if (!loom_low_descriptor_set_has_descriptor(descriptor_set,
+                                              asm_form->descriptor_ordinal)) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "low asm form %" PRIu32
                             " references descriptor ordinal %" PRIu32
-                            " but only %" PRIu32 " descriptors exist",
-                            asm_form_index, asm_form->descriptor_ordinal,
-                            descriptor_set->descriptor_count);
+                            " not available in the descriptor set",
+                            asm_form_index, asm_form->descriptor_ordinal);
   }
   const loom_low_descriptor_t* descriptor =
       &descriptor_set->descriptors[asm_form->descriptor_ordinal];
-  if (descriptor->op_kind == LOOM_LOW_DESCRIPTOR_OP_KIND_CONST &&
-      (asm_form->result_operand_index_count != 1 ||
-       asm_form->operand_index_count != 0)) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  if (asm_form->layout_index >= descriptor_set->asm_layout_count) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "low asm form %" PRIu32
+                            " references an out-of-range layout",
+                            asm_form_index);
+  }
+  const loom_low_asm_layout_t* layout =
+      &descriptor_set->asm_layouts[asm_form->layout_index];
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      layout->tied_result_start, layout->tied_result_count,
+      descriptor_set->asm_tied_result_count, "asm_tied_results"));
+  const loom_low_asm_result_type_t* result_types = NULL;
+  uint16_t ownership_recipe_count = 0;
+  if (layout->result_type_start != LOOM_LOW_ASM_RESULT_TYPE_START_NONE) {
+    if (descriptor->result_count == 0) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low asm form %" PRIu32
+                              " declares result recipes but has no results",
+                              asm_form_index);
+    }
+    IREE_RETURN_IF_ERROR(loom_low_verify_span(
+        layout->result_type_start, descriptor->result_count,
+        descriptor_set->asm_result_type_count, "asm_result_types"));
+    result_types = descriptor_set->asm_result_types + layout->result_type_start;
+    bool has_recipe = false;
+    for (uint16_t i = 0; i < descriptor->result_count; ++i) {
+      const loom_low_asm_result_type_t* recipe = &result_types[i];
+      has_recipe |= recipe->kind != LOOM_LOW_ASM_RESULT_TYPE_KIND_NONE;
+      ownership_recipe_count +=
+          recipe->kind == LOOM_LOW_ASM_RESULT_TYPE_KIND_TIED_OPERAND;
+      if ((recipe->kind == LOOM_LOW_ASM_RESULT_TYPE_KIND_OPERAND ||
+           recipe->kind == LOOM_LOW_ASM_RESULT_TYPE_KIND_TIED_OPERAND) &&
+          recipe->operand_index >=
+              descriptor_layout->minimum_packet_operand_count) {
+        return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "low asm form %" PRIu32
+                                " result recipe references an absent input",
+                                asm_form_index);
+      }
+    }
+    if (!has_recipe) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low asm form %" PRIu32
+                              " result type span contains only absent rows",
+                              asm_form_index);
+    }
+  }
+  if (ownership_recipe_count != layout->tied_result_count) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "low asm form %" PRIu32
+        " ownership recipes disagree with default tie count",
+        asm_form_index);
+  }
+  uint16_t tied_result_count = 0;
+  for (uint16_t i = 0; i < descriptor_layout->constraint_count; ++i) {
+    const loom_low_constraint_t* constraint =
+        &descriptor_set->constraints[descriptor_layout->constraint_start + i];
+    if (constraint->kind != LOOM_LOW_CONSTRAINT_KIND_TIED &&
+        constraint->kind != LOOM_LOW_CONSTRAINT_KIND_PREFER_TIED &&
+        constraint->kind != LOOM_LOW_CONSTRAINT_KIND_DESTRUCTIVE) {
+      continue;
+    }
+    const uint16_t result_index = constraint->lhs_operand_index;
+    const loom_low_operand_t* operand = loom_low_descriptor_operand(
+        descriptor_set, descriptor, constraint->rhs_operand_index);
+    if (result_types == NULL ||
+        (result_types[result_index].kind !=
+             LOOM_LOW_ASM_RESULT_TYPE_KIND_OPERAND &&
+         result_types[result_index].kind !=
+             LOOM_LOW_ASM_RESULT_TYPE_KIND_TIED_OPERAND) ||
+        result_types[result_index].operand_index !=
+            operand->source_value_index) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low asm form %" PRIu32
+                              " result recipe disagrees with operand inference",
+                              asm_form_index);
+    }
+    if (constraint->kind != LOOM_LOW_CONSTRAINT_KIND_TIED &&
+        constraint->kind != LOOM_LOW_CONSTRAINT_KIND_PREFER_TIED) {
+      continue;
+    }
+    if (tied_result_count >= layout->tied_result_count) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low asm form %" PRIu32 " omits default ties",
+                              asm_form_index);
+    }
+    const loom_tied_result_t* tie =
+        &descriptor_set->asm_tied_results[layout->tied_result_start +
+                                          tied_result_count++];
+    if (tie->result_index != result_index ||
+        tie->operand_index != operand->source_value_index ||
+        tie->has_type_change ||
+        result_types[result_index].kind !=
+            LOOM_LOW_ASM_RESULT_TYPE_KIND_TIED_OPERAND) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low asm form %" PRIu32
+                              " has inconsistent default ties",
+                              asm_form_index);
+    }
+  }
+  if (tied_result_count != layout->tied_result_count) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "low.const asm form %" PRIu32
-                            " must expose exactly one result and no operands",
+                            "low asm form %" PRIu32 " has extra default ties",
                             asm_form_index);
   }
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      asm_form->result_operand_index_start,
-      asm_form->result_operand_index_count,
-      descriptor_set->asm_operand_index_count, "asm_operand_indices"));
-  if (asm_form->result_value_type_start !=
-      LOOM_LOW_ASM_RESULT_VALUE_TYPE_START_NONE) {
-    if (asm_form->result_operand_index_count == 0) {
-      return iree_make_status(
-          IREE_STATUS_INVALID_ARGUMENT,
-          "low asm form %" PRIu32
-          " declares exact result value types but has no results",
-          asm_form_index);
-    }
-    IREE_RETURN_IF_ERROR(loom_low_verify_span(
-        asm_form->result_value_type_start, asm_form->result_operand_index_count,
-        descriptor_set->asm_result_value_type_count, "asm_result_value_types"));
-    bool has_exact_value_type = false;
-    for (uint16_t i = 0; i < asm_form->result_operand_index_count; ++i) {
-      const loom_low_asm_result_value_type_t* value_type =
-          &descriptor_set
-               ->asm_result_value_types[asm_form->result_value_type_start + i];
-      if (value_type->kind == LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_NONE) {
-        continue;
-      }
-      has_exact_value_type = true;
-      const uint16_t result_operand_index =
-          descriptor_set
-              ->asm_operand_indices[asm_form->result_operand_index_start + i];
-      for (uint16_t j = 0; j < descriptor->constraint_count; ++j) {
-        const loom_low_constraint_t* constraint =
-            &descriptor_set->constraints[descriptor->constraint_start + j];
-        if (constraint->lhs_operand_index == result_operand_index &&
-            (constraint->kind == LOOM_LOW_CONSTRAINT_KIND_TIED ||
-             constraint->kind == LOOM_LOW_CONSTRAINT_KIND_DESTRUCTIVE)) {
-          return iree_make_status(
-              IREE_STATUS_INVALID_ARGUMENT,
-              "low asm form %" PRIu32 " result %" PRIu16
-              " has both an exact result value type and operand inference",
-              asm_form_index, i);
-        }
-      }
-    }
-    if (!has_exact_value_type) {
-      return iree_make_status(
-          IREE_STATUS_INVALID_ARGUMENT,
-          "low asm form %" PRIu32
-          " exact result value type span contains only absent rows",
-          asm_form_index);
-    }
-  }
-  IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      asm_form->operand_index_start, asm_form->operand_index_count,
-      descriptor_set->asm_operand_index_count, "asm_operand_indices"));
-  IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      asm_form->operand_segment_start, asm_form->operand_segment_count,
+      layout->operand_segment_start, layout->operand_segment_count,
       descriptor_set->asm_operand_segment_count, "asm_operand_segments"));
   uint32_t segmented_operand_count = 0;
   bool has_variadic_segment = false;
-  for (uint16_t i = 0; i < asm_form->operand_segment_count; ++i) {
+  for (uint16_t i = 0; i < layout->operand_segment_count; ++i) {
     const loom_low_asm_operand_segment_t* segment =
         &descriptor_set
-             ->asm_operand_segments[asm_form->operand_segment_start + i];
+             ->asm_operand_segments[layout->operand_segment_start + i];
     if (segment->delimiter < LOOM_LOW_ASM_OPERAND_SEGMENT_DELIMITER_ANGLE ||
         segment->delimiter > LOOM_LOW_ASM_OPERAND_SEGMENT_DELIMITER_PAREN) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -802,7 +908,7 @@ static iree_status_t loom_low_verify_asm_form(
     }
     IREE_RETURN_IF_ERROR(loom_low_verify_known_flags(
         segment->flags, LOOM_LOW_ASM_OPERAND_SEGMENT_FLAG_VARIADIC,
-        "asm operand segment", asm_form->operand_segment_start + i));
+        "asm operand segment", layout->operand_segment_start + i));
     if (segment->operand_count == 0) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                               "low asm form %" PRIu32
@@ -811,7 +917,7 @@ static iree_status_t loom_low_verify_asm_form(
     }
     if (iree_any_bit_set(segment->flags,
                          LOOM_LOW_ASM_OPERAND_SEGMENT_FLAG_VARIADIC)) {
-      if (has_variadic_segment || i != asm_form->operand_segment_count - 1) {
+      if (has_variadic_segment || i != layout->operand_segment_count - 1) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
             "low asm form %" PRIu32
@@ -822,64 +928,59 @@ static iree_status_t loom_low_verify_asm_form(
     }
     segmented_operand_count += segment->operand_count;
   }
-  if (asm_form->operand_segment_count != 0 &&
-      segmented_operand_count != asm_form->operand_index_count) {
+  const uint32_t schema_operand_count =
+      descriptor_layout->minimum_packet_operand_count +
+      loom_low_descriptor_has_variadic_operands(descriptor);
+  if (layout->operand_segment_count != 0 &&
+      segmented_operand_count != schema_operand_count) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "low asm form %" PRIu32 " operand segments cover %" PRIu32
-        " descriptor operands but the form contains %" PRIu16,
-        asm_form_index, segmented_operand_count, asm_form->operand_index_count);
+        " descriptor operands but the form contains %" PRIu32,
+        asm_form_index, segmented_operand_count, schema_operand_count);
   }
-  if (has_variadic_segment) {
-    const uint16_t descriptor_operand_index =
-        descriptor_set->asm_operand_indices[asm_form->operand_index_start +
-                                            asm_form->operand_index_count - 1];
-    const loom_low_operand_t* operand =
-        &descriptor_set
-             ->operands[descriptor->operand_start + descriptor_operand_index];
-    if (!iree_any_bit_set(operand->flags, LOOM_LOW_OPERAND_FLAG_VARIADIC)) {
-      return iree_make_status(
-          IREE_STATUS_INVALID_ARGUMENT,
-          "low asm form %" PRIu32
-          " marks a variadic segment whose final descriptor operand is fixed",
-          asm_form_index);
-    }
-  } else if (loom_low_descriptor_has_variadic_operands(descriptor)) {
+  if (has_variadic_segment !=
+      loom_low_descriptor_has_variadic_operands(descriptor)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low asm form %" PRIu32
-                            " does not segment its variadic descriptor operand",
+                            " variadic segment disagrees with descriptor",
                             asm_form_index);
   }
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      asm_form->immediate_start, asm_form->immediate_count,
+      layout->immediate_start, descriptor_layout->immediate_count,
       descriptor_set->asm_immediate_count, "asm_immediates"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_known_flags(
+      layout->flags,
+      LOOM_LOW_ASM_LAYOUT_FLAG_NAMED_IMMEDIATES |
+          LOOM_LOW_ASM_LAYOUT_FLAG_REQUIRED_NAMED_IMMEDIATES |
+          LOOM_LOW_ASM_LAYOUT_FLAG_NATIVE_IMMEDIATE_SYNTAX,
+      "asm_layouts", asm_form->layout_index));
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      asm_form->native_assembly_value_start,
-      asm_form->native_assembly_value_count,
+      layout->native_assembly_value_start, layout->native_assembly_value_count,
       descriptor_set->native_asm_value_count, "native_asm_values"));
-  IREE_RETURN_IF_ERROR(loom_low_verify_asm_operand_indices(
-      descriptor_set, descriptor, asm_form->descriptor_ordinal,
-      asm_form->result_operand_index_start,
-      asm_form->result_operand_index_count, /*expect_result=*/true));
-  IREE_RETURN_IF_ERROR(loom_low_verify_asm_operand_indices(
-      descriptor_set, descriptor, asm_form->descriptor_ordinal,
-      asm_form->operand_index_start, asm_form->operand_index_count,
-      /*expect_result=*/false));
   IREE_RETURN_IF_ERROR(loom_low_verify_asm_immediates(
-      descriptor_set, asm_form, descriptor, asm_form->descriptor_ordinal));
+      descriptor_set, layout, descriptor, asm_form->descriptor_ordinal));
   IREE_RETURN_IF_ERROR(loom_low_verify_native_asm_values(
-      descriptor_set, asm_form, descriptor, asm_form->descriptor_ordinal));
+      descriptor_set, layout, descriptor, asm_form->descriptor_ordinal));
   if (out_mnemonic != NULL) {
     *out_mnemonic = mnemonic;
   }
   return iree_ok_status();
 }
 
-static iree_status_t loom_low_verify_asm_result_value_type(
-    const loom_low_asm_result_value_type_t* value_type,
-    uint32_t value_type_index) {
+static iree_status_t loom_low_verify_asm_result_type(
+    const loom_low_asm_result_type_t* value_type, uint32_t value_type_index) {
   switch (value_type->kind) {
-    case LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_NONE:
+    case LOOM_LOW_ASM_RESULT_TYPE_KIND_OPERAND:
+    case LOOM_LOW_ASM_RESULT_TYPE_KIND_TIED_OPERAND:
+      if (value_type->element_type != LOOM_SCALAR_TYPE_NONE) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "operand-inferred low asm result type %" PRIu32
+                                " must not declare a semantic element type",
+                                value_type_index);
+      }
+      return iree_ok_status();
+    case LOOM_LOW_ASM_RESULT_TYPE_KIND_NONE:
       if (value_type->element_type != LOOM_SCALAR_TYPE_NONE ||
           value_type->vector_lane_count != 0) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -888,7 +989,7 @@ static iree_status_t loom_low_verify_asm_result_value_type(
                                 value_type_index);
       }
       return iree_ok_status();
-    case LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_SCALAR:
+    case LOOM_LOW_ASM_RESULT_TYPE_KIND_SCALAR:
       if (!loom_scalar_type_is_valid(value_type->element_type) ||
           value_type->vector_lane_count != 0) {
         return iree_make_status(
@@ -898,7 +999,7 @@ static iree_status_t loom_low_verify_asm_result_value_type(
             value_type_index);
       }
       return iree_ok_status();
-    case LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_VECTOR:
+    case LOOM_LOW_ASM_RESULT_TYPE_KIND_VECTOR:
       if (!loom_scalar_type_is_valid(value_type->element_type) ||
           value_type->vector_lane_count == 0) {
         return iree_make_status(
@@ -918,14 +1019,14 @@ static iree_status_t loom_low_verify_asm_result_value_type(
 
 static iree_status_t loom_low_verify_asm_forms(
     const loom_low_descriptor_set_t* descriptor_set) {
-  for (uint32_t i = 0; i < descriptor_set->asm_result_value_type_count; ++i) {
-    IREE_RETURN_IF_ERROR(loom_low_verify_asm_result_value_type(
-        &descriptor_set->asm_result_value_types[i], i));
+  for (uint32_t i = 0; i < descriptor_set->asm_result_type_count; ++i) {
+    IREE_RETURN_IF_ERROR(loom_low_verify_asm_result_type(
+        &descriptor_set->asm_result_types[i], i));
   }
   if (descriptor_set->asm_form_count == 0) {
-    if (descriptor_set->asm_operand_index_count != 0 ||
+    if (descriptor_set->asm_tied_result_count != 0 ||
         descriptor_set->asm_operand_segment_count != 0 ||
-        descriptor_set->asm_result_value_type_count != 0 ||
+        descriptor_set->asm_result_type_count != 0 ||
         descriptor_set->asm_immediate_count != 0 ||
         descriptor_set->native_asm_value_count != 0) {
       return iree_make_status(
@@ -939,10 +1040,11 @@ static iree_status_t loom_low_verify_asm_forms(
   for (uint32_t i = 0; i < descriptor_set->asm_form_count; ++i) {
     const loom_low_asm_form_t* asm_form = &descriptor_set->asm_forms[i];
     iree_string_view_t mnemonic = iree_string_view_empty();
-    if (asm_form->descriptor_ordinal >= descriptor_set->descriptor_count) {
-      // Shared backing storage may carry extension rows for larger descriptor
-      // set views. Smaller views keep those rows sorted for lookup, but the
-      // extension view owns full payload validation.
+    if (!loom_low_descriptor_set_has_descriptor(descriptor_set,
+                                                asm_form->descriptor_ordinal)) {
+      // Shared backing storage may carry rows outside this descriptor-set
+      // view. The rows remain sorted for lookup, but a view containing each
+      // descriptor owns full payload validation.
       IREE_RETURN_IF_ERROR(loom_low_verify_non_empty_required_string(
           descriptor_set, asm_form->mnemonic_string_ref, "asm_form.mnemonic",
           &mnemonic));
@@ -1011,30 +1113,53 @@ static iree_status_t loom_low_verify_storage_continuation_pair(
         "low storage-continuation result and source must have equal unit "
         "counts");
   }
-  if (result->register_part_id == LOOM_LOW_REGISTER_PART_NONE ||
-      source->register_part_id == LOOM_LOW_REGISTER_PART_NONE ||
-      result->register_part_id >= descriptor_set->register_part_count ||
-      source->register_part_id >= descriptor_set->register_part_count) {
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      result->reg_class_alt_start, result->reg_class_alt_count,
+      descriptor_set->reg_class_alt_count, "reg_class_alts"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      source->reg_class_alt_start, source->reg_class_alt_count,
+      descriptor_set->reg_class_alt_count, "reg_class_alts"));
+  if (result->reg_class_alt_count == 0 ||
+      result->reg_class_alt_count != source->reg_class_alt_count) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
-        "low storage-continuation result and source must name valid register "
-        "parts");
+        "low storage-continuation result and source must name register parts "
+        "for the same register classes");
   }
-  const loom_low_register_part_t* result_part =
-      &descriptor_set->register_parts[result->register_part_id];
-  const loom_low_register_part_t* source_part =
-      &descriptor_set->register_parts[source->register_part_id];
-  if (result_part->reg_class_id != source_part->reg_class_id) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "low storage-continuation result and source register parts must "
-        "belong to the same class");
-  }
-  if ((result_part->mask & source_part->mask) != 0) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "low storage-continuation result and source register parts must be "
-        "disjoint");
+  for (uint16_t i = 0; i < result->reg_class_alt_count; ++i) {
+    const loom_low_reg_class_alt_t* result_alternative =
+        &descriptor_set
+             ->reg_class_alts[result->reg_class_alt_start + (uint32_t)i];
+    const loom_low_reg_class_alt_t* source_alternative =
+        loom_low_operand_reg_class_alt(descriptor_set, source,
+                                       result_alternative->reg_class_id);
+    if (source_alternative == NULL ||
+        result_alternative->register_part_id >=
+            descriptor_set->register_part_count ||
+        source_alternative->register_part_id >=
+            descriptor_set->register_part_count) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low storage-continuation result and source must name valid "
+          "register parts for the same register classes");
+    }
+    const loom_low_register_part_t* result_part =
+        &descriptor_set->register_parts[result_alternative->register_part_id];
+    const loom_low_register_part_t* source_part =
+        &descriptor_set->register_parts[source_alternative->register_part_id];
+    if (result_part->reg_class_id != result_alternative->reg_class_id ||
+        source_part->reg_class_id != result_alternative->reg_class_id) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low storage-continuation result and source register parts must "
+          "belong to their alternative register class");
+    }
+    if ((result_part->mask & source_part->mask) != 0) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low storage-continuation result and source register parts must be "
+          "disjoint");
+    }
   }
   return iree_ok_status();
 }
@@ -1042,9 +1167,11 @@ static iree_status_t loom_low_verify_storage_continuation_pair(
 static iree_status_t loom_low_verify_descriptor_constraints(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor) {
-  for (uint16_t i = 0; i < descriptor->constraint_count; ++i) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  for (uint16_t i = 0; i < descriptor_layout->constraint_count; ++i) {
     const loom_low_constraint_t* constraint =
-        &descriptor_set->constraints[descriptor->constraint_start + i];
+        &descriptor_set->constraints[descriptor_layout->constraint_start + i];
     if (constraint->lhs_operand_index >= descriptor->operand_count) {
       return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                               "low descriptor constraint lhs operand %" PRIu16
@@ -1060,15 +1187,15 @@ static iree_status_t loom_low_verify_descriptor_constraints(
                               constraint->rhs_operand_index,
                               descriptor->operand_count);
     }
-    const loom_low_operand_t* lhs =
-        &descriptor_set->operands[descriptor->operand_start +
-                                  constraint->lhs_operand_index];
+    const loom_low_operand_t* lhs = loom_low_descriptor_operand(
+        descriptor_set, descriptor, constraint->lhs_operand_index);
     const loom_low_operand_t* rhs = NULL;
     if (constraint->rhs_operand_index != LOOM_LOW_ID_NONE) {
-      rhs = &descriptor_set->operands[descriptor->operand_start +
-                                      constraint->rhs_operand_index];
+      rhs = loom_low_descriptor_operand(descriptor_set, descriptor,
+                                        constraint->rhs_operand_index);
     }
     switch (constraint->kind) {
+      case LOOM_LOW_CONSTRAINT_KIND_PREFER_TIED:
       case LOOM_LOW_CONSTRAINT_KIND_TIED: {
         IREE_RETURN_IF_ERROR(
             loom_low_verify_binary_constraint(constraint, "tied"));
@@ -1109,6 +1236,21 @@ static iree_status_t loom_low_verify_descriptor_constraints(
             constraint, "same-register-ordinal"));
         break;
       }
+      case LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_CLASS:
+      case LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_VALUE_TYPE: {
+        IREE_RETURN_IF_ERROR(
+            loom_low_verify_binary_constraint(constraint, "register-type"));
+        if ((lhs->role != LOOM_LOW_OPERAND_ROLE_RESULT &&
+             !loom_low_operand_role_is_packet_operand(lhs->role)) ||
+            (rhs->role != LOOM_LOW_OPERAND_ROLE_RESULT &&
+             !loom_low_operand_role_is_packet_operand(rhs->role))) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "low register-type constraint requires two result "
+              "or packet operand rows");
+        }
+        break;
+      }
       case LOOM_LOW_CONSTRAINT_KIND_EARLY_CLOBBER:
         if (constraint->rhs_operand_index != LOOM_LOW_ID_NONE ||
             lhs->role != LOOM_LOW_OPERAND_ROLE_RESULT) {
@@ -1118,6 +1260,35 @@ static iree_status_t loom_low_verify_descriptor_constraints(
         }
         break;
       case LOOM_LOW_CONSTRAINT_KIND_REMATERIALIZABLE:
+        if (rhs != NULL) {
+          IREE_RETURN_IF_ERROR(loom_low_verify_binary_constraint(
+              constraint, "rematerializable"));
+        }
+        if (lhs->role != LOOM_LOW_OPERAND_ROLE_RESULT ||
+            (rhs != NULL &&
+             !loom_low_operand_role_is_packet_operand(rhs->role))) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "low rematerializable constraint requires a result lhs and "
+              "optional packet operand rhs");
+        }
+        if (!iree_any_bit_set(lhs->flags,
+                              LOOM_LOW_OPERAND_FLAG_REMATERIALIZABLE)) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "low rematerializable constraint result must project the "
+              "rematerializable operand flag");
+        }
+        const uint16_t expected_source_plus_one =
+            rhs == NULL ? 0 : (uint16_t)(rhs->source_value_index + 1u);
+        if (lhs->rematerialization_source_operand_plus_one !=
+            expected_source_plus_one) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "low rematerializable constraint source must project its "
+              "packet operand index");
+        }
+        break;
       case LOOM_LOW_CONSTRAINT_KIND_FOLDABLE:
         if (constraint->rhs_operand_index != LOOM_LOW_ID_NONE ||
             lhs->role != LOOM_LOW_OPERAND_ROLE_RESULT) {
@@ -1131,29 +1302,28 @@ static iree_status_t loom_low_verify_descriptor_constraints(
     }
   }
 
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[descriptor->operand_start];
   for (uint16_t operand_index = 0; operand_index < descriptor->operand_count;
        ++operand_index) {
-    const loom_low_operand_t* operand = &operands[operand_index];
+    const loom_low_operand_t* operand =
+        loom_low_descriptor_operand(descriptor_set, descriptor, operand_index);
     if (!iree_any_bit_set(operand->flags,
                           LOOM_LOW_OPERAND_FLAG_STORAGE_CONTINUATION)) {
       continue;
     }
     uint16_t matching_tie_count = 0;
-    for (uint16_t i = 0; i < descriptor->constraint_count; ++i) {
+    for (uint16_t i = 0; i < descriptor_layout->constraint_count; ++i) {
       const loom_low_constraint_t* constraint =
-          &descriptor_set->constraints[descriptor->constraint_start + i];
+          &descriptor_set->constraints[descriptor_layout->constraint_start + i];
       if (constraint->kind != LOOM_LOW_CONSTRAINT_KIND_TIED ||
           (constraint->lhs_operand_index != operand_index &&
            constraint->rhs_operand_index != operand_index)) {
         continue;
       }
       ++matching_tie_count;
-      const loom_low_operand_t* result =
-          &operands[constraint->lhs_operand_index];
-      const loom_low_operand_t* source =
-          &operands[constraint->rhs_operand_index];
+      const loom_low_operand_t* result = loom_low_descriptor_operand(
+          descriptor_set, descriptor, constraint->lhs_operand_index);
+      const loom_low_operand_t* source = loom_low_descriptor_operand(
+          descriptor_set, descriptor, constraint->rhs_operand_index);
       IREE_RETURN_IF_ERROR(loom_low_verify_storage_continuation_pair(
           descriptor_set, result, source));
     }
@@ -1195,10 +1365,9 @@ static uint16_t loom_low_descriptor_packet_operand_count(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor) {
   uint16_t count = 0;
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[descriptor->operand_start];
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
-    if (loom_low_operand_role_is_packet_operand(operands[i].role)) {
+    if (loom_low_operand_role_is_packet_operand(
+            loom_low_descriptor_operand(descriptor_set, descriptor, i)->role)) {
       ++count;
     }
   }
@@ -1210,19 +1379,20 @@ static iree_status_t loom_low_verify_descriptor_operand_forms(
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
   const uint16_t source_packet_operand_count =
       loom_low_descriptor_packet_operand_count(descriptor_set, descriptor);
-  for (uint16_t i = 0; i < descriptor->operand_form_count; ++i) {
-    const uint32_t form_index = descriptor->operand_form_start + i;
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  for (uint16_t i = 0; i < descriptor_layout->operand_form_count; ++i) {
+    const uint32_t form_index = descriptor_layout->operand_form_start + i;
     const loom_low_operand_form_t* form =
         &descriptor_set->operand_forms[form_index];
-    if (form->replacement_descriptor_ordinal >=
-        descriptor_set->descriptor_count) {
+    if (!loom_low_descriptor_set_has_descriptor(
+            descriptor_set, form->replacement_descriptor_ordinal)) {
       return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                               "low descriptor %" PRIu32 " operand form %" PRIu32
                               " references replacement descriptor %" PRIu32
-                              " but only %" PRIu32 " descriptors exist",
+                              " not available in the descriptor set",
                               descriptor_index, form_index,
-                              form->replacement_descriptor_ordinal,
-                              descriptor_set->descriptor_count);
+                              form->replacement_descriptor_ordinal);
     }
     if (form->match_count == 0) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1247,9 +1417,8 @@ static iree_status_t loom_low_verify_descriptor_operand_forms(
             descriptor_index, form_index, match_index,
             match->source_operand_index, descriptor->operand_count);
       }
-      const loom_low_operand_t* source_operand =
-          &descriptor_set->operands[descriptor->operand_start +
-                                    match->source_operand_index];
+      const loom_low_operand_t* source_operand = loom_low_descriptor_operand(
+          descriptor_set, descriptor, match->source_operand_index);
       if (!loom_low_operand_role_is_packet_operand(source_operand->role)) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
@@ -1341,27 +1510,31 @@ static iree_status_t loom_low_verify_descriptor_operand_forms(
 
     const loom_low_descriptor_t* replacement =
         &descriptor_set->descriptors[form->replacement_descriptor_ordinal];
+    const loom_low_descriptor_layout_t* replacement_layout =
+        loom_low_descriptor_layout(descriptor_set, replacement);
     if (form->source_immediate_index != LOOM_LOW_DESCRIPTOR_SET_ORDINAL_NONE &&
-        form->source_immediate_index >= descriptor->immediate_count) {
+        form->source_immediate_index >= descriptor_layout->immediate_count) {
       return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                               "low descriptor %" PRIu32 " operand form %" PRIu32
                               " references source immediate %" PRIu16
                               " but descriptor has only %" PRIu16 " immediates",
                               descriptor_index, form_index,
                               form->source_immediate_index,
-                              descriptor->immediate_count);
+                              descriptor_layout->immediate_count);
     }
     if (form->replacement_immediate_index !=
             LOOM_LOW_DESCRIPTOR_SET_ORDINAL_NONE &&
-        form->replacement_immediate_index >= replacement->immediate_count) {
-      return iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "low descriptor %" PRIu32 " operand form %" PRIu32
-          " references replacement immediate %" PRIu16
-          " but replacement descriptor %" PRIu32 " has only %" PRIu16
-          " immediates",
-          descriptor_index, form_index, form->replacement_immediate_index,
-          form->replacement_descriptor_ordinal, replacement->immediate_count);
+        form->replacement_immediate_index >=
+            replacement_layout->immediate_count) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "low descriptor %" PRIu32 " operand form %" PRIu32
+                              " references replacement immediate %" PRIu16
+                              " but replacement descriptor %" PRIu32
+                              " has only %" PRIu16 " immediates",
+                              descriptor_index, form_index,
+                              form->replacement_immediate_index,
+                              form->replacement_descriptor_ordinal,
+                              replacement_layout->immediate_count);
     }
     if (replacement->result_count != descriptor->result_count) {
       return iree_make_status(
@@ -1468,6 +1641,7 @@ static bool loom_low_storage_lease_release_scope_is_valid(
 
 static bool loom_low_constraint_kind_is_valid(loom_low_constraint_kind_t kind) {
   switch (kind) {
+    case LOOM_LOW_CONSTRAINT_KIND_PREFER_TIED:
     case LOOM_LOW_CONSTRAINT_KIND_TIED:
     case LOOM_LOW_CONSTRAINT_KIND_COMMUTABLE:
     case LOOM_LOW_CONSTRAINT_KIND_DESTRUCTIVE:
@@ -1475,6 +1649,8 @@ static bool loom_low_constraint_kind_is_valid(loom_low_constraint_kind_t kind) {
     case LOOM_LOW_CONSTRAINT_KIND_REMATERIALIZABLE:
     case LOOM_LOW_CONSTRAINT_KIND_FOLDABLE:
     case LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_ORDINAL:
+    case LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_VALUE_TYPE:
+    case LOOM_LOW_CONSTRAINT_KIND_SAME_REGISTER_CLASS:
       return true;
     default:
       return false;
@@ -1545,12 +1721,16 @@ static bool loom_low_hazard_reference_kind_is_valid(
 }
 
 static loom_low_schedule_class_flags_t
-loom_low_schedule_flags_required_for_effect(loom_low_effect_kind_t kind) {
-  switch (kind) {
+loom_low_schedule_flags_required_for_effect(const loom_low_effect_t* effect) {
+  switch (effect->kind) {
     case LOOM_LOW_EFFECT_KIND_READ:
-      return LOOM_LOW_SCHEDULE_CLASS_FLAG_MAY_LOAD;
+      return effect->memory_space == LOOM_LOW_MEMORY_SPACE_NONE
+                 ? 0
+                 : LOOM_LOW_SCHEDULE_CLASS_FLAG_MAY_LOAD;
     case LOOM_LOW_EFFECT_KIND_WRITE:
-      return LOOM_LOW_SCHEDULE_CLASS_FLAG_MAY_STORE;
+      return effect->memory_space == LOOM_LOW_MEMORY_SPACE_NONE
+                 ? 0
+                 : LOOM_LOW_SCHEDULE_CLASS_FLAG_MAY_STORE;
     case LOOM_LOW_EFFECT_KIND_CALL:
       return LOOM_LOW_SCHEDULE_CLASS_FLAG_MAY_CALL;
     case LOOM_LOW_EFFECT_KIND_CONTROL:
@@ -1585,12 +1765,14 @@ static iree_status_t loom_low_verify_descriptor_encoding_contract(
                             " is pseudo but has target encoding id %" PRIu16,
                             descriptor_index, descriptor->encoding_id);
   }
-  if (is_pseudo && descriptor->encoding_format_id != 0) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  if (is_pseudo && descriptor_layout->encoding_format_id != 0) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "low descriptor %" PRIu32
         " is pseudo but has target encoding format id %" PRIu16,
-        descriptor_index, descriptor->encoding_format_id);
+        descriptor_index, descriptor_layout->encoding_format_id);
   }
   if (!is_pseudo && descriptor->encoding_id == LOOM_LOW_ID_NONE) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1599,12 +1781,12 @@ static iree_status_t loom_low_verify_descriptor_encoding_contract(
                             descriptor_index);
   }
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->encoding_field_value_start,
-      descriptor->encoding_field_value_count,
+      descriptor_layout->encoding_field_value_start,
+      descriptor_layout->encoding_field_value_count,
       descriptor_set->encoding_field_value_count, "encoding_field_values"));
-  for (uint16_t i = 0; i < descriptor->encoding_field_value_count; ++i) {
+  for (uint16_t i = 0; i < descriptor_layout->encoding_field_value_count; ++i) {
     const uint32_t field_value_index =
-        descriptor->encoding_field_value_start + i;
+        descriptor_layout->encoding_field_value_start + i;
     const loom_low_encoding_field_value_t* field_value =
         &descriptor_set->encoding_field_values[field_value_index];
     if (field_value->encoding_field_id == 0) {
@@ -1616,9 +1798,8 @@ static iree_status_t loom_low_verify_descriptor_encoding_contract(
     }
     for (uint16_t j = 0; j < i; ++j) {
       const loom_low_encoding_field_value_t* previous =
-          &descriptor_set
-               ->encoding_field_values[descriptor->encoding_field_value_start +
-                                       j];
+          &descriptor_set->encoding_field_values
+               [descriptor_layout->encoding_field_value_start + j];
       if (previous->encoding_field_id == field_value->encoding_field_id) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                 "low descriptor %" PRIu32
@@ -1634,20 +1815,21 @@ static iree_status_t loom_low_verify_descriptor_encoding_contract(
 static iree_status_t loom_low_verify_descriptor_operand_encoding_fields(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[descriptor->operand_start];
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
   for (uint16_t operand_index = 0; operand_index < descriptor->operand_count;
        ++operand_index) {
-    const loom_low_operand_t* operand = &operands[operand_index];
+    const loom_low_operand_t* operand =
+        loom_low_descriptor_operand(descriptor_set, descriptor, operand_index);
     if (operand->encoding_field_id == 0) {
       continue;
     }
     for (uint16_t field_index = 0;
-         field_index < descriptor->encoding_field_value_count; ++field_index) {
+         field_index < descriptor_layout->encoding_field_value_count;
+         ++field_index) {
       const loom_low_encoding_field_value_t* field_value =
-          &descriptor_set
-               ->encoding_field_values[descriptor->encoding_field_value_start +
-                                       field_index];
+          &descriptor_set->encoding_field_values
+               [descriptor_layout->encoding_field_value_start + field_index];
       if (field_value->encoding_field_id == operand->encoding_field_id) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
@@ -1658,7 +1840,8 @@ static iree_status_t loom_low_verify_descriptor_operand_encoding_fields(
     }
     for (uint16_t previous_index = 0; previous_index < operand_index;
          ++previous_index) {
-      const loom_low_operand_t* previous = &operands[previous_index];
+      const loom_low_operand_t* previous = loom_low_descriptor_operand(
+          descriptor_set, descriptor, previous_index);
       if (previous->encoding_field_id != operand->encoding_field_id) {
         continue;
       }
@@ -1700,31 +1883,24 @@ static iree_status_t loom_low_verify_descriptor_effect_contract(
                             " is a terminator but is not side-effecting",
                             descriptor_index);
   }
-  if (descriptor->effect_count == 0 && is_side_effecting) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  if (descriptor_layout->effect_count == 0 && is_side_effecting) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low descriptor %" PRIu32
                             " is side-effecting but has no effect rows",
                             descriptor_index);
   }
-  if (descriptor->effect_count == 0) {
+  if (descriptor_layout->effect_count == 0) {
     return iree_ok_status();
   }
 
   bool has_control_effect = false;
   bool has_convergent_effect = false;
   loom_low_schedule_class_flags_t required_schedule_flags = 0;
-  for (uint16_t i = 0; i < descriptor->effect_count; ++i) {
-    const uint32_t effect_index = descriptor->effect_start + i;
+  for (uint16_t i = 0; i < descriptor_layout->effect_count; ++i) {
+    const uint32_t effect_index = descriptor_layout->effect_start + i;
     const loom_low_effect_t* effect = &descriptor_set->effects[effect_index];
-    if (effect->kind == LOOM_LOW_EFFECT_KIND_READ ||
-        effect->kind == LOOM_LOW_EFFECT_KIND_WRITE) {
-      if (effect->memory_space == LOOM_LOW_MEMORY_SPACE_NONE) {
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "low descriptor %" PRIu32 " effect %" PRIu32
-                                " reads or writes no memory space",
-                                descriptor_index, effect_index);
-      }
-    }
     if (effect->kind == LOOM_LOW_EFFECT_KIND_CONTROL) {
       has_control_effect = true;
     }
@@ -1739,7 +1915,7 @@ static iree_status_t loom_low_verify_descriptor_effect_contract(
                               descriptor_index, effect_index);
     }
     required_schedule_flags |=
-        loom_low_schedule_flags_required_for_effect(effect->kind);
+        loom_low_schedule_flags_required_for_effect(effect);
   }
 
   if (is_terminator && !has_control_effect) {
@@ -1763,7 +1939,7 @@ static iree_status_t loom_low_verify_descriptor_effect_contract(
   if (descriptor_view->schedule_class_id != LOOM_LOW_SCHEDULE_CLASS_NONE &&
       required_schedule_flags != 0) {
     const loom_low_schedule_class_t* schedule_class =
-        &descriptor_set->schedule_classes[descriptor_view->schedule_class_id];
+        loom_low_descriptor_set_schedule_class(descriptor_set, descriptor_view);
     const loom_low_schedule_class_flags_t missing_flags =
         required_schedule_flags & ~schedule_class->flags;
     if (missing_flags != 0) {
@@ -1813,13 +1989,14 @@ static iree_status_t loom_low_verify_descriptor_canonical_asm_form(
 static iree_status_t loom_low_verify_descriptor_operand_roles(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
   uint16_t packet_operand_index = 0;
   uint16_t minimum_packet_operand_count = 0;
   bool has_variadic_operand = false;
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
-    const uint32_t operand_index = descriptor->operand_start + i;
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[operand_index];
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     if (operand->role == LOOM_LOW_OPERAND_ROLE_OPERAND_RESULT) {
       return iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
@@ -1840,8 +2017,11 @@ static iree_status_t loom_low_verify_descriptor_operand_roles(
       }
       const loom_low_operand_flags_t unsupported_flags =
           operand->flags & ~LOOM_LOW_OPERAND_FLAG_VARIADIC;
+      bool has_register_part = false;
+      IREE_RETURN_IF_ERROR(loom_low_verify_operand_has_register_part(
+          descriptor_set, operand, &has_register_part));
       if (unsupported_flags != 0 || operand->encoding_field_id != 0 ||
-          operand->register_part_id != LOOM_LOW_REGISTER_PART_NONE ||
+          has_register_part ||
           operand->address_map_kind != LOOM_LOW_OPERAND_ADDRESS_MAP_DIRECT) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
@@ -1850,9 +2030,9 @@ static iree_status_t loom_low_verify_descriptor_operand_roles(
             "metadata",
             descriptor_index, i);
       }
-      if (descriptor->constraint_count != 0 ||
-          descriptor->storage_lease_count != 0 ||
-          descriptor->operand_form_count != 0) {
+      if (descriptor_layout->constraint_count != 0 ||
+          descriptor_layout->storage_lease_count != 0 ||
+          descriptor_layout->operand_form_count != 0) {
         return iree_make_status(
             IREE_STATUS_INVALID_ARGUMENT,
             "low descriptor %" PRIu32
@@ -1915,13 +2095,13 @@ static iree_status_t loom_low_verify_descriptor_operand_roles(
       ++packet_operand_index;
     }
   }
-  if (descriptor->minimum_packet_operand_count !=
+  if (descriptor_layout->minimum_packet_operand_count !=
       minimum_packet_operand_count) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "low descriptor %" PRIu32 " minimum packet operand count %" PRIu16
         " should be %" PRIu16,
-        descriptor_index, descriptor->minimum_packet_operand_count,
+        descriptor_index, descriptor_layout->minimum_packet_operand_count,
         minimum_packet_operand_count);
   }
   if (loom_low_descriptor_has_variadic_operands(descriptor) !=
@@ -1938,7 +2118,9 @@ static iree_status_t loom_low_verify_descriptor_operand_roles(
 static iree_status_t loom_low_verify_descriptor_op_kind(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
-  switch (descriptor->op_kind) {
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  switch (descriptor_layout->op_kind) {
     case LOOM_LOW_DESCRIPTOR_OP_KIND_OP:
       return iree_ok_status();
     case LOOM_LOW_DESCRIPTOR_OP_KIND_CONST:
@@ -1950,7 +2132,7 @@ static iree_status_t loom_low_verify_descriptor_op_kind(
       }
       for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
         const loom_low_operand_t* operand =
-            &descriptor_set->operands[descriptor->operand_start + i];
+            loom_low_descriptor_operand(descriptor_set, descriptor, i);
         if (loom_low_operand_role_is_packet_operand(operand->role)) {
           return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                   "low descriptor %" PRIu32
@@ -1958,19 +2140,46 @@ static iree_status_t loom_low_verify_descriptor_op_kind(
                                   descriptor_index);
         }
       }
-      if (descriptor->effect_count != 0) {
+      if (descriptor_layout->effect_count != 0) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "low descriptor %" PRIu32 " uses low.const but has %" PRIu16
+            " effect rows",
+            descriptor_index, descriptor_layout->effect_count);
+      }
+      return iree_ok_status();
+    case LOOM_LOW_DESCRIPTOR_OP_KIND_COND_BR:
+      if (descriptor->result_count != 0) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                 "low descriptor %" PRIu32
-                                " uses low.const but has %" PRIu16
-                                " effect rows",
-                                descriptor_index, descriptor->effect_count);
+                                " uses low.op.cond_br but has %" PRIu16
+                                " results",
+                                descriptor_index, descriptor->result_count);
+      }
+      if (descriptor_layout->effect_count != 1 ||
+          descriptor_set->effects[descriptor_layout->effect_start].kind !=
+              LOOM_LOW_EFFECT_KIND_CONTROL) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "low descriptor %" PRIu32
+            " uses low.op.cond_br without exactly one control effect",
+            descriptor_index);
+      }
+      if (!iree_all_bits_set(descriptor->flags,
+                             LOOM_LOW_DESCRIPTOR_FLAG_SIDE_EFFECTING |
+                                 LOOM_LOW_DESCRIPTOR_FLAG_TERMINATOR)) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "low descriptor %" PRIu32
+            " uses low.op.cond_br without side-effecting and terminator flags",
+            descriptor_index);
       }
       return iree_ok_status();
     default:
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "low descriptor %" PRIu32
-                              " has invalid operation kind %u",
-                              descriptor_index, (unsigned)descriptor->op_kind);
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low descriptor %" PRIu32 " has invalid operation kind %u",
+          descriptor_index, (unsigned)descriptor_layout->op_kind);
   }
 }
 
@@ -1978,9 +2187,8 @@ static iree_status_t loom_low_verify_descriptor_state_operands(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index) {
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
-    const uint32_t operand_index = descriptor->operand_start + i;
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[operand_index];
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     const uint16_t state_flags =
         operand->flags &
         (LOOM_LOW_OPERAND_FLAG_STATE_READ | LOOM_LOW_OPERAND_FLAG_STATE_WRITE);
@@ -2056,9 +2264,8 @@ static iree_status_t loom_low_verify_storage_lease_attachment_unit_count(
           " but descriptor has only %" PRIu16 " results",
           descriptor_index, lease->attachment_index, descriptor->result_count);
     }
-    const loom_low_operand_t* result =
-        &descriptor_set
-             ->operands[descriptor->operand_start + lease->attachment_index];
+    const loom_low_operand_t* result = loom_low_descriptor_operand(
+        descriptor_set, descriptor, lease->attachment_index);
     *out_unit_count = result->unit_count;
     return iree_ok_status();
   }
@@ -2067,7 +2274,7 @@ static iree_status_t loom_low_verify_storage_lease_attachment_unit_count(
   for (uint16_t operand_index = descriptor->result_count;
        operand_index < descriptor->operand_count; ++operand_index) {
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[descriptor->operand_start + operand_index];
+        loom_low_descriptor_operand(descriptor_set, descriptor, operand_index);
     if (!loom_low_operand_role_is_packet_operand(operand->role)) {
       continue;
     }
@@ -2090,7 +2297,9 @@ static iree_status_t loom_low_verify_storage_lease(
     const loom_low_descriptor_t* descriptor, uint32_t descriptor_index,
     uint16_t descriptor_lease_index) {
   const uint32_t lease_index =
-      descriptor->storage_lease_start + descriptor_lease_index;
+      loom_low_descriptor_layout(descriptor_set, descriptor)
+          ->storage_lease_start +
+      descriptor_lease_index;
   const loom_low_descriptor_storage_lease_t* lease =
       &descriptor_set->storage_leases[lease_index];
   if (lease->kind == LOOM_LOW_STORAGE_LEASE_UNKNOWN) {
@@ -2205,7 +2414,11 @@ static iree_status_t loom_low_verify_descriptor(
           LOOM_LOW_DESCRIPTOR_FLAG_EARLY_CLOBBER |
           LOOM_LOW_DESCRIPTOR_FLAG_VARIADIC_OPERANDS |
           LOOM_LOW_DESCRIPTOR_FLAG_ALLOCATION_MOVE |
-          LOOM_LOW_DESCRIPTOR_FLAG_UNIQUE_IDENTITY,
+          LOOM_LOW_DESCRIPTOR_FLAG_UNIQUE_IDENTITY |
+          LOOM_LOW_DESCRIPTOR_FLAG_ENUM_IMMEDIATES |
+          LOOM_LOW_DESCRIPTOR_FLAG_SAFE_TO_SPECULATE |
+          LOOM_LOW_DESCRIPTOR_FLAG_STATE_ASSIGNMENT |
+          LOOM_LOW_DESCRIPTOR_FLAG_LATE_READ,
       "descriptor", descriptor_index));
   iree_string_view_t descriptor_key = iree_string_view_empty();
   IREE_RETURN_IF_ERROR(loom_low_verify_non_empty_required_string(
@@ -2233,12 +2446,15 @@ static iree_status_t loom_low_verify_descriptor(
   IREE_RETURN_IF_ERROR(loom_low_verify_optional_string(
       descriptor_set, descriptor->semantic_tag_string_ref,
       "descriptor.semantic_tag"));
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->feature_mask_word_start, descriptor->feature_mask_word_count,
+      descriptor_layout->feature_mask_word_start,
+      descriptor_layout->feature_mask_word_count,
       descriptor_set->feature_mask_word_count, "feature_mask_words"));
-  IREE_RETURN_IF_ERROR(
-      loom_low_verify_span(descriptor->operand_start, descriptor->operand_count,
-                           descriptor_set->operand_count, "operands"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      descriptor->operand_start, descriptor->operand_count,
+      descriptor_set->operand_index_count, "operand_indices"));
   if (descriptor->result_count > descriptor->operand_count) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
@@ -2247,29 +2463,42 @@ static iree_status_t loom_low_verify_descriptor(
         descriptor_index, descriptor->result_count, descriptor->operand_count);
   }
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->immediate_start, descriptor->immediate_count,
+      descriptor_layout->immediate_start, descriptor_layout->immediate_count,
       descriptor_set->immediate_count, "immediates"));
-  IREE_RETURN_IF_ERROR(
-      loom_low_verify_span(descriptor->effect_start, descriptor->effect_count,
-                           descriptor_set->effect_count, "effects"));
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->constraint_start, descriptor->constraint_count,
+      descriptor_layout->effect_start, descriptor_layout->effect_count,
+      descriptor_set->effect_count, "effects"));
+  IREE_RETURN_IF_ERROR(loom_low_verify_span(
+      descriptor_layout->constraint_start, descriptor_layout->constraint_count,
       descriptor_set->constraint_count, "constraints"));
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->storage_lease_start, descriptor->storage_lease_count,
+      descriptor_layout->storage_lease_start,
+      descriptor_layout->storage_lease_count,
       descriptor_set->storage_lease_count, "storage_leases"));
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
-      descriptor->operand_form_start, descriptor->operand_form_count,
-      descriptor_set->operand_form_count, "operand_forms"));
+      descriptor_layout->operand_form_start,
+      descriptor_layout->operand_form_count, descriptor_set->operand_form_count,
+      "operand_forms"));
   if (descriptor_view->schedule_class_id != LOOM_LOW_SCHEDULE_CLASS_NONE &&
       descriptor_view->schedule_class_id >=
           descriptor_set->schedule_class_count) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
         "low descriptor %" PRIu32 " references schedule class %" PRIu16
-        " but only %" PRIu32 " classes exist",
+        " but only %" PRIu16 " classes exist",
         descriptor_index, descriptor_view->schedule_class_id,
         descriptor_set->schedule_class_count);
+  }
+  if (descriptor_view->schedule_class_id != LOOM_LOW_SCHEDULE_CLASS_NONE &&
+      loom_low_descriptor_set_schedule_class_row_id(
+          descriptor_set, descriptor_view->schedule_class_id) >=
+          descriptor_set->schedule_class_row_count) {
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "low descriptor %" PRIu32 " maps schedule class %" PRIu16
+        " outside %" PRIu16 " rows",
+        descriptor_index, descriptor_view->schedule_class_id,
+        descriptor_set->schedule_class_row_count);
   }
   if (descriptor_view->schedule_class_id == LOOM_LOW_SCHEDULE_CLASS_NONE) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -2290,7 +2519,7 @@ static iree_status_t loom_low_verify_descriptor(
       descriptor_set, descriptor, descriptor_index));
   IREE_RETURN_IF_ERROR(
       loom_low_verify_descriptor_constraints(descriptor_set, descriptor));
-  for (uint16_t i = 0; i < descriptor->storage_lease_count; ++i) {
+  for (uint16_t i = 0; i < descriptor_layout->storage_lease_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_low_verify_storage_lease(
         descriptor_set, descriptor, descriptor_index, i));
   }
@@ -2341,6 +2570,16 @@ static iree_status_t loom_low_verify_operand(
         " has source binding %u but is not a packet operand",
         operand_index, (unsigned)operand->source_binding);
   }
+  if (operand->rematerialization_source_operand_plus_one != 0 &&
+      (operand->role != LOOM_LOW_OPERAND_ROLE_RESULT ||
+       !iree_any_bit_set(operand->flags,
+                         LOOM_LOW_OPERAND_FLAG_REMATERIALIZABLE))) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "low operand %" PRIu32
+        " has a rematerialization source without a rematerializable result",
+        operand_index);
+  }
   if (!loom_low_operand_address_map_kind_is_valid(operand->address_map_kind)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low operand %" PRIu32
@@ -2379,6 +2618,24 @@ static iree_status_t loom_low_verify_operand(
   IREE_RETURN_IF_ERROR(loom_low_verify_span(
       operand->reg_class_alt_start, operand->reg_class_alt_count,
       descriptor_set->reg_class_alt_count, "reg_class_alts"));
+  for (uint16_t i = 0; i < operand->reg_class_alt_count; ++i) {
+    const loom_low_reg_class_alt_t* lhs =
+        &descriptor_set
+             ->reg_class_alts[operand->reg_class_alt_start + (uint32_t)i];
+    for (uint16_t j = i + 1; j < operand->reg_class_alt_count; ++j) {
+      const loom_low_reg_class_alt_t* rhs =
+          &descriptor_set
+               ->reg_class_alts[operand->reg_class_alt_start + (uint32_t)j];
+      if (lhs->reg_class_id == rhs->reg_class_id &&
+          lhs->register_part_id != rhs->register_part_id) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "low operand %" PRIu32
+            " has ambiguous register parts for register class %" PRIu16,
+            operand_index, lhs->reg_class_id);
+      }
+    }
+  }
   if (loom_low_operand_address_map_kind_has_low_window(
           operand->address_map_kind)) {
     if (operand->addressable_unit_count < operand->unit_count) {
@@ -2410,39 +2667,6 @@ static iree_status_t loom_low_verify_operand(
           operand_index);
     }
   }
-  if (operand->register_part_id != LOOM_LOW_REGISTER_PART_NONE) {
-    if (operand->register_part_id >= descriptor_set->register_part_count) {
-      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                              "low operand %" PRIu32
-                              " references register part %" PRIu16
-                              " but only %" PRIu32 " register parts exist",
-                              operand_index, operand->register_part_id,
-                              descriptor_set->register_part_count);
-    }
-    uint16_t concrete_alt_count = 0;
-    uint16_t concrete_reg_class_id = LOOM_LOW_REG_CLASS_NONE;
-    for (uint16_t i = 0; i < operand->reg_class_alt_count; ++i) {
-      const uint16_t alt_index = operand->reg_class_alt_start + i;
-      const loom_low_reg_class_alt_t* alt =
-          &descriptor_set->reg_class_alts[alt_index];
-      if (iree_all_bits_set(alt->flags,
-                            LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE)) {
-        continue;
-      }
-      concrete_reg_class_id = alt->reg_class_id;
-      ++concrete_alt_count;
-    }
-    const loom_low_register_part_t* register_part =
-        &descriptor_set->register_parts[operand->register_part_id];
-    if (concrete_alt_count != 1 ||
-        concrete_reg_class_id != register_part->reg_class_id) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "low operand %" PRIu32
-                              " uses register part %" PRIu16
-                              " but does not name exactly that register class",
-                              operand_index, operand->register_part_id);
-    }
-  }
   return iree_ok_status();
 }
 
@@ -2453,7 +2677,8 @@ static iree_status_t loom_low_verify_immediate(
   IREE_RETURN_IF_ERROR(loom_low_verify_known_flags(
       immediate->flags,
       LOOM_LOW_IMMEDIATE_FLAG_SYMBOLIC | LOOM_LOW_IMMEDIATE_FLAG_RELATIVE |
-          LOOM_LOW_IMMEDIATE_FLAG_DEFAULT_VALUE,
+          LOOM_LOW_IMMEDIATE_FLAG_DEFAULT_VALUE |
+          LOOM_LOW_IMMEDIATE_FLAG_READ_ONLY_DATA,
       "immediate", immediate_index));
   IREE_RETURN_IF_ERROR(loom_low_verify_required_string(
       descriptor_set, immediate->field_name_string_ref,
@@ -2467,6 +2692,21 @@ static iree_status_t loom_low_verify_immediate(
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low immediate %" PRIu32 " has invalid kind %u",
                             immediate_index, (unsigned)immediate->kind);
+  }
+  if (iree_any_bit_set(immediate->flags,
+                       LOOM_LOW_IMMEDIATE_FLAG_READ_ONLY_DATA)) {
+    if (immediate->kind != LOOM_LOW_IMMEDIATE_KIND_ORDINAL) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low read-only-data immediate %" PRIu32
+                              " is not ordinal",
+                              immediate_index);
+    }
+    if (!iree_any_bit_set(immediate->flags, LOOM_LOW_IMMEDIATE_FLAG_SYMBOLIC)) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "low read-only-data immediate %" PRIu32
+                              " is not symbolic",
+                              immediate_index);
+    }
   }
   if (immediate->kind == LOOM_LOW_IMMEDIATE_KIND_ENUM) {
     if (immediate->enum_domain_id == LOOM_LOW_ENUM_DOMAIN_NONE) {
@@ -2516,6 +2756,27 @@ static iree_status_t loom_low_verify_immediate(
                             "low immediate %" PRIu32
                             " uses both direct and sliced encoding fields",
                             immediate_index);
+  }
+  if (immediate->encoding_subfield_offset != 0) {
+    const uint16_t encoding_bit_offset =
+        (uint16_t)(immediate->encoding_subfield_offset - 1u);
+    if (immediate->encoding_field_id == 0 ||
+        immediate->encoding_slice_count != 0) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low immediate %" PRIu32
+          " encoding subfield requires one direct encoding field",
+          immediate_index);
+    }
+    if (immediate->bit_width == 0 ||
+        encoding_bit_offset > 64u - immediate->bit_width) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "low immediate %" PRIu32
+                              " encoding subfield range [%" PRIu16 ", %" PRIu16
+                              ") does not fit 64 bits",
+                              immediate_index, encoding_bit_offset,
+                              encoding_bit_offset + immediate->bit_width);
+    }
   }
   if (immediate->encoding_slice_count != 0) {
     uint64_t covered_bits = 0;
@@ -2704,8 +2965,9 @@ static iree_status_t loom_low_verify_reg_class(
   if (reg_class->name_string_ref == LOOM_STRING_REF_NONE) {
     if (reg_class->target_bank_id != 0 || reg_class->flags != 0 ||
         reg_class->alloc_unit_bits != 0 || reg_class->allocatable_count != 0 ||
-        reg_class->fixed_location_base != 0 ||
-        reg_class->fixed_location_count != 0 || reg_class->alias_set_id != 0 ||
+        reg_class->storage.fixed_locations.fixed_location_base != 0 ||
+        reg_class->storage.fixed_locations.fixed_location_count != 0 ||
+        reg_class->alias_set_id != 0 ||
         reg_class->spill_class_id != LOOM_LOW_REG_CLASS_NONE ||
         reg_class->full_register_part_mask != 0 ||
         reg_class->spill_slot_space != 0) {
@@ -2721,7 +2983,9 @@ static iree_status_t loom_low_verify_reg_class(
       LOOM_LOW_REG_CLASS_FLAG_VIRTUAL_ONLY | LOOM_LOW_REG_CLASS_FLAG_PHYSICAL |
           LOOM_LOW_REG_CLASS_FLAG_REFERENCE |
           LOOM_LOW_REG_CLASS_FLAG_UNSPILLABLE |
-          LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS,
+          LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS |
+          LOOM_LOW_REG_CLASS_FLAG_EVEN_ALIGNED_TUPLES |
+          LOOM_LOW_REG_CLASS_FLAG_CONTIGUOUS_PHYSICAL_REGISTER_CANDIDATES,
       "register class", reg_class_index));
   IREE_RETURN_IF_ERROR(loom_low_verify_required_string(
       descriptor_set, reg_class->name_string_ref, "reg_class.name"));
@@ -2750,6 +3014,17 @@ static iree_status_t loom_low_verify_reg_class(
       iree_all_bits_set(reg_class->flags, LOOM_LOW_REG_CLASS_FLAG_PHYSICAL);
   const bool uses_explicit_physical_registers = iree_all_bits_set(
       reg_class->flags, LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS);
+  const bool uses_contiguous_physical_register_candidates = iree_all_bits_set(
+      reg_class->flags,
+      LOOM_LOW_REG_CLASS_FLAG_CONTIGUOUS_PHYSICAL_REGISTER_CANDIDATES);
+  const uint16_t fixed_location_base =
+      uses_explicit_physical_registers
+          ? 0
+          : reg_class->storage.fixed_locations.fixed_location_base;
+  const uint16_t fixed_location_count =
+      uses_explicit_physical_registers
+          ? 0
+          : reg_class->storage.fixed_locations.fixed_location_count;
   if (is_virtual_only == is_physical) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
@@ -2763,8 +3038,8 @@ static iree_status_t loom_low_verify_reg_class(
                             " has non-zero allocatable count %" PRIu16,
                             reg_class_index, reg_class->allocatable_count);
   }
-  if (is_virtual_only && (reg_class->fixed_location_base != 0 ||
-                          reg_class->fixed_location_count != 0)) {
+  if (is_virtual_only &&
+      (fixed_location_base != 0 || fixed_location_count != 0)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low virtual register class %" PRIu32
                             " has a non-empty fixed-location window",
@@ -2783,12 +3058,26 @@ static iree_status_t loom_low_verify_reg_class(
         " uses explicit physical registers without the physical flag",
         reg_class_index);
   }
-  if (uses_explicit_physical_registers &&
-      (reg_class->fixed_location_base != 0 ||
-       reg_class->fixed_location_count != 0 || reg_class->alias_set_id != 0)) {
+  if (uses_contiguous_physical_register_candidates &&
+      !uses_explicit_physical_registers) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "low register class %" PRIu32
+        " uses contiguous physical register candidates without explicit "
+        "physical registers",
+        reg_class_index);
+  }
+  if (uses_explicit_physical_registers && reg_class->alias_set_id != 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low explicit physical register class %" PRIu32
-                            " has a linear fixed-location or alias contract",
+                            " has a linear alias contract",
+                            reg_class_index);
+  }
+  if (uses_explicit_physical_registers &&
+      reg_class->storage.explicit_registers.reserved != 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low explicit physical register class %" PRIu32
+                            " has non-zero reserved storage metadata",
                             reg_class_index);
   }
   if (uses_explicit_physical_registers) {
@@ -2817,30 +3106,29 @@ static iree_status_t loom_low_verify_reg_class(
                             " has a physical-register candidate start",
                             reg_class_index);
   }
-  if (reg_class->fixed_location_count == 0 &&
-      reg_class->fixed_location_base != 0) {
+  if (fixed_location_count == 0 && fixed_location_base != 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low physical register class %" PRIu32
                             " has fixed-location base %" PRIu16
                             " without a count",
-                            reg_class_index, reg_class->fixed_location_base);
+                            reg_class_index, fixed_location_base);
   }
-  const uint32_t fixed_location_end = (uint32_t)reg_class->fixed_location_base +
-                                      reg_class->fixed_location_count;
+  const uint32_t fixed_location_end =
+      (uint32_t)fixed_location_base + fixed_location_count;
   if (fixed_location_end > UINT16_MAX + UINT32_C(1)) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "low physical register class %" PRIu32 " fixed-location range [%" PRIu16
         ", %" PRIu32 ") exceeds the u16 location namespace",
-        reg_class_index, reg_class->fixed_location_base, fixed_location_end);
+        reg_class_index, fixed_location_base, fixed_location_end);
   }
-  if (reg_class->fixed_location_count != 0 &&
-      reg_class->fixed_location_base < reg_class->allocatable_count) {
+  if (fixed_location_count != 0 &&
+      fixed_location_base < reg_class->allocatable_count) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "low physical register class %" PRIu32
                             " fixed-location range begins at %" PRIu16
                             " inside its %" PRIu16 " allocatable locations",
-                            reg_class_index, reg_class->fixed_location_base,
+                            reg_class_index, fixed_location_base,
                             reg_class->allocatable_count);
   }
   if (reg_class->spill_class_id != LOOM_LOW_REG_CLASS_NONE &&
@@ -2910,6 +3198,13 @@ static iree_status_t loom_low_verify_physical_register_view(
       "physical_register_view_unit_candidate_ordinals"));
   const loom_low_reg_class_t* reg_class =
       &descriptor_set->reg_classes[view->reg_class_id];
+  if (loom_low_reg_class_uses_contiguous_physical_register_candidates(
+          reg_class)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low physical register view %" PRIu32
+                            " references a contiguous-candidate register class",
+                            physical_register_view_index);
+  }
   for (uint16_t i = 0; i < view->unit_count; ++i) {
     const uint16_t candidate_ordinal =
         descriptor_set->physical_register_view_unit_candidate_ordinals
@@ -2968,28 +3263,69 @@ static iree_status_t loom_low_verify_reg_class_alt(
     const loom_low_descriptor_set_t* descriptor_set, uint32_t alt_index) {
   const loom_low_reg_class_alt_t* alt =
       &descriptor_set->reg_class_alts[alt_index];
-  IREE_RETURN_IF_ERROR(
-      loom_low_verify_known_flags(alt->flags,
-                                  LOOM_LOW_REG_CLASS_ALT_FLAG_PREFERRED |
-                                      LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE |
-                                      LOOM_LOW_REG_CLASS_ALT_FLAG_PHYSICAL_ONLY,
-                                  "register-class alternative", alt_index));
+  IREE_RETURN_IF_ERROR(loom_low_verify_known_flags(
+      alt->flags,
+      LOOM_LOW_REG_CLASS_ALT_FLAG_PREFERRED |
+          LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE |
+          LOOM_LOW_REG_CLASS_ALT_FLAG_PHYSICAL_ONLY |
+          LOOM_LOW_REG_CLASS_ALT_FLAG_LATE_READ,
+      "register-class alternative", alt_index));
   const bool is_immediate =
       (alt->flags & LOOM_LOW_REG_CLASS_ALT_FLAG_IMMEDIATE) != 0;
-  if (is_immediate && alt->reg_class_id != LOOM_LOW_REG_CLASS_NONE) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "low register-class alternative %" PRIu32
-        " marks an immediate but also references register class %" PRIu16,
-        alt_index, alt->reg_class_id);
+  const bool is_late_read =
+      iree_any_bit_set(alt->flags, LOOM_LOW_REG_CLASS_ALT_FLAG_LATE_READ);
+  if ((is_immediate && is_late_read) ||
+      (!is_late_read && alt->late_read_subgroup_size != 0)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "low register-class alternative %" PRIu32
+                            " has inconsistent late-read timing",
+                            alt_index);
   }
-  if (!is_immediate && alt->reg_class_id >= descriptor_set->reg_class_count) {
+  if (is_immediate) {
+    if (alt->reg_class_id != LOOM_LOW_REG_CLASS_NONE) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low register-class alternative %" PRIu32
+          " marks an immediate but also references register class %" PRIu16,
+          alt_index, alt->reg_class_id);
+    }
+    if (alt->register_part_id != LOOM_LOW_REGISTER_PART_NONE) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "low register-class alternative %" PRIu32
+          " marks an immediate but also references register part %" PRIu16,
+          alt_index, alt->register_part_id);
+    }
+    return iree_ok_status();
+  }
+  if (alt->reg_class_id >= descriptor_set->reg_class_count) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "low register-class alternative %" PRIu32
                             " references register class %" PRIu16
                             " but only %" PRIu32 " classes exist",
                             alt_index, alt->reg_class_id,
                             descriptor_set->reg_class_count);
+  }
+  if (alt->register_part_id == LOOM_LOW_REGISTER_PART_NONE) {
+    return iree_ok_status();
+  }
+  if (alt->register_part_id >= descriptor_set->register_part_count) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "low register-class alternative %" PRIu32
+                            " references register part %" PRIu16
+                            " but only %" PRIu32 " register parts exist",
+                            alt_index, alt->register_part_id,
+                            descriptor_set->register_part_count);
+  }
+  const loom_low_register_part_t* register_part =
+      &descriptor_set->register_parts[alt->register_part_id];
+  if (register_part->reg_class_id != alt->reg_class_id) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "low register-class alternative %" PRIu32 " for register class %" PRIu16
+        " uses register part %" PRIu16 " for register class %" PRIu16,
+        alt_index, alt->reg_class_id, alt->register_part_id,
+        register_part->reg_class_id);
   }
   return iree_ok_status();
 }
@@ -3089,6 +3425,13 @@ static iree_status_t loom_low_verify_issue_use(
                             "low issue-use %" PRIu32 " has invalid kind %u",
                             issue_use_index, (unsigned)issue_use->kind);
   }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_low_verify_issue_use_capacity(
+    const loom_low_descriptor_set_t* descriptor_set, uint32_t issue_use_index) {
+  const loom_low_issue_use_t* issue_use =
+      &descriptor_set->issue_uses[issue_use_index];
   const loom_low_resource_t* resource =
       &descriptor_set->resources[issue_use->resource_id];
   if (issue_use->units > resource->capacity_per_cycle) {
@@ -3126,6 +3469,17 @@ static iree_status_t loom_low_verify_resource(
   return iree_ok_status();
 }
 
+static bool loom_low_resources_share_capacity(
+    const loom_low_descriptor_set_t* descriptor_set, uint16_t lhs_resource_id,
+    uint16_t rhs_resource_id) {
+  const uint16_t lhs_group =
+      descriptor_set->resources[lhs_resource_id].contention_group_id;
+  const uint16_t rhs_group =
+      descriptor_set->resources[rhs_resource_id].contention_group_id;
+  return lhs_resource_id == rhs_resource_id ||
+         (lhs_group != 0 && lhs_group == rhs_group);
+}
+
 static iree_status_t loom_low_verify_schedule_class_minimum_issue_cycles(
     const loom_low_descriptor_set_t* descriptor_set,
     uint32_t schedule_class_index) {
@@ -3136,16 +3490,22 @@ static iree_status_t loom_low_verify_schedule_class_minimum_issue_cycles(
     const uint32_t issue_use_index = schedule_class->issue_use_start + i;
     const loom_low_issue_use_t* issue_use =
         &descriptor_set->issue_uses[issue_use_index];
-    bool is_first_use_of_resource = true;
+    if (issue_use->kind != LOOM_LOW_ISSUE_USE_KIND_REQUIRED) {
+      continue;
+    }
+    bool is_first_required_use_of_resource = true;
     for (uint16_t j = 0; j < i; ++j) {
       const loom_low_issue_use_t* previous_issue_use =
           &descriptor_set->issue_uses[schedule_class->issue_use_start + j];
-      if (previous_issue_use->resource_id == issue_use->resource_id) {
-        is_first_use_of_resource = false;
+      if (previous_issue_use->kind == LOOM_LOW_ISSUE_USE_KIND_REQUIRED &&
+          loom_low_resources_share_capacity(descriptor_set,
+                                            previous_issue_use->resource_id,
+                                            issue_use->resource_id)) {
+        is_first_required_use_of_resource = false;
         break;
       }
     }
-    if (!is_first_use_of_resource) {
+    if (!is_first_required_use_of_resource) {
       continue;
     }
 
@@ -3153,7 +3513,10 @@ static iree_status_t loom_low_verify_schedule_class_minimum_issue_cycles(
     for (uint16_t j = i; j < schedule_class->issue_use_count; ++j) {
       const loom_low_issue_use_t* matching_issue_use =
           &descriptor_set->issue_uses[schedule_class->issue_use_start + j];
-      if (matching_issue_use->resource_id == issue_use->resource_id) {
+      if (matching_issue_use->kind == LOOM_LOW_ISSUE_USE_KIND_REQUIRED &&
+          loom_low_resources_share_capacity(descriptor_set,
+                                            matching_issue_use->resource_id,
+                                            issue_use->resource_id)) {
         resource_unit_cycles +=
             (uint64_t)matching_issue_use->cycles * matching_issue_use->units;
       }
@@ -3175,6 +3538,25 @@ static iree_status_t loom_low_verify_schedule_class_minimum_issue_cycles(
         expected_minimum_issue_cycles);
   }
   return iree_ok_status();
+}
+
+static iree_status_t loom_low_verify_descriptor_schedule_model(
+    const loom_low_descriptor_set_t* descriptor_set,
+    uint32_t descriptor_index) {
+  const loom_low_descriptor_view_t* descriptor_view =
+      &descriptor_set->descriptor_views[descriptor_index];
+  const uint16_t schedule_class_id = descriptor_view->schedule_class_id;
+  const uint16_t schedule_class_row_id =
+      loom_low_descriptor_set_schedule_class_row_id(descriptor_set,
+                                                    schedule_class_id);
+  const loom_low_schedule_class_t* schedule_class =
+      &descriptor_set->schedule_classes[schedule_class_row_id];
+  for (uint16_t i = 0; i < schedule_class->issue_use_count; ++i) {
+    IREE_RETURN_IF_ERROR(loom_low_verify_issue_use_capacity(
+        descriptor_set, schedule_class->issue_use_start + i));
+  }
+  return loom_low_verify_schedule_class_minimum_issue_cycles(
+      descriptor_set, schedule_class_row_id);
 }
 
 static iree_status_t loom_low_verify_effect(uint32_t effect_index,
@@ -3302,7 +3684,34 @@ iree_status_t loom_low_descriptor_set_verify(
   IREE_RETURN_IF_ERROR(loom_low_verify_optional_string(
       descriptor_set, descriptor_set->feature_key_string_ref, "set.feature"));
 
-  for (uint32_t i = 0; i < descriptor_set->descriptor_count; ++i) {
+  // Operand forms can reference a later descriptor before its full validation.
+  // Establish every selected layout index before following those references.
+  for (uint32_t i = 0; i < descriptor_set->descriptor_ordinal_count; ++i) {
+    if (!loom_low_descriptor_set_has_descriptor(descriptor_set, i)) {
+      continue;
+    }
+    const uint16_t layout_index = descriptor_set->descriptors[i].layout_index;
+    if (layout_index >= descriptor_set->descriptor_layout_count) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "low descriptor %" PRIu32 " layout index %" PRIu16
+                              " is out of range",
+                              i, layout_index);
+    }
+  }
+
+  for (uint32_t i = 0; i < descriptor_set->operand_index_count; ++i) {
+    if (descriptor_set->operand_indices[i] >= descriptor_set->operand_count) {
+      return iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "low operand index %" PRIu32 " references operand row %" PRIu16
+          " but only %" PRIu32 " rows exist",
+          i, descriptor_set->operand_indices[i], descriptor_set->operand_count);
+    }
+  }
+  for (uint32_t i = 0; i < descriptor_set->descriptor_ordinal_count; ++i) {
+    if (!loom_low_descriptor_set_has_descriptor(descriptor_set, i)) {
+      continue;
+    }
     IREE_RETURN_IF_ERROR(loom_low_verify_descriptor(descriptor_set, i));
   }
   for (uint32_t i = 0; i < descriptor_set->operand_count; ++i) {
@@ -3341,7 +3750,7 @@ iree_status_t loom_low_descriptor_set_verify(
   for (uint32_t i = 0; i < descriptor_set->reg_class_alt_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_low_verify_reg_class_alt(descriptor_set, i));
   }
-  for (uint32_t i = 0; i < descriptor_set->schedule_class_count; ++i) {
+  for (uint32_t i = 0; i < descriptor_set->schedule_class_row_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_low_verify_schedule_class(descriptor_set, i));
   }
   for (uint32_t i = 0; i < descriptor_set->issue_use_count; ++i) {
@@ -3350,9 +3759,12 @@ iree_status_t loom_low_descriptor_set_verify(
   for (uint32_t i = 0; i < descriptor_set->resource_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_low_verify_resource(descriptor_set, i));
   }
-  for (uint32_t i = 0; i < descriptor_set->schedule_class_count; ++i) {
+  for (uint32_t i = 0; i < descriptor_set->descriptor_ordinal_count; ++i) {
+    if (!loom_low_descriptor_set_has_descriptor(descriptor_set, i)) {
+      continue;
+    }
     IREE_RETURN_IF_ERROR(
-        loom_low_verify_schedule_class_minimum_issue_cycles(descriptor_set, i));
+        loom_low_verify_descriptor_schedule_model(descriptor_set, i));
   }
   for (uint32_t i = 0; i < descriptor_set->hazard_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_low_verify_hazard(descriptor_set, i));

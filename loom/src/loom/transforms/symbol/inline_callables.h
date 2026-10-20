@@ -20,8 +20,9 @@ extern "C" {
 // or moved. Allocation/analysis failures propagate separately from eligibility.
 typedef struct loom_inline_callables_eligibility_callback_t {
   // Called once per reachable template call during plan construction.
-  iree_status_t (*fn)(void* user_data, loom_symbol_id_t source_symbol_id,
-                      loom_op_t* call_op, bool* out_eligible);
+  iree_status_t (*fn)(void* user_data,
+                      const loom_symbol_reference_occurrence_t* occurrence,
+                      bool* out_eligible);
   // Borrowed state owned by the producer of applicability decisions.
   void* user_data;
 } loom_inline_callables_eligibility_callback_t;
@@ -56,19 +57,19 @@ typedef struct loom_inline_callables_plan_t loom_inline_callables_plan_t;
 // Planning borrows |options|' snapshots and allocates in |pass->arena|. It does
 // not mutate the module. The caller may then replace selected applications
 // with exact calls and append them without rebuilding the reference snapshot.
-iree_status_t loom_inline_callables_plan_create(
+iree_status_t loom_inline_callables_plan_allocate(
     loom_pass_t* pass, loom_module_t* module,
     const loom_inline_callables_plan_options_t* options,
     loom_inline_callables_plan_t** out_plan);
 
 // Appends an applicable template call replacing an application in the original
-// snapshot. Its selection owner supplies the original containing symbol and
-// selected provider directly. Each call consumes one reserved capacity slot;
+// snapshot. Its selection owner supplies the original containing symbol,
+// execution scope, and selected provider. Each call consumes one reserved slot;
 // no lookup, applicability reevaluation, or allocation occurs here.
-void loom_inline_callables_plan_append(loom_inline_callables_plan_t* plan,
-                                       loom_symbol_id_t source_symbol_id,
-                                       loom_symbol_id_t target_symbol_id,
-                                       loom_op_t* call_op);
+void loom_inline_callables_plan_append(
+    loom_inline_callables_plan_t* plan, loom_symbol_id_t source_symbol_id,
+    loom_symbol_reference_execution_scope_id_t execution_scope,
+    loom_symbol_id_t target_symbol_id, loom_op_t* call_op);
 
 // Checks required-edge cycles and body legality, then executes the existing
 // clone/consume scheduler. Emits diagnostics through the owning pass and marks
@@ -84,7 +85,8 @@ const loom_pass_info_t* loom_inline_callables_pass_info(void);
 iree_status_t loom_inline_callables_create(loom_pass_t* pass,
                                            iree_string_view_t options);
 
-// Runs module-level required callable inlining. Template calls stay intact;
+// Runs module-level required callable inlining. Command program calls expand
+// with their serial ordering intact. Template calls stay intact;
 // select-templates{rewrite=inline} owns their applicability and expansion.
 iree_status_t loom_inline_callables_run(loom_pass_t* pass,
                                         loom_module_t* module);

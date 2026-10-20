@@ -8,9 +8,13 @@
 
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
+#include "loom/ops/test/ops.h"
 #include "loom/pass/report.h"
 #include "loom/pass/test/harness.h"
+#include "loom/pass/trace.h"
+#include "loom/rewrite/rewriter.h"
+#include "loom/util/stream.h"
 
 namespace loom {
 namespace {
@@ -18,6 +22,8 @@ namespace {
 struct DiagnosticCapture {
   // Number of diagnostic emissions captured.
   int emission_count = 0;
+  // Module associated with the diagnostic emission.
+  const loom_module_t* module = nullptr;
   // Operation associated with the diagnostic emission.
   const loom_op_t* op = nullptr;
   // Structured diagnostic definition that was emitted.
@@ -60,6 +66,7 @@ class PassInterpreterTest : public PassTestHarness {
       void* user_data, const loom_diagnostic_emission_t* emission) {
     DiagnosticCapture* capture = static_cast<DiagnosticCapture*>(user_data);
     ++capture->emission_count;
+    capture->module = emission->module;
     capture->op = emission->op;
     capture->error = emission->error;
     capture->param_count = emission->param_count;
@@ -107,6 +114,84 @@ TEST_F(PassInterpreterTest, RunsModuleAndFunctionPasses) {
   EXPECT_EQ(trace.noop_invocation_count, 2);
 }
 
+TEST_F(PassInterpreterTest, StopsExecutionAtFailedTraceBoundary) {
+  for (bool function_anchor : {false, true}) {
+    for (bool fail_before : {false, true}) {
+      for (bool enable_report : {false, true}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "function_anchor=" << function_anchor << " fail_before="
+                     << fail_before << " enable_report=" << enable_report);
+        loom_module_t* module =
+            Parse(function_anchor
+                      ? IREE_SV("pass.pipeline<module> @pipeline pipeline {\n"
+                                "  for func {\n"
+                                "    test.options(count = 5)\n"
+                                "    test.options(count = 7)\n"
+                                "  }\n"
+                                "}\n"
+                                "test.func @main() { test.yield }\n")
+                      : IREE_SV("pass.pipeline<module> @pipeline pipeline {\n"
+                                "  test.module-noop\n"
+                                "  test.module-noop\n"
+                                "}\n"));
+        ASSERT_NE(module, nullptr);
+        PassProgramStorage storage;
+        IREE_ASSERT_OK(Compile(module, Pipeline(module, 0), &storage.program));
+
+        int write_count = 0;
+        loom_output_stream_t stream = {
+            .write =
+                [](void* user_data, iree_string_view_t text) {
+                  ++*static_cast<int*>(user_data);
+                  return iree_status_from_code(IREE_STATUS_UNAVAILABLE);
+                },
+            .user_data = &write_count,
+        };
+        loom_pass_trace_options_t trace_options;
+        loom_pass_trace_options_initialize(&trace_options);
+        trace_options.stream = &stream;
+        trace_options.dump_before_all = fail_before;
+        trace_options.dump_after_all = !fail_before;
+        loom_pass_trace_t trace;
+        loom_pass_trace_initialize(&trace_options, &trace);
+
+        loom_test_pass_trace_t pass_trace = {};
+        DiagnosticCapture diagnostic_capture;
+        PassReportStorage report_storage;
+        auto options = InterpreterOptions(
+            &pass_trace,
+            {.fn = CaptureDiagnostic, .user_data = &diagnostic_capture},
+            enable_report ? &report_storage.report : nullptr);
+        options.trace = &trace;
+        loom_pass_run_result_t result = {};
+        IREE_EXPECT_STATUS_IS(IREE_STATUS_UNAVAILABLE,
+                              loom_pass_interpreter_run_module(
+                                  &storage.program, module, &options, &result));
+
+        EXPECT_EQ(write_count, 1);
+        EXPECT_EQ(diagnostic_capture.emission_count, 0);
+        EXPECT_EQ(result.error_count, 0u);
+        EXPECT_EQ(pass_trace.event_count, fail_before ? 0u : 1u);
+        EXPECT_EQ(pass_trace.module_noop_invocation_count,
+                  !fail_before && !function_anchor ? 1 : 0);
+        EXPECT_EQ(pass_trace.options_invocation_count,
+                  !fail_before && function_anchor ? 1 : 0);
+        EXPECT_EQ(pass_trace.options_decoded_create_count,
+                  !fail_before && function_anchor ? 1 : 0);
+        if (!fail_before && function_anchor) {
+          EXPECT_EQ(pass_trace.decoded_options_count_value, 5u);
+        }
+        ASSERT_EQ(report_storage.report.invocation_count,
+                  !fail_before && enable_report ? 1u : 0u);
+        if (!fail_before && enable_report) {
+          EXPECT_EQ(report_storage.report.invocations[0].status_code,
+                    IREE_STATUS_OK);
+        }
+      }
+    }
+  }
+}
+
 TEST_F(PassInterpreterTest, SelectsFunctionsEnteredByModuleProgram) {
   loom_module_t* module =
       Parse(IREE_SV("pass.pipeline<module> @pipeline pipeline {\n"
@@ -129,8 +214,8 @@ TEST_F(PassInterpreterTest, SelectsFunctionsEnteredByModuleProgram) {
   iree_string_view_t selected_name = IREE_SV("second");
   loom_pass_interpreter_options_t options = InterpreterOptions(&trace);
   options.function_selector = {
-      /*.select=*/SelectNamedFunction,
-      /*.user_data=*/&selected_name,
+      .select = SelectNamedFunction,
+      .user_data = &selected_name,
   };
   loom_pass_run_result_t result = {};
   IREE_ASSERT_OK(loom_pass_interpreter_run_module(&storage.program, module,
@@ -157,16 +242,16 @@ TEST_F(PassInterpreterTest, RunsFunctionRootProgram) {
   ASSERT_NE(module, nullptr);
 
   loom_function_version_type_t version_type = {
-      /*.name=*/IREE_SVL("test"),
+      .name = IREE_SVL("test"),
   };
   loom_function_version_t version = {
-      /*.type=*/&version_type,
-      /*.function=*/Function(module, 1),
+      .type = &version_type,
+      .function = Function(module, 1),
   };
   loom_function_version_t* version_values[] = {&version};
   const loom_function_version_list_t versions = {
-      /*.values=*/version_values,
-      /*.count=*/IREE_ARRAYSIZE(version_values),
+      .values = version_values,
+      .count = IREE_ARRAYSIZE(version_values),
   };
 
   PassProgramStorage storage;
@@ -181,6 +266,99 @@ TEST_F(PassInterpreterTest, RunsFunctionRootProgram) {
   EXPECT_EQ(trace.noop_invocation_count, 1);
   ASSERT_EQ(trace.event_count, 1u);
   EXPECT_EQ(trace.events[0].function_version, &version);
+}
+
+// Models a lowering pass that replaces the anchored definition and publishes
+// its new implementation before the enclosing pipeline resumes.
+static iree_status_t ReplaceFunction(loom_pass_t* pass, loom_module_t* module,
+                                     loom_func_like_t function) {
+  loom_builder_t builder;
+  loom_builder_initialize(module, &module->arena, nullptr, &builder);
+  loom_builder_set_before(&builder, function.op);
+  loom_op_t* replacement = nullptr;
+  IREE_RETURN_IF_ERROR(loom_test_func_build(
+      &builder, LOOM_TEST_FUNC_BUILD_FLAG_HAS_VISIBILITY,
+      LOOM_TEST_VISIBILITY_PUBLIC, 0, loom_func_like_callee(function), nullptr,
+      0, nullptr, 0, nullptr, 0, nullptr, 0, function.op->location,
+      &replacement));
+  loom_builder_enter_region(&builder, replacement,
+                            loom_test_func_body(replacement));
+  loom_op_t* yield = nullptr;
+  IREE_RETURN_IF_ERROR(loom_test_yield_build(&builder, nullptr, 0,
+                                             function.op->location, &yield));
+  loom_rewriter_t rewriter;
+  loom_rewriter_initialize(&rewriter, module, pass->arena);
+  iree_status_t status = loom_rewriter_erase(&rewriter, function.op);
+  loom_rewriter_deinitialize(&rewriter);
+  IREE_RETURN_IF_ERROR(status);
+  loom_module_link_symbol_defining_op(module, replacement,
+                                      loom_op_vtable(module, replacement));
+  if (pass->function_version) {
+    loom_function_version_update(pass->function_version,
+                                 loom_func_like_cast(module, replacement));
+  }
+  loom_pass_mark_changed(pass);
+  return iree_ok_status();
+}
+
+TEST_F(PassInterpreterTest, FollowsReplacementAcrossNestedPipelineBoundaries) {
+  for (bool module_root : {false, true}) {
+    for (bool has_version : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "module_root=" << module_root
+                                        << ", has_version=" << has_version);
+      const char* root = module_root
+                             ? "pass.pipeline<module> @pipeline pipeline {"
+                               "  for func { call @body } }"
+                             : "pass.pipeline<func> @pipeline pipeline {"
+                               "  call @body }";
+      std::string source = std::string(root) + R"(
+pass.pipeline<func> @body pipeline {
+  repeat fixed(count = 1) { test.mark-changed }
+  if changed {
+    where attr(name = "visibility", value = "public") { test.noop }
+  }
+}
+test.func @main() { test.yield }
+)";
+      loom_module_t* module =
+          Parse(iree_make_string_view(source.data(), source.size()));
+      ASSERT_NE(module, nullptr);
+      loom_func_like_t original = Function(module, 2);
+      loom_function_version_type_t version_type = {IREE_SVL("test")};
+      loom_function_version_t version = {&version_type, original};
+      loom_function_version_t* version_values[] = {&version};
+      const loom_function_version_list_t versions = {version_values, 1};
+      PassProgramStorage storage;
+      IREE_ASSERT_OK(Compile(module, Pipeline(module, 0), &storage.program));
+      // Bind this test's replacing implementation at the normal callback seam.
+      for (iree_host_size_t i = 0; i < storage.program.instruction_count; ++i) {
+        auto& instruction = storage.program.instructions[i];
+        if (instruction.kind == LOOM_PASS_PROGRAM_INSTRUCTION_INVOKE &&
+            iree_string_view_equal(instruction.invoke.descriptor->key,
+                                   IREE_SV("test.mark-changed"))) {
+          instruction.invoke.function_run = ReplaceFunction;
+        }
+      }
+      loom_test_pass_trace_t trace = {};
+      auto options = InterpreterOptions(&trace);
+      options.function_versions = has_version ? &versions : nullptr;
+      loom_pass_run_result_t result = {};
+      IREE_ASSERT_OK(loom_pass_interpreter_run_program(&storage.program, module,
+                                                       &options, &result));
+      ASSERT_EQ(trace.event_count, 1u);
+      const auto current = loom_func_like_cast(
+          module,
+          module->symbols.entries[loom_func_like_callee(original).symbol_id]
+              .defining_op);
+      EXPECT_NE(current.op, original.op);
+      EXPECT_EQ(trace.events[0].function.op, current.op);
+      EXPECT_EQ(trace.events[0].function_version,
+                has_version ? &version : nullptr);
+      if (has_version) {
+        EXPECT_EQ(version.function.op, current.op);
+      }
+    }
+  }
 }
 
 TEST_F(PassInterpreterTest, AppendsExecutionReportRecords) {
@@ -425,32 +603,32 @@ TEST_F(PassInterpreterTest, AppliesProviderPredicateToCurrentFunction) {
   ASSERT_NE(module, nullptr);
 
   PassTestPredicateCapture predicate_capture = {
-      /*.verify_count=*/{},
-      /*.evaluate_count=*/{},
-      /*.selected_symbol=*/IREE_SV("selected"),
-      /*.selected_function_version=*/nullptr,
+      .verify_count = {},
+      .evaluate_count = {},
+      .selected_symbol = IREE_SV("selected"),
+      .selected_function_version = nullptr,
   };
   loom_pass_predicate_provider_t predicate_provider =
       PassTestTargetPredicateProvider(&predicate_capture);
 
   loom_function_version_type_t version_type = {
-      /*.name=*/IREE_SVL("test"),
+      .name = IREE_SVL("test"),
   };
   loom_function_version_t selected_version = {
-      /*.type=*/&version_type,
-      /*.function=*/Function(module, 1),
+      .type = &version_type,
+      .function = Function(module, 1),
   };
   loom_function_version_t skipped_version = {
-      /*.type=*/&version_type,
-      /*.function=*/Function(module, 2),
+      .type = &version_type,
+      .function = Function(module, 2),
   };
   loom_function_version_t* version_values[] = {
       &selected_version,
       &skipped_version,
   };
   const loom_function_version_list_t versions = {
-      /*.values=*/version_values,
-      /*.count=*/IREE_ARRAYSIZE(version_values),
+      .values = version_values,
+      .count = IREE_ARRAYSIZE(version_values),
   };
 
   PassProgramStorage storage;
@@ -661,32 +839,37 @@ TEST_F(PassInterpreterTest, ExposesDecodedOptionsToPassInstance) {
 }
 
 TEST_F(PassInterpreterTest, PropagatesDescriptorCallbackFailure) {
-  loom_module_t* module =
+  loom_module_t* pipeline_module =
       Parse(IREE_SV("pass.pipeline<module> @pipeline pipeline {\n"
                     "  test.fail\n"
                     "}\n"));
-  ASSERT_NE(module, nullptr);
+  ASSERT_NE(pipeline_module, nullptr);
+  loom_module_t* target_module = AllocateModule(IREE_SV("target"));
+  ASSERT_NE(target_module, nullptr);
 
   PassProgramStorage storage;
-  IREE_ASSERT_OK(Compile(module, Pipeline(module, 0), &storage.program));
+  IREE_ASSERT_OK(
+      Compile(pipeline_module, Pipeline(pipeline_module, 0), &storage.program));
 
   loom_test_pass_trace_t trace = {};
   DiagnosticCapture diagnostic_capture;
   loom_pass_interpreter_options_t options =
-      InterpreterOptions(&trace, (iree_diagnostic_emitter_t){
-                                     /*.fn=*/CaptureDiagnostic,
-                                     /*.user_data=*/&diagnostic_capture,
+      InterpreterOptions(&trace, iree_diagnostic_emitter_t{
+                                     .fn = CaptureDiagnostic,
+                                     .user_data = &diagnostic_capture,
                                  });
   loom_pass_run_result_t result = {};
-  IREE_EXPECT_STATUS_IS(IREE_STATUS_INTERNAL,
-                        loom_pass_interpreter_run_module(
-                            &storage.program, module, &options, &result));
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INTERNAL,
+      loom_pass_interpreter_run_module(&storage.program, target_module,
+                                       &options, &result));
   EXPECT_EQ(trace.fail_invocation_count, 1);
   EXPECT_EQ(diagnostic_capture.emission_count, 1);
   ASSERT_NE(diagnostic_capture.error, nullptr);
   EXPECT_EQ(loom_error_def_domain(diagnostic_capture.error),
             LOOM_ERROR_DOMAIN_STRUCTURE);
   EXPECT_EQ(loom_error_def_code(diagnostic_capture.error), 28);
+  EXPECT_EQ(diagnostic_capture.module, pipeline_module);
   EXPECT_EQ(diagnostic_capture.op, storage.program.instructions[0].source.op);
   ASSERT_EQ(diagnostic_capture.param_count, 4);
   EXPECT_EQ(diagnostic_capture.params[0].kind, LOOM_PARAM_STRING);

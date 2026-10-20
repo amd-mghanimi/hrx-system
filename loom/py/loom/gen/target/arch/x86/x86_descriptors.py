@@ -26,10 +26,12 @@ def _ensure_runtime_py_on_path() -> None:
 _ensure_runtime_py_on_path()
 
 from loom.gen.support.files import write_text_file  # noqa: E402
+from loom.gen.support.string_pool import CStringBank  # noqa: E402
 from loom.gen.target.low.low_descriptors import (  # noqa: E402
     generate_descriptor_set_family,
     write_descriptor_set_to_paths,
 )
+from loom.target.arch.x86.descriptors.encoding import validate_descriptor_encoding  # noqa: E402
 from loom.target.arch.x86.target_info import (  # noqa: E402
     X86DescriptorSetInfo,
     x86_descriptor_set_info_by_generator_target,
@@ -62,8 +64,11 @@ def _parse_view_headers(values: Sequence[str]) -> dict[str, Path]:
 
 
 def _descriptor_set_for_info(info: X86DescriptorSetInfo) -> DescriptorSet:
+    descriptor_set = resolve_descriptor_set(info.key)
+    for descriptor in descriptor_set.descriptors:
+        validate_descriptor_encoding(descriptor)
     return replace(
-        resolve_descriptor_set(info.key),
+        descriptor_set,
         descriptor_set_ordinal=x86_descriptor_set_ordinal(info.key),
     )
 
@@ -119,6 +124,20 @@ def _shared_storage_descriptor_set(
     )
 
 
+def descriptor_set_family_specs(
+    storage_info: X86DescriptorSetInfo,
+    view_infos: Sequence[X86DescriptorSetInfo],
+) -> tuple[DescriptorSet, tuple[DescriptorSet, ...]]:
+    """Builds the shared storage spec and ordered public view specs."""
+    descriptor_set = _descriptor_set_for_info(storage_info)
+    view_descriptor_sets = tuple(_descriptor_set_for_info(info) for info in view_infos)
+    storage_descriptor_set = _shared_storage_descriptor_set(
+        descriptor_set,
+        view_descriptor_sets,
+    )
+    return storage_descriptor_set, (*view_descriptor_sets, descriptor_set)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate x86 target-low descriptor C tables.")
     parser.add_argument(
@@ -144,24 +163,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[],
         help="Generated descriptor view header as <target>=<path>.",
     )
+    parser.add_argument("--shared-strings", type=Path, help="Producer-owned shared string-bank layout.")
     args = parser.parse_args(argv)
 
+    shared_strings = CStringBank.read(args.shared_strings) if args.shared_strings else None
     view_headers = _parse_view_headers(args.view_header)
     descriptor_set_info = x86_descriptor_set_info_by_generator_target(args.target)
     storage_info = x86_descriptor_set_storage_info_by_generator_target(args.target)
     if storage_info != descriptor_set_info:
         raise ValueError(f"x86 descriptor target {args.target} is a view of storage target {storage_info.generator_target}; generate the storage target with --view-header instead")
     view_infos = _view_infos_for_storage_target(descriptor_set_info, view_headers)
-    descriptor_set = _descriptor_set_for_info(descriptor_set_info)
     if view_infos:
-        view_descriptor_sets = tuple(_descriptor_set_for_info(info) for info in view_infos)
-        storage_descriptor_set = _shared_storage_descriptor_set(
-            descriptor_set,
-            view_descriptor_sets,
-        )
+        storage_descriptor_set, view_descriptor_sets = descriptor_set_family_specs(descriptor_set_info, view_infos)
         generated = generate_descriptor_set_family(
             storage_descriptor_set,
-            (*view_descriptor_sets, descriptor_set),
+            view_descriptor_sets,
+            shared_strings=shared_strings,
         )
         write_text_file(args.header, generated.view_headers[-1])
         write_text_file(args.source, generated.source)
@@ -174,10 +191,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_text_file(view_header_path, view_header)
         return 0
 
+    descriptor_set = _descriptor_set_for_info(descriptor_set_info)
     write_descriptor_set_to_paths(
         descriptor_set,
         header_path=args.header,
         source_path=args.source,
+        shared_strings=shared_strings,
     )
     return 0
 

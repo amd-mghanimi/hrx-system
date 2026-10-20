@@ -87,7 +87,7 @@ typedef struct loom_pass_requirement_def_t {
 
 // Static descriptor for one pass implementation.
 typedef struct loom_pass_descriptor_t {
-  // Canonical pass key used by textual pipelines and future pass.run ops.
+  // Canonical pass key used by textual pipelines and pass.run ops.
   iree_string_view_t key;
   // Returns static pass metadata.
   loom_pass_info_fn_t info;
@@ -115,39 +115,24 @@ typedef struct loom_pass_descriptor_t {
   uint16_t requirement_count;
 } loom_pass_descriptor_t;
 
-// Decoded value for one pass option schema entry.
-typedef struct loom_pass_decoded_option_t {
-  // Option schema describing this value.
-  const loom_pass_option_schema_t* schema;
-  // True when the option was present in the source option dictionary.
-  bool present;
-  union {
-    // String value when schema->kind is LOOM_PASS_OPTION_SCHEMA_STRING.
-    iree_string_view_t string_value;
-    // Integer value when schema->kind is LOOM_PASS_OPTION_SCHEMA_UINT32.
-    uint32_t uint32_value;
-    // Index into schema->enum_values when kind is LOOM_PASS_OPTION_SCHEMA_ENUM.
-    uint16_t enum_value_index;
-  };
-} loom_pass_decoded_option_t;
-
-// Immutable decoded option set for one pass descriptor.
-typedef struct loom_pass_decoded_options_t {
-  // Descriptor that owns the option schema.
-  const loom_pass_descriptor_t* descriptor;
-  // Arena-owned decoded options indexed by descriptor option schema order.
-  const loom_pass_decoded_option_t* options;
-  // Number of entries in |options|.
-  uint16_t option_count;
-} loom_pass_decoded_options_t;
-
 // A sorted registry of pass descriptors.
 typedef struct loom_pass_registry_t {
-  // Descriptors sorted by canonical key.
+  // Optional contiguous descriptors sorted by canonical key. Static registries
+  // use this representation; composed registries leave it NULL.
   const loom_pass_descriptor_t* descriptors;
-  // Number of descriptors in |descriptors|.
+  // Number of descriptors in the active representation.
   iree_host_size_t descriptor_count;
+  // Optional sorted references to canonical descriptors. Composed registries
+  // use this representation; static registries leave it NULL.
+  const loom_pass_descriptor_t* const* descriptor_refs;
 } loom_pass_registry_t;
+
+// Returns descriptor |index| from either registry representation.
+static inline const loom_pass_descriptor_t* loom_pass_registry_at(
+    const loom_pass_registry_t* registry, iree_host_size_t index) {
+  return registry->descriptor_refs != NULL ? registry->descriptor_refs[index]
+                                           : &registry->descriptors[index];
+}
 
 enum {
   LOOM_PASS_REGISTRY_STORAGE_DESCRIPTOR_CAPACITY = 256,
@@ -155,24 +140,23 @@ enum {
 
 // Storage for a composed pass registry assembled from static registries.
 typedef struct loom_pass_registry_storage_t {
-  // Sorted descriptor storage copied from source registries.
-  loom_pass_descriptor_t
-      descriptors[LOOM_PASS_REGISTRY_STORAGE_DESCRIPTOR_CAPACITY];
-  // Registry view over |descriptors|.
+  // Sorted references to canonical descriptors owned by source registries.
+  const loom_pass_descriptor_t*
+      descriptor_refs[LOOM_PASS_REGISTRY_STORAGE_DESCRIPTOR_CAPACITY];
+  // Registry view over |descriptor_refs|.
   loom_pass_registry_t registry;
 } loom_pass_registry_storage_t;
 
-// Looks up |key| by exact canonical spelling. Returns OK with
-// |*out_descriptor| NULL when the key is unknown.
-iree_status_t loom_pass_registry_lookup(
-    const loom_pass_registry_t* registry, iree_string_view_t key,
-    const loom_pass_descriptor_t** out_descriptor);
+// Looks up |key| by exact canonical spelling, returning NULL when unknown.
+const loom_pass_descriptor_t* loom_pass_registry_lookup(
+    const loom_pass_registry_t* registry, iree_string_view_t key);
 
 // Builds a sorted registry from zero or more sorted source registries.
 //
-// Descriptors are copied by value and their callback/data pointers continue to
-// reference static storage owned by the source registry packages. Duplicate
-// pass keys are rejected so every textual pass.run key has a single owner.
+// Descriptor references remain owned by the source registry packages, which
+// must outlive |out_storage| and all consumers of descriptors returned from it.
+// Duplicate pass keys are rejected so every textual pass.run key has a single
+// owner.
 iree_status_t loom_pass_registry_storage_initialize_from_registries(
     const loom_pass_registry_t* const* registries,
     iree_host_size_t registry_count, loom_pass_registry_storage_t* out_storage);
@@ -184,25 +168,6 @@ const loom_pass_registry_t* loom_pass_registry_storage_registry(
 // Returns true when |descriptor| can be instantiated in the current build.
 bool loom_pass_descriptor_is_available(
     const loom_pass_descriptor_t* descriptor);
-
-// Validates textual option assignments against |descriptor|'s schema.
-iree_status_t loom_pass_descriptor_validate_options(
-    const loom_pass_descriptor_t* descriptor, iree_string_view_t options);
-
-// Decodes textual option assignments against |descriptor|'s schema into
-// immutable arena-owned storage. String values reference the original option
-// text and must not outlive it.
-iree_status_t loom_pass_descriptor_decode_options(
-    const loom_pass_descriptor_t* descriptor, iree_string_view_t options,
-    iree_arena_allocator_t* arena, loom_pass_decoded_options_t* out_options);
-
-// Decodes a pass.run option attribute dictionary against |descriptor|'s schema
-// into immutable arena-owned storage. String and enum values reference interned
-// strings owned by |module|.
-iree_status_t loom_pass_descriptor_decode_attr_options(
-    const loom_pass_descriptor_t* descriptor, const loom_module_t* module,
-    loom_named_attr_slice_t options, iree_arena_allocator_t* arena,
-    loom_pass_decoded_options_t* out_options);
 
 #ifdef __cplusplus
 }  // extern "C"

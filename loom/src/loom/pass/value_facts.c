@@ -10,11 +10,15 @@
 
 #include "loom/analysis/conditioned_value_facts.h"
 #include "loom/ops/op_defs.h"
+#include "loom/ops/target/facts.h"
 #include "loom/ops/type_registry.h"
 
 static bool loom_pass_value_fact_scope_equal(loom_pass_value_fact_scope_t lhs,
                                              loom_pass_value_fact_scope_t rhs) {
-  if (lhs.kind != rhs.kind || lhs.target_facts != rhs.target_facts) {
+  if (lhs.kind != rhs.kind || lhs.target_facts != rhs.target_facts ||
+      lhs.seed_facts.table != rhs.seed_facts.table ||
+      lhs.seed_facts.value_ids != rhs.seed_facts.value_ids ||
+      lhs.seed_facts.value_count != rhs.seed_facts.value_count) {
     return false;
   }
   switch (lhs.kind) {
@@ -81,7 +85,22 @@ static void loom_pass_value_fact_owner_clear_scope(
   loom_pass_value_fact_owner_record_scope_clear(owner);
   loom_value_fact_table_clear_scope(&owner->table);
   iree_arena_reset(&owner->transient_arena);
+  loom_symbol_fact_table_initialize(&owner->target_symbols,
+                                    &owner->transient_arena);
   owner->active_scope = loom_pass_value_fact_scope_none();
+}
+
+static iree_status_t loom_pass_value_fact_resolve_region_target(
+    void* user_data, const loom_module_t* module, loom_symbol_ref_t target,
+    const loom_target_facts_t** out_facts) {
+  loom_pass_value_fact_owner_t* owner = user_data;
+  const loom_symbol_facts_base_t* base_facts = NULL;
+  IREE_RETURN_IF_ERROR(loom_symbol_fact_table_lookup_ref(
+      &owner->target_symbols, module, target, &base_facts));
+  const loom_target_symbol_facts_t* facts =
+      loom_target_symbol_facts_cast(base_facts);
+  *out_facts = facts ? facts->projection : NULL;
+  return iree_ok_status();
 }
 
 static iree_status_t loom_pass_value_fact_owner_ensure_table(
@@ -104,6 +123,11 @@ static iree_status_t loom_pass_value_fact_owner_ensure_table(
       &owner->table, &owner->storage_arena, &owner->transient_arena,
       loom_value_table_capacity(&module->values)));
   loom_type_registry_configure_fact_context(&owner->table.context);
+  loom_symbol_fact_table_initialize(&owner->target_symbols,
+                                    &owner->transient_arena);
+  owner->table.context.resolve_region_target.fn =
+      loom_pass_value_fact_resolve_region_target;
+  owner->table.context.resolve_region_target.user_data = owner;
   owner->flags |= LOOM_PASS_VALUE_FACT_OWNER_FLAG_TABLE_INITIALIZED;
   return iree_ok_status();
 }
@@ -169,7 +193,17 @@ iree_status_t loom_pass_value_fact_owner_prepare(
   IREE_RETURN_IF_ERROR(loom_pass_value_fact_scope_validate(scope));
   IREE_RETURN_IF_ERROR(loom_pass_value_fact_owner_ensure_table(owner, module));
   loom_pass_value_fact_owner_clear_scope(owner);
+  IREE_RETURN_IF_ERROR(loom_value_fact_table_reserve(
+      &owner->table, scope.minimum_value_capacity));
   owner->table.context.target_facts = scope.target_facts;
+  if (scope.seed_facts.table) {
+    const iree_status_t status = loom_value_fact_table_seed_values(
+        &owner->table, scope.seed_facts, module);
+    if (!iree_status_is_ok(status)) {
+      loom_pass_value_fact_owner_clear_scope(owner);
+      return status;
+    }
+  }
   *out_table = &owner->table;
   return iree_ok_status();
 }
@@ -203,36 +237,45 @@ iree_status_t loom_pass_value_fact_owner_acquire(
   if (!refine_existing) {
     loom_pass_value_fact_owner_clear_scope(owner);
   }
+  IREE_RETURN_IF_ERROR(loom_value_fact_table_reserve(
+      &owner->table, scope.minimum_value_capacity));
   owner->table.context.target_facts = scope.target_facts;
   *out_table = &owner->table;
   if (owner->lifecycle_counts) {
     ++owner->lifecycle_counts->recomputation_count;
   }
   iree_status_t status = iree_ok_status();
-  switch (scope.kind) {
-    case LOOM_PASS_VALUE_FACT_SCOPE_FUNCTION:
-    case LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION:
-      if (!refine_existing) {
-        status = loom_value_fact_table_compute(&owner->table, module,
-                                               scope.function);
-      }
-      if (iree_status_is_ok(status) &&
-          scope.kind == LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION) {
-        status = loom_conditioned_value_facts_compute(&owner->table, module,
-                                                      scope.function);
-      }
-      break;
-    case LOOM_PASS_VALUE_FACT_SCOPE_REGION:
-      status = loom_value_fact_table_compute_region(
-          &owner->table, module, scope.function, scope.region, scope.parent_op);
-      break;
-    case LOOM_PASS_VALUE_FACT_SCOPE_MODULE:
-      status = loom_pass_value_fact_owner_compute_module(owner, module);
-      break;
-    default:
-      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "unsupported value fact scope");
-      break;
+  if (!refine_existing && scope.seed_facts.table) {
+    status = loom_value_fact_table_seed_values(&owner->table, scope.seed_facts,
+                                               module);
+  }
+  if (iree_status_is_ok(status)) {
+    switch (scope.kind) {
+      case LOOM_PASS_VALUE_FACT_SCOPE_FUNCTION:
+      case LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION:
+        if (!refine_existing) {
+          status = loom_value_fact_table_compute(&owner->table, module,
+                                                 scope.function);
+        }
+        if (iree_status_is_ok(status) &&
+            scope.kind == LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION) {
+          status = loom_conditioned_value_facts_compute(&owner->table, module,
+                                                        scope.function);
+        }
+        break;
+      case LOOM_PASS_VALUE_FACT_SCOPE_REGION:
+        status = loom_value_fact_table_compute_region(
+            &owner->table, module, scope.function, scope.region,
+            scope.parent_op);
+        break;
+      case LOOM_PASS_VALUE_FACT_SCOPE_MODULE:
+        status = loom_pass_value_fact_owner_compute_module(owner, module);
+        break;
+      default:
+        status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                  "unsupported value fact scope");
+        break;
+    }
   }
   if (iree_status_is_ok(status)) {
     owner->active_scope = scope;

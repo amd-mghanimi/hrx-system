@@ -9,6 +9,7 @@
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 import loom.dsl as dsl
 import loom.ir as ir
@@ -18,6 +19,7 @@ from loom.assembly import (
     EQUALS,
     AssemblyFormat,
     Attr,
+    BlockArgs,
     BlockRef,
     Clause,
     EncodingOf,
@@ -30,6 +32,7 @@ from loom.assembly import (
     Ref,
     Region,
     ResultType,
+    ResultTypeList,
     ScalarOf,
     Scope,
     ScopedEnumRef,
@@ -48,6 +51,7 @@ from loom.dsl import (
     ATTR_TYPE_SYMBOL_SET,
     BUFFER,
     BY_REFERENCE,
+    BYTE_PATTERN_ELEMENT,
     BYTE_PATTERN_SCALAR,
     COMMAND_EFFECT,
     COMMUTATIVE,
@@ -126,8 +130,10 @@ from loom.dsl import (
     HasAllStaticRankOneVector,
     HasAllStaticVector,
     HasAncestor,
+    HasAnyAncestor,
     HasBitwiseElement,
     HasBitwiseScalar,
+    HasBytePatternElement,
     HasF16OrBf16Element,
     HasF32Element,
     HasFloatElement,
@@ -161,6 +167,7 @@ from loom.dsl import (
     PositiveBitWidthAttr,
     RanksMatch,
     Reads,
+    ReadWrites,
     ReferenceTypeKey,
     RegionDef,
     Result,
@@ -186,8 +193,8 @@ from loom.dsl import (
     UnpackedPayloadBitCountMatchesStorage,
     ValueCountMatchesStaticElementCount,
     Writes,
-    YieldCountMatchesResults,
-    YieldTypesMatchResults,
+    YieldCountMatches,
+    YieldTypesMatch,
     binary_op,
     cast_op,
     comparison_op,
@@ -266,6 +273,7 @@ class TestTypeConstraints:
         assert ADDRESS == TypeConstraint.ADDRESS
         assert BUFFER == TypeConstraint.BUFFER
         assert BYTE_PATTERN_SCALAR == TypeConstraint.BYTE_PATTERN_SCALAR
+        assert BYTE_PATTERN_ELEMENT == TypeConstraint.BYTE_PATTERN_ELEMENT
         assert dsl.I32 == TypeConstraint.I32
         assert STORAGE == TypeConstraint.STORAGE
         assert ANY_ENCODING == TypeConstraint.ANY_ENCODING
@@ -288,6 +296,7 @@ class TestTypeConstraints:
         assert ADDRESS.value == "address"
         assert STORAGE.value == "storage"
         assert BYTE_PATTERN_SCALAR.value == "byte_pattern_scalar"
+        assert BYTE_PATTERN_ELEMENT.value == "byte_pattern_element"
         assert dsl.I32.value == "i32"
 
     def test_element_family_constraints_are_shaped_specific(self) -> None:
@@ -366,6 +375,14 @@ class TestAttrDef:
     def test_elide_default_requires_default(self) -> None:
         with _raises(ValueError, match="elide_default requires default"):
             AttrDef("offset", "i64", elide_default=True)
+
+    def test_executable_predicates_require_predicate_list(self) -> None:
+        predicates = AttrDef("predicates", "predicate_list", executable_predicates=True)
+        assert predicates.executable_predicates
+        with _raises(
+            ValueError, match="executable_predicates requires.*predicate_list"
+        ):
+            AttrDef("predicate", "i64", executable_predicates=True)
 
     def test_enum_attr(self) -> None:
         a = AttrDef("predicate", "enum", enum_def=_cmpi_preds)
@@ -1124,11 +1141,18 @@ class TestTraits:
 
     def test_ancestor_placement_traits(self) -> None:
         required = HasAncestor("low.func.def")
+        alternative = HasAnyAncestor("check.case", "check.scenario")
         forbidden = NoAncestor("low.func.def")
         assert required.name == "HasAncestor"
         assert required.args == ("low.func.def",)
+        assert alternative.name == "HasAnyAncestor"
+        assert alternative.args == ("check.case", "check.scenario")
         assert forbidden.name == "NoAncestor"
         assert forbidden.args == ("low.func.def",)
+
+    def test_any_ancestor_requires_an_alternative(self) -> None:
+        with _raises(ValueError, match="at least one op name"):
+            HasAnyAncestor()
 
     def test_implicit_terminator(self) -> None:
         t = ImplicitTerminator("scf.yield")
@@ -1168,7 +1192,7 @@ class TestInterfaces:
         assert interface.callee == "callee"
         assert interface.operands == "operands"
         assert interface.results is None
-        assert interface.purity is None
+        assert interface.effect_contract is None
         assert interface.kind == CallLikeKind.SEMANTIC
 
     def test_call_like_kind_values(self) -> None:
@@ -1431,7 +1455,7 @@ class TestConstraints:
             {"x": FakeValue(vector_type(F32))}
         )[0]
 
-    def test_bitwise_constraints_accept_integer_and_float_payloads(self) -> None:
+    def test_bitwise_and_byte_pattern_constraints(self) -> None:
         class FakeValue:
             def __init__(self, value_type: object):
                 self.type = value_type
@@ -1447,6 +1471,17 @@ class TestConstraints:
         assert HasBitwiseElement("x").check({"x": FakeValue(vector_type(I8))})[0]
         assert HasBitwiseElement("x").check({"x": FakeValue(vector_type(F32))})[0]
         assert not HasBitwiseElement("x").check({"x": FakeValue(vector_type(ir.I1))})[0]
+        assert HasBytePatternElement("x").check({"x": FakeValue(vector_type(I8))})[0]
+        assert HasBytePatternElement("x").check({"x": FakeValue(vector_type(F32))})[0]
+        assert not HasBytePatternElement("x").check(
+            {"x": FakeValue(vector_type(ir.I1))}
+        )[0]
+        assert not HasBytePatternElement("x").check(
+            {"x": FakeValue(vector_type(ir.INDEX))}
+        )[0]
+        assert not HasBytePatternElement("x").check(
+            {"x": FakeValue(vector_type(ir.OFFSET))}
+        )[0]
 
     def test_vector_shape_constraints_validate_vector_shape(self) -> None:
         class FakeValue:
@@ -1863,11 +1898,11 @@ class TestConstraints:
         assert block_args_type_match.error is not None
         assert block_args_type_match.error.error_id == "ERR_TYPE_013"
 
-        yield_count = YieldCountMatchesResults("body", "results")
+        yield_count = YieldCountMatches("body", "results")
         assert yield_count.error is not None
         assert yield_count.error.error_id == "ERR_STRUCTURE_008"
 
-        yield_types = YieldTypesMatchResults("body", "results")
+        yield_types = YieldTypesMatch("body", "results")
         assert yield_types.error is not None
         assert yield_types.error.error_id == "ERR_TYPE_009"
 
@@ -2672,6 +2707,102 @@ class TestOp:
         assert op.result("out") is not None
         assert op.result("missing") is None
 
+    def test_signature_only_results_require_a_local_signature(self) -> None:
+        op = Op(
+            "test.sink",
+            results=[Result("results", ANY, variadic=True, signature_only=True)],
+            format=[Scope([ResultTypeList("results")])],
+        )
+        assert op.has_signature_only_results
+
+        with _raises(ValueError, match="cannot be mixed"):
+            Op(
+                "test.mixed",
+                results=[
+                    Result("signature", ANY, signature_only=True),
+                    Result("value", ANY),
+                ],
+                format=[Scope([ResultType("signature"), ResultType("value")])],
+            )
+        with _raises(ValueError, match=r"inside Scope\(\.\.\.\)"):
+            Op(
+                "test.unscoped",
+                results=[Result("result", ANY, signature_only=True)],
+                format=[ResultType("result")],
+            )
+        with _raises(ValueError, match="require an explicit result type format"):
+            Op(
+                "test.implicit",
+                results=[Result("result", ANY, signature_only=True)],
+            )
+        with _raises(ValueError, match="cannot allocate resources"):
+            Op(
+                "test.allocating",
+                results=[Result("result", ANY, allocates=True, signature_only=True)],
+                format=[Scope([ResultType("result")])],
+            )
+
+    def test_reference_source_requires_a_definite_storage_origin(self) -> None:
+        Op(
+            "test.derive",
+            operands=[Operand("source", BUFFER)],
+            results=[Result("result", BUFFER, reference_source="source")],
+            traits=[PURE],
+        )
+        for operands, result, message in [
+            (
+                [],
+                Result("result", BUFFER, reference_source="missing"),
+                "not an operand",
+            ),
+            (
+                [Operand("source", BUFFER, optional=True)],
+                Result("result", BUFFER, reference_source="source"),
+                "one required operand",
+            ),
+            (
+                [Operand("source", BUFFER, variadic=True)],
+                Result("result", BUFFER, reference_source="source"),
+                "one required operand",
+            ),
+            (
+                [Operand("source", INTEGER)],
+                Result("result", BUFFER, reference_source="source"),
+                "buffer or view",
+            ),
+            (
+                [Operand("source", BUFFER)],
+                Result("result", INTEGER, reference_source="source"),
+                "buffer or view",
+            ),
+            (
+                [Operand("source", BUFFER)],
+                Result("result", BUFFER, allocates=True, reference_source="source"),
+                "cannot allocate",
+            ),
+        ]:
+            with _raises(ValueError, match=message):
+                Op("test.derive", operands=operands, results=[result])
+
+    def test_reference_observations_exclude_payload_effects(self) -> None:
+        for reference_type in (BUFFER, dsl.VIEW):
+            Op(
+                "test.observe",
+                operands=[Operand("input", reference_type, observes_reference=True)],
+                traits=[PURE],
+            )
+        with _raises(ValueError, match="buffer or view fields"):
+            Op(
+                "test.observe",
+                operands=[Operand("input", INTEGER, observes_reference=True)],
+            )
+        with _raises(ValueError, match="cannot access payload"):
+            Op(
+                "test.observe",
+                operands=[Operand("input", BUFFER, observes_reference=True)],
+                effects=[Reads("input")],
+            )
+
     def test_lookup_attr(self) -> None:
         op = Op("test.op", attrs=[AttrDef("axis", "i64")])
         assert op.attr("axis") is not None
@@ -2840,6 +2971,21 @@ class TestOp:
 
 
 class TestEffects:
+    def test_ambient_effects(self) -> None:
+        for effect in (Reads(), Writes(), ReadWrites()):
+            op = Op("test.ambient", effects=[effect])
+            assert not op.is_pure
+            assert op.effects[0].operand is None
+            for trait in (
+                PURE,
+                UNKNOWN_EFFECTS,
+                SAFE_TO_SPECULATE,
+                HINT,
+                COMPILE_TIME_ONLY,
+            ):
+                with _raises(ValueError):
+                    Op("test.bad", traits=[trait], effects=[effect])
+
     def test_valid_read_effect(self) -> None:
         op = Op(
             "test.load",
@@ -3249,7 +3395,7 @@ class TestOwnershipEffects:
         with _raises(ValueError, match="SAFE_TO_SPECULATE.*CONVERGENT"):
             Op("test.bad", traits=[SAFE_TO_SPECULATE, CONVERGENT])
 
-    def test_contextual_is_independent_of_purity(self) -> None:
+    def test_contextual_is_independent_of_effect_contract(self) -> None:
         op = Op("test.contextual", traits=[PURE, dsl.CONTEXTUAL])
         assert dsl.CONTEXTUAL in op.traits
         assert PURE in op.traits
@@ -3444,6 +3590,35 @@ class TestSymbolReference:
 
 
 class TestSymbolKernelContract:
+    def test_linkage_requires_declared_enum_attr(self) -> None:
+        with _raises(ValueError, match="does not name an attr"):
+            Op(
+                "test.record",
+                traits=[SYMBOL_DEFINE],
+                attrs=[AttrDef("name", ATTR_TYPE_SYMBOL)],
+                symbol_def=SymbolDefinition(
+                    field="name",
+                    name="record",
+                    interfaces=["record"],
+                    linkage="linkage",
+                ),
+            )
+        with _raises(ValueError, match="must be an enum attr"):
+            Op(
+                "test.record",
+                traits=[SYMBOL_DEFINE],
+                attrs=[
+                    AttrDef("name", ATTR_TYPE_SYMBOL),
+                    AttrDef("linkage", "i64"),
+                ],
+                symbol_def=SymbolDefinition(
+                    field="name",
+                    name="record",
+                    interfaces=["record"],
+                    linkage="linkage",
+                ),
+            )
+
     def test_product_carrier_requires_declared_enum_attr(self) -> None:
         with _raises(ValueError, match="does not name an attr"):
             Op(
@@ -3561,6 +3736,129 @@ class TestSymbolKernelContract:
         )
 
         assert op.attr("specialization_count") is not None
+
+    def test_region_signature_may_have_contiguous_argument_groups(self) -> None:
+        op = Op(
+            "test.partitioned_region",
+            attrs=[AttrDef("actual_count", "i64")],
+            regions=[RegionDef("body")],
+            format=[
+                BlockArgs(
+                    "body",
+                    group="actual",
+                    end_attr="actual_count",
+                ),
+                BlockArgs(
+                    "body",
+                    group="expected",
+                    start_attr="actual_count",
+                ),
+                Region("body"),
+            ],
+        )
+
+        assert op.attr("actual_count") is not None
+
+    def test_region_signature_partition_allows_optional_boundary(self) -> None:
+        op = Op(
+            "test.partitioned_region",
+            attrs=[AttrDef("actual_count", "i64", optional=True)],
+            regions=[RegionDef("body")],
+            format=[
+                BlockArgs(
+                    "body",
+                    group="actual",
+                    end_attr="actual_count",
+                ),
+                BlockArgs(
+                    "body",
+                    group="expected",
+                    start_attr="actual_count",
+                ),
+                Region("body"),
+            ],
+        )
+
+        assert op.attr("actual_count") is not None
+
+    def test_region_signature_partition_requires_matching_boundaries(self) -> None:
+        with _raises(ValueError, match="must use 'actual_count'"):
+            Op(
+                "test.partitioned_region",
+                attrs=[
+                    AttrDef("actual_count", "i64"),
+                    AttrDef("wrong_count", "i64"),
+                ],
+                regions=[RegionDef("body")],
+                format=[
+                    BlockArgs(
+                        "body",
+                        group="actual",
+                        end_attr="actual_count",
+                    ),
+                    BlockArgs(
+                        "body",
+                        group="expected",
+                        start_attr="wrong_count",
+                    ),
+                    Region("body"),
+                ],
+            )
+
+    def test_region_signature_partition_requires_boundaries(self) -> None:
+        with _raises(ValueError, match="requires an end boundary"):
+            Op(
+                "test.partitioned_region",
+                regions=[RegionDef("body")],
+                format=[
+                    BlockArgs("body", group="actual"),
+                    BlockArgs("body", group="expected"),
+                    Region("body"),
+                ],
+            )
+
+    def test_region_signature_partition_requires_i64_boundary(self) -> None:
+        with _raises(ValueError, match="must name an i64 attribute"):
+            Op(
+                "test.partitioned_region",
+                attrs=[AttrDef("actual_count", "string")],
+                regions=[RegionDef("body")],
+                format=[
+                    BlockArgs(
+                        "body",
+                        group="actual",
+                        end_attr="actual_count",
+                    ),
+                    BlockArgs(
+                        "body",
+                        group="expected",
+                        start_attr="actual_count",
+                    ),
+                    Region("body"),
+                ],
+            )
+
+    def test_region_signature_partition_requires_explicit_arguments(self) -> None:
+        with _raises(ValueError, match="require explicit entry arguments"):
+            Op(
+                "test.partitioned_region",
+                operands=[Operand("inputs", ANY, variadic=True)],
+                attrs=[AttrDef("actual_count", "i64")],
+                regions=[RegionDef("body", arg_source="inputs")],
+                format=[
+                    BlockArgs(
+                        "body",
+                        group="actual",
+                        end_attr="actual_count",
+                    ),
+                    BlockArgs(
+                        "body",
+                        group="expected",
+                        start_attr="actual_count",
+                    ),
+                    Region("body"),
+                ],
+            )
 
     def test_body_signature_partition_requires_matching_boundaries(self) -> None:
         with _raises(ValueError, match="must use 'specialization_count'"):
@@ -3766,6 +4064,170 @@ def test_condition_refinement_requires_a_required_operand_and_i1_result() -> Non
             operands=[Operand("value", INTEGER)],
             results=[Result("result", INTEGER)],
             condition_refinement=refinement,
+        )
+
+
+def test_execution_condition_requires_canonical_integer_shift_shape() -> None:
+    condition = dsl.ExecutionCondition.INTEGER_SHIFT_LEFT
+    canonical_flags = EnumDef(
+        "IntOverflowFlags",
+        [EnumCase("nsw", 1), EnumCase("nuw", 2)],
+        c_type="loom_integer_overflow_flags_t",
+        c_const_prefix="LOOM_INTEGER_OVERFLOW_FLAG",
+        c_include="loom/ops/op_defs.h",
+    )
+
+    def make_op(**overrides: Any) -> Op:
+        fields: dict[str, Any] = {
+            "operands": [Operand("lhs", INTEGER), Operand("rhs", INTEGER)],
+            "results": [Result("result", INTEGER)],
+            "constraints": [SameType("lhs", "rhs", "result")],
+            "traits": [PURE],
+            "attrs": [
+                AttrDef(
+                    "overflow",
+                    dsl.ATTR_TYPE_FLAGS,
+                    optional=True,
+                    enum_def=canonical_flags,
+                )
+            ],
+            "execution_condition": condition,
+        }
+        fields.update(overrides)
+        return Op("test.shift", **fields)
+
+    assert make_op().execution_condition is condition
+    assert (
+        make_op(
+            operands=[Operand("lhs", INDEX), Operand("rhs", INDEX)],
+            results=[Result("result", INDEX)],
+            constraints=[SameType("lhs", "rhs", "result")],
+            attrs=[],
+        ).execution_condition
+        is condition
+    )
+
+    with _raises(ValueError, match="requires the PURE trait"):
+        make_op(traits=[])
+    with _raises(ValueError, match="conflicts with unconditional"):
+        make_op(traits=[PURE, SAFE_TO_SPECULATE])
+    with _raises(ValueError, match="requires a leaf operation"):
+        make_op(regions=[RegionDef("body")])
+    with _raises(ValueError, match="requires same-typed integer"):
+        make_op(constraints=[])
+    with _raises(ValueError, match="canonical integer overflow flags"):
+        make_op(attrs=[])
+    with _raises(ValueError, match="canonical integer overflow flags"):
+        make_op(
+            attrs=[
+                AttrDef(
+                    "overflow",
+                    dsl.ATTR_TYPE_FLAGS,
+                    optional=True,
+                    enum_def=EnumDef(
+                        "LookalikeFlags",
+                        [EnumCase("nsw", 1), EnumCase("nuw", 2)],
+                    ),
+                )
+            ]
+        )
+    with _raises(ValueError, match="does not accept instance attributes"):
+        make_op(
+            execution_condition=dsl.ExecutionCondition.INTEGER_SHIFT_RIGHT,
+            attrs=[AttrDef("mode", dsl.ATTR_TYPE_I64)],
+        )
+
+
+def test_execution_condition_requires_complete_integer_arithmetic_shape() -> None:
+    canonical_flags = EnumDef(
+        "IntOverflowFlags",
+        [EnumCase("nsw", 1), EnumCase("nuw", 2)],
+        c_type="loom_integer_overflow_flags_t",
+        c_const_prefix="LOOM_INTEGER_OVERFLOW_FLAG",
+        c_include="loom/ops/op_defs.h",
+    )
+    overflow_attr = AttrDef(
+        "overflow",
+        dsl.ATTR_TYPE_FLAGS,
+        optional=True,
+        enum_def=canonical_flags,
+    )
+
+    for condition in (
+        dsl.ExecutionCondition.INTEGER_ADD,
+        dsl.ExecutionCondition.INTEGER_SUBTRACT,
+        dsl.ExecutionCondition.INTEGER_MULTIPLY,
+    ):
+        op = Op(
+            "test.binary",
+            operands=[Operand("lhs", INTEGER), Operand("rhs", INTEGER)],
+            results=[Result("result", INTEGER)],
+            attrs=[overflow_attr],
+            constraints=[SameType("lhs", "rhs", "result")],
+            traits=[PURE],
+            execution_condition=condition,
+        )
+        assert op.execution_condition is condition
+
+    vector_add = Op(
+        "test.vector_add",
+        operands=[Operand("lhs", dsl.VECTOR), Operand("rhs", dsl.VECTOR)],
+        results=[Result("result", dsl.VECTOR)],
+        attrs=[overflow_attr],
+        constraints=[
+            SameType("lhs", "rhs", "result"),
+            HasIntegerElement("result"),
+        ],
+        traits=[PURE],
+        execution_condition=dsl.ExecutionCondition.INTEGER_ADD,
+    )
+    assert vector_add.execution_condition is dsl.ExecutionCondition.INTEGER_ADD
+
+    multiply_add = Op(
+        "test.multiply_add",
+        operands=[
+            Operand("a", INTEGER),
+            Operand("b", INTEGER),
+            Operand("c", INTEGER),
+        ],
+        results=[Result("result", INTEGER)],
+        attrs=[overflow_attr],
+        constraints=[SameType("a", "b", "c", "result")],
+        traits=[PURE],
+        execution_condition=dsl.ExecutionCondition.INTEGER_MULTIPLY_ADD,
+    )
+    assert (
+        multiply_add.execution_condition is dsl.ExecutionCondition.INTEGER_MULTIPLY_ADD
+    )
+
+    address_add = Op(
+        "test.address_add",
+        operands=[Operand("lhs", ADDRESS), Operand("rhs", ADDRESS)],
+        results=[Result("result", ADDRESS)],
+        constraints=[SameType("lhs", "rhs", "result")],
+        traits=[PURE],
+        execution_condition=dsl.ExecutionCondition.INTEGER_ADD,
+    )
+    assert address_add.execution_condition is dsl.ExecutionCondition.INTEGER_ADD
+
+    with _raises(ValueError, match="same-typed integer"):
+        Op(
+            "test.address_multiply",
+            operands=[Operand("lhs", ADDRESS), Operand("rhs", ADDRESS)],
+            results=[Result("result", ADDRESS)],
+            constraints=[SameType("lhs", "rhs", "result")],
+            traits=[PURE],
+            execution_condition=dsl.ExecutionCondition.INTEGER_MULTIPLY,
+        )
+    with _raises(ValueError, match="3 required operands"):
+        Op(
+            "test.short_multiply_add",
+            operands=[Operand("lhs", INTEGER), Operand("rhs", INTEGER)],
+            results=[Result("result", INTEGER)],
+            attrs=[overflow_attr],
+            constraints=[SameType("lhs", "rhs", "result")],
+            traits=[PURE],
+            execution_condition=dsl.ExecutionCondition.INTEGER_MULTIPLY_ADD,
         )
 
 

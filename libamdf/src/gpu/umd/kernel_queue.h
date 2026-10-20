@@ -19,6 +19,25 @@ extern "C" {
 
 typedef struct amdf_gpu_umd_kernel_queue_t amdf_gpu_umd_kernel_queue_t;
 
+// Maximum unretired prefix admitted before queue-ordered mapping publication,
+// or zero when unavailable. Cached capability query without native work.
+uint32_t amdf_gpu_umd_kernel_queue_mapping_capacity(
+    const amdf_gpu_umd_kernel_queue_t* queue);
+
+// Supported native wake destinations. Cached query without native work.
+amdf_native_event_types_t amdf_gpu_umd_kernel_queue_query_notification_types(
+    const amdf_gpu_umd_kernel_queue_t* queue);
+
+// Requests one native-progress hint into a validated supported event. Zero
+// means the shared owner already checked the public point and requires an
+// immediate hint. No event descriptor or subscription is retained. Explicit
+// native registration/signaling calls are allowed; library allocation, waits,
+// locks, retries and lazy setup are not. Concurrent calls are independent of
+// submission and the reusable synchronous-wait event.
+amdf_status_t amdf_gpu_umd_kernel_queue_request_notification(
+    amdf_gpu_umd_kernel_queue_t* queue, uint64_t native_submission,
+    const amdf_native_event_t* event);
+
 // Acquires one native kernel-mediated queue accepting |command_type|.
 // Cold path: command and completion resources are prepared before publication,
 // including reusable native wait state. No first-submit or first-wait setup.
@@ -41,8 +60,8 @@ amdf_status_t amdf_gpu_umd_kernel_queue_submit(
 uint64_t amdf_gpu_umd_kernel_queue_query_progress(
     const amdf_gpu_umd_kernel_queue_t* queue);
 
-// Returns the observed terminal device failure without native queries. An
-// operation error alone does not fail the queue or establish retirement.
+// Returns cached terminal queue/device failure without native queries. A
+// rejected command alone does not fail the queue or establish retirement.
 // Atomic observation only; no locks, allocation, initialization or polling.
 amdf_status_t amdf_gpu_umd_kernel_queue_query_terminal_status(
     const amdf_gpu_umd_kernel_queue_t* queue);

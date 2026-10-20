@@ -12,6 +12,7 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/atomics.h"
+#include "iree/base/threading/mutex.h"
 #include "iree/hal/device_event.h"
 #include "iree/hal/drivers/amdgpu/util/loaded_code_object.h"
 
@@ -57,6 +58,24 @@ typedef struct iree_hal_amdgpu_source_context_t {
   iree_atomic_int32_t sanitizer_site_table_published;
 } iree_hal_amdgpu_source_context_t;
 
+typedef struct iree_hal_amdgpu_source_context_registry_entry_t
+    iree_hal_amdgpu_source_context_registry_entry_t;
+
+// Owns immutable source contexts for the lifetime of a logical device.
+//
+// Registered contexts have stable addresses and remain valid until registry
+// deinitialization. This lets asynchronous device feedback retain direct source
+// attribution without depending on the lifetime of the executable that
+// produced the packet.
+typedef struct iree_hal_amdgpu_source_context_registry_t {
+  // Host allocator used for registry entries.
+  iree_allocator_t host_allocator;
+  // Serializes concurrent executable registration.
+  iree_slim_mutex_t mutex;
+  // Linked list of stable individually allocated contexts.
+  iree_hal_amdgpu_source_context_registry_entry_t* entry_list;
+} iree_hal_amdgpu_source_context_registry_t;
+
 // Initializes |out_context| with executable-owned storage.
 void iree_hal_amdgpu_source_context_initialize(
     uint64_t executable_id, const uint64_t code_object_hash[2],
@@ -91,6 +110,29 @@ iree_status_t iree_hal_amdgpu_source_context_set_sanitizer_site_table(
 bool iree_hal_amdgpu_source_context_try_resolve_sanitizer_site(
     const iree_hal_amdgpu_source_context_t* context, uint64_t site_id,
     iree_hal_device_event_site_t* out_site);
+
+// Initializes an empty logical-device source context registry.
+void iree_hal_amdgpu_source_context_registry_initialize(
+    iree_allocator_t host_allocator,
+    iree_hal_amdgpu_source_context_registry_t* out_registry);
+
+// Releases all contexts owned by |registry|.
+//
+// Callers must ensure no feedback handlers can still access registered
+// contexts.
+void iree_hal_amdgpu_source_context_registry_deinitialize(
+    iree_hal_amdgpu_source_context_registry_t* registry);
+
+// Registers an immutable copy of |source_context| in |registry|.
+//
+// The returned context is owned by |registry| and remains valid until registry
+// deinitialization. Loaded code-object ranges are intentionally omitted because
+// they are used only while attaching the sanitizer site table during executable
+// load. The site-table bytes required by asynchronous reports are copied.
+iree_status_t iree_hal_amdgpu_source_context_registry_register(
+    iree_hal_amdgpu_source_context_registry_t* registry,
+    const iree_hal_amdgpu_source_context_t* source_context,
+    const iree_hal_amdgpu_source_context_t** out_registered_context);
 
 #ifdef __cplusplus
 }  // extern "C"

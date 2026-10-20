@@ -6,6 +6,8 @@
 
 #include "loom/codegen/low/lower/representation_observer.h"
 
+#include <string.h>
+
 #include "loom/codegen/low/lower/context.h"
 #include "loom/ir/context.h"
 #include "loom/ir/local_value_domain.h"
@@ -25,6 +27,10 @@ typedef struct loom_low_lower_representation_observer_state_t {
 struct loom_low_lower_representation_recorder_t {
   // Active function-local representation state.
   loom_low_lower_representation_observer_state_t* state;
+  // Source operand uses claimed by accepted relations or target boundaries.
+  uint64_t* claimed_operand_words;
+  // Number of operands on the active source operation.
+  uint16_t operand_count;
 };
 
 static const uint8_t kLoomLowLowerRepresentationStateKey;
@@ -94,6 +100,43 @@ void loom_low_lower_representation_record_candidates(
   }
 }
 
+void loom_low_lower_representation_record_costs(
+    loom_low_lower_representation_recorder_t* recorder,
+    loom_value_id_t source_value_id,
+    const loom_low_representation_candidate_t* candidates,
+    iree_host_size_t candidate_count) {
+  IREE_ASSERT_ARGUMENT(recorder);
+  if (!iree_status_is_ok(recorder->state->terminal_status)) {
+    return;
+  }
+  IREE_ASSERT_ARGUMENT(candidates);
+  IREE_ASSERT_GT(candidate_count, 0u);
+  const loom_value_ordinal_t value_ordinal =
+      loom_low_lower_representation_ordinal(recorder, source_value_id);
+  iree_status_t status = loom_low_representation_plan_contribute_costs(
+      &recorder->state->plan, value_ordinal, candidates, candidate_count);
+  if (!iree_status_is_ok(status)) {
+    loom_low_lower_representation_record_failure(recorder, status);
+  }
+}
+
+static inline void loom_low_lower_representation_mark_claimed_operand(
+    loom_low_lower_representation_recorder_t* recorder,
+    uint16_t source_operand_index) {
+  IREE_ASSERT_ARGUMENT(recorder);
+  IREE_ASSERT_LT(source_operand_index, recorder->operand_count);
+  IREE_ASSERT_ARGUMENT(recorder->claimed_operand_words);
+  recorder->claimed_operand_words[source_operand_index / 64u] |=
+      UINT64_C(1) << (source_operand_index % 64u);
+}
+
+void loom_low_lower_representation_claim_operand(
+    loom_low_lower_representation_recorder_t* recorder,
+    uint16_t source_operand_index) {
+  loom_low_lower_representation_mark_claimed_operand(recorder,
+                                                     source_operand_index);
+}
+
 bool loom_low_lower_representation_component_is_constrained(
     loom_low_lower_representation_recorder_t* recorder,
     loom_value_id_t source_value_id) {
@@ -120,6 +163,11 @@ static void loom_low_lower_representation_try_relation(
       recorder->state->provider;
   if (provider->relation(provider->user_data, context, source_op, relation,
                          recorder)) {
+    if (relation->source_operand_index !=
+        LOOM_VALUE_RELATION_OPERAND_INDEX_NONE) {
+      loom_low_lower_representation_mark_claimed_operand(
+          recorder, relation->source_operand_index);
+    }
     loom_low_lower_representation_record_union(
         recorder, relation->source_value_id, relation->destination_value_id);
   }
@@ -132,20 +180,44 @@ loom_low_lower_representation_find_boundary(
   if (provider->boundary_count == 0) {
     return NULL;
   }
-  if (op_kind < provider->boundaries[0].op_kind) {
-    return NULL;
+  const loom_low_lower_representation_boundary_t* first =
+      &provider->boundaries[0];
+  if (op_kind <= first->op_kind) {
+    return op_kind == first->op_kind ? first : NULL;
   }
   const loom_low_lower_representation_boundary_t* last =
       &provider->boundaries[provider->boundary_count - 1];
   if (op_kind >= last->op_kind) {
     return op_kind == last->op_kind ? last : NULL;
   }
+  const uint8_t dialect_id = loom_op_dialect_id(op_kind);
+  if (dialect_id < provider->boundary_dialect_base_id) {
+    return NULL;
+  }
+  const uint8_t dialect_index = dialect_id - provider->boundary_dialect_base_id;
+  if (dialect_index >= provider->boundary_dialect_count) {
+    return NULL;
+  }
+  const loom_low_lower_representation_boundary_span_t span =
+      provider->boundary_spans[dialect_index];
+  if (span.boundary_count == 0) {
+    return NULL;
+  }
+  const loom_low_lower_representation_boundary_t* boundaries =
+      &provider->boundaries[span.first_boundary];
+  if (op_kind <= boundaries[0].op_kind) {
+    return op_kind == boundaries[0].op_kind ? &boundaries[0] : NULL;
+  }
+  last = &boundaries[span.boundary_count - 1];
+  if (op_kind >= last->op_kind) {
+    return op_kind == last->op_kind ? last : NULL;
+  }
   uint16_t begin = 0;
-  uint16_t end = provider->boundary_count - 1;
+  uint16_t end = span.boundary_count - 1;
   while (begin < end) {
     const uint16_t middle = begin + (uint16_t)((end - begin) / 2);
     const loom_low_lower_representation_boundary_t* boundary =
-        &provider->boundaries[middle];
+        &boundaries[middle];
     if (op_kind == boundary->op_kind) {
       return boundary;
     }
@@ -155,9 +227,7 @@ loom_low_lower_representation_find_boundary(
       begin = middle + 1;
     }
   }
-  return provider->boundaries[begin].op_kind == op_kind
-             ? &provider->boundaries[begin]
-             : NULL;
+  return boundaries[begin].op_kind == op_kind ? &boundaries[begin] : NULL;
 }
 
 iree_status_t loom_low_lower_representation_observer_begin(
@@ -171,8 +241,11 @@ iree_status_t loom_low_lower_representation_observer_begin(
       provider != NULL &&
           (provider->relation_mask != 0) == (provider->relation != NULL) &&
           (provider->relation_mask & ~LOOM_VALUE_RELATION_MASK_ALL) == 0 &&
+          provider->observe_unclaimed_operand != NULL &&
+          (provider->boundary_count == 0) ==
+              (provider->boundary_dialect_count == 0) &&
           (provider->boundary_count == 0 ||
-           (provider->boundaries != NULL &&
+           (provider->boundaries != NULL && provider->boundary_spans != NULL &&
             provider->observe_boundary != NULL)),
       "source representation provider must be internally valid");
   loom_low_lower_representation_observer_state_t* state = NULL;
@@ -194,9 +267,9 @@ iree_status_t loom_low_lower_representation_observer_begin(
   loom_low_representation_plan_initialize(
       value_domain->value_count, loom_low_lower_context_function_arena(context),
       &state->plan);
-  IREE_ASSERT(context->lowering.source_plan.representation_plan == NULL,
+  IREE_ASSERT(context->lowering->source_plan.representation_plan == NULL,
               "source representation plan must begin exactly once");
-  context->lowering.source_plan.representation_plan = &state->plan;
+  context->lowering->source_plan.representation_plan = &state->plan;
   *out_observer_state = state;
   loom_low_lower_representation_observer_observe(
       state, context, loom_low_lower_context_source_function(context).op);
@@ -215,12 +288,26 @@ void loom_low_lower_representation_observer_observe(
   IREE_ASSERT_ARGUMENT(state);
   IREE_ASSERT(state->provider != NULL);
   IREE_ASSERT(!state->plan.solved);
-  loom_low_lower_representation_recorder_t recorder = {
-      .state = state,
-  };
   if (!iree_status_is_ok(state->terminal_status)) {
     return;
   }
+  const iree_host_size_t claimed_operand_word_count =
+      ((iree_host_size_t)source_op->operand_count + 63u) / 64u;
+  uint64_t inline_claimed_operand_word = 0;
+  uint64_t* claimed_operand_words = NULL;
+  if (claimed_operand_word_count == 1) {
+    claimed_operand_words = &inline_claimed_operand_word;
+  } else if (claimed_operand_word_count > 1) {
+    claimed_operand_words = (uint64_t*)iree_alloca(
+        claimed_operand_word_count * sizeof(*claimed_operand_words));
+    memset(claimed_operand_words, 0,
+           claimed_operand_word_count * sizeof(*claimed_operand_words));
+  }
+  loom_low_lower_representation_recorder_t recorder = {
+      .state = state,
+      .claimed_operand_words = claimed_operand_words,
+      .operand_count = source_op->operand_count,
+  };
 
   if (state->provider->relation_mask != 0) {
     loom_value_relation_iterator_t relation_iterator;
@@ -256,6 +343,9 @@ void loom_low_lower_representation_observer_observe(
       state->provider->observe_callable_boundary(state->provider->user_data,
                                                  callable_kind, context,
                                                  source_op, &recorder);
+      for (uint16_t i = 0; i < source_op->operand_count; ++i) {
+        loom_low_lower_representation_mark_claimed_operand(&recorder, i);
+      }
     }
   }
   if (!iree_status_is_ok(state->terminal_status)) {
@@ -271,6 +361,17 @@ void loom_low_lower_representation_observer_observe(
     state->provider->observe_boundary(state->provider->user_data,
                                       boundary->action, boundary->flags,
                                       context, source_op, &recorder);
+  }
+  if (!iree_status_is_ok(state->terminal_status)) {
+    return;
+  }
+
+  for (uint16_t i = 0; i < source_op->operand_count; ++i) {
+    if ((claimed_operand_words[i / 64u] & (UINT64_C(1) << (i % 64u))) != 0) {
+      continue;
+    }
+    state->provider->observe_unclaimed_operand(
+        state->provider->user_data, context, source_op, i, &recorder);
   }
 }
 
@@ -320,7 +421,7 @@ void loom_low_lower_representation_lookup(
   IREE_ASSERT_ARGUMENT(out_representation);
   *out_representation = LOOM_LOW_REPRESENTATION_ID_NONE;
   loom_low_lower_representation_plan_lookup(
-      context->lowering.source_plan.representation_plan,
+      context->lowering->source_plan.representation_plan,
       loom_low_lower_context_value_domain(context), source_value_id,
       out_representation);
 }
@@ -331,7 +432,7 @@ void loom_low_lower_representation_lookup_if_ready(
   IREE_ASSERT_ARGUMENT(out_representation);
   *out_representation = LOOM_LOW_REPRESENTATION_ID_NONE;
   loom_low_representation_plan_t* plan =
-      context->lowering.source_plan.representation_plan;
+      context->lowering->source_plan.representation_plan;
   if (plan == NULL || !plan->solved) {
     return;
   }

@@ -2,6 +2,83 @@
 
 amdgpu.target<gfx1100> @target
 
+func.def target(@target) @report_exact_i8_to_bf16_pack(%input: vector<3xi8>) -> (vector<3xbf16>) {
+  %wide = vector.sitofp %input : vector<3xi8> to vector<3xf32>
+  %narrow = vector.fptrunc %wide : vector<3xf32> to vector<3xbf16>
+  func.return %narrow : vector<3xbf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_exact_i8_to_bf16_pack source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_bf16_exact_permute *
+
+// ====
+
+amdgpu.target<gfx942> @target
+
+func.def target(@target) @report_exact_i8_to_bf16_pack_without_literal_permute(%input: vector<3xi8>) -> (vector<3xbf16>) {
+  %wide = vector.sitofp %input : vector<3xi8> to vector<3xf32>
+  %narrow = vector.fptrunc %wide : vector<3xf32> to vector<3xbf16>
+  func.return %narrow : vector<3xbf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_exact_i8_to_bf16_pack_without_literal_permute source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_bf16_exact_pack *
+
+// ====
+
+amdgpu.target<gfx1100> @target
+
+func.def target(@target) @report_rounded_i16_to_bf16_pack(%input: vector<2xi16>) -> (vector<2xbf16>) {
+  %wide = vector.sitofp %input : vector<2xi16> to vector<2xf32>
+  %narrow = vector.fptrunc %wide : vector<2xf32> to vector<2xbf16>
+  func.return %narrow : vector<2xbf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_rounded_i16_to_bf16_pack source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_bf16_integer_pack *
+
+// ====
+
+amdgpu.target<gfx950> @target
+
+func.def target(@target) @report_native_exact_i8_to_bf16_pack(%input: vector<3xi8>) -> (vector<3xbf16>) {
+  %wide = vector.sitofp %input : vector<3xi8> to vector<3xf32>
+  %narrow = vector.fptrunc %wide : vector<3xf32> to vector<3xbf16>
+  func.return %narrow : vector<3xbf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_native_exact_i8_to_bf16_pack source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_bf16_native *
+
+// ====
+
+amdgpu.target<gfx1100> @target
+
+func.def target(@target) @report_exact_i8_to_f16_pack(%input: vector<3xi8>) -> (vector<3xf16>) {
+  %wide = vector.sitofp %input : vector<3xi8> to vector<3xf32>
+  %narrow = vector.fptrunc %wide : vector<3xf32> to vector<3xf16>
+  func.return %narrow : vector<3xf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_exact_i8_to_f16_pack source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_f16_exact_native *
+
+// ====
+
+amdgpu.target<gfx1100> @target
+
+func.def target(@target) @report_unknown_f32_to_f16_pack(%input: vector<2xf32>) -> (vector<2xf16>) {
+  %narrow = vector.fptrunc %input : vector<2xf32> to vector<2xf16>
+  func.return %narrow : vector<2xf16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_unknown_f32_to_f16_pack source_op=vector.fptrunc selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.f32_to_packed_f16 *
+
+// ====
+
+amdgpu.target<gfx1100> @target
+
 kernel.def target(@target) @report_gfx1100_fp8_to_bf16_software_decode() {
   %unit = index.constant 1 : index
   %workgroup_size = index.constant 64 : index
@@ -91,7 +168,7 @@ kernel.def target(@target) @report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack() {
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=15 emitted_ops=374 rows=15
+COMPILE-REPORT: source_low selected_ops=15 emitted_ops=422 rows=15 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=5 arguments=5 argument_packets=5 strategies=0 packets=5 loads=3 stores=2 scalar_packets=1 vector_packets=4 source_lanes=33 source_bytes=52 read_bytes=20 write_bytes=32 issued_read_bytes=20 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=5 unknown_dynamic_packets=0 dynamic_packets=5 dynamic_source_bytes=52 dynamic_read_bytes=20 dynamic_write_bytes=32 dynamic_issued_read_bytes=20 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1280 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3328 dispatch_issued_read_bytes=1280 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3328 interval_envelope={packets:5,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:3,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -104,8 +181,8 @@ COMPILE-REPORT: source_low[7] function=report_gfx942_fp8_bf8_f32_scale_manual_bf
 COMPILE-REPORT: source_low[8] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.load selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[9] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=view.load selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[10] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.splat selection=plan emitted_ops=0
-COMPILE-REPORT: source_low[11] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_software_packed_bf16_decode emitted_ops=182
-COMPILE-REPORT: source_low[12] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_software_packed_bf16_decode emitted_ops=182
+COMPILE-REPORT: source_low[11] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_software_packed_bf16_decode emitted_ops=206
+COMPILE-REPORT: source_low[12] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_software_packed_bf16_decode emitted_ops=206
 COMPILE-REPORT: source_low[13] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.store selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[14] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.store selection=plan emitted_ops=2
 COMPILE-REPORT: source_low_memory[0] function=report_gfx942_fp8_bf8_f32_scale_manual_bf16_pack source_op=vector.load memory_space=global operation=load packet=amdgpu.global_load_b64_saddr source_root=fp8_input source_root_argument_index=0 storage={element_format:f8e4m3fn} source_interval={begin_min_bytes:0,begin_max_bytes:504,end_min_bytes:8,end_max_bytes:512,exact_length_bytes:8} address_form=global_saddr dynamic_term_kind=vaddr fallback_reason=- static_offset_bytes=0 element_bytes=1 vector_lanes=8 issued_read_bytes=8 issued_write_bytes=0 issued_read_unknown_widths=0 issued_write_unknown_widths=0 dynamic_stride_bytes=8 vector_lane_stride_bytes=1
@@ -159,7 +236,7 @@ kernel.def target(@target) @report_gfx942_finite_fp8_bf8_to_bf16_packed_decode()
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=12 emitted_ops=139 rows=12
+COMPILE-REPORT: source_low selected_ops=12 emitted_ops=139 rows=12 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=4 arguments=4 argument_packets=4 strategies=0 packets=4 loads=2 stores=2 scalar_packets=0 vector_packets=4 source_lanes=32 source_bytes=48 read_bytes=16 write_bytes=32 issued_read_bytes=16 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=4 unknown_dynamic_packets=0 dynamic_packets=4 dynamic_source_bytes=48 dynamic_read_bytes=16 dynamic_write_bytes=32 dynamic_issued_read_bytes=16 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1024 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3072 dispatch_issued_read_bytes=1024 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3072 interval_envelope={packets:4,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx942_finite_fp8_bf8_to_bf16_packed_decode source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx942_finite_fp8_bf8_to_bf16_packed_decode source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -223,7 +300,7 @@ kernel.def target(@target) @report_gfx950_fp8_bf8_scalef32_native_decode_variant
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=15 emitted_ops=32 rows=15
+COMPILE-REPORT: source_low selected_ops=15 emitted_ops=32 rows=15 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=5 arguments=5 argument_packets=5 strategies=0 packets=5 loads=3 stores=2 scalar_packets=1 vector_packets=4 source_lanes=33 source_bytes=52 read_bytes=20 write_bytes=32 issued_read_bytes=20 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=5 unknown_dynamic_packets=0 dynamic_packets=5 dynamic_source_bytes=52 dynamic_read_bytes=20 dynamic_write_bytes=32 dynamic_issued_read_bytes=20 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1280 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3328 dispatch_issued_read_bytes=1280 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3328 interval_envelope={packets:5,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:3,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx950_fp8_bf8_scalef32_native_decode_variants source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx950_fp8_bf8_scalef32_native_decode_variants source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -355,7 +432,7 @@ kernel.def target(@target) @report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack()
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=15 emitted_ops=120 rows=15
+COMPILE-REPORT: source_low selected_ops=15 emitted_ops=144 rows=15 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=5 arguments=5 argument_packets=5 strategies=0 packets=5 loads=3 stores=2 scalar_packets=1 vector_packets=4 source_lanes=33 source_bytes=52 read_bytes=20 write_bytes=32 issued_read_bytes=20 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=5 unknown_dynamic_packets=0 dynamic_packets=5 dynamic_source_bytes=52 dynamic_read_bytes=20 dynamic_write_bytes=32 dynamic_issued_read_bytes=20 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1280 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3328 dispatch_issued_read_bytes=1280 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3328 interval_envelope={packets:5,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:3,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -368,7 +445,7 @@ COMPILE-REPORT: source_low[7] function=report_gfx1200_fp8_bf8_f32_scale_manual_1
 COMPILE-REPORT: source_low[8] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.load selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[9] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=view.load selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[10] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.splat selection=plan emitted_ops=0
-COMPILE-REPORT: source_low[11] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_native_f32_pair_manual_bf16_pack emitted_ops=63
+COMPILE-REPORT: source_low[11] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_native_f32_pair_manual_bf16_pack emitted_ops=87
 COMPILE-REPORT: source_low[12] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.decode selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_scalef32_native_f32_pair_manual_f16_pack emitted_ops=47
 COMPILE-REPORT: source_low[13] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.store selection=plan emitted_ops=2
 COMPILE-REPORT: source_low[14] function=report_gfx1200_fp8_bf8_f32_scale_manual_16bit_pack source_op=vector.store selection=plan emitted_ops=2
@@ -423,7 +500,7 @@ kernel.def target(@target) @report_gfx1200_finite_fp8_bf8_to_bf16_packed_decode(
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=12 emitted_ops=113 rows=12
+COMPILE-REPORT: source_low selected_ops=12 emitted_ops=113 rows=12 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=4 arguments=4 argument_packets=4 strategies=0 packets=4 loads=2 stores=2 scalar_packets=0 vector_packets=4 source_lanes=32 source_bytes=48 read_bytes=16 write_bytes=32 issued_read_bytes=16 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=4 unknown_dynamic_packets=0 dynamic_packets=4 dynamic_source_bytes=48 dynamic_read_bytes=16 dynamic_write_bytes=32 dynamic_issued_read_bytes=16 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1024 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3072 dispatch_issued_read_bytes=1024 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3072 interval_envelope={packets:4,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx1200_finite_fp8_bf8_to_bf16_packed_decode source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx1200_finite_fp8_bf8_to_bf16_packed_decode source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -487,7 +564,7 @@ kernel.def target(@target) @report_gfx1250_fp8_bf8_f32_scale_native_f32_pair_nat
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=15 emitted_ops=62 rows=15
+COMPILE-REPORT: source_low selected_ops=15 emitted_ops=62 rows=15 unkeyed_maximum_emitted_ops=2
 COMPILE-REPORT: source_low_memory roots=5 arguments=5 argument_packets=5 strategies=0 packets=5 loads=3 stores=2 scalar_packets=1 vector_packets=4 source_lanes=33 source_bytes=52 read_bytes=20 write_bytes=32 issued_read_bytes=20 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=4 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=5 unknown_dynamic_packets=0 dynamic_packets=5 dynamic_source_bytes=52 dynamic_read_bytes=20 dynamic_write_bytes=32 dynamic_issued_read_bytes=20 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1280 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=3328 dispatch_issued_read_bytes=1280 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=3328 interval_envelope={packets:5,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} read_interval_envelope={packets:3,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low[0] function=report_gfx1250_fp8_bf8_f32_scale_native_f32_pair_native_bf16_pack source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx1250_fp8_bf8_f32_scale_native_f32_pair_native_bf16_pack source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -598,7 +675,7 @@ kernel.def target(@target) @report_gfx1250_fp8_bf8_e8m0_native_decode_variants()
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
 COMPILE-REPORT: workload workgroup_size=64x1x1 flat_workgroup_size=64 workgroup_count=1x1x1 dispatch_workgroup_count=1 dispatch_workitem_count=64
-COMPILE-REPORT: source_low selected_ops=26 emitted_ops=88 rows=26
+COMPILE-REPORT: source_low selected_ops=26 emitted_ops=88 rows=26 unkeyed_maximum_emitted_ops=6
 COMPILE-REPORT: source_low_memory roots=9 arguments=9 argument_packets=9 strategies=0 packets=11 loads=3 stores=8 scalar_packets=1 vector_packets=10 source_lanes=65 source_bytes=148 read_bytes=20 write_bytes=128 issued_read_bytes=20 issued_write_bytes=128 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=10 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=11 unknown_dynamic_packets=0 dynamic_packets=11 dynamic_source_bytes=148 dynamic_read_bytes=20 dynamic_write_bytes=128 dynamic_issued_read_bytes=20 dynamic_issued_write_bytes=128 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=1280 dispatch_source_write_bytes=8192 dispatch_source_total_bytes=9472 dispatch_issued_read_bytes=1280 dispatch_issued_write_bytes=8192 dispatch_issued_total_bytes=9472 interval_envelope={packets:11,begin_min_bytes:0,end_max_bytes:2048,byte_count:2048} read_interval_envelope={packets:3,begin_min_bytes:0,end_max_bytes:512,byte_count:512} write_interval_envelope={packets:8,begin_min_bytes:0,end_max_bytes:2048,byte_count:2048}
 COMPILE-REPORT: source_low[0] function=report_gfx1250_fp8_bf8_e8m0_native_decode_variants source_op=index.constant selection=plan emitted_ops=0
 COMPILE-REPORT: source_low[1] function=report_gfx1250_fp8_bf8_e8m0_native_decode_variants source_op=kernel.workitem.id selection=plan emitted_ops=0
@@ -664,3 +741,38 @@ COMPILE-REPORT: source_low_memory_argument_packet[5] function=report_gfx1250_fp8
 COMPILE-REPORT: source_low_memory_argument_packet[6] function=report_gfx1250_fp8_bf8_e8m0_native_decode_variants source_root=bf8_bf16_output source_root_argument_index=6 memory_space=global operation=store packet=amdgpu.global_store_b128_saddr storage={element_format:bf16} packets=1 loads=0 stores=1 scalar_packets=0 vector_packets=1 source_lanes=8 source_bytes=16 read_bytes=0 write_bytes=16 issued_read_bytes=0 issued_write_bytes=16 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=1 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=1 unknown_dynamic_packets=0 dynamic_packets=1 dynamic_source_bytes=16 dynamic_read_bytes=0 dynamic_write_bytes=16 dynamic_issued_read_bytes=0 dynamic_issued_write_bytes=16 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=0 dispatch_source_write_bytes=1024 dispatch_source_total_bytes=1024 dispatch_issued_read_bytes=0 dispatch_issued_write_bytes=1024 dispatch_issued_total_bytes=1024 interval_envelope={packets:1,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} write_interval_envelope={packets:1,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low_memory_argument_packet[7] function=report_gfx1250_fp8_bf8_e8m0_native_decode_variants source_root=bf8_f16_output source_root_argument_index=7 memory_space=global operation=store packet=amdgpu.global_store_b128_saddr storage={element_format:f16} packets=1 loads=0 stores=1 scalar_packets=0 vector_packets=1 source_lanes=8 source_bytes=16 read_bytes=0 write_bytes=16 issued_read_bytes=0 issued_write_bytes=16 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=1 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=1 unknown_dynamic_packets=0 dynamic_packets=1 dynamic_source_bytes=16 dynamic_read_bytes=0 dynamic_write_bytes=16 dynamic_issued_read_bytes=0 dynamic_issued_write_bytes=16 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=0 dispatch_source_write_bytes=1024 dispatch_source_total_bytes=1024 dispatch_issued_read_bytes=0 dispatch_issued_write_bytes=1024 dispatch_issued_total_bytes=1024 interval_envelope={packets:1,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024} write_interval_envelope={packets:1,begin_min_bytes:0,end_max_bytes:1024,byte_count:1024}
 COMPILE-REPORT: source_low_memory_argument_packet[8] function=report_gfx1250_fp8_bf8_e8m0_native_decode_variants source_root=bf8_f32_output source_root_argument_index=8 memory_space=global operation=store packet=amdgpu.global_store_b128_saddr storage={element_format:f32} packets=2 loads=0 stores=2 scalar_packets=0 vector_packets=2 source_lanes=8 source_bytes=32 read_bytes=0 write_bytes=32 issued_read_bytes=0 issued_write_bytes=32 issued_read_unknown_widths=0 issued_write_unknown_widths=0 contiguous_vector_packets=2 strided_vector_packets=0 unknown_stride_vector_packets=0 exact_dynamic_packets=2 unknown_dynamic_packets=0 dynamic_packets=2 dynamic_source_bytes=32 dynamic_read_bytes=0 dynamic_write_bytes=32 dynamic_issued_read_bytes=0 dynamic_issued_write_bytes=32 dynamic_issued_read_unknown_widths=0 dynamic_issued_write_unknown_widths=0 dispatch_source_read_bytes=0 dispatch_source_write_bytes=2048 dispatch_source_total_bytes=2048 dispatch_issued_read_bytes=0 dispatch_issued_write_bytes=2048 dispatch_issued_total_bytes=2048 interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:2048,byte_count:2048} write_interval_envelope={packets:2,begin_min_bytes:0,end_max_bytes:2048,byte_count:2048}
+// ====
+
+// Three-lane conversions exercise the partial packed carrier separately from
+// the full-width decode plans above.
+amdgpu.target<gfx1100> @target
+
+func.def target(@target) @report_gfx1100_f8e4m3x3_to_bf16_partial_decode(%first: f8E4M3, %second: f8E4M3, %third: f8E4M3) -> (bf16, bf16, bf16) {
+  %input = vector.from_elements %first, %second, %third : vector<3xf8E4M3>
+  %converted = vector.extf %input : vector<3xf8E4M3> to vector<3xbf16>
+  %first_result = vector.extract %converted[0] : vector<3xbf16> -> bf16
+  %second_result = vector.extract %converted[1] : vector<3xbf16> -> bf16
+  %third_result = vector.extract %converted[2] : vector<3xbf16> -> bf16
+  func.return %first_result, %second_result, %third_result : bf16, bf16, bf16
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low selected_ops=5 emitted_ops=67 rows=5 unkeyed_maximum_emitted_ops=7
+CHECK: COMPILE-REPORT: source_low[*] function=report_gfx1100_f8e4m3x3_to_bf16_partial_decode source_op=vector.extf selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_mixed_packed_bf16_decode emitted_ops=56
+
+// ====
+
+amdgpu.target<gfx1100> @target
+
+func.def target(@target) @report_gfx1100_f8e5m2x3_to_f16_partial_decode(%first: f8E5M2, %second: f8E5M2, %third: f8E5M2) -> (f16, f16, f16) {
+  %input = vector.from_elements %first, %second, %third : vector<3xf8E5M2>
+  %converted = vector.extf %input : vector<3xf8E5M2> to vector<3xf16>
+  %first_result = vector.extract %converted[0] : vector<3xf16> -> f16
+  %second_result = vector.extract %converted[1] : vector<3xf16> -> f16
+  %third_result = vector.extract %converted[2] : vector<3xf16> -> f16
+  func.return %first_result, %second_result, %third_result : f16, f16, f16
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low selected_ops=5 emitted_ops=86 rows=5 unkeyed_maximum_emitted_ops=7
+CHECK: COMPILE-REPORT: source_low[*] function=report_gfx1100_f8e5m2x3_to_f16_partial_decode source_op=vector.extf selection=plan plan_key=amdgpu.vector_16bit_float_conversion.strategy.fp8_mixed_packed_f16_decode emitted_ops=75

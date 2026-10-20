@@ -3,10 +3,16 @@
 //
 // Device operations. Generic across accelerator types once you have a handle.
 
+#include "device.h"
+
 #include <stdint.h>
 #include <string.h>
 
 #include "hrx_internal.h"
+
+iree_hal_device_t* hrx_device_hal(hrx_device_t device) {
+  return device ? device->hal_device : NULL;
+}
 
 hrx_status_t hrx_device_query_total_memory_from_spec(
     hrx_device_t device, bool* out_known, iree_device_size_t* out_total) {
@@ -169,6 +175,7 @@ void hrx_device_release(hrx_device_t device) {
   iree_hal_device_t* hal_device = device->hal_device;
   iree_hal_device_group_t* hal_device_group = device->hal_device_group;
   if (iree_atomic_ref_count_dec(&device->ref_count) == 1) {
+    hrx_mem_pool_backing_deinitialize(&device->mem_pool_backing);
     iree_hal_allocator_release(device->allocator.hal_allocator);
     device->allocator.hal_allocator = NULL;
     device->transfer_queue = NULL;

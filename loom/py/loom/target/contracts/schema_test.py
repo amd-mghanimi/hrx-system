@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
+from loom.dialect.buffer import defs as buffer
 from loom.dialect.scalar import analysis as scalar_analysis
 from loom.dialect.scalar import arithmetic as scalar_arithmetic
+from loom.dialect.scalar import conversion as scalar_conversion
 from loom.dialect.vector import defs as vector
+from loom.dsl import ANY, CONVERGENT, PURE, Op, Operand, Result, TiedResult
 from loom.error.target import ERR_TARGET_003
 from loom.target.contracts import (
     AttrProject,
@@ -22,9 +26,12 @@ from loom.target.contracts import (
     EmitDescriptorOp,
     EmitRegisterConcat,
     EmitRegisterCopy,
+    EmitRegisterMove,
     EmitRegisterSlice,
     Guard,
+    OperandSegmentProject,
     OrdinalValueAliasRule,
+    ReadOnlyDataLiteral,
     RecipeRule,
     Scalar,
     SourceNode,
@@ -36,7 +43,9 @@ from loom.target.contracts import (
     contract_fragment_public_header,
     descriptor_by_semantic_tag,
 )
+from loom.target.contracts import descriptors as contract_descriptors
 from loom.target.contracts.diagnostics import string_param, target_diagnostic
+from loom.target.low_descriptors import Immediate, ImmediateFlag, ImmediateKind
 from loom.target.test.descriptors import (
     TEST_LOW_ADD_F32_DESCRIPTOR,
     TEST_LOW_ADD_I32_DESCRIPTOR,
@@ -115,12 +124,142 @@ def test_contract_fragment_requires_explicit_public_header() -> None:
         contract_fragment_public_header(table)
 
 
+@pytest.mark.parametrize(
+    ("same_key", "message"),
+    [(True, "duplicate descriptor key"), (False, "stable ID collides")],
+)
+def test_contract_fragment_rejects_ambiguous_descriptor_identities(
+    same_key: bool, message: str
+) -> None:
+    descriptor = TEST_LOW_ADD_I32_DESCRIPTOR
+    other = descriptor if same_key else TEST_LOW_ADD_F32_DESCRIPTOR
+    descriptor_set = replace(
+        TEST_LOW_CORE_DESCRIPTOR_SET, descriptors=(descriptor, other)
+    )
+    # Even unused descriptors can appear in the selected target view.
+    with (
+        patch.object(contract_descriptors, "descriptor_stable_id", return_value=1),
+        pytest.raises(ValueError, match=message),
+    ):
+        ContractFragment(name="test.identity", descriptor_set=descriptor_set)
+
+
 def test_descriptor_rule_validates_related_source_nodes() -> None:
     ContractFragment(
         name="test-low.fused-source-nodes",
         descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
         cases=(_fused_scalar_rule(source_nodes=(_forward_source_node(),)),),
     )
+
+
+def test_descriptor_rule_accepts_dead_related_result() -> None:
+    ContractFragment(
+        name="test-low.dead-related-result",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        cases=(
+            DescriptorRule(
+                source_op=scalar_arithmetic.scalar_addi,
+                descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+                source_nodes=(
+                    SourceNode.adjacent_definition(
+                        "pair",
+                        source_op=vector.vector_deinterleave,
+                        parent_operand=ValueRef.operand("lhs"),
+                        node_result=ValueRef.result("even"),
+                        guards=(Guard.value_no_uses("odd"),),
+                    ),
+                ),
+                emit=(
+                    EmitDescriptorOp(
+                        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+                        operands={
+                            "lhs": ValueRef.result("even", source_node="pair"),
+                            "rhs": ValueRef.operand("rhs"),
+                        },
+                        results={"dst": ValueRef.result("result")},
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_descriptor_rule_rejects_live_sibling_source_graph_result() -> None:
+    rule = DescriptorRule(
+        source_op=scalar_arithmetic.scalar_addi,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+        source_nodes=(
+            SourceNode.adjacent_definition(
+                "pair",
+                source_op=vector.vector_deinterleave,
+                parent_operand=ValueRef.operand("lhs"),
+                node_result=ValueRef.result("even"),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="must guard sibling results as unused: odd"):
+        ContractFragment(
+            name="test-low.live-sibling-source-graph-result",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(rule,),
+        )
+
+
+def test_descriptor_rule_rejects_live_sibling_root_result() -> None:
+    root_pair = Op(
+        "test.source_graph_root_pair",
+        operands=[Operand("lhs", ANY), Operand("rhs", ANY)],
+        results=[Result("result", ANY), Result("sibling", ANY)],
+        traits=[PURE],
+    )
+    rule = DescriptorRule(
+        source_op=root_pair,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+        source_nodes=(_forward_source_node(),),
+    )
+    with pytest.raises(ValueError, match="must guard sibling results as unused"):
+        ContractFragment(
+            name="test-low.live-sibling-root-result",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(rule,),
+        )
+
+
+def test_descriptor_rule_rejects_variadic_source_graph_definition() -> None:
+    variadic_root = Op(
+        "test.variadic_source_graph_root",
+        operands=[Operand("input", ANY)],
+        results=[Result("result", ANY, variadic=True)],
+        traits=[PURE],
+    )
+    rule = DescriptorRule(
+        source_op=variadic_root,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+        source_nodes=(_forward_source_node(),),
+    )
+    with pytest.raises(ValueError, match="cannot have variadic results"):
+        ContractFragment(
+            name="test-low.variadic-source-graph-definition",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(rule,),
+        )
+
+
+def test_descriptor_rule_rejects_duplicate_source_graph_result_user() -> None:
+    rule = DescriptorRule(
+        source_op=scalar_arithmetic.scalar_addi,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+        source_nodes=(
+            _forward_source_node(name="first"),
+            _forward_source_node(name="second"),
+        ),
+    )
+    with pytest.raises(ValueError, match=r"root.result.*has multiple users"):
+        ContractFragment(
+            name="test-low.duplicate-source-graph-result-user",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(rule,),
+        )
 
 
 def test_descriptor_rule_rejects_unknown_source_node_parent() -> None:
@@ -154,6 +293,38 @@ def test_descriptor_rule_rejects_duplicate_source_node_name() -> None:
 def test_descriptor_rule_rejects_non_pure_source_node() -> None:
     source_node = replace(_forward_source_node(), source_op=vector.vector_load)
     with pytest.raises(ValueError, match="must be pure and regionless"):
+        ContractFragment(
+            name="test-low.fused-source-nodes",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(_fused_scalar_rule(source_nodes=(source_node,)),),
+        )
+
+
+def test_descriptor_rule_rejects_convergent_source_node() -> None:
+    convergent = Op(
+        "test.convergent_source_node",
+        operands=[Operand("input", ANY)],
+        results=[Result("result", ANY)],
+        traits=[PURE, CONVERGENT],
+    )
+    source_node = replace(_forward_source_node(), source_op=convergent)
+    with pytest.raises(ValueError, match="must be relocatable"):
+        ContractFragment(
+            name="test-low.fused-source-nodes",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(_fused_scalar_rule(source_nodes=(source_node,)),),
+        )
+
+
+def test_descriptor_rule_rejects_tied_source_node() -> None:
+    pure_tied = Op(
+        "test.pure_tied_source_node",
+        operands=[Operand("input", ANY)],
+        results=[TiedResult("result", "input", ANY)],
+        traits=[PURE],
+    )
+    source_node = replace(_forward_source_node(), source_op=pure_tied)
+    with pytest.raises(ValueError, match="must be relocatable"):
         ContractFragment(
             name="test-low.fused-source-nodes",
             descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
@@ -199,6 +370,28 @@ def test_descriptor_rule_rejects_unbound_related_result() -> None:
     ):
         ContractFragment(
             name="test-low.fused-source-nodes",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(replace(rule, emit=(emit,)),),
+        )
+
+
+def test_descriptor_rule_rejects_unbound_root_result() -> None:
+    rule = _fused_scalar_rule(source_nodes=())
+    emit = replace(
+        rule.emit[0],
+        operands={
+            "lhs": ValueRef.operand("lhs"),
+            "rhs": ValueRef.operand("rhs"),
+        },
+        results={"dst": ValueRef.temporary("unpublished")},
+        result_types={"dst": Scalar("i32")},
+    )
+    with pytest.raises(
+        ValueError,
+        match="source node 'root' result 'result' is neither internal",
+    ):
+        ContractFragment(
+            name="test-low.unbound-root-result",
             descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
             cases=(replace(rule, emit=(emit,)),),
         )
@@ -352,6 +545,78 @@ def test_structural_register_emits_validate_program_shape() -> None:
             ),
         )
 
+    fragment = ContractFragment(
+        name="register.copy.temporary-type",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        cases=(
+            DescriptorRule(
+                source_op=scalar_analysis.scalar_assume,
+                emit=(
+                    EmitRegisterCopy(
+                        source=ValueRef.operand("values"),
+                        result=ValueRef.temporary("carrier"),
+                        result_type=Scalar("i32"),
+                    ),
+                    EmitRegisterMove(
+                        source=ValueRef.temporary("carrier"),
+                        result=ValueRef.temporary("reclassified"),
+                        result_type=ValueRef.temporary("carrier"),
+                    ),
+                ),
+            ),
+        ),
+    )
+    assert len(fragment.cases[0].emit) == 2
+
+    with pytest.raises(ValueError, match="register move source must bind a temporary"):
+        ContractFragment(
+            name="register.move.source-operand",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(
+                DescriptorRule(
+                    source_op=scalar_analysis.scalar_assume,
+                    emit=(
+                        EmitRegisterMove(
+                            source=ValueRef.operand("values"),
+                            result=ValueRef.temporary("moved"),
+                            result_type=Scalar("i32"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="register copy source temporary 'carrier' is not defined",
+    ):
+        ContractFragment(
+            name="register.move.consumed-source",
+            descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+            cases=(
+                DescriptorRule(
+                    source_op=scalar_analysis.scalar_assume,
+                    emit=(
+                        EmitRegisterCopy(
+                            source=ValueRef.operand("values"),
+                            result=ValueRef.temporary("carrier"),
+                            result_type=Scalar("i32"),
+                        ),
+                        EmitRegisterMove(
+                            source=ValueRef.temporary("carrier"),
+                            result=ValueRef.temporary("moved"),
+                            result_type=ValueRef.temporary("carrier"),
+                        ),
+                        EmitRegisterCopy(
+                            source=ValueRef.temporary("carrier"),
+                            result=ValueRef.temporary("invalid"),
+                            result_type=Scalar("i32"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
 
 def test_ordinal_alias_rule_validates_variadic_identity_fields() -> None:
     table = ContractFragment(
@@ -400,6 +665,13 @@ def test_elide_rule_validates_guards() -> None:
     assert table.cases[0].source_op == vector.vector_extract
 
 
+def test_optional_operand_segment_count_guard() -> None:
+    Guard.operand_segment_count("pool", 0).validate(buffer.buffer_alloca)
+    Guard.operand_segment_count("pool", 1).validate(buffer.buffer_alloca)
+    with pytest.raises(ValueError, match="count must be zero or one"):
+        Guard.operand_segment_count("pool", 2).validate(buffer.buffer_alloca)
+
+
 def test_value_memory_space_guard_requires_known_unique_spaces() -> None:
     guard = Guard.value_memory_space("result", ("global", "descriptor"))
 
@@ -411,6 +683,32 @@ def test_value_memory_space_guard_requires_known_unique_spaces() -> None:
         Guard.value_memory_space("result", ("device",))
     with pytest.raises(ValueError, match="repeats memory space 'global'"):
         Guard.value_memory_space("result", ("global", "global"))
+
+
+def test_target_subgroup_size_range_guard_requires_positive_u32_bounds() -> None:
+    guard = Guard.target_subgroup_size_range(1, 64)
+
+    assert guard.field == "subgroup_size"
+    assert guard.minimum == 1
+    assert guard.maximum == 64
+
+    with pytest.raises(ValueError, match="needs a positive u32 range"):
+        Guard.target_subgroup_size_range(0, 32)
+    with pytest.raises(ValueError, match="range minimum exceeds maximum"):
+        Guard.target_subgroup_size_range(64, 32)
+    with pytest.raises(ValueError, match="needs a positive u32 range"):
+        Guard.target_subgroup_size_range(1, 2**32)
+
+
+def test_value_target_subgroup_size_guard_requires_a_source_value() -> None:
+    guard = Guard.value_i64_equals_target_subgroup_size("lhs")
+
+    guard.validate(scalar_arithmetic.scalar_addi)
+
+    with pytest.raises(ValueError, match="field 'missing' is not an operand or result"):
+        Guard.value_i64_equals_target_subgroup_size("missing").validate(
+            scalar_arithmetic.scalar_addi
+        )
 
 
 def test_recipe_rule_validates_guards() -> None:
@@ -697,6 +995,35 @@ def test_descriptor_rule_rejects_unknown_instance_flag() -> None:
         )
 
 
+def test_descriptor_rule_validates_fact_or_instance_flag_guard() -> None:
+    ContractFragment(
+        name="test-low.subnormal-policy",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        cases=[
+            RecipeRule(
+                source_op=scalar_conversion.scalar_fptrunc,
+                guards=[
+                    Guard.value_not_subnormal_or_instance_flags_has_all(
+                        "input", "subnormal", "daz"
+                    )
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"scalar.fptrunc: guard "
+        r"value_not_subnormal_or_instance_flags_has_all field 'subnormal' "
+        r"has no enum case 'spicy'",
+    ):
+        Guard.value_not_subnormal_or_instance_flags_has_all(
+            "input", "subnormal", "spicy"
+        ).validate(
+            scalar_conversion.scalar_fptrunc,
+        )
+
+
 def test_descriptor_rule_validates_source_and_descriptor_fields() -> None:
     descriptor = TEST_LOW_EXTRACT_LANE_I32_DESCRIPTOR
 
@@ -931,6 +1258,136 @@ def test_descriptor_rule_rejects_negative_variadic_operand_element() -> None:
         )
 
 
+def test_operand_segment_exact_bits_requires_variadic_payload_fields() -> None:
+    Guard.operand_segment_exact_bits("elements", bit_width=32).validate(
+        vector.vector_from_elements
+    )
+    with pytest.raises(ValueError, match="must be a variadic operand"):
+        Guard.operand_segment_exact_bits("lhs", bit_width=32).validate(
+            scalar_arithmetic.scalar_addi
+        )
+    with pytest.raises(ValueError, match="bit width must be 8, 16, 32, or 64"):
+        Guard.operand_segment_exact_bits("elements", bit_width=24)
+
+
+def test_operand_segment_exact_bits_requires_read_only_immediate() -> None:
+    descriptor = replace(
+        TEST_LOW_FROM_ELEMENTS_V4I32_DESCRIPTOR,
+        immediates=(
+            Immediate(
+                "data",
+                ImmediateKind.ORDINAL,
+                bit_width=32,
+                unsigned_max=(2**32) - 1,
+            ),
+        ),
+    )
+    projection = OperandSegmentProject.exact_bits_read_only("elements", bit_width=32)
+    with pytest.raises(ValueError, match="must reference read-only data"):
+        projection.validate(vector.vector_from_elements, descriptor, "data")
+
+    read_only_descriptor = replace(
+        descriptor,
+        immediates=(
+            replace(
+                descriptor.immediates[0],
+                flags=(ImmediateFlag.READ_ONLY_DATA,),
+            ),
+        ),
+    )
+    projection.validate(vector.vector_from_elements, read_only_descriptor, "data")
+
+
+def test_read_only_data_literal_requires_read_only_immediate() -> None:
+    literal = ReadOnlyDataLiteral(b"\x00\x80\xff")
+    descriptor = replace(
+        TEST_LOW_FROM_ELEMENTS_V4I32_DESCRIPTOR,
+        immediates=(
+            Immediate(
+                "data",
+                ImmediateKind.ORDINAL,
+                bit_width=32,
+                unsigned_max=(2**32) - 1,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="must reference read-only data"):
+        literal.validate(vector.vector_from_elements, descriptor, "data")
+
+    read_only_descriptor = replace(
+        descriptor,
+        immediates=(
+            replace(
+                descriptor.immediates[0],
+                flags=(ImmediateFlag.READ_ONLY_DATA,),
+            ),
+        ),
+    )
+    literal.validate(vector.vector_from_elements, read_only_descriptor, "data")
+
+
+@pytest.mark.parametrize("data", [b"", bytes(256)])
+def test_read_only_data_literal_rejects_unrepresentable_lengths(data: bytes) -> None:
+    with pytest.raises(ValueError, match="read-only data literal"):
+        ReadOnlyDataLiteral(data)
+
+
+def test_operand_segment_projection_requires_matching_exact_bits_guard() -> None:
+    descriptor = replace(
+        TEST_LOW_FROM_ELEMENTS_V4I32_DESCRIPTOR,
+        immediates=(
+            Immediate(
+                "data",
+                ImmediateKind.ORDINAL,
+                flags=(ImmediateFlag.READ_ONLY_DATA,),
+                bit_width=32,
+                unsigned_max=(2**32) - 1,
+            ),
+        ),
+    )
+    descriptor_set = replace(
+        TEST_LOW_CORE_DESCRIPTOR_SET,
+        descriptors=tuple(
+            descriptor
+            if row.key == TEST_LOW_FROM_ELEMENTS_V4I32_DESCRIPTOR.key
+            else row
+            for row in TEST_LOW_CORE_DESCRIPTOR_SET.descriptors
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="needs a matching operand_segment_exact_bits guard",
+    ):
+        ContractFragment(
+            name="bad.from-elements-exact-data",
+            descriptor_set=descriptor_set,
+            cases=(
+                DescriptorRule(
+                    source_op=vector.vector_from_elements,
+                    descriptor=descriptor,
+                    guards=(
+                        Guard.operand_segment_exact_bits("elements", bit_width=16),
+                    ),
+                    emit=(
+                        EmitDescriptorOp(
+                            descriptor=descriptor,
+                            operands={
+                                f"lane{i}": ValueRef.operand("elements", element=i)
+                                for i in range(4)
+                            },
+                            results={"dst": ValueRef.result("result")},
+                            immediates={
+                                "data": OperandSegmentProject.exact_bits_read_only(
+                                    "elements", bit_width=32
+                                )
+                            },
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+
 def test_result_ref_rejects_element_on_fixed_result() -> None:
     with pytest.raises(
         ValueError,
@@ -944,10 +1401,10 @@ def test_result_ref_rejects_element_on_fixed_result() -> None:
 def test_result_ref_rejects_negative_variadic_element() -> None:
     with pytest.raises(
         ValueError,
-        match=(r"vector.deinterleave: test result result element must be non-negative"),
+        match=(r"scalar.assume: test result result element must be non-negative"),
     ):
         ValueRef.result("results", element=-1).validate(
-            vector.vector_deinterleave, "test result"
+            scalar_analysis.scalar_assume, "test result"
         )
 
 

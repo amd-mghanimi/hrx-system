@@ -83,15 +83,60 @@ TEST_F(LocationsTest, RetainedRangeAndFilenameOutliveSource) {
   EXPECT_EQ(entry.file.end_col, 11);
 }
 
-TEST_F(LocationsTest, RejectsCoordinatesThatWouldTruncate) {
-  std::string contents(65535, '\n');
+TEST_F(LocationsTest, ObserverReceivesExactHeaderSource) {
+  struct Capture {
+    // Physical filename of the observed translated source.
+    std::string filename;
+    // Exact bytes retained for that physical source.
+    std::string source;
+  } capture;
+  options_.source_provider = {
+      [](void*, iree_string_view_t path, bool* out_found,
+         iree_string_view_t* out_source) {
+        *out_found = iree_string_view_equal(path, IREE_SV("/app/value.h"));
+        *out_source =
+            *out_found ? IREE_SV("int value;\n") : iree_string_view_empty();
+        return iree_ok_status();
+      },
+      nullptr};
+  options_.source_observer = {
+      [](void* user_data, loom_source_id_t, iree_string_view_t filename,
+         iree_string_view_t source) {
+        auto& capture = *static_cast<Capture*>(user_data);
+        capture.filename = string(filename);
+        capture.source = string(source);
+        return iree_ok_status();
+      },
+      &capture};
+  Source source(IREE_SV("#include \"value.h\"\n"), IREE_SV("/app/source.cpp"),
+                options_);
+  Locations locations(source.unit(), source.diagnostics(), module_,
+                      options_.source_observer);
+  auto* declaration = find_value(source.unit());
+  ASSERT_NE(declaration, nullptr);
+  EXPECT_NE(locations.get(declaration), LOOM_LOCATION_UNKNOWN);
+  EXPECT_EQ(capture.filename, "/app/value.h");
+  EXPECT_EQ(capture.source, "int value;\n");
+}
+
+TEST_F(LocationsTest, PreservesCoordinatesBeyondCompactRange) {
+  std::string contents(LOOM_LOCATION_COMPACT_COORDINATE_MAX, '\n');
+  contents.append(LOOM_LOCATION_COMPACT_COORDINATE_MAX, ' ');
   contents += "int value;\n";
   Source source(view(contents), IREE_SV("large.cpp"), options_);
   Locations locations(source.unit(), source.diagnostics(), module_);
   auto* declaration = find_value(source.unit());
   ASSERT_NE(declaration, nullptr);
-  EXPECT_THROW(locations.get(declaration), SourceRejected);
-  EXPECT_TRUE(source.diagnostics().has_error());
+  const loom_location_id_t location = locations.get(declaration);
+  ASSERT_NE(location, LOOM_LOCATION_UNKNOWN);
+  EXPECT_FALSE(source.diagnostics().has_error());
+  const auto* entry =
+      loom_location_table_const_entry(&module_->locations, location);
+  ASSERT_EQ(entry->kind, LOOM_LOCATION_FILE);
+  EXPECT_EQ(entry->file.start_line, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(entry->file.start_col, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(entry->file.end_line, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 1);
+  EXPECT_EQ(entry->file.end_col, LOOM_LOCATION_COMPACT_COORDINATE_MAX + 11);
 }
 
 }  // namespace

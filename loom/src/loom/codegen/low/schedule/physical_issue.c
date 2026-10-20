@@ -60,20 +60,31 @@ void loom_low_physical_issue_commit_source(loom_low_physical_issue_t* issue,
         schedule->nodes[node].block_index) {
       continue;
     }
+    // Storage setup has no payload read until it becomes a concrete move.
+    // Its physical accesses, or those of a coalesced alias's eventual user,
+    // observe the original producer events through the register frontier.
+    // Carry issue order without forwarding the logical fallback latency for
+    // an operation that may emit no instruction. Memory effects retain their
+    // independent completion requirement.
+    const bool is_storage_setup =
+        iree_any_bit_set(schedule->nodes[consumer].flags,
+                         LOOM_LOW_SCHEDULE_NODE_FLAG_STORAGE_SETUP) &&
+        loom_low_schedule_dependency_index_group_has_ssa(index, i) &&
+        !loom_low_schedule_dependency_index_group_has_effect(index, i);
+    const int32_t separation =
+        is_storage_setup ? 0
+                         : iree_max(0, group->minimum_issue_separation_cycles);
     issue->node_ready_cycles[consumer] =
         iree_max(issue->node_ready_cycles[consumer],
-                 loom_low_schedule_add_signed_issue_separation(
-                     available_cycle, group->minimum_issue_separation_cycles));
+                 loom_low_schedule_add_signed_issue_separation(available_cycle,
+                                                               separation));
   }
 }
 
 static const loom_low_schedule_class_t* loom_low_physical_instruction_class(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_physical_instruction_t* instruction) {
-  const loom_low_descriptor_view_t* view =
-      loom_low_descriptor_set_descriptor_view_at(
-          descriptor_set, instruction->descriptor_ordinal);
-  return &descriptor_set->schedule_classes[view->schedule_class_id];
+  return &descriptor_set->schedule_classes[instruction->schedule_class_row_id];
 }
 
 static bool loom_low_physical_registers_overlap(
@@ -125,10 +136,10 @@ bool loom_low_physical_issue_group_fits(
           &descriptor_set->descriptors[instructions[j].descriptor_ordinal];
       for (uint16_t p = 0; p < producer->operand_count; ++p) {
         const loom_low_operand_t* lhs =
-            &descriptor_set->operands[producer->operand_start + p];
+            loom_low_descriptor_operand(descriptor_set, producer, p);
         for (uint16_t c = 0; c < consumer->operand_count; ++c) {
           const loom_low_operand_t* rhs =
-              &descriptor_set->operands[consumer->operand_start + c];
+              loom_low_descriptor_operand(descriptor_set, consumer, c);
           if (!loom_low_physical_events_require_separation(
                   descriptor_set, lhs->read_event_id, rhs->write_event_id) &&
               !loom_low_physical_events_require_separation(
@@ -160,7 +171,7 @@ uint32_t loom_low_physical_issue_register_ready_cycle(
         &descriptor_set->descriptors[instructions[i].descriptor_ordinal];
     for (uint16_t j = 0; j < descriptor->operand_count; ++j) {
       const loom_low_operand_t* operand =
-          &descriptor_set->operands[descriptor->operand_start + j];
+          loom_low_descriptor_operand(descriptor_set, descriptor, j);
       const uint16_t physical_register = instructions[i].physical_registers[j];
       cycle = iree_max(cycle, loom_low_schedule_event_frontier_query(
                                   &issue->events, physical_register,
@@ -173,10 +184,10 @@ uint32_t loom_low_physical_issue_register_ready_cycle(
   return cycle;
 }
 
-iree_status_t loom_low_physical_issue_place(
-    loom_low_physical_issue_t* issue,
+uint32_t loom_low_physical_issue_find_earliest_issue_cycle(
+    const loom_low_physical_issue_t* issue,
     const loom_low_physical_instruction_t* instructions, uint16_t count,
-    uint32_t proposed_cycle, uint32_t* out_cycle) {
+    uint32_t proposed_cycle) {
   const loom_low_descriptor_set_t* descriptor_set =
       issue->events.descriptor_set;
   const loom_low_schedule_class_t** classes =
@@ -185,14 +196,28 @@ iree_status_t loom_low_physical_issue_place(
     classes[i] =
         loom_low_physical_instruction_class(descriptor_set, &instructions[i]);
   }
-  uint32_t cycle = iree_max(
+  const uint32_t cycle = iree_max(
       proposed_cycle,
       loom_low_physical_issue_register_ready_cycle(issue, instructions, count));
   uint16_t bottleneck = LOOM_LOW_RESOURCE_NONE;
-  cycle = loom_low_schedule_resource_calendar_find_earliest_issue_cycle(
+  return loom_low_schedule_resource_calendar_find_earliest_issue_cycle(
       &issue->resources, classes, count, cycle, &bottleneck);
+}
+
+iree_status_t loom_low_physical_issue_commit(
+    loom_low_physical_issue_t* issue,
+    const loom_low_physical_instruction_t* instructions, uint16_t count,
+    uint32_t issue_cycle) {
+  const loom_low_descriptor_set_t* descriptor_set =
+      issue->events.descriptor_set;
+  const loom_low_schedule_class_t** classes =
+      (const loom_low_schedule_class_t**)iree_alloca(count * sizeof(*classes));
+  for (uint16_t i = 0; i < count; ++i) {
+    classes[i] =
+        loom_low_physical_instruction_class(descriptor_set, &instructions[i]);
+  }
   IREE_RETURN_IF_ERROR(loom_low_schedule_resource_calendar_commit(
-      &issue->resources, classes, count, cycle));
+      &issue->resources, classes, count, issue_cycle));
   iree_status_t status = iree_ok_status();
   for (uint16_t i = 0; i < count && iree_status_is_ok(status); ++i) {
     const loom_low_descriptor_t* descriptor =
@@ -200,37 +225,39 @@ iree_status_t loom_low_physical_issue_place(
     for (uint16_t j = 0;
          j < descriptor->operand_count && iree_status_is_ok(status); ++j) {
       const loom_low_operand_t* operand =
-          &descriptor_set->operands[descriptor->operand_start + j];
+          loom_low_descriptor_operand(descriptor_set, descriptor, j);
       const uint16_t physical_register = instructions[i].physical_registers[j];
       status = loom_low_schedule_event_frontier_commit(
-          &issue->events, physical_register, operand->read_event_id, cycle);
+          &issue->events, physical_register, operand->read_event_id,
+          issue_cycle);
       if (iree_status_is_ok(status)) {
         status = loom_low_schedule_event_frontier_commit(
-            &issue->events, physical_register, operand->write_event_id, cycle);
+            &issue->events, physical_register, operand->write_event_id,
+            issue_cycle);
       }
     }
+    const loom_low_descriptor_layout_t* descriptor_layout =
+        loom_low_descriptor_layout(descriptor_set, descriptor);
     for (uint16_t j = 0;
-         j < descriptor->effect_count && iree_status_is_ok(status); ++j) {
+         j < descriptor_layout->effect_count && iree_status_is_ok(status);
+         ++j) {
       const loom_low_effect_t* effect =
-          &descriptor_set->effects[descriptor->effect_start + j];
+          &descriptor_set->effects[descriptor_layout->effect_start + j];
       if (effect->producer_event_id == LOOM_LOW_TIMING_EVENT_NONE) {
         continue;
       }
       const uint32_t separation =
           descriptor_set->timing_events[effect->producer_event_id]
               .maximum_issue_separation_cycles;
-      if (cycle > UINT32_MAX - separation) {
+      if (issue_cycle > UINT32_MAX - separation) {
         status =
             iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                              "physical effect exceeds the issue-cycle domain");
       } else {
         issue->effect_quiescent_cycle =
-            iree_max(issue->effect_quiescent_cycle, cycle + separation);
+            iree_max(issue->effect_quiescent_cycle, issue_cycle + separation);
       }
     }
-  }
-  if (iree_status_is_ok(status)) {
-    *out_cycle = cycle;
   }
   return status;
 }

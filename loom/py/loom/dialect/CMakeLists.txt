@@ -17,6 +17,7 @@ iree_py_library(
   DEPS
     loom::py::loom::dialect::buffer::buffer
     loom::py::loom::dialect::cfg::cfg
+    loom::py::loom::dialect::channel::channel
     loom::py::loom::dialect::check::check
     loom::py::loom::dialect::command::command
     loom::py::loom::dialect::config::config
@@ -51,6 +52,7 @@ iree_py_library(
     "cache.py"
     "combining.py"
     "memory.py"
+    "symbol.py"
   DEPS
     loom::py::loom::core
 )

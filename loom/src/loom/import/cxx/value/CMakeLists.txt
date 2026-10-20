@@ -65,8 +65,10 @@ loom_cc_library(
     ::representation
     iree::third_party::cxx_parser
     loom::import::cxx::source
+    loom::import::cxx::source::error
     loom::ir
     loom::ops::op_defs
+    loom::ops::type_registry
   PUBLIC
 )
 endif()
@@ -173,6 +175,59 @@ endif()
 if(LOOM_IMPORT_CXX)
 loom_cc_library(
   NAME
+    objects
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "objects.h"
+  SRCS
+    "objects.cc"
+  DEPS
+    ::representation
+    ::storage
+    ::types
+    iree::third_party::cxx_parser
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    initialization
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "initialization.h"
+  SRCS
+    "initialization.cc"
+  DEPS
+    ::objects
+    ::representation
+    ::scalar
+    ::storage
+    ::types
+    ::vector
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::error
+    loom::import::cxx::source::locations
+    loom::ir
+    loom::ops::scalar
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
     storage
   CXX_STANDARD
     23
@@ -235,6 +290,7 @@ loom_cc_test(
     "exceptions"
     "rtti"
   DEPS
+    ::builder_test
     ::types
     iree::testing::gtest
     iree::testing::gtest_main

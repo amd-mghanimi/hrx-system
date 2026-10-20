@@ -8,6 +8,7 @@
 
 #include "loom/analysis/condition_fact_scope.h"
 #include "loom/ops/cfg/ops.h"
+#include "loom/ops/low/ops.h"
 
 typedef struct loom_cfg_branch_fold_t {
   // Original conditional terminator, retained until the batch applies.
@@ -50,8 +51,12 @@ static iree_status_t loom_cfg_branch_fold_plan_apply(
     const loom_cfg_branch_fold_t* fold = &plan->folds[i];
     loom_builder_set_before(&rewriter->builder, fold->branch);
     loom_op_t* new_branch = NULL;
-    status = loom_cfg_br_build(&rewriter->builder, fold->destination, NULL, 0,
-                               fold->branch->location, &new_branch);
+    status =
+        loom_cfg_cond_br_isa(fold->branch)
+            ? loom_cfg_br_build(&rewriter->builder, fold->destination, NULL, 0,
+                                fold->branch->location, &new_branch)
+            : loom_low_br_build(&rewriter->builder, fold->destination, NULL, 0,
+                                fold->branch->location, &new_branch);
     if (iree_status_is_ok(status)) {
       status = loom_rewriter_erase(rewriter, fold->branch);
     }
@@ -72,16 +77,22 @@ iree_status_t loom_cfg_fold_constant_branches(loom_rewriter_t* rewriter,
   loom_block_t* block = NULL;
   loom_region_for_each_block(region, block) {
     loom_op_t* branch = block->last_op;
-    if (!branch || !loom_cfg_cond_br_isa(branch)) {
+    if (!branch ||
+        (!loom_cfg_cond_br_isa(branch) && !loom_low_cond_br_isa(branch))) {
       continue;
     }
-    loom_block_t* true_destination = loom_cfg_cond_br_true_dest(branch);
-    loom_block_t* false_destination = loom_cfg_cond_br_false_dest(branch);
+    loom_block_t* true_destination = loom_op_successors(branch)[0];
+    loom_block_t* false_destination = loom_op_successors(branch)[1];
     loom_block_t* destination = true_destination;
     if (true_destination != false_destination) {
       bool condition = false;
       loom_value_facts_t facts = loom_value_fact_table_lookup(
-          rewriter->fact_table, loom_cfg_cond_br_condition(branch));
+          rewriter->fact_table, loom_op_operands(branch)[0]);
+      if (loom_low_cond_br_isa(branch) &&
+          !loom_value_facts_query_all_equal_element(
+              &rewriter->fact_table->context, facts, &facts)) {
+        continue;
+      }
       if (!loom_value_facts_as_exact_bool(facts, &condition)) {
         continue;
       }
@@ -109,7 +120,8 @@ iree_status_t loom_cfg_fold_path_sensitive_branches(
       continue;
     }
     loom_op_t* branch = graph->blocks[block_index].block->last_op;
-    if (!branch || !loom_cfg_cond_br_isa(branch)) {
+    if (!branch ||
+        (!loom_cfg_cond_br_isa(branch) && !loom_low_cond_br_isa(branch))) {
       continue;
     }
     loom_condition_fact_scope_t scope = {0};
@@ -119,13 +131,12 @@ iree_status_t loom_cfg_fold_path_sensitive_branches(
     bool condition = false;
     bool proven = false;
     IREE_RETURN_IF_ERROR(loom_condition_fact_scope_proves_condition(
-        query, rewriter->fact_table, &scope, loom_cfg_cond_br_condition(branch),
+        query, rewriter->fact_table, &scope, loom_op_operands(branch)[0],
         &condition, &proven));
     if (!proven) {
       continue;
     }
-    loom_block_t* destination = condition ? loom_cfg_cond_br_true_dest(branch)
-                                          : loom_cfg_cond_br_false_dest(branch);
+    loom_block_t* destination = loom_op_successors(branch)[condition ? 0 : 1];
     if (destination->arg_count != 0) {
       continue;
     }

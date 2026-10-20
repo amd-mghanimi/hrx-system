@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from loom.dialect.scalar import ALL_SCALAR_OPS, FastMathFlags
 from loom.dialect.vector import ALL_VECTOR_OPS
-from loom.dsl import FLOAT, I1, INTEGER, Op
+from loom.dialect.vector import defs as vector
+from loom.dsl import DECOMPOSABLE, FLOAT, I1, INTEGER, SAFE_TO_SPECULATE, Op
 
 SCALAR_TO_VECTOR_SUFFIX_EXCLUSIONS = {
     "assume": "scalar.assume refines scalar predicate facts, not vector lanes.",
+    "constexpr": "scalar.constexpr must specialize before vector lowering.",
 }
 
 
@@ -54,3 +56,43 @@ def test_vector_float_flags_use_scalar_fastmath_flags() -> None:
     assert reduce_fastmath_ops == {"vector.reduce", "vector.reduce.axes"}
     assert scalar_flags["contract"] == 32
     assert scalar_flags["fast"] == 127
+
+
+def test_shape_preserving_vector_casts_are_decomposable() -> None:
+    casts = (
+        vector.vector_index_cast,
+        vector.vector_extf,
+        vector.vector_fptrunc,
+        vector.vector_extsi,
+        vector.vector_extui,
+        vector.vector_trunci,
+        vector.vector_sitofp,
+        vector.vector_uitofp,
+        vector.vector_fptosi,
+        vector.vector_fptoui,
+    )
+    assert all(DECOMPOSABLE in op.traits for op in casts)
+
+
+def test_total_vector_numeric_families_author_speculation_policy() -> None:
+    total_ops = (
+        *vector.VECTOR_COMPARE_OPS,
+        *vector.VECTOR_FLOAT_ARITHMETIC_OPS,
+        *vector.VECTOR_MATH_OPS,
+        *vector.VECTOR_BITPACK_OPS,
+        *vector.VECTOR_CONTRACTION_OPS,
+        *vector.VECTOR_REDUCTION_OPS,
+    )
+    scalar_by_suffix = {_op_suffix(op): op for op in ALL_SCALAR_OPS}
+    vector_only_unit_cost_names = {
+        "vector.bitfield.extracts",
+        "vector.bitfield.extractu",
+        "vector.bitfield.insert",
+        "vector.select",
+    }
+
+    for op in total_ops:
+        assert SAFE_TO_SPECULATE in op.traits, op.name
+        scalar_op = scalar_by_suffix.get(_op_suffix(op))
+        expected_cost = scalar_op.eager_execution_cost if scalar_op is not None else int(op.name in vector_only_unit_cost_names)
+        assert op.eager_execution_cost == expected_cost, op.name

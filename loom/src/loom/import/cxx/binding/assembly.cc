@@ -9,7 +9,6 @@
 #include <cxx/ast.h>
 #include <cxx/literals.h>
 #include <cxx/names.h>
-#include <cxx/preprocessor.h>
 #include <cxx/symbols.h>
 #include <cxx/types.h>
 
@@ -44,7 +43,8 @@ void AssemblyFragments::verify(loom_module_t* module,
   if (functions_.empty()) {
     return;
   }
-  loom_source_table_resolver_t sources = {sources_.data(), sources_.size()};
+  loom_source_table_resolver_t sources = {module, sources_.data(),
+                                          sources_.size()};
   const loom_verify_options_t options = {
       .sink = sink,
       .max_errors = 20,
@@ -158,13 +158,11 @@ loom_symbol_ref_t AssemblyIntrinsic::fragment(
   if (auto found = fragments_.find(literal); found != fragments_.end()) {
     return found->second;
   }
-  auto token = unit.tokenAt(literal->firstSourceLocation());
-  if (!token.fileId()) {
-    diagnostics.reject(unit, source, "assembly literal requires source text");
-  }
-  auto spelling = unit.preprocessor()
-                      ->source(token.fileId())
-                      .substr(token.offset(), token.length());
+  auto first = unit.tokenStartPosition(literal->firstSourceLocation());
+  auto last = unit.tokenEndPosition(literal->firstSourceLocation());
+  auto physical = diagnostics.contents().range(first, last);
+  auto spelling =
+      physical.source.substr(physical.start, physical.end - physical.start);
   auto opening = spelling.find('(');
   if (!spelling.starts_with("R\"") || opening == std::string_view::npos ||
       spelling != literal->literal->value() ||
@@ -174,19 +172,17 @@ loom_symbol_ref_t AssemblyIntrinsic::fragment(
   }
   // The frontend has validated the raw delimiter; both delimiters have the
   // same length. Parse the original source slice to preserve exact locations.
-  auto first = unit.tokenStartPosition(literal->firstSourceLocation());
-  auto last = unit.tokenEndPosition(literal->firstSourceLocation());
-  if (last.line > UINT16_MAX || last.column > UINT16_MAX ||
-      first.column + opening + 1 > UINT16_MAX) {
+  if (opening >=
+      (iree_host_size_t)LOOM_LOCATION_COORDINATE_MAX - first.column) {
     diagnostics.reject(unit, source,
                        "assembly range exceeds Loom's location representation");
   }
   const loom_source_range_t range = {
       .provenance = LOOM_SOURCE_PROVENANCE_EXACT_SOURCE,
       .filename = view(first.fileName),
-      .source = view(unit.preprocessor()->source(token.fileId())),
-      .start = token.offset() + opening + 1,
-      .end = token.offset() + token.length() - opening,
+      .source = view(physical.source),
+      .start = physical.start + opening + 1,
+      .end = physical.end - opening,
       .start_line = first.line,
       .start_column = static_cast<uint32_t>(first.column + opening + 1),
       .end_line = last.line,
@@ -223,9 +219,11 @@ loom_symbol_ref_t AssemblyIntrinsic::fragment(
           : loom_location_table_const_entry(&module->locations,
                                             function->location)
                 ->file.source_id;
-  fragments.record(callable, {.source_id = source_id,
-                              .source = range.source,
-                              .filename = range.filename});
+  fragments.record(callable, {
+                                 .source_id = source_id,
+                                 .source = range.source,
+                                 .filename = range.filename,
+                             });
   fragments_.emplace(literal, symbol);
   return symbol;
 }

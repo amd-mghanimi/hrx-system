@@ -1,0 +1,266 @@
+// Each application selects for the execution environment in which it runs.
+// Capturing a construction result does not retarget that computation.
+// RUN: pass select-templates{rewrite=inline},canonicalize
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+template.decl @width_value() -> (i32)
+
+template.def<@width_value> requires [#target.subgroup.size<64>] @width64() -> (i32) {
+  %value = scalar.constant 64 : i32
+  template.return %value : i32
+}
+
+template.def<@width_value> requires [#target.subgroup.size<32>] @width32() -> (i32) {
+  %value = scalar.constant 32 : i32
+  template.return %value : i32
+}
+
+pipeline.def public target(@construction) @publish_widths() run(%first: channel<tile<2xi32>>, %second: channel<tile<2xi32>>) {
+  %construction_value = template.apply<@width_value>() : () -> (i32)
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %value = template.apply<@width_value>() : () -> (i32)
+    view.store %construction_value, %record[0] : i32, view<2xi32>
+    view.store %value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+  pipeline.strand target(@construction) workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %value = template.apply<@width_value>() : () -> (i32)
+    view.store %construction_value, %record[0] : i32, view<2xi32>
+    view.store %value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+template.decl @width_value() -> (i32)
+
+pipeline.def public target(@construction) @publish_widths() run(%first: channel<tile<2xi32>>, %second: channel<tile<2xi32>>) {
+  %value$2 = scalar.constant 64 : i32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %value = scalar.constant 32 : i32
+    view.store %value$2, %record[0] : i32, view<2xi32>
+    view.store %value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+  pipeline.strand target(@construction) workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %value = scalar.constant 64 : i32
+    view.store %value$2, %record[0] : i32, view<2xi32>
+    view.store %value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ====
+
+// Applicability uses the worker target while operand facts preserve both
+// construction and worker queries. Exact calls and abstract demands agree.
+// RUN: pass select-templates{mode=final,rewrite=inline},canonicalize
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+template.decl @combined_width(%construction: index, %worker: index) -> (index)
+
+template.def<@combined_width> requires [#target.subgroup.size<32>] @combine(%construction: index, %worker: index) -> (index) where [eq(%construction, 64), eq(%worker, 32)] {
+  %result = index.add %construction, %worker : index
+  template.return %result : index
+}
+
+pipeline.def public target(@construction) @publish_combined() run(%output: channel<tile<2xi32>>) {
+  %construction_width = target.subgroup.size : index
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %worker_width = target.subgroup.size : index
+    %exact = template.call @combine(%construction_width, %worker_width) : (index, index) -> (index)
+    %selected = template.apply<@combined_width>(%construction_width, %worker_width) : (index, index) -> (index)
+    %exact_value = index.cast %exact : index to i32
+    %selected_value = index.cast %selected : index to i32
+    view.store %exact_value, %record[0] : i32, view<2xi32>
+    view.store %selected_value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+template.decl @combined_width(%construction: index, %worker: index) -> (index)
+
+pipeline.def public target(@construction) @publish_combined() run(%output: channel<tile<2xi32>>) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %exact_value = scalar.constant 96 : i32
+    %selected_value = scalar.constant 96 : i32
+    view.store %exact_value, %record[0] : i32, view<2xi32>
+    view.store %selected_value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ====
+
+// An explicit unresolved target cannot select the construction provider.
+// An omitted target inherits that provider from its enclosing environment.
+// RUN: pass select-templates
+test.target<low_core> @construction {subgroup_size = 64}
+
+target.decl @worker
+
+template.decl @width_value() -> (i32)
+
+template.def<@width_value> requires [#target.subgroup.size<64>] @width64() -> (i32) {
+  %value = scalar.constant 64 : i32
+  template.return %value : i32
+}
+
+pipeline.def public target(@construction) @publish_unknown() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = template.apply<@width_value>() : () -> (i32)
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = template.apply<@width_value>() : () -> (i32)
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+target.decl @worker
+
+template.decl @width_value() -> (i32)
+
+template.def<@width_value> requires [#target.subgroup.size<64>] @width64() -> (i32) {
+  %value = scalar.constant 64 : i32
+  template.return %value : i32
+}
+
+pipeline.def public target(@construction) @publish_unknown() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = template.apply<@width_value>() : () -> (i32)
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = template.call @width64() : () -> (i32)
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+// Target-symbol applicability is scoped through ordinary nested control flow.
+// RUN: pass select-templates{rewrite=inline}
+test.target<low_core> @construction
+
+test.target<quirky> @worker
+
+template.decl @adjust(%value: i32) -> (i32)
+
+template.def<@adjust> target(@construction) @keep(%value: i32) -> (i32) {
+  template.return %value : i32
+}
+
+template.def<@adjust> target(@worker) @double(%value: i32) -> (i32) {
+  %result = scalar.addi %value, %value : i32
+  template.return %result : i32
+}
+
+pipeline.def public target(@construction) @publish_adjusted(%enabled: i1, %value: i32) run(%output: channel<tile<1xi32>>) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    scf.if %enabled {
+      %write, %record = channel.reserve %output : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %adjusted = template.apply<@adjust>(%value) : (i32) -> (i32)
+      view.store %adjusted, %record[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+}
+
+// ----
+test.target<low_core> @construction
+
+test.target<quirky> @worker
+
+template.decl @adjust(%value: i32) -> (i32)
+
+pipeline.def public target(@construction) @publish_adjusted(%enabled: i1, %value: i32) run(%output: channel<tile<1xi32>>) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    scf.if %enabled {
+      %write, %record = channel.reserve %output : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %result = scalar.addi %value, %value : i32
+      view.store %result, %record[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+}
+
+// ====
+
+// Provider applicability observes the worker contract before target callgraph
+// specialization. Lexical construction still sees its device environment.
+// RUN: pass select-templates{mode=final,rewrite=inline},canonicalize
+test.target<device> @device
+
+test.target<low_core> @core
+
+template.decl @scope_value() -> (i32)
+
+template.def<@scope_value> target(@device) @construction_value() -> (i32) {
+  %value = scalar.constant 7 : i32
+  template.return %value : i32
+}
+
+template.def<@scope_value> target(@core) @worker_value() -> (i32) {
+  %value = scalar.constant 11 : i32
+  template.return %value : i32
+}
+
+pipeline.def public target(@device) @publish_scopes() run(%output: channel<tile<2xi32>>) {
+  %construction = template.apply<@scope_value>() : () -> (i32)
+  pipeline.strand workers([0], [1], [1]) {
+    %worker = template.apply<@scope_value>() : () -> (i32)
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    view.store %construction, %record[0] : i32, view<2xi32>
+    view.store %worker, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ----
+test.target<device> @device
+
+test.target<low_core> @core
+
+template.decl @scope_value() -> (i32)
+
+pipeline.def public target(@device) @publish_scopes() run(%output: channel<tile<2xi32>>) {
+  %value$2 = scalar.constant 7 : i32
+  pipeline.strand workers([0], [1], [1]) {
+    %value = scalar.constant 11 : i32
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    view.store %value$2, %record[0] : i32, view<2xi32>
+    view.store %value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}

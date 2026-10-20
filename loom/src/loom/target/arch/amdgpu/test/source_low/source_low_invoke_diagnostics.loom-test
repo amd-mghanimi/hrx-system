@@ -36,22 +36,22 @@ low.func.def target<amdgpu.gfx11.generic.core>(@target) @wide_helper(%value: reg
   return %value
 }
 
-func.def target(@target) @wrong_operand_type(%value: vector<1xi32>) -> (vector<1xi32>) {
+func.def target(@target) @wrong_operand_type(%value: vector<1xi32>) -> (vector<2xi32>) {
   // ERROR@+1: TARGET/074 {callee_name="wide_helper", value_kind="operand", actual_type="reg<amdgpu.vgpr>", expected_type="reg<amdgpu.vgpr x2>"}
-  %result = low.invoke @wide_helper(%value) : (vector<1xi32>) -> (vector<1xi32>)
-  func.return %result : vector<1xi32>
+  %result = low.invoke @wide_helper(%value) : (vector<1xi32>) -> (vector<2xi32>)
+  func.return %result : vector<2xi32>
 }
 
 // ====
 
 amdgpu.target<gfx11-generic> @target
 
-low.func.def target<amdgpu.gfx11.generic.core>(@target) @multiple_of_16(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [mul(%value, 16)] asm {
+low.func.def target<amdgpu.gfx11.generic.core>(@target) @multiple_of_16(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [multiple_of(%value, 16)] asm {
   return %value
 }
 
 func.def target(@target) @unproven_precondition(%value: index) -> (index) {
-  // ERROR@+1: TARGET/078 {callee_name="multiple_of_16", predicate_index="0", predicate_kind="mul", proof_result="not proven"}
+  // ERROR@+1: TARGET/078 {callee_name="multiple_of_16", predicate_index="0", predicate_kind="multiple_of", proof_result="not proven"}
   %result = low.invoke @multiple_of_16(%value) : (index) -> (index)
   func.return %result : index
 }
@@ -60,13 +60,13 @@ func.def target(@target) @unproven_precondition(%value: index) -> (index) {
 
 amdgpu.target<gfx11-generic> @target
 
-low.func.def target<amdgpu.gfx11.generic.core>(@target) @multiple_of_16(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [mul(%value, 16)] asm {
+low.func.def target<amdgpu.gfx11.generic.core>(@target) @multiple_of_16(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [multiple_of(%value, 16)] asm {
   return %value
 }
 
 func.def target(@target) @contradicted_precondition() -> (index) {
   %c3 = index.constant 3 : index
-  // ERROR@+1: TARGET/078 {callee_name="multiple_of_16", predicate_index="0", predicate_kind="mul", proof_result="proven false"}
+  // ERROR@+1: TARGET/078 {callee_name="multiple_of_16", predicate_index="0", predicate_kind="multiple_of", proof_result="proven false"}
   %result = low.invoke @multiple_of_16(%c3) : (index) -> (index)
   func.return %result : index
 }
@@ -89,7 +89,9 @@ func.def target(@target) @proven_relational_precondition(%lower: index, %upper: 
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @proven_relational_precondition(%lower: reg<amdgpu.sgpr>, %upper: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) where [lt(%lower, %upper)] asm {
   %14, %15 = low.assume %lower, %upper [le(%lower, %upper)] : reg<amdgpu.sgpr>, reg<amdgpu.sgpr>
-  return %14, %15
+  %18 = copy %14 : reg<amdgpu.sgpr> -> reg<amdgpu.sgpr>
+  %19 = copy %15 : reg<amdgpu.sgpr> -> reg<amdgpu.sgpr>
+  return %18, %19
 }
 
 // ====

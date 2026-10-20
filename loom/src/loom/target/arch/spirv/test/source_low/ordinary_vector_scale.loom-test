@@ -1,0 +1,146 @@
+// RUN: emit source-low target=spirv:vulkan1.3+bda+extended-types output=low control-flow=structured-low
+
+// Loop-carried vectors retain native arithmetic rather than being unpacked for
+// scalar memory accesses. Both authored operand positions share one instruction.
+func.def @scale_half_lhs(%first: f16, %second: f16, %factor: f16, %count: index) -> (f16) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second : vector<2xf16>
+  %factors = vector.splat %factor : vector<2xf16>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<2xf16>) -> (vector<2xf16>) {
+    %scaled = vector.mulf %factors, %state : vector<2xf16>
+    scf.yield %scaled : vector<2xf16>
+  }
+  %value = vector.extract %result[1] : vector<2xf16> -> f16
+  func.return %value : f16
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @scale_half_lhs(%first: reg<spirv.id : f16>, %second: reg<spirv.id : f16>, %factor: reg<spirv.id : f16>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f16>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v2f16 %first, %second
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<2xf16>>) -> (reg<spirv.id : vector<2xf16>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<2xf16>>) {
+    %scaled = OpVectorTimesScalar.v2f16 %state, %factor
+    low.scf.yield %scaled : reg<spirv.id : vector<2xf16>>
+  }
+  %value = OpCompositeExtract.v2f16.f16 %result, 1
+  return %value
+}
+
+// ====
+
+func.def @scale_float_rhs(%first: f32, %second: f32, %factor: f32, %count: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second, %first : vector<3xf32>
+  %factors = vector.from_elements %factor, %factor, %factor : vector<3xf32>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<3xf32>) -> (vector<3xf32>) {
+    %scaled = vector.mulf %state, %factors : vector<3xf32>
+    scf.yield %scaled : vector<3xf32>
+  }
+  %value = vector.extract %result[1] : vector<3xf32> -> f32
+  func.return %value : f32
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @scale_float_rhs(%first: reg<spirv.id : f32>, %second: reg<spirv.id : f32>, %factor: reg<spirv.id : f32>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f32>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v3f32 %first, %second, %first
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<3xf32>>) -> (reg<spirv.id : vector<3xf32>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<3xf32>>) {
+    %scaled = OpVectorTimesScalar.v3f32 %state, %factor
+    low.scf.yield %scaled : reg<spirv.id : vector<3xf32>>
+  }
+  %value = OpCompositeExtract.v3f32.f32 %result, 1
+  return %value
+}
+
+// ====
+
+func.def @scale_double_rhs(%first: f64, %second: f64, %factor: f64, %count: index) -> (f64) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second, %first, %second : vector<4xf64>
+  %factors = vector.splat %factor : vector<4xf64>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<4xf64>) -> (vector<4xf64>) {
+    %scaled = vector.mulf %state, %factors : vector<4xf64>
+    scf.yield %scaled : vector<4xf64>
+  }
+  %value = vector.extract %result[3] : vector<4xf64> -> f64
+  func.return %value : f64
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @scale_double_rhs(%first: reg<spirv.id : f64>, %second: reg<spirv.id : f64>, %factor: reg<spirv.id : f64>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f64>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v4f64 %first, %second, %first, %second
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<4xf64>>) -> (reg<spirv.id : vector<4xf64>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<4xf64>>) {
+    %scaled = OpVectorTimesScalar.v4f64 %state, %factor
+    low.scf.yield %scaled : reg<spirv.id : vector<4xf64>>
+  }
+  %value = OpCompositeExtract.v4f64.f64 %result, 3
+  return %value
+}
+
+// ====
+
+func.def @nonuniform_factors(%initial_value: f32, %first: f32, %second: f32, %count: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.splat %initial_value : vector<2xf32>
+  %factors = vector.from_elements %first, %second : vector<2xf32>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<2xf32>) -> (vector<2xf32>) {
+    %scaled = vector.mulf %state, %factors : vector<2xf32>
+    scf.yield %scaled : vector<2xf32>
+  }
+  %value = vector.extract %result[1] : vector<2xf32> -> f32
+  func.return %value : f32
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @nonuniform_factors(%initial_value: reg<spirv.id : f32>, %first: reg<spirv.id : f32>, %second: reg<spirv.id : f32>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f32>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v2f32 %initial_value, %initial_value
+  %factors = OpCompositeConstruct.v2f32 %first, %second
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<2xf32>>) -> (reg<spirv.id : vector<2xf32>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<2xf32>>) {
+    %scaled = OpFMul.v2f32 %state, %factors
+    low.scf.yield %scaled : reg<spirv.id : vector<2xf32>>
+  }
+  %value = OpCompositeExtract.v2f32.f32 %result, 1
+  return %value
+}
+
+// ====
+
+// The uniform scalar retains its widened arithmetic type, even when its exact
+// numerical origin is also available in a narrower format.
+func.def @widened_factor(%first: f32, %second: f32, %factor: bf16, %count: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = vector.from_elements %first, %second, %first, %second : vector<4xf32>
+  %wide_factor = scalar.extf %factor : bf16 to f32
+  %factors = vector.splat %wide_factor : vector<4xf32>
+  %result = scf.for %iteration = [%begin to %count step %step](%state = %initial : vector<4xf32>) -> (vector<4xf32>) {
+    %scaled = vector.mulf %state, %factors : vector<4xf32>
+    scf.yield %scaled : vector<4xf32>
+  }
+  %value = vector.extract %result[3] : vector<4xf32> -> f32
+  func.return %value : f32
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @widened_factor(%first: reg<spirv.id : f32>, %second: reg<spirv.id : f32>, %factor: reg<spirv.id : bf16>, %count: reg<spirv.id : index>) -> (reg<spirv.id : f32>) asm {
+  %begin = OpConstant.i32 0 : reg<spirv.id : index>
+  %step = OpConstant.i32 1 : reg<spirv.id : index>
+  %initial = OpCompositeConstruct.v4f32 %first, %second, %first, %second
+  %wide_factor = OpFConvert.bf16.f32 %factor
+  %result = low.scf.for signed [%begin to %count step %step] iter_args(%initial: reg<spirv.id : vector<4xf32>>) -> (reg<spirv.id : vector<4xf32>>) do(%iteration: reg<spirv.id : index>, %state: reg<spirv.id : vector<4xf32>>) {
+    %scaled = OpVectorTimesScalar.v4f32 %state, %wide_factor
+    low.scf.yield %scaled : reg<spirv.id : vector<4xf32>>
+  }
+  %value = OpCompositeExtract.v4f32.f32 %result, 3
+  return %value
+}

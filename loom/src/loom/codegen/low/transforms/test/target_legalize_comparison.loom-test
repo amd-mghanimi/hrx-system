@@ -14,18 +14,42 @@ func.def target(@test_target) @narrow_signed_comparisons(%lhs: i8, %rhs: i8) -> 
 test.target<low_core> @test_target
 
 func.def target(@test_target) @narrow_signed_comparisons(%lhs: i8, %rhs: i8) -> (i1, i1, i1, i1) {
-  %19 = scalar.extsi %lhs : i8 to i32
-  %20 = scalar.extsi %rhs : i8 to i32
-  %less = scalar.cmpi slt, %19, %20 : i32
-  %16 = scalar.extsi %lhs : i8 to i32
-  %17 = scalar.extsi %rhs : i8 to i32
-  %less_equal = scalar.cmpi sle, %16, %17 : i32
-  %13 = scalar.extsi %lhs : i8 to i32
-  %14 = scalar.extsi %rhs : i8 to i32
-  %greater = scalar.cmpi sgt, %13, %14 : i32
-  %10 = scalar.extsi %lhs : i8 to i32
-  %11 = scalar.extsi %rhs : i8 to i32
-  %greater_equal = scalar.cmpi sge, %10, %11 : i32
+  %50 = scalar.extui %lhs : i8 to i32
+  %51 = scalar.constant 24 : i32
+  %52 = scalar.shli %50, %51 : i32
+  %53 = scalar.shrsi %52, %51 : i32
+  %46 = scalar.extui %rhs : i8 to i32
+  %47 = scalar.constant 24 : i32
+  %48 = scalar.shli %46, %47 : i32
+  %49 = scalar.shrsi %48, %47 : i32
+  %less = scalar.cmpi slt, %53, %49 : i32
+  %39 = scalar.extui %lhs : i8 to i32
+  %40 = scalar.constant 24 : i32
+  %41 = scalar.shli %39, %40 : i32
+  %42 = scalar.shrsi %41, %40 : i32
+  %35 = scalar.extui %rhs : i8 to i32
+  %36 = scalar.constant 24 : i32
+  %37 = scalar.shli %35, %36 : i32
+  %38 = scalar.shrsi %37, %36 : i32
+  %less_equal = scalar.cmpi sle, %42, %38 : i32
+  %28 = scalar.extui %lhs : i8 to i32
+  %29 = scalar.constant 24 : i32
+  %30 = scalar.shli %28, %29 : i32
+  %31 = scalar.shrsi %30, %29 : i32
+  %24 = scalar.extui %rhs : i8 to i32
+  %25 = scalar.constant 24 : i32
+  %26 = scalar.shli %24, %25 : i32
+  %27 = scalar.shrsi %26, %25 : i32
+  %greater = scalar.cmpi sgt, %31, %27 : i32
+  %17 = scalar.extui %lhs : i8 to i32
+  %18 = scalar.constant 24 : i32
+  %19 = scalar.shli %17, %18 : i32
+  %20 = scalar.shrsi %19, %18 : i32
+  %13 = scalar.extui %rhs : i8 to i32
+  %14 = scalar.constant 24 : i32
+  %15 = scalar.shli %13, %14 : i32
+  %16 = scalar.shrsi %15, %14 : i32
+  %greater_equal = scalar.cmpi sge, %20, %16 : i32
   func.return %less, %less_equal, %greater, %greater_equal : i1, i1, i1, i1
 }
 
@@ -84,15 +108,27 @@ test.target<low_core> @test_target
 func.def target(@test_target) @narrow_vector_comparison(%lhs: vector<2xi8>, %rhs: vector<2xi8>) -> (vector<2xi1>) {
   %4 = vector.extract %lhs[0] : vector<2xi8> -> i8
   %5 = vector.extract %rhs[0] : vector<2xi8> -> i8
-  %16 = scalar.extsi %4 : i8 to i32
-  %17 = scalar.extsi %5 : i8 to i32
-  %18 = scalar.cmpi slt, %16, %17 : i32
+  %31 = scalar.extui %4 : i8 to i32
+  %32 = scalar.constant 24 : i32
+  %33 = scalar.shli %31, %32 : i32
+  %34 = scalar.shrsi %33, %32 : i32
+  %27 = scalar.extui %5 : i8 to i32
+  %28 = scalar.constant 24 : i32
+  %29 = scalar.shli %27, %28 : i32
+  %30 = scalar.shrsi %29, %28 : i32
+  %26 = scalar.cmpi slt, %34, %30 : i32
   %7 = vector.extract %lhs[1] : vector<2xi8> -> i8
   %8 = vector.extract %rhs[1] : vector<2xi8> -> i8
-  %13 = scalar.extsi %7 : i8 to i32
-  %14 = scalar.extsi %8 : i8 to i32
-  %15 = scalar.cmpi slt, %13, %14 : i32
-  %11 = vector.splat %18 : vector<2xi1>
+  %20 = scalar.extui %7 : i8 to i32
+  %21 = scalar.constant 24 : i32
+  %22 = scalar.shli %20, %21 : i32
+  %23 = scalar.shrsi %22, %21 : i32
+  %16 = scalar.extui %8 : i8 to i32
+  %17 = scalar.constant 24 : i32
+  %18 = scalar.shli %16, %17 : i32
+  %19 = scalar.shrsi %18, %17 : i32
+  %15 = scalar.cmpi slt, %23, %19 : i32
+  %11 = vector.splat %26 : vector<2xi1>
   %mask = vector.insert %15 into %11[1] : i1, vector<2xi1>
   func.return %mask : vector<2xi1>
 }

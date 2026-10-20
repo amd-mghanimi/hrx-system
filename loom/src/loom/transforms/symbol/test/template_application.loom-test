@@ -4,7 +4,7 @@
 
 template.decl @aligned(%value: index) -> (index)
 
-template.def<@aligned> @implementation(%value: index) -> (index) where [mul(%value, 16)] {
+template.def<@aligned> @implementation(%value: index) -> (index) where [multiple_of(%value, 16)] {
   template.return %value : index
 }
 
@@ -42,7 +42,7 @@ test.target<low_core> @wave32 {subgroup_size = 32}
 
 template.decl @wave(%value: index) -> (index)
 
-template.def<@wave> requires [#target.subgroup.size<32>] @implementation(%value: index) -> (index) where [mul(%value, 16)] {
+template.def<@wave> requires [#target.subgroup.size<32>] @implementation(%value: index) -> (index) where [multiple_of(%value, 16)] {
   template.return %value : index
 }
 

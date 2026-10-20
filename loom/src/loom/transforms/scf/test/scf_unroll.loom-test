@@ -190,51 +190,51 @@ func.def @interleaved_unroll_preserves_type_ref_order(%buffer: buffer, %offset: 
 
 // ====
 
-func.def @interleaved_read_effects_commute(%pool: pool<16>) {
+func.def @interleaved_read_effects_commute(%pool: pool) {
   %start = index.constant 0 : index
   %end = index.constant 3 : index
   %step = index.constant 1 : index
   scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
-    %value = test.read_resource %pool : pool<16> -> i32
+    %value = test.read_resource %pool : pool -> i32
   }
   func.return
 }
 
 // ----
-func.def @interleaved_read_effects_commute(%pool: pool<16>) {
+func.def @interleaved_read_effects_commute(%pool: pool) {
   %start = index.constant 0 : index
   %end = index.constant 3 : index
   %step = index.constant 1 : index
-  %value = test.read_resource %pool : pool<16> -> i32
-  %value_1 = test.read_resource %pool : pool<16> -> i32
-  %value_2 = test.read_resource %pool : pool<16> -> i32
+  %value = test.read_resource %pool : pool -> i32
+  %value_1 = test.read_resource %pool : pool -> i32
+  %value_2 = test.read_resource %pool : pool -> i32
   func.return
 }
 
 // ====
 
-func.def @interleaved_write_read_hazard_preserves_order(%pool: pool<16>, %input: i32) {
+func.def @interleaved_write_read_hazard_preserves_order(%pool: pool, %input: i32) {
   %start = index.constant 0 : index
   %end = index.constant 2 : index
   %step = index.constant 1 : index
   scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
-    test.write_resource %pool, %input : pool<16>, i32
-    %value = test.read_resource %pool : pool<16> -> i32
+    test.write_resource %pool, %input : pool, i32
+    %value = test.read_resource %pool : pool -> i32
     test.use %value : i32
   }
   func.return
 }
 
 // ----
-func.def @interleaved_write_read_hazard_preserves_order(%pool: pool<16>, %input: i32) {
+func.def @interleaved_write_read_hazard_preserves_order(%pool: pool, %input: i32) {
   %start = index.constant 0 : index
   %end = index.constant 2 : index
   %step = index.constant 1 : index
-  test.write_resource %pool, %input : pool<16>, i32
-  %value = test.read_resource %pool : pool<16> -> i32
+  test.write_resource %pool, %input : pool, i32
+  %value = test.read_resource %pool : pool -> i32
   test.use %value : i32
-  test.write_resource %pool, %input : pool<16>, i32
-  %value_1 = test.read_resource %pool : pool<16> -> i32
+  test.write_resource %pool, %input : pool, i32
+  %value_1 = test.read_resource %pool : pool -> i32
   test.use %value_1 : i32
   func.return
 }
@@ -1138,29 +1138,29 @@ func.def @interleaved_carried_loop_with_vector_read(%buffer: buffer, %input: vec
 
 // ====
 
-func.def @interleaved_carried_loop_preserves_ordered_writes(%pool: pool<16>, %input: i32) -> (i32) {
+func.def @interleaved_carried_loop_preserves_ordered_writes(%pool: pool, %input: i32) -> (i32) {
   %start = index.constant 0 : index
   %end = index.constant 3 : index
   %step = index.constant 1 : index
   %result = scf.for %i = [%start to %end step %step](%acc = %input : i32) -> (i32) unroll schedule(interleaved) {
     %next = test.addi %acc, %acc : i32
-    test.write_resource %pool, %next : pool<16>, i32
+    test.write_resource %pool, %next : pool, i32
     scf.yield %next : i32
   }
   func.return %result : i32
 }
 
 // ----
-func.def @interleaved_carried_loop_preserves_ordered_writes(%pool: pool<16>, %input: i32) -> (i32) {
+func.def @interleaved_carried_loop_preserves_ordered_writes(%pool: pool, %input: i32) -> (i32) {
   %start = index.constant 0 : index
   %end = index.constant 3 : index
   %step = index.constant 1 : index
   %next = test.addi %input, %input : i32
-  test.write_resource %pool, %next : pool<16>, i32
+  test.write_resource %pool, %next : pool, i32
   %next_1 = test.addi %next, %next : i32
-  test.write_resource %pool, %next_1 : pool<16>, i32
+  test.write_resource %pool, %next_1 : pool, i32
   %next_2 = test.addi %next_1, %next_1 : i32
-  test.write_resource %pool, %next_2 : pool<16>, i32
+  test.write_resource %pool, %next_2 : pool, i32
   func.return %next_2 : i32
 }
 
@@ -1493,4 +1493,28 @@ func.def @bare_unroll_dynamic_trip_count_rejected(%end: index) {
     test.use %i : index
   }
   func.return
+}
+
+// ====
+
+// A disjunctive continuation does not prove the full-tile comparison and
+// cannot turn a dynamic bare unroll into a fixed schedule.
+func.def @disjunctive_condition_does_not_prove_unroll(%remaining: index, %other_reason: i1) -> (index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %tile_size = index.constant 8 : index
+  %terminal = scf.while(%before_remaining = %remaining : index) -> (index) {
+    %has_full_tile = index.cmp sge, %before_remaining, %tile_size : index
+    %continue = scalar.ori %has_full_tile, %other_reason : i1
+    scf.condition %continue, %before_remaining : i1, index
+  } do(%active_remaining: index) {
+    %tile_end = index.min %active_remaining, %tile_size : index
+    // ERROR@+1: STRUCTURE/014 {attr_name="unroll", expected_constraint="exact static trip count"}
+    scf.for %i = [%begin to %tile_end step %step] unroll {
+      test.use %i : index
+    }
+    %next_remaining = index.sub %active_remaining, %tile_size : index
+    scf.yield %next_remaining : index
+  }
+  func.return %terminal : index
 }

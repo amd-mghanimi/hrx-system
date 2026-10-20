@@ -1,0 +1,312 @@
+// RUN: pass canonicalize
+
+// An unknown FIFO slot is a range within its allocation, not the first slot.
+// The owned write and its borrowed view preserve that spatial information
+// when the fresh allocation borrows an explicit backing pool.
+func.def @reserve_record(%memory: pool) -> (i1, i64, i64, i64, i64, i64) {
+  %bytes = index.constant 576 : offset
+  %origin = index.constant 64 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x64xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x64xi32>, index -> channel<tile<64xi32>>
+  %write, %payload = channel.reserve %channel : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+  %root = test.fact_view_root_matches %payload, %storage : view<64xi32>, buffer -> i1
+  %space = test.fact_view_memory_space %payload : view<64xi32> -> i64
+  %low = test.fact_view_byte_offset_lo %payload : view<64xi32> -> i64
+  %high = test.fact_view_byte_offset_hi %payload : view<64xi32> -> i64
+  %length = test.fact_view_byte_length_hi %payload : view<64xi32> -> i64
+  %alignment = test.fact_view_min_alignment %payload : view<64xi32> -> i64
+  channel.publish %write : write<tile<64xi32>>
+  func.return %root, %space, %low, %high, %length, %alignment : i1, i64, i64, i64, i64, i64
+}
+
+// ----
+func.def @reserve_record(%memory: pool) -> (i1, i64, i64, i64, i64, i64) {
+  %bytes = index.constant 576 : offset
+  %origin = index.constant 64 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x64xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x64xi32>, index -> channel<tile<64xi32>>
+  %write, %payload = channel.reserve %channel : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+  %root = scalar.constant true : i1
+  %space = scalar.constant 2 : i64
+  %low = scalar.constant 64 : i64
+  %high = scalar.constant 320 : i64
+  %length = scalar.constant 256 : i64
+  %alignment = scalar.constant 64 : i64
+  channel.publish %write : write<tile<64xi32>>
+  func.return %root, %space, %low, %high, %length, %alignment : i1, i64, i64, i64, i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// Independent fanout readers refer to the same storage while keeping their
+// separate retirement obligations. Mutable acquire uses the same placement.
+func.def @fanout_storage(%storage: buffer) -> (i64, i64, i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %global = buffer.assume.memory_space<global> %storage : buffer
+  %slots = buffer.view %global[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %read = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+  %first, %second = channel.fanout %read : read<tile<16xi32>> -> (read<tile<16xi32>>, read<tile<16xi32>>)
+  %first_view = channel.wait %first : read<tile<16xi32>> -> view<16xi32>
+  %first_space = test.fact_view_memory_space %first_view : view<16xi32> -> i64
+  channel.release %first : read<tile<16xi32>>
+  %second_view = channel.wait %second : read<tile<16xi32>> -> view<16xi32>
+  %second_space = test.fact_view_memory_space %second_view : view<16xi32> -> i64
+  channel.release %second : read<tile<16xi32>>
+  %mutable, %mutable_view = channel.acquire<mutable> %channel : channel<tile<16xi32>> -> (read<tile<16xi32>, mutable>, view<16xi32>)
+  %mutable_space = test.fact_view_memory_space %mutable_view : view<16xi32> -> i64
+  channel.release %mutable : read<tile<16xi32>, mutable>
+  func.return %first_space, %second_space, %mutable_space : i64, i64, i64
+}
+
+// ----
+func.def @fanout_storage(%storage: buffer) -> (i64, i64, i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %global = buffer.assume.memory_space<global> %storage : buffer
+  %slots = buffer.view %global[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %read = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+  %first, %second = channel.fanout %read : read<tile<16xi32>> -> (read<tile<16xi32>>, read<tile<16xi32>>)
+  %first_view = channel.wait %first : read<tile<16xi32>> -> view<16xi32>
+  %first_space = scalar.constant 1 : i64
+  channel.release %first : read<tile<16xi32>>
+  %second_view = channel.wait %second : read<tile<16xi32>> -> view<16xi32>
+  %second_space = scalar.constant 1 : i64
+  channel.release %second : read<tile<16xi32>>
+  %mutable, %mutable_view = channel.acquire<mutable> %channel : channel<tile<16xi32>> -> (read<tile<16xi32>, mutable>, view<16xi32>)
+  %mutable_space = scalar.constant 1 : i64
+  channel.release %mutable : read<tile<16xi32>, mutable>
+  func.return %first_space, %second_space, %mutable_space : i64, i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// Ordinary loop-carried owned reads preserve the bound storage domain,
+// including the explicit pool selected for the allocation.
+func.def @retained_history(%memory: pool, %count: index) -> (i64, i64, i64) {
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = scalar.constant 2 : i64
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %first = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+  %last, %observed = scf.for %i = [%begin to %count step %step](%previous = %first : read<tile<16xi32>>, %prior_space = %initial : i64) -> (read<tile<16xi32>>, i64) {
+    %history = channel.wait %previous : read<tile<16xi32>> -> view<16xi32>
+    %body_space = test.fact_view_memory_space %history : view<16xi32> -> i64
+    channel.release %previous : read<tile<16xi32>>
+    %next = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    scf.yield %next, %body_space : read<tile<16xi32>>, i64
+  }
+  %final = channel.wait %last : read<tile<16xi32>> -> view<16xi32>
+  %space = test.fact_view_memory_space %final : view<16xi32> -> i64
+  %length = test.fact_view_byte_length_hi %final : view<16xi32> -> i64
+  channel.release %last : read<tile<16xi32>>
+  func.return %space, %length, %observed : i64, i64, i64
+}
+
+// ----
+func.def @retained_history(%memory: pool, %count: index) -> (i64, i64, i64) {
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial = scalar.constant 2 : i64
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %first = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+  %last, %observed = scf.for %i = [%begin to %count step %step](%previous = %first : read<tile<16xi32>>, %prior_space = %initial : i64) -> (read<tile<16xi32>>, i64) {
+    %history = channel.wait %previous : read<tile<16xi32>> -> view<16xi32>
+    %body_space = scalar.constant 2 : i64
+    channel.release %previous : read<tile<16xi32>>
+    %next = channel.accept %channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    scf.yield %next, %body_space : read<tile<16xi32>>, i64
+  }
+  %final = channel.wait %last : read<tile<16xi32>> -> view<16xi32>
+  %space = scalar.constant 2 : i64
+  %length = scalar.constant 64 : i64
+  channel.release %last : read<tile<16xi32>>
+  func.return %space, %length, %observed : i64, i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// Endpoint selection changes protocol ownership, not record placement.
+func.def @selected_record_storage() -> (i64, i64) {
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %source_rank, %read = channel.select %channel : channel<tile<16xi32>> -> (index, read<tile<16xi32>>)
+  %payload = channel.wait %read : read<tile<16xi32>> -> view<16xi32>
+  %space = test.fact_view_memory_space %payload : view<16xi32> -> i64
+  %length = test.fact_view_byte_length_hi %payload : view<16xi32> -> i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space, %length : i64, i64
+}
+
+// ----
+func.def @selected_record_storage() -> (i64, i64) {
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %source_rank, %read = channel.select %channel : channel<tile<16xi32>> -> (index, read<tile<16xi32>>)
+  %payload = channel.wait %read : read<tile<16xi32>> -> view<16xi32>
+  %space = scalar.constant 2 : i64
+  %length = scalar.constant 64 : i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space, %length : i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// A pending read can come from different channels. A join preserves only
+// common spatial facts, and never equates their protocol identities.
+func.def @mixed_spaces(%condition: i1, %input: buffer) -> (i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %bytes = index.constant 128 : offset
+  %local = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %local_slots = buffer.view %local[%origin] : buffer -> view<2x16xi32>
+  %global_slots = buffer.view %global[%origin] : buffer -> view<2x16xi32>
+  %local_channel = channel.bind<fifo> %local_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %global_channel = channel.bind<fifo> %global_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %read = scf.if %condition -> (read<tile<16xi32>>) {
+    %local_read = channel.accept %local_channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    scf.yield %local_read : read<tile<16xi32>>
+  } else {
+    %global_read = channel.accept %global_channel : channel<tile<16xi32>> -> read<tile<16xi32>>
+    scf.yield %global_read : read<tile<16xi32>>
+  }
+  %view = channel.wait %read : read<tile<16xi32>> -> view<16xi32>
+  %space = test.fact_view_memory_space %view : view<16xi32> -> i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space : i64
+}
+
+// ----
+func.def @mixed_spaces(%condition: i1, %input: buffer) -> (i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %bytes = index.constant 128 : offset
+  %local = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %global = buffer.assume.memory_space<global> %input : buffer
+  %local_slots = buffer.view %local[%origin] : buffer -> view<2x16xi32>
+  %global_slots = buffer.view %global[%origin] : buffer -> view<2x16xi32>
+  %local_channel = channel.bind<fifo> %local_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %global_channel = channel.bind<fifo> %global_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %20 = scf.select %condition, %local_channel, %global_channel : channel<tile<16xi32>>
+  %read = channel.accept %20 : channel<tile<16xi32>> -> read<tile<16xi32>>
+  %view = channel.wait %read : read<tile<16xi32>> -> view<16xi32>
+  %space = scalar.constant -1 : i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space : i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// Slot stride and record footprint are independent; padding between slots and
+// inside a record both come from the storage layout.
+func.def @padded_records(%storage: buffer) -> (i64, i64, i64, i64) {
+  %origin = index.constant 64 : offset
+  %capacity = index.constant 2 : index
+  %global = buffer.assume.memory_space<global> %storage : buffer
+  %storage_layout = encoding.layout.strided [64, 8, 1] : encoding<layout>
+  %record_layout = encoding.layout.strided [8, 1] : encoding<layout>
+  %slots = buffer.view %global[%origin] : buffer -> view<2x3x4xi32, %storage_layout>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x3x4xi32, %storage_layout>, index -> channel<tile<3x4xi32, %record_layout>>
+  %read, %payload = channel.acquire %channel : channel<tile<3x4xi32, %record_layout>> -> (read<tile<3x4xi32, %record_layout>>, view<3x4xi32, %record_layout>)
+  %low = test.fact_view_byte_offset_lo %payload : view<3x4xi32, %record_layout> -> i64
+  %high = test.fact_view_byte_offset_hi %payload : view<3x4xi32, %record_layout> -> i64
+  %length = test.fact_view_byte_length_hi %payload : view<3x4xi32, %record_layout> -> i64
+  %space = test.fact_view_memory_space %payload : view<3x4xi32, %record_layout> -> i64
+  channel.release %read : read<tile<3x4xi32, %record_layout>>
+  func.return %low, %high, %length, %space : i64, i64, i64, i64
+}
+
+// ----
+func.def @padded_records(%storage: buffer) -> (i64, i64, i64, i64) {
+  %origin = index.constant 64 : offset
+  %capacity = index.constant 2 : index
+  %global = buffer.assume.memory_space<global> %storage : buffer
+  %record_layout = encoding.layout.strided [8, 1] : encoding<layout>
+  %slots = buffer.view %global[%origin] : buffer -> view<2x3x4xi32, #encoding.layout.strided<strides=[64, 8, 1]>>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x3x4xi32, #encoding.layout.strided<strides=[64, 8, 1]>>, index -> channel<tile<3x4xi32, %record_layout>>
+  %read, %payload = channel.acquire %channel : channel<tile<3x4xi32, %record_layout>> -> (read<tile<3x4xi32, %record_layout>>, view<3x4xi32, #encoding.layout.strided<strides=[8, 1]>>)
+  %low = scalar.constant 64 : i64
+  %high = scalar.constant 320 : i64
+  %length = scalar.constant 80 : i64
+  %space = scalar.constant 1 : i64
+  channel.release %read : read<tile<3x4xi32, %record_layout>>
+  func.return %low, %high, %length, %space : i64, i64, i64, i64
+}
+
+// ====
+
+// RUN: pass canonicalize
+
+// Choosing between independent channels retains their common placement even
+// though no single allocation or slot range describes the selected payload.
+func.def @select_channel(%condition: i1) -> (i64, i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %bytes = index.constant 128 : offset
+  %first = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %second = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %first_slots = buffer.view %first[%origin] : buffer -> view<2x16xi32>
+  %second_slots = buffer.view %second[%origin] : buffer -> view<2x16xi32>
+  %first_channel = channel.bind<fifo> %first_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %second_channel = channel.bind<fifo> %second_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %channel = scf.select %condition, %first_channel, %second_channel : channel<tile<16xi32>>
+  %read, %payload = channel.acquire %channel : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+  %space = test.fact_view_memory_space %payload : view<16xi32> -> i64
+  %length = test.fact_view_byte_length_hi %payload : view<16xi32> -> i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space, %length : i64, i64
+}
+
+// ----
+func.def @select_channel(%condition: i1) -> (i64, i64) {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %bytes = index.constant 128 : offset
+  %first = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %second = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %first_slots = buffer.view %first[%origin] : buffer -> view<2x16xi32>
+  %second_slots = buffer.view %second[%origin] : buffer -> view<2x16xi32>
+  %first_channel = channel.bind<fifo> %first_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %second_channel = channel.bind<fifo> %second_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %channel = scf.select %condition, %first_channel, %second_channel : channel<tile<16xi32>>
+  %read, %payload = channel.acquire %channel : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+  %space = scalar.constant 2 : i64
+  %length = scalar.constant 64 : i64
+  channel.release %read : read<tile<16xi32>>
+  func.return %space, %length : i64, i64
+}

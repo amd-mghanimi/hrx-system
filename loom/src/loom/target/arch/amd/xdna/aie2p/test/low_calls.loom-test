@@ -1,0 +1,67 @@
+// RUN: format bytecode
+
+// Calls remain valid intermediate IR until the required target inliner runs.
+aie2p.target<core> @core_target
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) @increment(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = add %input, 1
+  return %next
+}
+
+low.func.def public retain target<amd.xdna.aie2p.core>(@core_target) @worker(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = low.func.call @increment(%input) : (reg<aie2p.er>) -> (reg<aie2p.er>)
+  return %next
+}
+
+// ----
+aie2p.target<core> @core_target
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) @increment(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = add %input, 1
+  return %next
+}
+
+low.func.def public retain target<amd.xdna.aie2p.core>(@core_target) @worker(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = low.func.call @increment(%input) : (reg<aie2p.er>) -> (reg<aie2p.er>)
+  return %next
+}
+
+// ====
+// RUN: emit source-low output=module
+
+// Ordinary compilation fulfills the target's no-call emission contract.
+aie2p.target<core> @core_target
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) @increment(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = add %input, 1
+  return %next
+}
+
+low.func.def public retain target<amd.xdna.aie2p.core>(@core_target) @worker(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = low.func.call @increment(%input) : (reg<aie2p.er>) -> (reg<aie2p.er>)
+  return %next
+}
+
+// ----
+aie2p.target<core> @core_target
+
+low.func.def public retain target<amd.xdna.aie2p.core>(@core_target) @worker(%input: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %next = add %input, 1
+  return %next
+}
+
+// ====
+// RUN: emit aie2p-leaf @residual_call
+
+// Direct native emission cannot bypass required helper inlining.
+aie2p.target<core> @core_target
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) @callee() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) @residual_call() asm {
+  // ERROR@+1: TARGET/072 {target_key="core_target", export_name="residual_call", config_key="core_target", function_name="residual_call", op_name="low.func.call", callee_name="callee", reason="the selected target requires every Low call to be inlined before emission"}
+  low.func.call @callee() : ()
+  return
+}

@@ -1,0 +1,305 @@
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
+
+func.def @address_constant_carriers() -> (vector<16xindex>, vector<32xoffset>, vector<64xindex>) {
+  %native = vector.constant -7 : vector<16xindex>
+  %wide = vector.constant 4294967295 : vector<32xoffset>
+  %accumulator = vector.constant 7 : vector<64xindex>
+  func.return %native, %wide, %accumulator : vector<16xindex>, vector<32xoffset>, vector<64xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @address_constant_carriers() -> (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x4>, reg<aie2p.mbms x4>) asm {
+  %9 = mov.short -7
+  %native = vbcst.32 %9
+  %11 = mov.i32 -1
+  %12 = vbcst.32 %11
+  %wide = concat(%12, %12) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  %14 = mov.short 7
+  %15 = vbcst.32 %14
+  %16 = vmov.vector512.to.accumulator512 %15
+  %accumulator = concat(%16, %16, %16, %16) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %native, %wide, %accumulator
+}
+
+// ====
+
+func.def @native_address_operations(%coordinate: index, %condition: vector<16xi1>, %true_value: vector<16xoffset>, %false_value: vector<16xoffset>, %choose: i1, %other: vector<16xindex>) -> (vector<16xindex>, vector<16xoffset>, vector<16xindex>, offset) {
+  %splat = vector.splat %coordinate : vector<16xindex>
+  %selected = vector.select %condition, %true_value, %false_value : vector<16xoffset>
+  %whole = scf.select %choose, %splat, %other : vector<16xindex>
+  %lane = vector.extract %selected[15] : vector<16xoffset> -> offset
+  func.return %splat, %selected, %whole, %lane : vector<16xindex>, vector<16xoffset>, vector<16xindex>, offset
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @native_address_operations(%coordinate: reg<aie2p.er>, %condition: reg<aie2p.elpredicate>, %true_value: reg<aie2p.vec256 x2>, %false_value: reg<aie2p.vec256 x2>, %choose: reg<aie2p.er>, %other: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>, reg<aie2p.er>) asm {
+  %splat = vbcst.32 %coordinate
+  %selected = vsel.32.mask64 %false_value, %true_value, %condition
+  %26 = select.mask %choose, -1
+  %whole = vsel.32 %splat, %other, %26
+  %lane = vextract.32.imm %selected, 15
+  return %splat, %selected, %whole, %lane
+}
+
+// ====
+
+func.def @wide_address_structure(%left: vector<16xindex>, %right: vector<16xindex>, %position: index) -> (vector<32xindex>, vector<16xindex>, index) {
+  %joined = vector.concat<0> %left, %right : vector<16xindex>, vector<16xindex> -> vector<32xindex>
+  %window = vector.slice %joined[1] : vector<32xindex> -> vector<16xindex>
+  %lane = vector.extract %joined[%position] : vector<32xindex> -> index
+  func.return %joined, %window, %lane : vector<32xindex>, vector<16xindex>, index
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @wide_address_structure(%left: reg<aie2p.vec256 x2>, %right: reg<aie2p.vec256 x2>, %position: reg<aie2p.er>) -> (reg<aie2p.vec256 x4>, reg<aie2p.vec256 x2>, reg<aie2p.er>) asm {
+  %joined = concat(%left, %right) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  %18 = mova.i32 4
+  %window = vshift %left, %right, %18
+  %22 = mov.short 15
+  %23 = mov.short 16
+  %24 = and %position, %22
+  %25 = and %position, %23
+  %26 = vextract.32.reg %left, %24
+  %27 = vextract.32.reg %right, %24
+  %28 = copy %25 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %lane = sel.nez %27, %26, %28
+  return %joined, %window, %lane
+}
+
+// ====
+
+func.def @accumulator_address_structure(%left: vector<32xoffset>, %right: vector<32xoffset>) -> (vector<64xoffset>, vector<32xoffset>) {
+  %joined = vector.concat<0> %left, %right : vector<32xoffset>, vector<32xoffset> -> vector<64xoffset>
+  %high = vector.slice %joined[32] : vector<64xoffset> -> vector<32xoffset>
+  func.return %joined, %high : vector<64xoffset>, vector<32xoffset>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @accumulator_address_structure(%left: reg<aie2p.vec256 x4>, %right: reg<aie2p.vec256 x4>) -> (reg<aie2p.mbms x4>, reg<aie2p.vec256 x4>) asm {
+  %10 = slice %left[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %11 = vmov.vector512.to.accumulator512 %10
+  %12 = slice %left[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %13 = vmov.vector512.to.accumulator512 %12
+  %14 = slice %right[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %15 = vmov.vector512.to.accumulator512 %14
+  %16 = slice %right[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %17 = vmov.vector512.to.accumulator512 %16
+  %joined = concat(%11, %13, %15, %17) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %joined, %right
+}
+
+// ====
+
+func.def @accumulator_address_extract(%values: vector<64xoffset>, %position: index) -> (offset, offset) {
+  %static = vector.extract %values[63] : vector<64xoffset> -> offset
+  %dynamic = vector.extract %values[%position] : vector<64xoffset> -> offset
+  func.return %static, %dynamic : offset, offset
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @accumulator_address_extract(%values: reg<aie2p.mbms x4>, %position: reg<aie2p.er>) -> (reg<aie2p.er>, reg<aie2p.er>) asm {
+  %10 = slice %values[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %11 = vmov.accumulator512.to.vector512 %10
+  %static = vextract.32.imm %11, 15
+  %13 = mov.short 15
+  %14 = and %position, %13
+  %15 = mov.short 16
+  %16 = and %position, %15
+  %17 = mov.short 32
+  %18 = and %position, %17
+  %19 = slice %values[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %20 = vmov.accumulator512.to.vector512 %19
+  %21 = vextract.32.reg %20, %14
+  %22 = slice %values[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %23 = vmov.accumulator512.to.vector512 %22
+  %24 = vextract.32.reg %23, %14
+  %25 = slice %values[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %26 = vmov.accumulator512.to.vector512 %25
+  %27 = vextract.32.reg %26, %14
+  %30 = vextract.32.reg %11, %14
+  %31 = copy %16 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %32 = sel.nez %24, %21, %31
+  %33 = copy %16 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %34 = sel.nez %30, %27, %33
+  %35 = copy %18 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %dynamic = sel.nez %34, %32, %35
+  return %static, %dynamic
+}
+
+// ====
+
+func.def @accumulator_address_select(%condition: vector<64xi1>, %true_value: vector<64xindex>, %false_value: vector<64xindex>) -> (vector<64xindex>) {
+  %selected = vector.select %condition, %true_value, %false_value : vector<64xindex>
+  func.return %selected : vector<64xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @accumulator_address_select(%condition: reg<aie2p.elpredicate>, %true_value: reg<aie2p.mbms x4>, %false_value: reg<aie2p.mbms x4>) -> (reg<aie2p.mbms x4>) asm {
+  %29 = slice %true_value[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %30 = vmov.accumulator512.to.vector512 %29
+  %31 = slice %false_value[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %32 = vmov.accumulator512.to.vector512 %31
+  %33 = vsel.32.mask64 %32, %30, %condition
+  %34 = mov.short -16
+  %35 = predicate.shift.low32 %condition, %34
+  %36 = predicate.complete.zero.high32 %35, 0
+  %37 = slice %true_value[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %38 = vmov.accumulator512.to.vector512 %37
+  %39 = slice %false_value[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %40 = vmov.accumulator512.to.vector512 %39
+  %41 = vsel.32.mask64 %40, %38, %36
+  %42 = mov.short 0
+  %43 = predicate.shift.high32 %condition, %42
+  %44 = predicate.complete.zero.high32 %43, 0
+  %45 = slice %true_value[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %46 = vmov.accumulator512.to.vector512 %45
+  %47 = slice %false_value[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %48 = vmov.accumulator512.to.vector512 %47
+  %49 = vsel.32.mask64 %48, %46, %44
+  %51 = predicate.shift.high32 %condition, %34
+  %52 = predicate.complete.zero.high32 %51, 0
+  %53 = slice %true_value[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %54 = vmov.accumulator512.to.vector512 %53
+  %55 = slice %false_value[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %56 = vmov.accumulator512.to.vector512 %55
+  %57 = vsel.32.mask64 %56, %54, %52
+  %61 = vmov.vector512.to.accumulator512 %33
+  %63 = vmov.vector512.to.accumulator512 %41
+  %65 = vmov.vector512.to.accumulator512 %49
+  %67 = vmov.vector512.to.accumulator512 %57
+  %selected = concat(%61, %63, %65, %67) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %selected
+}
+
+// ====
+
+func.def @accumulator_address_insert(%input: vector<64xindex>, %value: index) -> (vector<64xindex>) {
+  %result = vector.insert %value into %input[63] : index, vector<64xindex>
+  func.return %result : vector<64xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @accumulator_address_insert(%input: reg<aie2p.mbms x4>, %value: reg<aie2p.er>) -> (reg<aie2p.mbms x4>) asm {
+  %16 = slice %input[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %17 = vmov.accumulator512.to.vector512 %16
+  %18 = slice %input[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %19 = vmov.accumulator512.to.vector512 %18
+  %20 = slice %input[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %21 = vmov.accumulator512.to.vector512 %20
+  %22 = slice %input[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %23 = vmov.accumulator512.to.vector512 %22
+  %24 = mov.short 15
+  %25 = copy %24 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
+  %26 = vinsert.32.reg %23, %25, %value
+  %30 = vmov.vector512.to.accumulator512 %17
+  %32 = vmov.vector512.to.accumulator512 %19
+  %34 = vmov.vector512.to.accumulator512 %21
+  %36 = vmov.vector512.to.accumulator512 %26
+  %result = concat(%30, %32, %34, %36) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %result
+}
+
+// ====
+
+func.def @wide_address_table_payload(%table: vector<4xoffset>, %indices: vector<32xi32>) -> (vector<32xoffset>) {
+  %result = vector.table.lookup %table[%indices] : vector<4xoffset>, vector<32xi32> -> vector<32xoffset>
+  func.return %result : vector<32xoffset>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @wide_address_table_payload(%table: reg<aie2p.vec256 x2>, %indices: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x4>) asm {
+  %48 = slice %indices[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %49 = mov.short 0
+  %50 = vbcst.32 %49
+  %51 = mov.short 1
+  %52 = vbcst.32 %51
+  %53 = vband %48, %52
+  %54 = vlt.u32x16.el.low32 %50, %53
+  %55 = predicate.complete.zero.high32 %54, 0
+  %56 = mov.short 2
+  %57 = vbcst.32 %56
+  %58 = vband %48, %57
+  %59 = vlt.u32x16.el.low32 %50, %58
+  %60 = predicate.complete.zero.high32 %59, 0
+  %61 = vextbcst.32 %table, 0
+  %62 = vextbcst.32 %table, 1
+  %63 = vsel.32.mask64 %61, %62, %55
+  %64 = vextbcst.32 %table, 2
+  %65 = vextbcst.32 %table, 3
+  %66 = vsel.32.mask64 %64, %65, %55
+  %67 = vsel.32.mask64 %63, %66, %60
+  %68 = slice %indices[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %69 = vband %68, %52
+  %70 = vlt.u32x16.el.low32 %50, %69
+  %71 = predicate.complete.zero.high32 %70, 0
+  %72 = vband %68, %57
+  %73 = vlt.u32x16.el.low32 %50, %72
+  %74 = predicate.complete.zero.high32 %73, 0
+  %75 = vsel.32.mask64 %61, %62, %71
+  %76 = vsel.32.mask64 %64, %65, %71
+  %77 = vsel.32.mask64 %75, %76, %74
+  %result = concat(%67, %77) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %result
+}
+
+// ====
+
+func.def @wide_whole_address_select(%condition: i1, %true_value: vector<32xindex>, %false_value: vector<32xindex>) -> (vector<32xindex>) {
+  %result = scf.select %condition, %true_value, %false_value : vector<32xindex>
+  func.return %result : vector<32xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @wide_whole_address_select(%condition: reg<aie2p.er>, %true_value: reg<aie2p.vec256 x4>, %false_value: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x4>) asm {
+  %16 = slice %true_value[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %17 = slice %false_value[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %18 = select.mask %condition, -1
+  %19 = vsel.32 %16, %17, %18
+  %20 = slice %true_value[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %21 = slice %false_value[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %22 = select.mask %condition, -1
+  %23 = vsel.32 %20, %21, %22
+  %result = concat(%19, %23) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %result
+}
+
+// ====
+
+func.def @accumulator_whole_address_select(%condition: i1, %true_value: vector<64xoffset>, %false_value: vector<64xoffset>) -> (vector<64xoffset>) {
+  %result = scf.select %condition, %true_value, %false_value : vector<64xoffset>
+  func.return %result : vector<64xoffset>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @accumulator_whole_address_select(%condition: reg<aie2p.er>, %true_value: reg<aie2p.mbms x4>, %false_value: reg<aie2p.mbms x4>) -> (reg<aie2p.mbms x4>) asm {
+  %25 = slice %true_value[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %26 = vmov.accumulator512.to.vector512 %25
+  %27 = slice %false_value[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %28 = vmov.accumulator512.to.vector512 %27
+  %29 = select.mask %condition, -1
+  %30 = vsel.32 %26, %28, %29
+  %31 = slice %true_value[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %32 = vmov.accumulator512.to.vector512 %31
+  %33 = slice %false_value[1] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %34 = vmov.accumulator512.to.vector512 %33
+  %35 = select.mask %condition, -1
+  %36 = vsel.32 %32, %34, %35
+  %37 = slice %true_value[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %38 = vmov.accumulator512.to.vector512 %37
+  %39 = slice %false_value[2] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %40 = vmov.accumulator512.to.vector512 %39
+  %41 = select.mask %condition, -1
+  %42 = vsel.32 %38, %40, %41
+  %43 = slice %true_value[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %44 = vmov.accumulator512.to.vector512 %43
+  %45 = slice %false_value[3] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %46 = vmov.accumulator512.to.vector512 %45
+  %47 = select.mask %condition, -1
+  %48 = vsel.32 %44, %46, %47
+  %52 = vmov.vector512.to.accumulator512 %30
+  %54 = vmov.vector512.to.accumulator512 %36
+  %56 = vmov.vector512.to.accumulator512 %42
+  %58 = vmov.vector512.to.accumulator512 %48
+  %result = concat(%52, %54, %56, %58) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %result
+}

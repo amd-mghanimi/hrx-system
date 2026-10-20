@@ -14,15 +14,27 @@ set(IREE_DEPENDENCY_IDS
   "google_benchmark"
   "googletest"
   "libbacktrace"
+  "libjpeg_turbo"
+  "libpng"
+  "zlib"
   "zstd"
   "catch2"
+  "miniaudio"
+  "giflib"
+  "libwebp"
+  "tracy_client"
   "cxx"
+  "mimalloc"
   "rdma_core_headers"
   "libdrm_headers"
+  "linux_udmabuf_header"
   "linux_kfd_ioctl_header"
   "linux_kfd_sysfs_header"
   "linux_const_header"
   "linux_stddef_header"
+  "linux_io_uring_header"
+  "linux_io_uring_zcrx_header"
+  "linux_stat_header"
   "linux_xdna_header"
   "amdf_wkmi_header"
   "amdf_wkmi_library"
@@ -88,6 +100,54 @@ set(IREE_DEP_LIBBACKTRACE_BUILD_FILE "")
 set(IREE_DEP_LIBBACKTRACE_PATCHES "")
 set(IREE_DEP_LIBBACKTRACE_PATCH_ARGS "")
 
+set(IREE_DEP_LIBJPEG_TURBO_KIND "bazel_dep")
+set(IREE_DEP_LIBJPEG_TURBO_OWNER "shared")
+set(IREE_DEP_LIBJPEG_TURBO_MODULE_NAME "libjpeg_turbo")
+set(IREE_DEP_LIBJPEG_TURBO_REPO_NAME "libjpeg_turbo")
+set(IREE_DEP_LIBJPEG_TURBO_VERSION "3.1.3.bcr.6")
+set(IREE_DEP_LIBJPEG_TURBO_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LIBJPEG_TURBO_SOURCE_URL "https://bcr.bazel.build/modules/libjpeg_turbo/3.1.3.bcr.6/source.json")
+set(IREE_DEP_LIBJPEG_TURBO_URLS
+  "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.3/libjpeg-turbo-3.1.3.tar.gz"
+)
+set(IREE_DEP_LIBJPEG_TURBO_SHA256 "075920b826834ac4ddf97661cc73491047855859affd671d52079c6867c1c6c0")
+set(IREE_DEP_LIBJPEG_TURBO_STRIP_PREFIX "libjpeg-turbo-3.1.3")
+set(IREE_DEP_LIBJPEG_TURBO_BUILD_FILE "")
+set(IREE_DEP_LIBJPEG_TURBO_PATCHES "")
+set(IREE_DEP_LIBJPEG_TURBO_PATCH_ARGS "")
+
+set(IREE_DEP_LIBPNG_KIND "bazel_dep")
+set(IREE_DEP_LIBPNG_OWNER "shared")
+set(IREE_DEP_LIBPNG_MODULE_NAME "libpng")
+set(IREE_DEP_LIBPNG_REPO_NAME "libpng")
+set(IREE_DEP_LIBPNG_VERSION "1.6.58.bcr.1")
+set(IREE_DEP_LIBPNG_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LIBPNG_SOURCE_URL "https://bcr.bazel.build/modules/libpng/1.6.58.bcr.1/source.json")
+set(IREE_DEP_LIBPNG_URLS
+  "https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.58.tar.gz"
+)
+set(IREE_DEP_LIBPNG_SHA256 "a9d4df463d36a6e5f9c29bd6f4967312d17e996c1854f3511f833924eb1993cf")
+set(IREE_DEP_LIBPNG_STRIP_PREFIX "libpng-1.6.58")
+set(IREE_DEP_LIBPNG_BUILD_FILE "")
+set(IREE_DEP_LIBPNG_PATCHES "")
+set(IREE_DEP_LIBPNG_PATCH_ARGS "")
+
+set(IREE_DEP_ZLIB_KIND "bazel_dep")
+set(IREE_DEP_ZLIB_OWNER "shared")
+set(IREE_DEP_ZLIB_MODULE_NAME "zlib")
+set(IREE_DEP_ZLIB_REPO_NAME "zlib")
+set(IREE_DEP_ZLIB_VERSION "1.3.2")
+set(IREE_DEP_ZLIB_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_ZLIB_SOURCE_URL "https://bcr.bazel.build/modules/zlib/1.3.2/source.json")
+set(IREE_DEP_ZLIB_URLS
+  "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz"
+)
+set(IREE_DEP_ZLIB_SHA256 "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16")
+set(IREE_DEP_ZLIB_STRIP_PREFIX "zlib-1.3.2")
+set(IREE_DEP_ZLIB_BUILD_FILE "")
+set(IREE_DEP_ZLIB_PATCHES "")
+set(IREE_DEP_ZLIB_PATCH_ARGS "")
+
 set(IREE_DEP_ZSTD_KIND "bazel_dep")
 set(IREE_DEP_ZSTD_OWNER "shared")
 set(IREE_DEP_ZSTD_MODULE_NAME "zstd")
@@ -120,6 +180,81 @@ set(IREE_DEP_CATCH2_BUILD_FILE "")
 set(IREE_DEP_CATCH2_PATCHES "")
 set(IREE_DEP_CATCH2_PATCH_ARGS "")
 
+set(IREE_DEP_MINIAUDIO_KIND "http_archive")
+set(IREE_DEP_MINIAUDIO_OWNER "shared")
+set(IREE_DEP_MINIAUDIO_MODULE_NAME "miniaudio")
+set(IREE_DEP_MINIAUDIO_REPO_NAME "miniaudio")
+set(IREE_DEP_MINIAUDIO_VERSION "")
+set(IREE_DEP_MINIAUDIO_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_MINIAUDIO_SOURCE_URL "")
+set(IREE_DEP_MINIAUDIO_URLS
+  "https://github.com/mackron/miniaudio/archive/refs/tags/0.11.25.tar.gz"
+)
+set(IREE_DEP_MINIAUDIO_SHA256 "b900edcffe979816e2560a0580b9b1216d674b4f17fbadeca8f777a7f8ab0274")
+set(IREE_DEP_MINIAUDIO_STRIP_PREFIX "miniaudio-0.11.25")
+set(IREE_DEP_MINIAUDIO_BUILD_FILE "//build_tools/third_party/miniaudio:miniaudio.BUILD.bazel")
+set(IREE_DEP_MINIAUDIO_PATCHES "")
+set(IREE_DEP_MINIAUDIO_PATCH_ARGS "")
+
+set(IREE_DEP_GIFLIB_KIND "http_archive")
+set(IREE_DEP_GIFLIB_OWNER "shared")
+set(IREE_DEP_GIFLIB_MODULE_NAME "giflib")
+set(IREE_DEP_GIFLIB_REPO_NAME "giflib")
+set(IREE_DEP_GIFLIB_VERSION "")
+set(IREE_DEP_GIFLIB_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_GIFLIB_SOURCE_URL "")
+set(IREE_DEP_GIFLIB_URLS
+  "https://github.com/arthenica/giflib/archive/refs/tags/5.2.1.tar.gz"
+)
+set(IREE_DEP_GIFLIB_SHA256 "b606fd11f489ecf343cbd3d810f47f99f51754b2c09de4904253ffb235e3df4a")
+set(IREE_DEP_GIFLIB_STRIP_PREFIX "giflib-5.2.1")
+set(IREE_DEP_GIFLIB_BUILD_FILE "//build_tools/third_party/giflib:giflib.BUILD.bazel")
+set(IREE_DEP_GIFLIB_PATCHES
+  "//build_tools/third_party/giflib:portable_hash_header.patch"
+)
+set(IREE_DEP_GIFLIB_PATCH_ARGS
+  "-p1"
+)
+
+set(IREE_DEP_LIBWEBP_KIND "http_archive")
+set(IREE_DEP_LIBWEBP_OWNER "shared")
+set(IREE_DEP_LIBWEBP_MODULE_NAME "libwebp")
+set(IREE_DEP_LIBWEBP_REPO_NAME "libwebp")
+set(IREE_DEP_LIBWEBP_VERSION "")
+set(IREE_DEP_LIBWEBP_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LIBWEBP_SOURCE_URL "")
+set(IREE_DEP_LIBWEBP_URLS
+  "https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz"
+)
+set(IREE_DEP_LIBWEBP_SHA256 "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136")
+set(IREE_DEP_LIBWEBP_STRIP_PREFIX "libwebp-1.6.0")
+set(IREE_DEP_LIBWEBP_BUILD_FILE "//build_tools/third_party/libwebp:libwebp.BUILD.bazel")
+set(IREE_DEP_LIBWEBP_PATCHES "")
+set(IREE_DEP_LIBWEBP_PATCH_ARGS "")
+
+set(IREE_DEP_TRACY_CLIENT_KIND "http_archive")
+set(IREE_DEP_TRACY_CLIENT_OWNER "shared")
+set(IREE_DEP_TRACY_CLIENT_MODULE_NAME "tracy_client")
+set(IREE_DEP_TRACY_CLIENT_REPO_NAME "tracy_client")
+set(IREE_DEP_TRACY_CLIENT_VERSION "")
+set(IREE_DEP_TRACY_CLIENT_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_TRACY_CLIENT_SOURCE_URL "")
+set(IREE_DEP_TRACY_CLIENT_URLS
+  "https://github.com/wolfpld/tracy/archive/refs/tags/v0.14.1.tar.gz"
+)
+set(IREE_DEP_TRACY_CLIENT_SHA256 "bf4af567e9c7524d07f3caa745fad02fb33bd5694f11910750382d1efbb251c1")
+set(IREE_DEP_TRACY_CLIENT_STRIP_PREFIX "tracy-0.14.1")
+set(IREE_DEP_TRACY_CLIENT_BUILD_FILE "//build_tools/third_party/tracy_client:tracy_client.BUILD.bazel")
+set(IREE_DEP_TRACY_CLIENT_PATCHES
+  "//build_tools/third_party/tracy_client:allocator_initialization.patch"
+  "//build_tools/third_party/tracy_client:windows_diagnostics.patch"
+  "//build_tools/third_party/tracy_client:worker_signal_mask.patch"
+  "//build_tools/third_party/tracy_client:instruction_symbols.patch"
+)
+set(IREE_DEP_TRACY_CLIENT_PATCH_ARGS
+  "-p1"
+)
+
 set(IREE_DEP_CXX_KIND "http_archive")
 set(IREE_DEP_CXX_OWNER "shared")
 set(IREE_DEP_CXX_MODULE_NAME "cxx")
@@ -128,46 +263,31 @@ set(IREE_DEP_CXX_VERSION "")
 set(IREE_DEP_CXX_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_CXX_SOURCE_URL "")
 set(IREE_DEP_CXX_URLS
-  "https://github.com/robertoraggi/cplusplus/archive/bccf4d1e2d266b3d5d770c49e9eac59a2eab34b9.tar.gz"
+  "https://github.com/benvanik/cplusplus/archive/e5067cf5fe0330795eeb53136caa38437a761b57.tar.gz"
 )
-set(IREE_DEP_CXX_SHA256 "39e18971b03f3b5ae2afc8cb9313bcccaf6a51176a94eb57cb8fa4e683ef290b")
-set(IREE_DEP_CXX_STRIP_PREFIX "cplusplus-bccf4d1e2d266b3d5d770c49e9eac59a2eab34b9")
+set(IREE_DEP_CXX_SHA256 "5b1d9077e2ada751f3a16711cbf806e41d2fee2c5af2630749d7ce5ace4e105a")
+set(IREE_DEP_CXX_STRIP_PREFIX "cplusplus-e5067cf5fe0330795eeb53136caa38437a761b57")
 set(IREE_DEP_CXX_BUILD_FILE "//build_tools/third_party/cxx:cxx.BUILD.bazel")
-set(IREE_DEP_CXX_PATCHES
-  "//build_tools/third_party/cxx:braced_vector_initialization.patch"
-  "//build_tools/third_party/cxx:builtin_macro_locations.patch"
-  "//build_tools/third_party/cxx:constant_arithmetic.patch"
-  "//build_tools/third_party/cxx:enum_semantics.patch"
-  "//build_tools/third_party/cxx:include_continuation.patch"
-  "//build_tools/third_party/cxx:include_paths.patch"
-  "//build_tools/third_party/cxx:macro_operator_locations.patch"
-  "//build_tools/third_party/cxx:member_definition_attributes.patch"
-  "//build_tools/third_party/cxx:packed_bitfields.patch"
-  "//build_tools/third_party/cxx:packed_records.patch"
-  "//build_tools/third_party/cxx:aligned_records.patch"
-  "//build_tools/third_party/cxx:packed_enums.patch"
-  "//build_tools/third_party/cxx:bitfield_attributes.patch"
-  "//build_tools/third_party/cxx:record_layout_owner.patch"
-  "//build_tools/third_party/cxx:compound_offsetof.patch"
-  "//build_tools/third_party/cxx:template_lookahead.patch"
-  "//build_tools/third_party/cxx:constexpr_branches.patch"
-  "//build_tools/third_party/cxx:qualified_template_calls.patch"
-  "//build_tools/third_party/cxx:initializer_dependencies.patch"
-  "//build_tools/third_party/cxx:condition_declarations.patch"
-  "//build_tools/third_party/cxx:unsigned_complement.patch"
-  "//build_tools/third_party/cxx:float16_semantics.patch"
-  "//build_tools/third_party/cxx:bfloat16_semantics.patch"
-  "//build_tools/third_party/cxx:float8_semantics.patch"
-  "//build_tools/third_party/cxx:vector_constants.patch"
-  "//build_tools/third_party/cxx:vector_conversion.patch"
-  "//build_tools/third_party/cxx:auto_deduction.patch"
-  "//build_tools/third_party/cxx:vector_list_conversion.patch"
-  "//build_tools/third_party/cxx:using_directive_attributes.patch"
-  "//build_tools/third_party/cxx:constant_archive.patch"
-  "//build_tools/third_party/cxx:constexpr_bitcast.patch"
-  "//build_tools/third_party/cxx:list_initialization_diagnostics.patch"
+set(IREE_DEP_CXX_PATCHES "")
+set(IREE_DEP_CXX_PATCH_ARGS "")
+
+set(IREE_DEP_MIMALLOC_KIND "http_archive")
+set(IREE_DEP_MIMALLOC_OWNER "shared")
+set(IREE_DEP_MIMALLOC_MODULE_NAME "mimalloc")
+set(IREE_DEP_MIMALLOC_REPO_NAME "mimalloc")
+set(IREE_DEP_MIMALLOC_VERSION "")
+set(IREE_DEP_MIMALLOC_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_MIMALLOC_SOURCE_URL "")
+set(IREE_DEP_MIMALLOC_URLS
+  "https://github.com/microsoft/mimalloc/archive/refs/tags/v3.5.3.tar.gz"
 )
-set(IREE_DEP_CXX_PATCH_ARGS
+set(IREE_DEP_MIMALLOC_SHA256 "3b4a15153a59905995f7070296ed604bb5ccc00cabb8b93446931aff77224d47")
+set(IREE_DEP_MIMALLOC_STRIP_PREFIX "mimalloc-3.5.3")
+set(IREE_DEP_MIMALLOC_BUILD_FILE "//build_tools/third_party/mimalloc:mimalloc.BUILD.bazel")
+set(IREE_DEP_MIMALLOC_PATCHES
+  "//build_tools/third_party/mimalloc:c_new_handler.patch"
+)
+set(IREE_DEP_MIMALLOC_PATCH_ARGS
   "-p1"
 )
 
@@ -195,6 +315,7 @@ set(IREE_DEP_LIBDRM_HEADERS_VERSION "")
 set(IREE_DEP_LIBDRM_HEADERS_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_LIBDRM_HEADERS_SOURCE_URL "")
 set(IREE_DEP_LIBDRM_HEADERS_URLS
+  "https://mirrors.edge.kernel.org/gentoo/distfiles/13/libdrm-2.4.134.tar.xz"
   "https://dri.freedesktop.org/libdrm/libdrm-2.4.134.tar.xz"
 )
 set(IREE_DEP_LIBDRM_HEADERS_SHA256 "ac5e74d157830eb8bee44c6a6bf3ad49774ef0dd2a72bdad74a8f20308b52a95")
@@ -202,6 +323,23 @@ set(IREE_DEP_LIBDRM_HEADERS_STRIP_PREFIX "libdrm-2.4.134")
 set(IREE_DEP_LIBDRM_HEADERS_BUILD_FILE "//build_tools/third_party/linux_uapi:libdrm_headers.BUILD.bazel")
 set(IREE_DEP_LIBDRM_HEADERS_PATCHES "")
 set(IREE_DEP_LIBDRM_HEADERS_PATCH_ARGS "")
+
+set(IREE_DEP_LINUX_UDMABUF_HEADER_KIND "http_file")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_OWNER "shared")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_MODULE_NAME "linux_udmabuf_header")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_REPO_NAME "linux_udmabuf_header")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_VERSION "")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_SOURCE_URL "")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_URLS
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/udmabuf.h"
+)
+set(IREE_DEP_LINUX_UDMABUF_HEADER_SHA256 "a3c84394744eb25490cd3884bfe95e7c0837a79b3ac313516603646cf04612f5")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_STRIP_PREFIX "")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_BUILD_FILE "")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_DOWNLOADED_FILE_PATH "linux/udmabuf.h")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_PATCHES "")
+set(IREE_DEP_LINUX_UDMABUF_HEADER_PATCH_ARGS "")
 
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_KIND "http_file")
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_OWNER "shared")
@@ -211,7 +349,7 @@ set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_VERSION "")
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_SOURCE_URL "")
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_URLS
-  "https://raw.githubusercontent.com/torvalds/linux/f6e7b42bf05b2427fb8a7a1d1c387a86638bb413/include/uapi/linux/kfd_ioctl.h"
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/kfd_ioctl.h"
 )
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_SHA256 "db48398039c14702df2b51b2461d80d36f7160479d45700b7e826051b1d2a997")
 set(IREE_DEP_LINUX_KFD_IOCTL_HEADER_STRIP_PREFIX "")
@@ -228,7 +366,7 @@ set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_VERSION "")
 set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_SOURCE_URL "")
 set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_URLS
-  "https://raw.githubusercontent.com/torvalds/linux/f6e7b42bf05b2427fb8a7a1d1c387a86638bb413/include/uapi/linux/kfd_sysfs.h"
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/kfd_sysfs.h"
 )
 set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_SHA256 "1f26e1ea4a679b80605a4da221bc55e9f570f94f8eeccc53fb826dd0a7dedb00")
 set(IREE_DEP_LINUX_KFD_SYSFS_HEADER_STRIP_PREFIX "")
@@ -245,7 +383,7 @@ set(IREE_DEP_LINUX_CONST_HEADER_VERSION "")
 set(IREE_DEP_LINUX_CONST_HEADER_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_LINUX_CONST_HEADER_SOURCE_URL "")
 set(IREE_DEP_LINUX_CONST_HEADER_URLS
-  "https://raw.githubusercontent.com/torvalds/linux/f6e7b42bf05b2427fb8a7a1d1c387a86638bb413/include/uapi/linux/const.h"
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/const.h"
 )
 set(IREE_DEP_LINUX_CONST_HEADER_SHA256 "806c87c44e0a1a267b996c669ef36faeec94fee46bc4513f0d332d2169718855")
 set(IREE_DEP_LINUX_CONST_HEADER_STRIP_PREFIX "")
@@ -262,7 +400,7 @@ set(IREE_DEP_LINUX_STDDEF_HEADER_VERSION "")
 set(IREE_DEP_LINUX_STDDEF_HEADER_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_LINUX_STDDEF_HEADER_SOURCE_URL "")
 set(IREE_DEP_LINUX_STDDEF_HEADER_URLS
-  "https://raw.githubusercontent.com/torvalds/linux/f6e7b42bf05b2427fb8a7a1d1c387a86638bb413/include/uapi/linux/stddef.h"
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/stddef.h"
 )
 set(IREE_DEP_LINUX_STDDEF_HEADER_SHA256 "3703ea363b0f4d3b75a3a1f59b7daaa0b81f2e18cc459fedd6b1df331e8662b8")
 set(IREE_DEP_LINUX_STDDEF_HEADER_STRIP_PREFIX "")
@@ -270,6 +408,57 @@ set(IREE_DEP_LINUX_STDDEF_HEADER_BUILD_FILE "")
 set(IREE_DEP_LINUX_STDDEF_HEADER_DOWNLOADED_FILE_PATH "linux/stddef.h")
 set(IREE_DEP_LINUX_STDDEF_HEADER_PATCHES "")
 set(IREE_DEP_LINUX_STDDEF_HEADER_PATCH_ARGS "")
+
+set(IREE_DEP_LINUX_IO_URING_HEADER_KIND "http_file")
+set(IREE_DEP_LINUX_IO_URING_HEADER_OWNER "shared")
+set(IREE_DEP_LINUX_IO_URING_HEADER_MODULE_NAME "linux_io_uring_header")
+set(IREE_DEP_LINUX_IO_URING_HEADER_REPO_NAME "linux_io_uring_header")
+set(IREE_DEP_LINUX_IO_URING_HEADER_VERSION "")
+set(IREE_DEP_LINUX_IO_URING_HEADER_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LINUX_IO_URING_HEADER_SOURCE_URL "")
+set(IREE_DEP_LINUX_IO_URING_HEADER_URLS
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/io_uring.h"
+)
+set(IREE_DEP_LINUX_IO_URING_HEADER_SHA256 "8488b223988fe798a9c1c81d13a550a27cac1f096bdd016ef9eb5e51adaf46a7")
+set(IREE_DEP_LINUX_IO_URING_HEADER_STRIP_PREFIX "")
+set(IREE_DEP_LINUX_IO_URING_HEADER_BUILD_FILE "")
+set(IREE_DEP_LINUX_IO_URING_HEADER_DOWNLOADED_FILE_PATH "linux/io_uring.h")
+set(IREE_DEP_LINUX_IO_URING_HEADER_PATCHES "")
+set(IREE_DEP_LINUX_IO_URING_HEADER_PATCH_ARGS "")
+
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_KIND "http_file")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_OWNER "shared")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_MODULE_NAME "linux_io_uring_zcrx_header")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_REPO_NAME "linux_io_uring_zcrx_header")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_VERSION "")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_SOURCE_URL "")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_URLS
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/io_uring/zcrx.h"
+)
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_SHA256 "820d8642160740bff5ba1d8d12d5d0464d0e3a765a7e454b901d134bf4b94ec0")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_STRIP_PREFIX "")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_BUILD_FILE "")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_DOWNLOADED_FILE_PATH "linux/io_uring/zcrx.h")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_PATCHES "")
+set(IREE_DEP_LINUX_IO_URING_ZCRX_HEADER_PATCH_ARGS "")
+
+set(IREE_DEP_LINUX_STAT_HEADER_KIND "http_file")
+set(IREE_DEP_LINUX_STAT_HEADER_OWNER "shared")
+set(IREE_DEP_LINUX_STAT_HEADER_MODULE_NAME "linux_stat_header")
+set(IREE_DEP_LINUX_STAT_HEADER_REPO_NAME "linux_stat_header")
+set(IREE_DEP_LINUX_STAT_HEADER_VERSION "")
+set(IREE_DEP_LINUX_STAT_HEADER_DEV_DEPENDENCY "FALSE")
+set(IREE_DEP_LINUX_STAT_HEADER_SOURCE_URL "")
+set(IREE_DEP_LINUX_STAT_HEADER_URLS
+  "https://raw.githubusercontent.com/torvalds/linux/a90ee4305c4a5df72c11b31dacfdc76e00fcf78a/include/uapi/linux/stat.h"
+)
+set(IREE_DEP_LINUX_STAT_HEADER_SHA256 "c900a05e031d999074db5ac3567f651ce2cf2f9f9e0a686810d6453c9f8b9526")
+set(IREE_DEP_LINUX_STAT_HEADER_STRIP_PREFIX "")
+set(IREE_DEP_LINUX_STAT_HEADER_BUILD_FILE "")
+set(IREE_DEP_LINUX_STAT_HEADER_DOWNLOADED_FILE_PATH "linux/stat.h")
+set(IREE_DEP_LINUX_STAT_HEADER_PATCHES "")
+set(IREE_DEP_LINUX_STAT_HEADER_PATCH_ARGS "")
 
 set(IREE_DEP_LINUX_XDNA_HEADER_KIND "http_file")
 set(IREE_DEP_LINUX_XDNA_HEADER_OWNER "shared")
@@ -296,9 +485,9 @@ set(IREE_DEP_AMDF_WKMI_HEADER_VERSION "")
 set(IREE_DEP_AMDF_WKMI_HEADER_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_AMDF_WKMI_HEADER_SOURCE_URL "")
 set(IREE_DEP_AMDF_WKMI_HEADER_URLS
-  "https://raw.githubusercontent.com/ROCm/rocm-systems/85196955cb4342c047f165d64c64c15a0aa5ab1c/shared/amdgpu-windows-interop/wkmi/wkmi.h"
+  "https://raw.githubusercontent.com/ROCm/rocm-systems/6b7847ef03b76c004f57b8cf40cdef9621ee6f53/shared/amdgpu-windows-interop/wkmi/wkmi.h"
 )
-set(IREE_DEP_AMDF_WKMI_HEADER_SHA256 "9b76c44ae9898ec070bf10dee9564f24f33434d574b3c4bf6e0b707e6b6786f6")
+set(IREE_DEP_AMDF_WKMI_HEADER_SHA256 "3f1ae16835ead93f263e6b5148e1e4f6823435ef4debef9371a6f2607acc4541")
 set(IREE_DEP_AMDF_WKMI_HEADER_STRIP_PREFIX "")
 set(IREE_DEP_AMDF_WKMI_HEADER_BUILD_FILE "")
 set(IREE_DEP_AMDF_WKMI_HEADER_DOWNLOADED_FILE_PATH "wkmi.h")
@@ -313,9 +502,9 @@ set(IREE_DEP_AMDF_WKMI_LIBRARY_VERSION "")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_DEV_DEPENDENCY "FALSE")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_SOURCE_URL "")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_URLS
-  "https://therock-dvc.s3.amazonaws.com/rocm-systems/files/md5/5d/b2da7799ad342700df22f594012f70"
+  "https://therock-dvc.s3.amazonaws.com/rocm-systems/files/md5/ad/32f8a14a6bb2da2b28650137c6b331"
 )
-set(IREE_DEP_AMDF_WKMI_LIBRARY_SHA256 "0264bd496f9f6ed71780e137a999963c6254bb2d592a8d3899d6b823c810f89f")
+set(IREE_DEP_AMDF_WKMI_LIBRARY_SHA256 "cf7fc4c38520353ba2f1169bf7a42befbe07069950430d39edb5d8efae881dd1")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_STRIP_PREFIX "")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_BUILD_FILE "")
 set(IREE_DEP_AMDF_WKMI_LIBRARY_DOWNLOADED_FILE_PATH "wkmi.lib")

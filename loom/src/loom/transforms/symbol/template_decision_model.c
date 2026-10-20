@@ -1094,7 +1094,10 @@ loom_template_decision_model_constraint_info(
     return info;
   }
   if (!loom_decision_program_constraint_is_feature(constraint)) {
+    const uint32_t predicate_ordinal =
+        loom_decision_program_constraint_ordinal(constraint);
     info.reason = LOOM_TEMPLATE_PROVIDER_UNRESOLVED_VALUE_PREDICATE;
+    info.value_predicate = &model->program.predicates[predicate_ordinal];
     return info;
   }
   const loom_template_decision_feature_t* feature =
@@ -1132,7 +1135,7 @@ void loom_template_decision_model_summarize_choice_evidence(
         inout_summary->highest_unresolved_provider_ordinal =
             model->program.choices[choice_ordinal].action_ordinal;
         inout_summary->highest_unresolved_constraint =
-            evidence->unresolved_constraint;
+            evidence->decisive_constraint;
       }
     }
     if (!found_best_match_group && group_match_count > 0) {

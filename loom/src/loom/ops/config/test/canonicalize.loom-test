@@ -108,7 +108,7 @@ func.def @decl_config_is_workgroup_uniform() {
 
 // Declaration predicates apply to config.get results until specialization
 // replaces the declaration with an exact definition.
-config.decl @runtime_chunk_size : %value: index where [range(%value, 0, 131072), mul(%value, 16)]
+config.decl @runtime_chunk_size : %value: index where [range(%value, 0, 131072), multiple_of(%value, 16)]
 
 func.def @read_decl_config_predicate() -> (index) {
   %value = config.get @runtime_chunk_size : index
@@ -119,7 +119,7 @@ func.def @read_decl_config_predicate() -> (index) {
 }
 
 // ----
-config.decl @runtime_chunk_size : %value: index where [range(%value, 0, 131072), mul(%value, 16)]
+config.decl @runtime_chunk_size : %value: index where [range(%value, 0, 131072), multiple_of(%value, 16)]
 
 func.def @read_decl_config_predicate() -> (index) {
   %value = config.get @runtime_chunk_size : index
@@ -131,7 +131,7 @@ func.def @read_decl_config_predicate() -> (index) {
 // ====
 
 // Declaration predicates are ordinary facts on every config.get result.
-config.decl @runtime_tile_count : %value: index where [range(%value, 4, 64), mul(%value, 4)]
+config.decl @runtime_tile_count : %value: index where [range(%value, 4, 64), multiple_of(%value, 4)]
 
 func.def @read_decl_config_facts() -> (i64, i64, i64) {
   %value = config.get @runtime_tile_count : index
@@ -142,7 +142,7 @@ func.def @read_decl_config_facts() -> (i64, i64, i64) {
 }
 
 // ----
-config.decl @runtime_tile_count : %value: index where [range(%value, 4, 64), mul(%value, 4)]
+config.decl @runtime_tile_count : %value: index where [range(%value, 4, 64), multiple_of(%value, 4)]
 
 func.def @read_decl_config_facts() -> (i64, i64, i64) {
   %lo = scalar.constant 4 : i64

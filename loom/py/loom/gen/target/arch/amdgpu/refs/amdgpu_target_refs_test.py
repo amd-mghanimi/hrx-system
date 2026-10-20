@@ -13,6 +13,20 @@ from dataclasses import replace
 from pathlib import Path
 
 from loom.gen.target.arch.amdgpu.refs import amdgpu_target_refs
+from loom.target.arch.amdgpu.descriptors.cdna import (
+    _AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE,
+    _AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE,
+    _AMDGPU_CDNA4_CORE_DESCRIPTOR_SET_BASE,
+    _AMDGPU_GFX9_4_GENERIC_CORE_DESCRIPTOR_SET_BASE,
+    AMDGPU_MFMA_TIMINGS_BY_DESCRIPTOR_SET,
+)
+from loom.target.arch.amdgpu.descriptors.common import _amdgpu_mfma_schedule_class_name
+from loom.target.arch.amdgpu.descriptors.matrix import _cdna2_matrix_rows
+from loom.target.arch.amdgpu.descriptors.sets import (
+    _gfx9_4_generic_core_overlays,
+    _gfx940_core_overlays,
+    _gfx950_core_overlays,
+)
 from loom.target.arch.amdgpu.encoding import (
     AMDGPU_ENCODING_FIELD_IDS,
     AMDGPU_ENCODING_FORMAT_IDS,
@@ -21,11 +35,13 @@ from loom.target.arch.amdgpu.encoding import (
     AMDGPU_ENCODING_FORMAT_VOP1_SDWA,
 )
 from loom.target.arch.amdgpu.target_info import (
+    amdgpu_descriptor_set_info_by_generator_target,
     amdgpu_descriptor_set_ordinal,
     sorted_descriptor_set_infos,
 )
 from loom.target.low_descriptors import (
     AsmForm,
+    Constraint,
     Descriptor,
     DescriptorSet,
     EncodingFieldValue,
@@ -37,8 +53,10 @@ from loom.target.low_descriptors import (
     LatencyKind,
     ModelQuality,
     Operand,
+    OperandAddressMapKind,
     OperandFlag,
     OperandRole,
+    RegClassAlt,
     Resource,
     ResourceFlag,
     ResourceKind,
@@ -73,26 +91,31 @@ def _descriptor(
     key: str,
     asm_forms: tuple[AsmForm, ...] = (),
     *,
+    semantic_tag: str | None = None,
     schedule_class: str = _SCHEDULE_NONE,
     encoding_format_id: int = 0,
+    encoding_id: int = 0,
     immediates: tuple[Immediate, ...] = (),
     instruction_classes: tuple[InstructionClass, ...] = (),
     operands: tuple[Operand, ...] = (),
     encoding_field_values: tuple[EncodingFieldValue, ...] = (),
     storage_leases: tuple[StorageLease, ...] = (),
+    constraints: tuple[Constraint, ...] = (),
 ) -> Descriptor:
     return Descriptor(
         key=key,
         mnemonic=None,
-        semantic_tag=None,
+        semantic_tag=semantic_tag,
         operands=operands,
         schedule_class=schedule_class,
         asm_forms=asm_forms,
         encoding_format_id=encoding_format_id,
+        encoding_id=encoding_id,
         immediates=immediates,
         instruction_classes=instruction_classes,
         encoding_field_values=encoding_field_values,
         storage_leases=storage_leases,
+        constraints=constraints,
     )
 
 
@@ -272,6 +295,7 @@ def test_target_ref_tables_use_prebuilt_descriptor_sets() -> None:
     descriptor_set = replace(
         _descriptor_set(*_valid_contract_descriptors()),
         key=descriptor_set_info.key,
+        reg_classes=_AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE.reg_classes,
     )
 
     tables = amdgpu_target_refs._materialize_descriptor_ref_tables(
@@ -282,6 +306,15 @@ def test_target_ref_tables_use_prebuilt_descriptor_sets() -> None:
     assert len(tables) == 1
     assert tables[0].descriptor_set_key == descriptor_set_info.key
     assert tables[0].descriptor_set_ordinal == amdgpu_descriptor_set_ordinal(descriptor_set_info.key)
+    assert len(tables[0].cache_scope_immediate_slots) == len(descriptor_set.descriptors)
+
+
+def test_exact_target_materialization_includes_compatible_portable_view() -> None:
+    rdna3_5_info = amdgpu_descriptor_set_info_by_generator_target("rdna3_5")
+    gfx11_info = amdgpu_descriptor_set_info_by_generator_target("gfx11_generic")
+
+    assert set(amdgpu_target_refs._materialization_descriptor_set_infos((rdna3_5_info,))) == {rdna3_5_info, gfx11_info}
+    assert amdgpu_target_refs._materialization_descriptor_set_infos((gfx11_info,)) == (gfx11_info,)
 
 
 def test_target_ref_source_shares_exact_tables() -> None:
@@ -291,6 +324,7 @@ def test_target_ref_source_shares_exact_tables() -> None:
         descriptor_set_info.key: replace(
             descriptor_set,
             key=descriptor_set_info.key,
+            reg_classes=_AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE.reg_classes,
         )
         for descriptor_set_info in descriptor_set_infos
     }
@@ -300,6 +334,9 @@ def test_target_ref_source_shares_exact_tables() -> None:
         descriptor_set_infos=descriptor_set_infos,
         descriptor_sets_by_key=descriptor_sets_by_key,
     )
+
+    assert ".cache_scope = LOOM_AMDGPU_DESCRIPTOR_IMMEDIATE_SLOT_NONE" in source
+    assert ".literal = UINT8_C(" in source
 
     first_info, second_info = sorted(
         descriptor_set_infos,
@@ -325,6 +362,21 @@ def test_target_ref_source_shares_exact_tables() -> None:
         assert (f"[{amdgpu_target_refs._u16_literal(amdgpu_descriptor_set_ordinal(second_info.key))}] = {first_table_name},") in source
 
 
+def test_accumulator_class_ids_follow_each_descriptor_set() -> None:
+    for base in (
+        _AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE,
+        _AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE,
+        _AMDGPU_CDNA4_CORE_DESCRIPTOR_SET_BASE,
+        _AMDGPU_GFX9_4_GENERIC_CORE_DESCRIPTOR_SET_BASE,
+    ):
+        descriptor_set = replace(_descriptor_set(*_valid_contract_descriptors()), key=base.key, reg_classes=base.reg_classes)
+        info = next(info for info in sorted_descriptor_set_infos() if info.key == base.key)
+        tables = amdgpu_target_refs._materialize_descriptor_ref_tables((info,), {base.key: descriptor_set})
+        assert descriptor_set.reg_classes[tables[0].agpr_reg_class_id].name == "amdgpu.agpr"
+        with _raises_value_error("requires an accumulator register class"):
+            amdgpu_target_refs._materialize_descriptor_ref_tables((info,), {base.key: replace(descriptor_set, reg_classes=())})
+
+
 def test_descriptor_trait_names_include_resource_and_encoding_facts() -> None:
     descriptor_set = _descriptor_set(
         _descriptor(
@@ -342,6 +394,189 @@ def test_descriptor_trait_names_include_resource_and_encoding_facts() -> None:
     )
 
 
+def test_matrix_pass_traits_are_independent_of_latency_estimates() -> None:
+    for descriptor_set, overlays in (
+        (_AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE, tuple(overlay for overlay, _ in _cdna2_matrix_rows())),
+        (_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE, _gfx940_core_overlays()),
+        (_AMDGPU_CDNA4_CORE_DESCRIPTOR_SET_BASE, _gfx950_core_overlays()),
+        (_AMDGPU_GFX9_4_GENERIC_CORE_DESCRIPTOR_SET_BASE, _gfx9_4_generic_core_overlays()),
+    ):
+        overlays_by_key = {overlay.descriptor_key: overlay for overlay in overlays}
+        descriptor_set = replace(
+            descriptor_set,
+            schedule_classes=tuple(replace(row, latency_cycles=91) for row in descriptor_set.schedule_classes),
+        )
+        context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
+        for key, timing in AMDGPU_MFMA_TIMINGS_BY_DESCRIPTOR_SET[descriptor_set.key].items():
+            overlay = overlays_by_key[key]
+            descriptor = _descriptor(
+                key,
+                schedule_class=_amdgpu_mfma_schedule_class_name(key),
+                semantic_tag=overlay.semantic_tag,
+                operands=tuple(operand.descriptor_operand for operand in overlay.operands),
+                constraints=overlay.constraints,
+            )
+            traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+            assert f"({timing.execution_passes}u << LOOM_AMDGPU_DESCRIPTOR_MATRIX_PASSES_SHIFT)" in traits
+
+
+def test_matrix_pipeline_traits_preserve_arithmetic_semantics() -> None:
+    context = amdgpu_target_refs._descriptor_trait_context(_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE)
+    overlays_by_semantic = {overlay.semantic_tag: overlay for overlay in _gfx940_core_overlays()}
+    # Physical result width cannot distinguish these pipelines. Sparse and
+    # reduced-precision F32 instructions belong to XDL along with narrow inputs.
+    for semantic, expected in (
+        ("matrix.mfma.f32.16x16x4.f32", ()),
+        ("matrix.mfma.f64.16x16x4.f64", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_DGEMM",)),
+        ("matrix.mfma.f32.16x16x16.f16", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_XDL",)),
+        ("matrix.mfma.f32.16x16x16.bf16.1k", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_XDL",)),
+        ("matrix.mfma.f32.16x16x8.xf32", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_XDL",)),
+        ("matrix.mfma.i32.16x16x32.i8", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_XDL",)),
+        ("matrix.smfmac.f32.16x16x32.bf16", ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_XDL",)),
+    ):
+        overlay = overlays_by_semantic[semantic]
+        descriptor = _descriptor(
+            overlay.descriptor_key,
+            semantic_tag=semantic,
+            schedule_class=overlay.schedule_class,
+            operands=tuple(operand.descriptor_operand for operand in overlay.operands),
+            constraints=overlay.constraints,
+        )
+        traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+        assert tuple(trait for trait in traits if trait.endswith(("MATRIX_DGEMM", "MATRIX_XDL"))) == expected
+
+
+def test_matrix_exact_forwarding_floors_require_indexable_result_shapes() -> None:
+    context = amdgpu_target_refs._descriptor_trait_context(_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE)
+    timings = AMDGPU_MFMA_TIMINGS_BY_DESCRIPTOR_SET[context.descriptor_set.key]
+    for overlay in _gfx940_core_overlays():
+        timing = timings.get(overlay.descriptor_key)
+        if timing is None or not (timing.execution_passes == 2 or (timing.execution_passes == 4 and (overlay.semantic_tag or "").startswith("matrix.mfma.f64."))):
+            continue
+        operands = tuple(operand.descriptor_operand for operand in overlay.operands)
+        descriptor = _descriptor(overlay.descriptor_key, semantic_tag=overlay.semantic_tag, schedule_class=overlay.schedule_class, operands=operands)
+        for invalid_operands in (
+            (),
+            tuple(replace(operand, unit_count=operand.unit_count + 1) if operand.role in (OperandRole.RESULT, OperandRole.OPERAND_RESULT) else operand for operand in operands),
+        ):
+            with _raises_value_error("exact forwarding floor requires one"):
+                amdgpu_target_refs._descriptor_trait_names(context, replace(descriptor, operands=invalid_operands))
+
+
+def test_matrix_input_retention_requires_matching_accumulator_width() -> None:
+    for descriptor_set, overlays in (
+        (_AMDGPU_CDNA2_CORE_DESCRIPTOR_SET_BASE, tuple(overlay for overlay, _ in _cdna2_matrix_rows())),
+        (_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE, _gfx940_core_overlays()),
+        (_AMDGPU_CDNA4_CORE_DESCRIPTOR_SET_BASE, _gfx950_core_overlays()),
+        (_AMDGPU_GFX9_4_GENERIC_CORE_DESCRIPTOR_SET_BASE, _gfx9_4_generic_core_overlays()),
+    ):
+        context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
+        for overlay in overlays:
+            if overlay.descriptor_key not in AMDGPU_MFMA_TIMINGS_BY_DESCRIPTOR_SET[descriptor_set.key]:
+                continue
+            descriptor = _descriptor(
+                overlay.descriptor_key,
+                semantic_tag=overlay.semantic_tag,
+                schedule_class=overlay.schedule_class,
+                operands=tuple(operand.descriptor_operand for operand in overlay.operands),
+                constraints=overlay.constraints,
+            )
+            amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+            with _raises_value_error("same-width accumulator"):
+                amdgpu_target_refs._descriptor_trait_names(context, replace(descriptor, constraints=()))
+            with _raises_value_error("same-width accumulator"):
+                amdgpu_target_refs._descriptor_trait_names(
+                    context, replace(descriptor, operands=tuple(replace(operand, unit_count=operand.unit_count + 1) if operand.field_name == "acc" else operand for operand in descriptor.operands))
+                )
+
+
+def test_cdna_dot_identity_uses_native_opcode_and_preserves_aliases() -> None:
+    overlay = next(overlay for overlay in _gfx940_core_overlays() if overlay.semantic_tag == "dot.f16f16.f32x1")
+    descriptor = _descriptor(
+        overlay.descriptor_key,
+        semantic_tag=overlay.semantic_tag,
+        schedule_class=overlay.schedule_class,
+        operands=tuple(operand.descriptor_operand for operand in overlay.operands),
+        encoding_format_id=AMDGPU_ENCODING_FORMAT_IDS["ENC_VOP3P"],
+        encoding_id=35,
+    )
+    descriptors = (
+        descriptor,
+        replace(descriptor, key="amdgpu.dot_alias"),
+        replace(descriptor, key="amdgpu.other_dot", encoding_id=40),
+    )
+    context = amdgpu_target_refs._descriptor_trait_context(replace(_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE, descriptors=descriptors))
+    for row, identity in zip(descriptors, (1, 1, 2), strict=True):
+        traits = amdgpu_target_refs._descriptor_trait_names(context, row)
+        assert f"({identity}u << LOOM_AMDGPU_DESCRIPTOR_DOT_IDENTITY_SHIFT)" in traits
+    with _raises_value_error("six native DOT forwarding channels"):
+        amdgpu_target_refs._descriptor_trait_context(
+            replace(_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE, descriptors=tuple(replace(descriptor, key=f"dot{index}", encoding_id=index) for index in range(7)))
+        )
+    with _raises_value_error("one DWORD result and lhs/rhs/acc inputs"):
+        amdgpu_target_refs._descriptor_trait_names(context, replace(descriptor, operands=descriptor.operands[:-1]))
+    # RDNA uses its own hardware/delay-ALU contract and has no CDNA channels.
+    context = amdgpu_target_refs._descriptor_trait_context(
+        replace(_descriptor_set(descriptor), schedule_classes=_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE.schedule_classes, resources=_AMDGPU_CDNA3_CORE_DESCRIPTOR_SET_BASE.resources)
+    )
+    assert not context.dot_identities
+    assert not any("DOT_IDENTITY" in trait for trait in amdgpu_target_refs._descriptor_trait_names(context, descriptor))
+
+
+def test_scalar_memory_trait_follows_native_encoding_independently_of_spelling() -> None:
+    # SMEM includes scalar, descriptor-backed and scratch loads/stores plus
+    # cache operations. Their common encoding class, not their mnemonic or
+    # scheduling resource, defines replay-clause membership.
+    for name, format_id in AMDGPU_ENCODING_FORMAT_IDS.items():
+        descriptor = _descriptor("amdgpu.memory_alias", encoding_format_id=format_id)
+        context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+        traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+        assert ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_SCALAR_MEMORY" in traits) == (name == "ENC_SMEM"), name
+
+
+def test_matrix_memory_read_traits_cover_all_native_memory_formats() -> None:
+    for name in (
+        "ENC_MUBUF",
+        "ENC_MTBUF",
+        "ENC_FLAT",
+        "ENC_FLAT_GLBL",
+        "ENC_FLAT_SCRATCH",
+        "ENC_MIMG",
+        "MIMG_NSA1",
+        "MIMG_NSA2",
+        "MIMG_NSA3",
+        "ENC_DS",
+        "ENC_EXP",
+        "ENC_VBUFFER",
+        "ENC_VFLAT",
+        "ENC_VGLOBAL",
+        "ENC_VSCRATCH",
+        "ENC_VIMAGE",
+        "ENC_VSAMPLE",
+        "ENC_VDS",
+        "ENC_VEXPORT",
+    ):
+        descriptor = _descriptor("amdgpu.memory", encoding_format_id=AMDGPU_ENCODING_FORMAT_IDS[name])
+        context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+        assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_MEMORY_CONSUMER" in amdgpu_target_refs._descriptor_trait_names(context, descriptor), name
+        traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+        assert ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_MEMORY_INTERLOCK" in traits) == (name not in ("ENC_EXP", "ENC_VEXPORT")), name
+    for name in ("ENC_VOP1", "ENC_SMEM", "ENC_SOPP"):
+        descriptor = _descriptor("amdgpu.other", encoding_format_id=AMDGPU_ENCODING_FORMAT_IDS[name])
+        context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+        assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_MEMORY_CONSUMER" not in amdgpu_target_refs._descriptor_trait_names(context, descriptor), name
+        assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_MEMORY_INTERLOCK" not in amdgpu_target_refs._descriptor_trait_names(context, descriptor), name
+
+
+def test_fma64_pipeline_traits_follow_semantics_across_encoding_forms() -> None:
+    for semantic in ("float.fma.f64", "float.fmac.f64", "float.fma.f32", "float.add.f64", "float.div.fmas.f64"):
+        for format_name in ("ENC_VOP2", "ENC_VOP3"):
+            descriptor = _descriptor("amdgpu.arithmetic", semantic_tag=semantic, encoding_format_id=AMDGPU_ENCODING_FORMAT_IDS[format_name])
+            context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+            traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+            assert ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_FMA64" in traits) == (semantic in ("float.fma.f64", "float.fmac.f64"))
+
+
 def test_descriptor_trait_names_classify_dpp_encoding_families() -> None:
     for format_name, format_id in AMDGPU_ENCODING_FORMAT_IDS.items():
         if not format_name.endswith(("_DPP", "_DPP16", "_DPP8")):
@@ -356,6 +591,53 @@ def test_descriptor_trait_names_classify_dpp_encoding_families() -> None:
         trait_context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
         traits = amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[0])
         assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_DPP" in traits, format_name
+
+
+def test_descriptor_trait_names_classify_packed_f32_pair_spelling() -> None:
+    for semantic_tag, expected in (
+        ("float.add.pk2.f32", True),
+        ("float.mul.pk2.f32", True),
+        ("float.fma.pk2.f32", True),
+        ("float.fma.pk2.f16", False),
+        ("float.add.f32", False),
+        ("float.fma.mix.f32", False),
+    ):
+        descriptor_set = _descriptor_set(_descriptor("amdgpu.test", semantic_tag=semantic_tag))
+        context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
+        traits = amdgpu_target_refs._descriptor_trait_names(context, descriptor_set.descriptors[0])
+        assert ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_PACKED_F32" in traits) == expected
+
+
+def test_wide_shift_allocation_trait_requires_the_first_count_operand() -> None:
+    count = Operand("shift", OperandRole.OPERAND, (RegClassAlt("amdgpu.vgpr"),), address_map_kind=OperandAddressMapKind.LOW_SUBSET, addressable_unit_count=255)
+    value = Operand("value", OperandRole.OPERAND, (RegClassAlt("amdgpu.vgpr"),), unit_count=2)
+    for semantic_tag in ("integer.shl.u64", "integer.shr.u64", "integer.shr.s64"):
+        for operands, expected in (
+            ((count, value), True),
+            ((replace(count, address_map_kind=OperandAddressMapKind.DIRECT, addressable_unit_count=0), value), False),
+            ((value,), False),
+        ):
+            descriptor = _descriptor("amdgpu.shift", semantic_tag=semantic_tag, operands=operands)
+            context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+            assert ("LOOM_AMDGPU_DESCRIPTOR_TRAIT_SHIFT64_ALLOCATION" in amdgpu_target_refs._descriptor_trait_names(context, descriptor)) == expected
+        for operands in ((value, count), (replace(count, unit_count=2), value)):
+            descriptor = _descriptor("amdgpu.shift", semantic_tag=semantic_tag, operands=operands)
+            context = amdgpu_target_refs._descriptor_trait_context(_descriptor_set(descriptor))
+            with _raises_value_error("first one-register operand"):
+                amdgpu_target_refs._descriptor_trait_names(context, descriptor)
+
+
+def test_descriptor_trait_names_classify_permlane_semantics() -> None:
+    descriptor_set = _descriptor_set(
+        _descriptor(
+            "amdgpu.v_permlane32_swap_b32",
+            semantic_tag="lane.permlane32.swap.b32",
+            schedule_class=_SCHEDULE_VALU,
+        )
+    )
+    trait_context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
+
+    assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_PERMLANE" in (amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[0]))
 
 
 def test_descriptor_trait_names_include_destination_selection_forwarding() -> None:
@@ -450,6 +732,8 @@ def test_descriptor_trait_names_include_memory_and_ref_facts() -> None:
     assert amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[0]) == (
         "LOOM_AMDGPU_DESCRIPTOR_TRAIT_SCALAR_ALU",
         "LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_MEMORY",
+        "LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_MEMORY_CONSUMER",
+        "LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_MEMORY_INTERLOCK",
     )
     assert amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[1]) == (
         "LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_ALU",
@@ -465,6 +749,51 @@ def test_descriptor_trait_names_include_memory_and_ref_facts() -> None:
         "LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_ISSUE",
         "LOOM_AMDGPU_DESCRIPTOR_TRAIT_MATRIX_COEXECUTION_SOURCE",
     )
+
+
+def test_descriptor_trait_names_retain_exec_writes() -> None:
+    exec_alt = (RegClassAlt("amdgpu.exec"),)
+    scc_alt = (RegClassAlt("amdgpu.scc"),)
+    descriptor_set = _descriptor_set(
+        _descriptor(
+            "amdgpu.s_mov_b64_exec",
+            operands=(
+                Operand(
+                    "exec",
+                    OperandRole.IMPLICIT,
+                    exec_alt,
+                    flags=(OperandFlag.STATE_WRITE,),
+                ),
+            ),
+        ),
+        _descriptor(
+            "amdgpu.exec_read",
+            operands=(
+                Operand(
+                    "exec",
+                    OperandRole.IMPLICIT,
+                    exec_alt,
+                    flags=(OperandFlag.STATE_READ,),
+                ),
+            ),
+        ),
+        _descriptor(
+            "amdgpu.scc_write",
+            operands=(
+                Operand(
+                    "scc",
+                    OperandRole.IMPLICIT,
+                    scc_alt,
+                    flags=(OperandFlag.STATE_WRITE,),
+                ),
+            ),
+        ),
+    )
+    trait_context = amdgpu_target_refs._descriptor_trait_context(descriptor_set)
+
+    assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_WRITES_EXEC" in (amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[0]))
+    assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_WRITES_EXEC" not in (amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[1]))
+    assert "LOOM_AMDGPU_DESCRIPTOR_TRAIT_WRITES_EXEC" not in (amdgpu_target_refs._descriptor_trait_names(trait_context, descriptor_set.descriptors[2]))
 
 
 def test_vector_issue_traits_follow_issue_resource_contracts() -> None:
@@ -559,6 +888,42 @@ def test_reg_class_trait_names_classify_special_register_files() -> None:
     assert amdgpu_target_refs._reg_class_trait_names("amdgpu.m0") == ("LOOM_AMDGPU_REG_CLASS_TRAIT_M0",)
     assert amdgpu_target_refs._reg_class_trait_names("amdgpu.vcc") == ("LOOM_AMDGPU_REG_CLASS_TRAIT_VCC",)
     assert amdgpu_target_refs._reg_class_trait_names("amdgpu.vgpr") == ()
+
+
+def test_wide_store_windows_preserve_generation_and_offset_contracts() -> None:
+    # ISA section 4.5: CDNA2 has a uniform one-slot window. Later CDNA has
+    # a second VALU slot; LLVM retains one VALU slot for SGPR-offset buffers.
+    for target, ordinary, scalar_offset in (
+        ("cdna2", (1, 1), (0, 0)),
+        ("cdna3", (2, 1), (1, 0)),
+        ("cdna4", (2, 1), (1, 0)),
+        ("gfx9_4_generic", (2, 1), (1, 0)),
+    ):
+        info = amdgpu_descriptor_set_info_by_generator_target(target)
+        for format_name, data_field, offsets in (
+            ("ENC_FLAT", "DATA", (False,)),
+            ("ENC_MUBUF", "VDATA", (False, True)),
+        ):
+            # Ordinary stores plus 32/64-bit compare-swap input/result shapes.
+            for width, result_width in ((1, 0), (2, 0), (3, 0), (4, 0), (2, 1), (4, 2)):
+                for has_scalar_offset in offsets:
+                    returned = result_width != 0
+                    operands = [Operand("value", OperandRole.OPERAND, (), unit_count=width, encoding_field_id=AMDGPU_ENCODING_FIELD_IDS[data_field])]
+                    if returned:
+                        operands.insert(0, Operand("old", OperandRole.RESULT, (), unit_count=result_width))
+                    if has_scalar_offset:
+                        operands.append(Operand("offset", OperandRole.OPERAND, (), encoding_field_id=AMDGPU_ENCODING_FIELD_IDS["SOFFSET"]))
+                    descriptor = _descriptor(
+                        "amdgpu.payload",
+                        encoding_format_id=AMDGPU_ENCODING_FORMAT_IDS[format_name],
+                        operands=tuple(operands),
+                    )
+                    order = "LOOM_AMDGPU_VMEM_RESULT_ORDER_NOSAMPLER" if returned else "LOOM_AMDGPU_VMEM_RESULT_ORDER_NONE"
+                    valu_cycles, other_cycles = scalar_offset if has_scalar_offset else ordinary
+                    expected = order
+                    if width > 2 and valu_cycles:
+                        expected += f" | (({int(returned)} + 1) << 3) | ({other_cycles} << 6) | ({valu_cycles - 1} << 7)"
+                    assert amdgpu_target_refs._descriptor_memory_properties(info, descriptor) == expected
 
 
 def test_descriptor_traits_reject_missing_schedule_class() -> None:
@@ -740,6 +1105,65 @@ def test_descriptor_immediate_slots_publish_address_offset() -> None:
         )
         == 1
     )
+
+
+def test_descriptor_immediate_slots_publish_cache_scope() -> None:
+    descriptor_set = _descriptor_set(
+        _descriptor(
+            "amdgpu.global_store_b32",
+            immediates=(
+                Immediate("offset", ImmediateKind.UNSIGNED),
+                Immediate("scope", ImmediateKind.UNSIGNED),
+            ),
+        )
+    )
+
+    assert (
+        amdgpu_target_refs._descriptor_cache_scope_immediate_slot(
+            descriptor_set,
+            descriptor_set.descriptors[0],
+        )
+        == 1
+    )
+
+
+def test_descriptor_immediate_slots_reject_duplicate_cache_scope() -> None:
+    descriptor_set = _descriptor_set(
+        _descriptor(
+            "amdgpu.bad_global_store_b32",
+            immediates=(
+                Immediate("scope", ImmediateKind.UNSIGNED),
+                Immediate("scope", ImmediateKind.UNSIGNED),
+            ),
+        )
+    )
+
+    with _raises_value_error("descriptor 'amdgpu.bad_global_store_b32' has multiple cache scope immediates"):
+        amdgpu_target_refs._descriptor_cache_scope_immediate_slot(
+            descriptor_set,
+            descriptor_set.descriptors[0],
+        )
+
+
+def test_descriptor_immediate_slots_reject_unrepresentable_slot() -> None:
+    descriptor_set = _descriptor_set(
+        _descriptor(
+            "amdgpu.bad_global_store_b32",
+            immediates=tuple(
+                Immediate(
+                    "scope" if index == 255 else f"unused{index}",
+                    ImmediateKind.UNSIGNED,
+                )
+                for index in range(256)
+            ),
+        )
+    )
+
+    with _raises_value_error("cache scope immediate slot 255 does not fit compact target refs"):
+        amdgpu_target_refs._descriptor_cache_scope_immediate_slot(
+            descriptor_set,
+            descriptor_set.descriptors[0],
+        )
 
 
 def test_descriptor_immediate_slots_reject_duplicate_literal() -> None:

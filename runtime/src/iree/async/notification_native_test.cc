@@ -105,7 +105,7 @@ struct Peer {
   }
 
   void OpenStream() {
-    CheckStatus(iree_async_local_stream_create(
+    CheckStatus(iree_async_local_stream_allocate(
         proactor, channel, kHandleCount, iree_allocator_system(), &stream));
   }
 
@@ -119,7 +119,7 @@ struct Peer {
       CheckStatus(
           iree_async_proactor_poll(proactor, iree_infinite_timeout(), nullptr));
     }
-    iree_async_local_stream_destroy(stream);
+    iree_async_local_stream_free(stream);
     iree_async_primitive_close(&channel);
     iree_async_proactor_release(proactor);
   }
@@ -132,8 +132,7 @@ std::string PipeName(const char* directory) {
 }
 #else
 sockaddr_un SocketAddress(const char* directory) {
-  sockaddr_un address = {};
-  address.sun_family = AF_UNIX;
+  sockaddr_un address = {.sun_family = AF_UNIX};
   std::string path = std::string(directory) + "/notification.sock";
   ROLE_CHECK(path.size() < sizeof(address.sun_path));
   memcpy(address.sun_path, path.c_str(), path.size() + 1);

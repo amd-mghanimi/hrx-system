@@ -49,7 +49,7 @@ from loom.assembly import AssemblyFormat, FormatElement, OptionalGroup
 from loom.errors import ErrorDef
 
 if TYPE_CHECKING:
-    from loom.assembly import FuncArgs
+    from loom.assembly import BlockArgs, FuncArgs
 
 __all__ = [
     # Type constraints.
@@ -65,6 +65,7 @@ __all__ = [
     "INTEGER",
     "PAYLOAD_SCALAR",
     "BYTE_PATTERN_SCALAR",
+    "BYTE_PATTERN_ELEMENT",
     "INDEX_OR_NON_I1_INTEGER_SCALAR",
     "INTEGER_ELEMENT",
     "INDEX_OR_NON_I1_INTEGER_ELEMENT",
@@ -86,6 +87,7 @@ __all__ = [
     "ENCODING_STORAGE",
     "ENCODING_TRANSFORM",
     "POOL",
+    "GROUP",
     "REGISTER",
     "STORAGE",
     "I1",
@@ -103,6 +105,7 @@ __all__ = [
     "ATTR_TYPE_I64",
     "ATTR_TYPE_F64",
     "ATTR_TYPE_STRING",
+    "ATTR_TYPE_STRING_ARRAY",
     "ATTR_TYPE_BOOL",
     "ATTR_TYPE_ENUM",
     "ATTR_TYPE_ENUM_ARRAY",
@@ -122,6 +125,7 @@ __all__ = [
     "ATTR_TYPE_PARAMETERIZED",
     "ATTR_TYPE_PARAMETERIZED_ARRAY",
     "RegionDef",
+    "RegionExecution",
     # Symbol support.
     "SymbolDefinition",
     "SymbolDefinitionFlag",
@@ -162,6 +166,7 @@ __all__ = [
     "VALUE_ALIAS",
     # Semantic phase/contract metadata.
     "OpPhase",
+    "ExecutionCondition",
     "ContractFamily",
     "ConditionRefinement",
     "ConditionRefinementTruth",
@@ -171,6 +176,7 @@ __all__ = [
     # Trait constructors.
     "AllTypesMatch",
     "HasAncestor",
+    "HasAnyAncestor",
     "HasParent",
     "ImplicitTerminator",
     "NoAncestor",
@@ -213,6 +219,7 @@ __all__ = [
     "HasFloatElement",
     "HasBitwiseScalar",
     "HasBitwiseElement",
+    "HasBytePatternElement",
     "HasIndexOrNonI1IntegerScalar",
     "HasIndexOrNonI1IntegerElement",
     "HasI1Element",
@@ -243,9 +250,9 @@ __all__ = [
     "BlockArgsMatchElementTypes",
     "ConditionForwardedCountMatchesBlockArgs",
     "ConditionForwardedTypesMatchBlockArgs",
-    "YieldCountMatchesResults",
-    "YieldTypesMatchResults",
-    "YieldElementTypesMatchResults",
+    "YieldCountMatches",
+    "YieldTypesMatch",
+    "YieldElementTypesMatch",
     "VariadicValuesMatch",
     "IterArgsMatchResults",
     "AttrMatchesElementType",
@@ -326,6 +333,7 @@ class TypeConstraint(Enum):
       INTEGER_ELEMENT → ShapedType with integer element type
       FLOAT_ELEMENT   → ShapedType with float element type
       BITWISE_ELEMENT → ShapedType with index, non-i1 integer, or float element
+      BYTE_PATTERN_ELEMENT → ShapedType with 8/16/32/64-bit integer or float element
       INDEX_OR_NON_I1_INTEGER_ELEMENT → ShapedType index or non-i1 integer element
       I1_ELEMENT      → ShapedType with element type i1
       I8_ELEMENT      → ShapedType with element type i8
@@ -343,6 +351,7 @@ class TypeConstraint(Enum):
       ENCODING_STORAGE → EncodingType with role=storage
       ENCODING_TRANSFORM → EncodingType with role=transform
       POOL     → PoolType
+      GROUP    → GroupType
       REGISTER → RegisterType
       STORAGE  → StorageType
       I1       → ScalarType with kind=I1
@@ -373,6 +382,7 @@ class TypeConstraint(Enum):
     INTEGER_ELEMENT = "integer_element"
     FLOAT_ELEMENT = "float_element"
     BITWISE_ELEMENT = "bitwise_element"
+    BYTE_PATTERN_ELEMENT = "byte_pattern_element"
     INDEX_OR_NON_I1_INTEGER_ELEMENT = "index_or_non_i1_integer_element"
     I1_ELEMENT = "i1_element"
     I8_ELEMENT = "i8_element"
@@ -390,6 +400,7 @@ class TypeConstraint(Enum):
     ENCODING_STORAGE = "encoding<storage>"
     ENCODING_TRANSFORM = "encoding<transform>"
     POOL = "pool"
+    GROUP = "group"
     REGISTER = "register"
     STORAGE = "storage"
     I1 = "i1"
@@ -414,6 +425,7 @@ INDEX_OR_NON_I1_INTEGER_SCALAR = TypeConstraint.INDEX_OR_NON_I1_INTEGER_SCALAR
 INTEGER_ELEMENT = TypeConstraint.INTEGER_ELEMENT
 FLOAT_ELEMENT = TypeConstraint.FLOAT_ELEMENT
 BITWISE_ELEMENT = TypeConstraint.BITWISE_ELEMENT
+BYTE_PATTERN_ELEMENT = TypeConstraint.BYTE_PATTERN_ELEMENT
 INDEX_OR_NON_I1_INTEGER_ELEMENT = TypeConstraint.INDEX_OR_NON_I1_INTEGER_ELEMENT
 I1_ELEMENT = TypeConstraint.I1_ELEMENT
 I8_ELEMENT = TypeConstraint.I8_ELEMENT
@@ -431,6 +443,7 @@ ENCODING_SCHEMA = TypeConstraint.ENCODING_SCHEMA
 ENCODING_STORAGE = TypeConstraint.ENCODING_STORAGE
 ENCODING_TRANSFORM = TypeConstraint.ENCODING_TRANSFORM
 POOL = TypeConstraint.POOL
+GROUP = TypeConstraint.GROUP
 REGISTER = TypeConstraint.REGISTER
 STORAGE = TypeConstraint.STORAGE
 I1 = TypeConstraint.I1
@@ -470,6 +483,8 @@ class Operand:
     variadic: If True, this is zero-or-more values (list[Value]).
     optional: If True, this operand may be absent.
     role: Semantic role consumed by generic analyses.
+    observes_reference: Observes buffer/view metadata without accessing payload
+        or exposing a usable reference/address through a result or side effect.
     """
 
     name: str
@@ -478,6 +493,7 @@ class Operand:
     variadic: bool = False
     optional: bool = False
     role: OperandRole = OperandRole.NONE
+    observes_reference: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,6 +506,11 @@ class Result:
     variadic: If True, this is zero-or-more result values.
     allocates: If True, this result is a freshly allocated resource
         that cannot alias any pre-existing resource.
+    signature_only: If True, this result describes a locally scoped signature
+        value rather than an SSA value visible after the operation.
+    reference_source: Named buffer/view operand whose storage this reference
+        derives from. Coordinates and reference representation may change;
+        ownership and the physical carrier are not transferred or aliased.
     """
 
     name: str
@@ -497,6 +518,8 @@ class Result:
     doc: str = ""
     variadic: bool = False
     allocates: bool = False
+    signature_only: bool = False
+    reference_source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,6 +570,7 @@ type AttrType = str  # One of the ATTR_TYPE_* constants below.
 ATTR_TYPE_I64 = "i64"
 ATTR_TYPE_F64 = "f64"
 ATTR_TYPE_STRING = "string"
+ATTR_TYPE_STRING_ARRAY = "string_array"
 ATTR_TYPE_BOOL = "bool"
 ATTR_TYPE_ENUM = "enum"
 ATTR_TYPE_ENUM_ARRAY = "enum_array"
@@ -571,6 +595,7 @@ _VALID_ATTR_TYPES = frozenset(
         ATTR_TYPE_I64,
         ATTR_TYPE_F64,
         ATTR_TYPE_STRING,
+        ATTR_TYPE_STRING_ARRAY,
         ATTR_TYPE_BOOL,
         ATTR_TYPE_ENUM,
         ATTR_TYPE_ENUM_ARRAY,
@@ -619,6 +644,7 @@ class SymbolReferenceRole(Enum):
 
     DEPENDENCY = "dependency"
     AVAILABILITY = "availability"
+    TEST_SUPPORT_DEPENDENCY = "test_support_dependency"
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,8 +656,9 @@ class SymbolReference:
         These are structural contracts, not op names or bytecode wire kinds.
         An empty tuple accepts any symbol without imposing an additional
         interface constraint.
-    role: Whether the reference contributes a dependency edge or only records
-        where an otherwise non-live symbol may be found during compilation.
+    role: Whether the reference contributes an ordinary dependency edge, a
+        test-support edge, or only records where an otherwise non-live symbol
+        may be found during compilation.
     """
 
     name: str
@@ -738,6 +765,7 @@ class SymbolDefinition:
     visibility: Optional enum attribute carrying generic public/private symbol
         visibility. FuncLike symbols inherit the visibility field declared by
         their FuncLike interface when this is absent.
+    linkage: Optional enum attribute carrying source/module definition linkage.
     retain: Optional enum attribute that marks symbols which ordinary symbol
         DCE must preserve even when unreachable.
     product_carrier: Optional enum attribute that classifies the product
@@ -757,6 +785,7 @@ class SymbolDefinition:
     bytecode_kind: str = "LOOM_SYMBOL_NONE"
     fact_domain: str | None = None
     visibility: str | None = None
+    linkage: str | None = None
     retain: str | None = None
     product_carrier: str | None = None
     flags: tuple[SymbolDefinitionFlag, ...] = ()
@@ -772,6 +801,7 @@ class SymbolDefinition:
         bytecode_kind: str = "LOOM_SYMBOL_NONE",
         fact_domain: str | None = None,
         visibility: str | None = None,
+        linkage: str | None = None,
         retain: str | None = None,
         product_carrier: str | None = None,
         flags: list[SymbolDefinitionFlag] | tuple[SymbolDefinitionFlag, ...] = (),
@@ -786,6 +816,8 @@ class SymbolDefinition:
             raise ValueError("SymbolDefinition: name must be non-empty")
         if visibility is not None and not visibility:
             raise ValueError("SymbolDefinition: visibility must be non-empty")
+        if linkage is not None and not linkage:
+            raise ValueError("SymbolDefinition: linkage must be non-empty")
         if retain is not None and not retain:
             raise ValueError("SymbolDefinition: retain must be non-empty")
         if product_carrier is not None and not product_carrier:
@@ -847,6 +879,7 @@ class SymbolDefinition:
         object.__setattr__(self, "bytecode_kind", bytecode_kind)
         object.__setattr__(self, "fact_domain", fact_domain)
         object.__setattr__(self, "visibility", visibility)
+        object.__setattr__(self, "linkage", linkage)
         object.__setattr__(self, "retain", retain)
         object.__setattr__(self, "product_carrier", product_carrier)
         object.__setattr__(self, "flags", frozen_flags)
@@ -892,6 +925,9 @@ class AttrDef:
         ordinals and leaves selected/supported-case policy to the op verifier.
     bare_identifier: If True, string values use bare identifier spelling in
         descriptor-aware text formats instead of quoted string spelling.
+    executable_predicates: If True, this predicate-list field describes
+        runtime checks over operation operands. Generic verification requires
+        every value argument to be an operand with one exact semantic type.
     parameterized_attr: Optional exact family constraint for parameterized
         attributes or every element of a parameterized attribute array. None
         leaves the family open.
@@ -910,6 +946,7 @@ class AttrDef:
     open_enum: bool = False
     parameterized_attr: ParameterizedAttrDef | None = None
     bare_identifier: bool = False
+    executable_predicates: bool = False
 
     def __post_init__(self) -> None:
         if self.attr_type not in _VALID_ATTR_TYPES:
@@ -935,6 +972,11 @@ class AttrDef:
         ):
             raise ValueError(
                 f"AttrDef '{self.name}': open_enum requires an enum attribute"
+            )
+        if self.executable_predicates and self.attr_type != ATTR_TYPE_PREDICATE_LIST:
+            raise ValueError(
+                f"AttrDef '{self.name}': executable_predicates requires "
+                "attr_type='predicate_list'"
             )
         if self.attr_type == ATTR_TYPE_SCOPED_ENUM:
             if self.optional:
@@ -1016,6 +1058,19 @@ class AttrDef:
             )
 
 
+@unique
+class RegionExecution(Enum):
+    """Dynamic execution of a region within one owning-op invocation."""
+
+    ONCE = "LOOM_REGION_EXECUTION_ONCE"
+    REPEATED = "LOOM_REGION_EXECUTION_REPEATED"
+    EXIT = "LOOM_REGION_EXECUTION_EXIT"
+
+    @property
+    def c_name(self) -> str:
+        return str(self.value)
+
+
 @dataclass(frozen=True, slots=True)
 class RegionDef:
     """A nested region on an op.
@@ -1049,6 +1104,16 @@ class RegionDef:
         in this region or a nested region must be carried by an operation with
         the CommandEffect trait. Pure computation and identity-producing
         operations remain valid.
+    execution: Dynamic execution relative to the owning operation. ONCE allows
+        zero or one execution before continuing after the owner; REPEATED
+        allows recurrence without reentering the owner; EXIT never continues
+        after the owner. LoopLike supplies REPEATED for its regions and does
+        not permit an override. Other regions default to ONCE.
+    execution_target: Optional target-symbol attribute selecting an independent
+        execution environment for this region. An absent attribute inherits the
+        enclosing target environment; an explicit unresolved target remains
+        independent. The selected environment projects to its worker code
+        contract. Regions without this contract execute in their parent's context.
     """
 
     name: str
@@ -1062,6 +1127,8 @@ class RegionDef:
     buffer_arg_memory_space: str | None = None
     arg_uniform_scope: str | None = None
     command_effects_only: bool = False
+    execution: RegionExecution | None = None
+    execution_target: str | None = None
 
 
 # ============================================================================
@@ -1203,6 +1270,10 @@ TERMINATOR = Trait("Terminator")
 CONSTANT_LIKE = Trait("ConstantLike")
 POISON = Trait("Poison")
 ELEMENTWISE = Trait("Elementwise")
+# The operation can be rebuilt over any contiguous lane interval without
+# observing the authored vector shape or absolute lane ordinals. Vector
+# operands contribute the same lane interval and scalar operands are invariant
+# captures. The operation must be pure and have one vector result.
 DECOMPOSABLE = Trait("Decomposable")
 SYMBOL_DEFINE = Trait("SymbolDefine")
 # Op is valid only as a direct child of the module body. Module-owned operations
@@ -1239,7 +1310,7 @@ MEMORY_FENCE = Trait("MemoryFence")
 # duplicate, speculate, or move it across convergence-changing boundaries.
 CONVERGENT = Trait("Convergent")
 # Source expansion depends on facts at the operation's control-flow position.
-# Motion and CSE must preserve that context until expansion. Runtime purity
+# Motion and CSE must preserve that context until expansion. Runtime effects
 # and erasure of unused pure results remain independent.
 CONTEXTUAL = Trait("Contextual")
 # Each execution produces a result with a distinct identity, even when
@@ -1309,6 +1380,27 @@ class OpPhase(Enum):
     SOURCE_STRUCTURE = "LOOM_OP_PHASE_SOURCE_STRUCTURE"
     MODULE_METADATA = "LOOM_OP_PHASE_MODULE_METADATA"
     COMPILE_TIME_QUERY = "LOOM_OP_PHASE_COMPILE_TIME_QUERY"
+
+    @property
+    def c_name(self) -> str:
+        return str(self.value)
+
+
+@unique
+class ExecutionCondition(Enum):
+    """Fact-dependent condition for safe execution on additional paths.
+
+    Each value names a shared semantic family interpreted against retained
+    operand facts. Operation declarations using a condition are validated
+    against the exact field and flag shape expected by that family.
+    """
+
+    INTEGER_SHIFT_LEFT = "LOOM_EXECUTION_CONDITION_INTEGER_SHIFT_LEFT"
+    INTEGER_SHIFT_RIGHT = "LOOM_EXECUTION_CONDITION_INTEGER_SHIFT_RIGHT"
+    INTEGER_ADD = "LOOM_EXECUTION_CONDITION_INTEGER_ADD"
+    INTEGER_SUBTRACT = "LOOM_EXECUTION_CONDITION_INTEGER_SUBTRACT"
+    INTEGER_MULTIPLY = "LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY"
+    INTEGER_MULTIPLY_ADD = "LOOM_EXECUTION_CONDITION_INTEGER_MULTIPLY_ADD"
 
     @property
     def c_name(self) -> str:
@@ -1469,7 +1561,7 @@ class ReferenceTypeKey:
 
 @unique
 class EffectKind(Enum):
-    """Kind of memory effect on a resource-typed operand."""
+    """Kind of memory effect on a resource operand or ambient state."""
 
     READ = "read"
     WRITE = "write"
@@ -1478,28 +1570,29 @@ class EffectKind(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Effect:
-    """Declares a memory effect on a specific operand.
+    """Declares a memory effect on an operand or ambient state.
 
-    operand: Name of the resource-typed operand being accessed.
+    operand: Name of the resource-typed operand being accessed, or None for
+        memory reached without an SSA operand, such as a global value slot.
     kind: What the op does to the resource (read, write, or both).
     """
 
-    operand: str
+    operand: str | None
     kind: EffectKind
 
 
-def Reads(operand: str) -> Effect:
-    """Op reads from the named resource operand."""
+def Reads(operand: str | None = None) -> Effect:
+    """Op reads from the named resource operand or ambient memory."""
     return Effect(operand, EffectKind.READ)
 
 
-def Writes(operand: str) -> Effect:
-    """Op writes to the named resource operand."""
+def Writes(operand: str | None = None) -> Effect:
+    """Op writes to the named resource operand or ambient memory."""
     return Effect(operand, EffectKind.WRITE)
 
 
-def ReadWrites(operand: str) -> Effect:
-    """Op performs an atomic read-modify-write on the named resource operand."""
+def ReadWrites(operand: str | None = None) -> Effect:
+    """Op reads and writes the named resource operand or ambient memory."""
     return Effect(operand, EffectKind.READWRITE)
 
 
@@ -1667,6 +1760,13 @@ def KeyedModuleRecord(key_attr: str) -> Trait:
 def HasAncestor(op_name: str) -> Trait:
     """This op must be nested under the named op at any depth."""
     return Trait("HasAncestor", op_name)
+
+
+def HasAnyAncestor(*op_names: str) -> Trait:
+    """This op must be nested under at least one named op at any depth."""
+    if not op_names:
+        raise ValueError("HasAnyAncestor requires at least one op name")
+    return Trait("HasAnyAncestor", *op_names)
 
 
 def HasParent(op_name: str) -> Trait:
@@ -2156,6 +2256,21 @@ def _type_satisfies_field_constraint(
             ScalarTypeKind.F32,
             ScalarTypeKind.F64,
         }
+    if constraint == BYTE_PATTERN_SCALAR:
+        if not isinstance(value_type, ScalarType):
+            return False
+        return value_type.kind in {
+            ScalarTypeKind.I8,
+            ScalarTypeKind.I16,
+            ScalarTypeKind.I32,
+            ScalarTypeKind.I64,
+            ScalarTypeKind.F8E4M3,
+            ScalarTypeKind.F8E5M2,
+            ScalarTypeKind.F16,
+            ScalarTypeKind.BF16,
+            ScalarTypeKind.F32,
+            ScalarTypeKind.F64,
+        }
     if not isinstance(value_type, ShapedType):
         return False
     element_kind = value_type.element_type.kind
@@ -2169,6 +2284,19 @@ def _type_satisfies_field_constraint(
         }
     if constraint == BITWISE_ELEMENT:
         return element_kind == ScalarTypeKind.INDEX or element_kind in {
+            ScalarTypeKind.I8,
+            ScalarTypeKind.I16,
+            ScalarTypeKind.I32,
+            ScalarTypeKind.I64,
+            ScalarTypeKind.F8E4M3,
+            ScalarTypeKind.F8E5M2,
+            ScalarTypeKind.F16,
+            ScalarTypeKind.BF16,
+            ScalarTypeKind.F32,
+            ScalarTypeKind.F64,
+        }
+    if constraint == BYTE_PATTERN_ELEMENT:
+        return element_kind in {
             ScalarTypeKind.I8,
             ScalarTypeKind.I16,
             ScalarTypeKind.I32,
@@ -2266,6 +2394,12 @@ def HasBitwiseElement(field: str) -> Constraint:
     """A shaped field must have an element type with a non-i1 bitwise payload."""
 
     return _has_element_constraint(field, BITWISE_ELEMENT)
+
+
+def HasBytePatternElement(field: str) -> Constraint:
+    """A shaped field must have a fixed-width byte-addressable element type."""
+
+    return _has_element_constraint(field, BYTE_PATTERN_ELEMENT)
 
 
 def HasIndexOrNonI1IntegerScalar(field: str) -> Constraint:
@@ -2979,34 +3113,34 @@ def ConditionForwardedTypesMatchBlockArgs(
     )
 
 
-def YieldCountMatchesResults(region: str, results: str) -> Constraint:
-    """Region terminator must yield the same number of values as results."""
+def YieldCountMatches(region: str, target: str) -> Constraint:
+    """Region terminator must yield a value field or region entry's count."""
 
     from loom.error.structure import ERR_STRUCTURE_008
 
     return Constraint(
-        "YieldCountMatchesResults",
-        (region, results),
+        "YieldCountMatches",
+        (region, target),
         error=ERR_STRUCTURE_008,
-        validate=constraint_validation.yield_count(region, results),
+        validate=constraint_validation.yield_count(region, target),
     )
 
 
-def YieldTypesMatchResults(region: str, results: str) -> Constraint:
-    """Yielded value types must match result types."""
+def YieldTypesMatch(region: str, target: str) -> Constraint:
+    """Yielded value types must match a value field or region entry tuple."""
 
     from loom.error.type import ERR_TYPE_009
 
     return Constraint(
-        "YieldTypesMatchResults",
-        (region, results),
+        "YieldTypesMatch",
+        (region, target),
         error=ERR_TYPE_009,
-        validate=constraint_validation.yield_types(region, results),
+        validate=constraint_validation.yield_types(region, target),
     )
 
 
-def YieldElementTypesMatchResults(region: str, results: str) -> Constraint:
-    """Yielded value element types must match result element types.
+def YieldElementTypesMatch(region: str, target: str) -> Constraint:
+    """Yielded value element types must match target element types.
 
     For elementwise ops where the body operates at scalar granularity:
     the yield produces scalar values and the result is a shaped type.
@@ -3017,10 +3151,10 @@ def YieldElementTypesMatchResults(region: str, results: str) -> Constraint:
     from loom.error.type import ERR_TYPE_009
 
     return Constraint(
-        "YieldElementTypesMatchResults",
-        (region, results),
+        "YieldElementTypesMatch",
+        (region, target),
         error=ERR_TYPE_009,
-        validate=constraint_validation.yield_types(region, results, element_types=True),
+        validate=constraint_validation.yield_types(region, target, element_types=True),
     )
 
 
@@ -3044,7 +3178,7 @@ def IterArgsMatchResults(iter_args: str, results: str) -> Constraint:
     scf.for): the iter_args operands provide initial values, the body
     yields the next iteration's values, and the results expose the
     final values. The yield-to-results match is enforced by
-    YieldTypesMatchResults; this constraint enforces that iter_args
+    YieldTypesMatch; this constraint enforces that iter_args
     and results agree directly so a count or type mismatch is reported
     on the loop op itself, not just the terminator.
 
@@ -3168,6 +3302,7 @@ _DESCRIPTOR_PARAMETER_TYPES = frozenset(
         ATTR_TYPE_I64,
         ATTR_TYPE_F64,
         ATTR_TYPE_STRING,
+        ATTR_TYPE_STRING_ARRAY,
         ATTR_TYPE_BOOL,
         ATTR_TYPE_ENUM,
         ATTR_TYPE_ENUM_ARRAY,
@@ -4124,7 +4259,7 @@ type TypeParamDef = (
 )
 
 
-_COMPACT_SHAPE_IR_KINDS = frozenset(("pool", "tile", "tensor", "vector", "view"))
+_COMPACT_SHAPE_IR_KINDS = frozenset(("group", "tile", "tensor", "vector", "view"))
 
 
 def _validate_compact_shape_format(
@@ -4149,10 +4284,11 @@ def _validate_compact_shape_format(
         kw,
     )
 
-    if ir_kind == "pool":
+    if ir_kind == "group":
         if len(params) != 1 or not isinstance(params[0], ShapeParam):
             raise ValueError(
-                f"TypeDef '{name}': pool representation requires one shape parameter"
+                f"TypeDef '{name}': {ir_kind} representation requires one "
+                "shape parameter"
             )
         expected_format: tuple[FormatElement, ...] = (ShapeOf(params[0].name),)
     elif ir_kind == "vector":
@@ -4611,8 +4747,18 @@ def _collect_format_fields(elements: tuple[FormatElement, ...]) -> set[str]:
                 fields.add(f)
             case Region(field=f):
                 fields.add(f)
-            case BindingList(field=f) | BlockArgs(region=f):
+            case BindingList(field=f):
                 fields.add(f)
+            case BlockArgs(
+                region=f,
+                start_attr=start_attr,
+                end_attr=end_attr,
+            ):
+                fields.add(f)
+                if start_attr is not None:
+                    fields.add(start_attr)
+                if end_attr is not None:
+                    fields.add(end_attr)
             case FuncArgs(field=f, start_attr=start_attr, end_attr=end_attr):
                 fields.add(f)
                 if start_attr is not None:
@@ -4778,6 +4924,107 @@ def _validate_func_args_partitions(
             raise ValueError(
                 f"Op '{op_name}': FuncArgs boundary '{element.end_attr}' must "
                 "name a required i64 attribute"
+            )
+
+
+def _collect_block_args_elements(
+    elements: tuple[FormatElement, ...],
+) -> tuple[BlockArgs, ...]:
+    """Collects BlockArgs elements in assembly order."""
+    from loom.assembly import BlockArgs, Clause, OptionalGroup, Scope
+
+    block_args: list[BlockArgs] = []
+    for element in elements:
+        match element:
+            case BlockArgs():
+                block_args.append(element)
+            case (
+                Clause(elements=nested)
+                | OptionalGroup(elements=nested)
+                | Scope(elements=nested)
+            ):
+                block_args.extend(_collect_block_args_elements(nested))
+            case _:
+                pass
+    return tuple(block_args)
+
+
+def _validate_block_args_partitions(
+    op_name: str,
+    format_elements: tuple[FormatElement, ...],
+    attrs: tuple[AttrDef, ...],
+    regions: tuple[RegionDef, ...],
+) -> None:
+    """Validates contiguous region entry argument partitions."""
+    block_args = _collect_block_args_elements(format_elements)
+    if not any(
+        element.group is not None
+        or element.start_attr is not None
+        or element.end_attr is not None
+        for element in block_args
+    ) and len({element.region for element in block_args}) == len(block_args):
+        return
+
+    effective_groups = [element.group or element.region for element in block_args]
+    if any(not group for group in effective_groups) or len(
+        set(effective_groups)
+    ) != len(effective_groups):
+        raise ValueError(
+            f"Op '{op_name}': projected BlockArgs groups require distinct "
+            "non-empty group names"
+        )
+
+    groups_by_region: dict[str, list[BlockArgs]] = {}
+    for element in block_args:
+        groups_by_region.setdefault(element.region, []).append(element)
+    region_defs = {region.name: region for region in regions}
+    for region, region_groups in groups_by_region.items():
+        has_boundaries = any(
+            element.start_attr is not None or element.end_attr is not None
+            for element in region_groups
+        )
+        if len(region_groups) == 1 and not has_boundaries:
+            continue
+        region_def = region_defs.get(region)
+        if region_def is not None and (
+            region_def.arg_source or region_def.implicit_args
+        ):
+            raise ValueError(
+                f"Op '{op_name}': projected BlockArgs for region '{region}' "
+                "require explicit entry arguments"
+            )
+        previous_end: str | None = None
+        for index, element in enumerate(region_groups):
+            group = element.group or region
+            if element.start_attr != previous_end:
+                expected = (
+                    repr(previous_end) if previous_end is not None else "no start attr"
+                )
+                raise ValueError(
+                    f"Op '{op_name}': BlockArgs group '{group}' must use "
+                    f"{expected} as its start boundary"
+                )
+            if index + 1 < len(region_groups) and element.end_attr is None:
+                raise ValueError(
+                    f"Op '{op_name}': BlockArgs group '{group}' requires an "
+                    "end boundary before the next group"
+                )
+            previous_end = element.end_attr
+        if previous_end is not None:
+            raise ValueError(
+                f"Op '{op_name}': the final projected BlockArgs group for "
+                f"region '{region}' must extend to the end of the entry signature"
+            )
+
+    attrs_by_name = {attr.name: attr for attr in attrs}
+    for element in block_args:
+        if element.end_attr is None:
+            continue
+        attr = attrs_by_name.get(element.end_attr)
+        if attr is None or attr.attr_type != ATTR_TYPE_I64:
+            raise ValueError(
+                f"Op '{op_name}': BlockArgs boundary '{element.end_attr}' must "
+                "name an i64 attribute"
             )
 
 
@@ -4971,6 +5218,7 @@ def _validate_op_formats(op: Op) -> None:
         _validate_scoped_enum_fields(op.name, elements, op.attrs)
         _validate_attr_params_fields(op.name, elements, op.attrs)
         _validate_func_args_partitions(op.name, elements, op.attrs)
+        _validate_block_args_partitions(op.name, elements, op.attrs, op.regions)
         _validate_operand_dictionaries(
             op.name, op.operands, op.attrs, op.constraints, elements
         )
@@ -5129,7 +5377,7 @@ def _validate_effects(
     operands: tuple[Operand, ...],
     traits: tuple[Trait, ...],
 ) -> None:
-    """Validate memory effect declarations against operands and traits."""
+    """Validate operand and ambient memory effects against the op contract."""
     trait_names = {t.name for t in traits}
     operand_map = {o.name: o for o in operands}
 
@@ -5167,6 +5415,8 @@ def _validate_effects(
         )
 
     for effect in effects:
+        if effect.operand is None:
+            continue
         # Effect must reference an existing operand.
         if effect.operand not in operand_map:
             raise ValueError(
@@ -5486,6 +5736,8 @@ class CallLikeKind(Enum):
     COMMAND_PROGRAM = "command_program"
     # Exact compile-time template implementation call.
     TEMPLATE = "template"
+    # Structural composition sharing the enclosing execution and lifetime scope.
+    COMPOSITION = "composition"
 
 
 class InlinePolicy(Enum):
@@ -5511,8 +5763,8 @@ class CallLikeInterface(NamedTuple):
     operands: str
     # Variadic result field holding call results, or None for no-result calls.
     results: str | None
-    # Optional purity enum attr. None if not applicable.
-    purity: str | None = None
+    # Optional callable effect-contract enum attr. None if not applicable.
+    effect_contract: str | None = None
     # Optional temperature enum attr. None if not applicable.
     temperature: str | None = None
     # Optional inline policy enum attr. None if not applicable.
@@ -5558,8 +5810,8 @@ class FuncLikeInterface(NamedTuple):
     visibility: str | None = None
     # Calling convention enum attr. None if not applicable.
     cc: str | None = None
-    # Purity enum attr. None if not applicable.
-    purity: str | None = None
+    # Callable effect-contract enum attr. None if not applicable.
+    effect_contract: str | None = None
     # Temperature enum attr. None if not applicable.
     temperature: str | None = None
     # Inline policy enum attr. None if not applicable.
@@ -5636,23 +5888,17 @@ class TargetLikeInterface(NamedTuple):
 class LoopLikeInterface(NamedTuple):
     """Interface for loop-like ops that iterate a body region.
 
-    The variadic iter_args operand is the complete loop-carried state domain.
-    Implementing ops have one matching variadic result field and exactly one
-    required single-block body whose carried block arguments follow any
-    induction variable. Each entry instantiates the result type scheme with its
-    own argument identities. The shared verifier checks that tuple and the
-    counted induction variable type. IterArgsMatchResults,
-    YieldCountMatchesResults, and YieldTypesMatchResults constraints check the
-    incoming and yielded state.
+    Implementing ops have one variadic initial-state operand, one variadic
+    result field, and exactly one required single-block body. Counted loops use
+    one state domain: iter_args, body arguments after the induction variable,
+    body yields, and results agree positionally.
 
     Condition-controlled loops have exactly one additional required
-    single-block condition region. Its entry arguments are the initial and
-    backedge state. Operand zero of its terminator is the condition, and the
-    remaining operands form the complete state tuple forwarded to the body and
-    results.
-    ConditionForwardedCountMatchesBlockArgs and
-    ConditionForwardedTypesMatchBlockArgs check this edge against the recurring
-    result scheme instantiated at the body entry.
+    single-block condition region and two independent state domains. Initial
+    operands and body yields enter the condition region's header tuple. The
+    values forwarded after its condition enter the body and define loop
+    results. Either domain may have a different arity and dependent-type
+    scheme. The shared verifier checks all four edges.
 
     Each field is the name of a region, an implicit block argument, or an
     operand on the op (or None where applicable). Exactly one control form is
@@ -5672,6 +5918,10 @@ class LoopLikeInterface(NamedTuple):
     # upper_bound, step; for scf.while iter_args are the only
     # operands and this names that variadic.
     iter_args: str
+    # Variadic result field. For counted loops this is the same positional
+    # state domain as iter_args. For condition loops it is the independently
+    # forwarded body/result domain.
+    results: str
     # Implicit block argument name for the induction variable on the
     # body region's entry block. None for loops without an IV (while
     # loops). For scf.for this is "iv" — the implicit_args entry on
@@ -5709,6 +5959,14 @@ class RegionBranchInterface(NamedTuple):
     # Operand name that drives the branch decision. For scf.if this
     # is the i1 condition; for scf.switch this is the index selector.
     selector: str
+
+    # Region entered when a Boolean selector is true. None when the selector
+    # has keyed or otherwise non-Boolean branch semantics.
+    true_region: str | None = None
+
+    # Region entered when a Boolean selector is false. None when the selector
+    # has keyed or otherwise non-Boolean branch semantics.
+    false_region: str | None = None
 
 
 _DEFAULT_INTERFACE_FIELD = object()
@@ -5999,6 +6257,134 @@ def _validate_condition_refinement(
         )
 
 
+def _validate_execution_condition(
+    op_name: str,
+    condition: ExecutionCondition | None,
+    operands: tuple[Operand, ...],
+    results: tuple[Result | TiedResult, ...],
+    attrs: tuple[AttrDef, ...],
+    successors: tuple[Successor, ...],
+    regions: tuple[RegionDef, ...],
+    constraints: tuple[Constraint, ...],
+    traits: tuple[Trait, ...],
+) -> None:
+    if condition is None:
+        return
+
+    trait_names = {trait.name for trait in traits}
+    if "Pure" not in trait_names:
+        raise ValueError(f"Op '{op_name}': execution condition requires the PURE trait")
+    if "SafeToSpeculate" in trait_names:
+        raise ValueError(
+            f"Op '{op_name}': execution condition conflicts with "
+            "unconditional SAFE_TO_SPECULATE"
+        )
+    if successors or regions:
+        raise ValueError(
+            f"Op '{op_name}': execution condition requires a leaf operation"
+        )
+
+    arithmetic_conditions = {
+        ExecutionCondition.INTEGER_ADD,
+        ExecutionCondition.INTEGER_SUBTRACT,
+        ExecutionCondition.INTEGER_MULTIPLY,
+        ExecutionCondition.INTEGER_MULTIPLY_ADD,
+    }
+    operand_count = 3 if condition is ExecutionCondition.INTEGER_MULTIPLY_ADD else 2
+    if (
+        len(operands) != operand_count
+        or any(operand.optional or operand.variadic for operand in operands)
+        or len(results) != 1
+        or not isinstance(results[0], Result)
+        or results[0].variadic
+    ):
+        raise ValueError(
+            f"Op '{op_name}': integer execution condition requires "
+            f"{operand_count} required operands and one required result"
+        )
+
+    fields = (*operands, results[0])
+    field_names = {field.name for field in fields}
+    has_same_type = any(
+        constraint.name == "SameType" and field_names.issubset(constraint.args)
+        for constraint in constraints
+    )
+    constraints_by_field = {field.type_constraint for field in fields}
+    scalar_constraint = (
+        next(iter(constraints_by_field)) if len(constraints_by_field) == 1 else None
+    )
+    allowed_scalar_constraints = {INTEGER, INDEX}
+    if condition in (
+        ExecutionCondition.INTEGER_ADD,
+        ExecutionCondition.INTEGER_SUBTRACT,
+    ):
+        allowed_scalar_constraints.add(ADDRESS)
+    scalar = scalar_constraint in allowed_scalar_constraints
+    vector = constraints_by_field == {VECTOR} and any(
+        constraint.name == "HasIntegerElement" and results[0].name in constraint.args
+        for constraint in constraints
+    )
+    if not has_same_type or not (scalar or vector):
+        allowed_fields = "integer, index, or integer-vector"
+        if condition in (
+            ExecutionCondition.INTEGER_ADD,
+            ExecutionCondition.INTEGER_SUBTRACT,
+        ):
+            allowed_fields = "integer, index, address, or integer-vector"
+        raise ValueError(
+            f"Op '{op_name}': integer execution condition requires same-typed "
+            f"{allowed_fields} fields"
+        )
+
+    if condition is ExecutionCondition.INTEGER_SHIFT_RIGHT:
+        if attrs:
+            raise ValueError(
+                f"Op '{op_name}': right-shift execution condition does not "
+                "accept instance attributes"
+            )
+        return
+
+    if scalar_constraint in (INDEX, ADDRESS):
+        if attrs:
+            raise ValueError(
+                f"Op '{op_name}': index/address execution condition does not "
+                "accept instance attributes"
+            )
+        return
+
+    if (
+        condition in arithmetic_conditions
+        or condition is ExecutionCondition.INTEGER_SHIFT_LEFT
+    ):
+        condition_name = (
+            "arithmetic" if condition in arithmetic_conditions else "left-shift"
+        )
+    else:
+        raise ValueError(f"Op '{op_name}': unknown execution condition {condition}")
+
+    if len(attrs) != 1:
+        raise ValueError(
+            f"Op '{op_name}': {condition_name} execution condition requires "
+            "canonical integer overflow flags"
+        )
+    overflow_attr = attrs[0]
+    overflow_enum = overflow_attr.enum_def
+    if (
+        overflow_attr.attr_type != ATTR_TYPE_FLAGS
+        or not overflow_attr.optional
+        or overflow_enum is None
+        or overflow_enum.c_type != "loom_integer_overflow_flags_t"
+        or overflow_enum.c_const_prefix != "LOOM_INTEGER_OVERFLOW_FLAG"
+        or overflow_enum.c_include != "loom/ops/op_defs.h"
+        or [(case.keyword, case.value) for case in overflow_enum.cases]
+        != [("nsw", 1), ("nuw", 2)]
+    ):
+        raise ValueError(
+            f"Op '{op_name}': {condition_name} execution condition requires "
+            "canonical integer overflow flags"
+        )
+
+
 def _validate_keyed_module_record(
     op_name: str,
     operands: tuple[Operand, ...],
@@ -6051,6 +6437,170 @@ def _validate_keyed_module_record(
         )
 
 
+def _validate_reference_contracts(
+    op_name: str,
+    operands: tuple[Operand, ...],
+    results: tuple[Result | TiedResult, ...],
+    effects: tuple[Effect, ...],
+) -> None:
+    """Validates storage provenance independently of ownership or carriers."""
+    for operand in operands:
+        if not operand.observes_reference:
+            continue
+        if operand.type_constraint not in (BUFFER, VIEW):
+            raise ValueError(
+                f"Op '{op_name}': reference observations require buffer or view fields"
+            )
+        if any(effect.operand == operand.name for effect in effects):
+            raise ValueError(
+                f"Op '{op_name}': reference observations cannot access payload"
+            )
+    for result in results:
+        source_name = getattr(result, "reference_source", None)
+        if source_name is None:
+            continue
+        source = next(
+            (operand for operand in operands if operand.name == source_name), None
+        )
+        if source is None:
+            raise ValueError(
+                f"Op '{op_name}': reference source '{source_name}' is not an operand"
+            )
+        if source.variadic or source.optional:
+            raise ValueError(
+                f"Op '{op_name}': reference source '{source_name}' "
+                "must be one required operand"
+            )
+        if source.type_constraint not in (
+            BUFFER,
+            VIEW,
+        ) or result.type_constraint not in (BUFFER, VIEW):
+            raise ValueError(
+                f"Op '{op_name}': reference sources require buffer or view fields"
+            )
+        if result.allocates or getattr(result, "signature_only", False):
+            raise ValueError(
+                f"Op '{op_name}': derived references cannot allocate "
+                "or be signature-only"
+            )
+        if operands.index(source) >= 255:
+            raise ValueError(
+                f"Op '{op_name}': reference source exceeds descriptor index range"
+            )
+
+
+def _validate_signature_only_results(
+    op_name: str,
+    results: tuple[Result | TiedResult, ...],
+    traits: tuple[Trait, ...],
+    format_elements: tuple[FormatElement, ...],
+) -> None:
+    """Validates locally scoped result signatures."""
+    from loom.assembly import Clause, OptionalGroup, ResultType, ResultTypeList, Scope
+
+    signature_results = [
+        result for result in results if getattr(result, "signature_only", False)
+    ]
+    if not signature_results:
+        return
+    if len(signature_results) != len(results):
+        raise ValueError(
+            f"Op '{op_name}': signature-only and SSA-visible results cannot be mixed"
+        )
+    if any(isinstance(result, TiedResult) for result in results):
+        raise ValueError(
+            f"Op '{op_name}': signature-only results cannot be tied to operands"
+        )
+    if any(result.allocates for result in signature_results):
+        raise ValueError(
+            f"Op '{op_name}': signature-only results cannot allocate resources"
+        )
+    if any(trait.name == "SymbolDefine" for trait in traits):
+        raise ValueError(
+            f"Op '{op_name}': symbol results are already locally scoped and "
+            "must not be marked signature-only"
+        )
+
+    result_names = {result.name for result in signature_results}
+    scoped_result_fields: set[str] = set()
+    unscoped_result_fields: set[str] = set()
+
+    def collect(
+        elements: tuple[FormatElement, ...], inside_scope: bool = False
+    ) -> None:
+        for element in elements:
+            if isinstance(element, Scope):
+                collect(element.elements, True)
+            elif isinstance(element, Clause | OptionalGroup):
+                collect(element.elements, inside_scope)
+            elif isinstance(element, ResultType | ResultTypeList):
+                if element.field not in result_names:
+                    continue
+                (scoped_result_fields if inside_scope else unscoped_result_fields).add(
+                    element.field
+                )
+
+    collect(format_elements)
+    if unscoped_result_fields:
+        raise ValueError(
+            f"Op '{op_name}': signature-only result fields must be printed "
+            f"inside Scope(...): {sorted(unscoped_result_fields)}"
+        )
+    missing_result_fields = result_names - scoped_result_fields
+    if missing_result_fields:
+        raise ValueError(
+            f"Op '{op_name}': signature-only result fields require an explicit "
+            f"result type format: {sorted(missing_result_fields)}"
+        )
+
+
+def _validate_symbol_definition_attr(
+    op_name: str,
+    attrs: tuple[AttrDef, ...],
+    field: str,
+    role: str,
+    expected_type: str,
+) -> None:
+    attr = next((attr for attr in attrs if attr.name == field), None)
+    if attr is None:
+        raise ValueError(
+            f"Op '{op_name}': symbol_def {role} '{field}' does not name an attr"
+        )
+    if attr.attr_type != expected_type:
+        article = "an" if expected_type[0] in "aeiou" else "a"
+        raise ValueError(
+            f"Op '{op_name}': symbol_def {role} '{field}' must be "
+            f"{article} {expected_type} attr"
+        )
+
+
+def _validate_symbol_definition(
+    op_name: str,
+    symbol_def: SymbolDefinition | None,
+    attrs: tuple[AttrDef, ...],
+    traits: tuple[Trait, ...],
+) -> None:
+    has_symbol_define = any(trait.name == "SymbolDefine" for trait in traits)
+    if has_symbol_define and symbol_def is None:
+        raise ValueError(f"Op '{op_name}': SYMBOL_DEFINE requires symbol_def")
+    if symbol_def is None:
+        return
+    if not has_symbol_define:
+        raise ValueError(f"Op '{op_name}': symbol_def requires SYMBOL_DEFINE trait")
+    _validate_symbol_definition_attr(
+        op_name, attrs, symbol_def.field, "field", ATTR_TYPE_SYMBOL
+    )
+    for role, field in (
+        ("retain", symbol_def.retain),
+        ("linkage", symbol_def.linkage),
+        ("product_carrier", symbol_def.product_carrier),
+    ):
+        if field is not None:
+            _validate_symbol_definition_attr(
+                op_name, attrs, field, role, ATTR_TYPE_ENUM
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class Op:
     """A complete operation declaration.
@@ -6077,6 +6627,13 @@ class Op:
     symbol_def: Symbol definition descriptor for SYMBOL_DEFINE ops.
     format: Format element list describing textual assembly.
     assembly: Short target-assembly spelling using the same operation fields.
+    execution_condition: Shared fact-dependent condition under which the op is
+        safe to execute on additional control-flow paths.
+    eager_execution_cost: Relative cost for transforms that eagerly execute
+        the op on additional control-flow paths. None means no legality path
+        requires a policy; zero disables generic eager execution.
+    structural_materialization: Whether a descriptor-free operation may emit
+        target register packets while materializing its results.
     legacy_formats: Legacy textual formats accepted by migration tooling.
     examples: List of example IR strings for documentation.
 
@@ -6107,6 +6664,8 @@ class Op:
     facts: str = ""  # C function name for fact inference, or "".
     type_transfer: str = ""  # C function name for semantic type transfer, or "".
     condition_refinement: ConditionRefinement | None = None
+    execution_condition: ExecutionCondition | None = None
+    eager_execution_cost: int | None = None
     verify: str = ""  # C function name for op-specific verification, or "".
     builder_name: str | None = None  # Python builder method override, or None.
     generate_c_builder: bool = True  # False when construction requires domain context.
@@ -6119,6 +6678,7 @@ class Op:
     ] = ()  # Interface implementations (FuncLikeInterface, etc.).
     format: tuple[FormatElement, ...] = ()
     assembly: AssemblyFormat | None = None
+    structural_materialization: bool = False
     legacy_formats: tuple[LegacyFormat, ...] = ()
     examples: tuple[str, ...] = ()
 
@@ -6144,6 +6704,8 @@ class Op:
         facts: str = "",
         type_transfer: str = "",
         condition_refinement: ConditionRefinement | None = None,
+        execution_condition: ExecutionCondition | None = None,
+        eager_execution_cost: int | None = None,
         verify: str = "",
         builder_name: str | None = None,
         generate_c_builder: bool = True,
@@ -6154,6 +6716,7 @@ class Op:
         interfaces: list[Any] | tuple[Any, ...] = (),
         format: list[FormatElement] | tuple[FormatElement, ...] = (),
         assembly: AssemblyFormat | None = None,
+        structural_materialization: bool = False,
         legacy_formats: list[LegacyFormat] | tuple[LegacyFormat, ...] = (),
         examples: list[str] | tuple[str, ...] = (),
     ) -> None:
@@ -6185,6 +6748,8 @@ class Op:
         object.__setattr__(self, "facts", facts)
         object.__setattr__(self, "type_transfer", type_transfer)
         object.__setattr__(self, "condition_refinement", condition_refinement)
+        object.__setattr__(self, "execution_condition", execution_condition)
+        object.__setattr__(self, "eager_execution_cost", eager_execution_cost)
         object.__setattr__(self, "verify", verify)
         object.__setattr__(self, "builder_name", builder_name)
         object.__setattr__(self, "generate_c_builder", generate_c_builder)
@@ -6192,6 +6757,17 @@ class Op:
         object.__setattr__(self, "contracts", tuple(contracts))
         _validate_condition_refinement(
             name, condition_refinement, frozen_operands, frozen_results
+        )
+        _validate_execution_condition(
+            name,
+            execution_condition,
+            frozen_operands,
+            frozen_results,
+            frozen_attrs,
+            frozen_successors,
+            frozen_regions,
+            tuple(constraints),
+            tuple(traits),
         )
         if (
             category is not None
@@ -6208,62 +6784,12 @@ class Op:
         object.__setattr__(self, "interfaces", tuple(interfaces))
         object.__setattr__(self, "format", frozen_format)
         object.__setattr__(self, "assembly", assembly)
+        object.__setattr__(
+            self, "structural_materialization", structural_materialization
+        )
         object.__setattr__(self, "legacy_formats", frozen_legacy_formats)
         object.__setattr__(self, "examples", tuple(examples))
-        has_symbol_define = any(trait.name == "SymbolDefine" for trait in traits)
-        if has_symbol_define and symbol_def is None:
-            raise ValueError(f"Op '{name}': SYMBOL_DEFINE requires symbol_def")
-        if symbol_def is not None and not has_symbol_define:
-            raise ValueError(f"Op '{name}': symbol_def requires SYMBOL_DEFINE trait")
-        if symbol_def is not None:
-            defining_attr = next(
-                (attr for attr in frozen_attrs if attr.name == symbol_def.field),
-                None,
-            )
-            if defining_attr is None:
-                raise ValueError(
-                    f"Op '{name}': symbol_def field '{symbol_def.field}' "
-                    "does not name an attr"
-                )
-            if defining_attr.attr_type != ATTR_TYPE_SYMBOL:
-                raise ValueError(
-                    f"Op '{name}': symbol_def field '{symbol_def.field}' "
-                    "must be a symbol attr"
-                )
-            if symbol_def.retain is not None:
-                retain_attr = next(
-                    (attr for attr in frozen_attrs if attr.name == symbol_def.retain),
-                    None,
-                )
-                if retain_attr is None:
-                    raise ValueError(
-                        f"Op '{name}': symbol_def retain '{symbol_def.retain}' "
-                        "does not name an attr"
-                    )
-                if retain_attr.attr_type != ATTR_TYPE_ENUM:
-                    raise ValueError(
-                        f"Op '{name}': symbol_def retain '{symbol_def.retain}' "
-                        "must be an enum attr"
-                    )
-            if symbol_def.product_carrier is not None:
-                product_carrier_attr = next(
-                    (
-                        attr
-                        for attr in frozen_attrs
-                        if attr.name == symbol_def.product_carrier
-                    ),
-                    None,
-                )
-                if product_carrier_attr is None:
-                    raise ValueError(
-                        f"Op '{name}': symbol_def product_carrier "
-                        f"'{symbol_def.product_carrier}' does not name an attr"
-                    )
-                if product_carrier_attr.attr_type != ATTR_TYPE_ENUM:
-                    raise ValueError(
-                        f"Op '{name}': symbol_def product_carrier "
-                        f"'{symbol_def.product_carrier}' must be an enum attr"
-                    )
+        _validate_symbol_definition(name, symbol_def, frozen_attrs, tuple(traits))
         func_like = next(
             (
                 interface
@@ -6395,6 +6921,12 @@ class Op:
             frozen_effects,
             frozen_ownership_effects,
         )
+        _validate_reference_contracts(
+            name, frozen_operands, frozen_results, frozen_effects
+        )
+        _validate_signature_only_results(
+            name, frozen_results, tuple(traits), frozen_format
+        )
         _validate_op_formats(self)
         if frozen_legacy_formats:
             _validate_legacy_formats(
@@ -6418,6 +6950,14 @@ class Op:
         return f"Op({self.name!r})"
 
     # --- Lookup helpers ---
+
+    @property
+    def has_signature_only_results(self) -> bool:
+        """Whether every result is local to the operation's signature."""
+        return bool(self.results) and all(
+            isinstance(result, Result) and result.signature_only
+            for result in self.results
+        )
 
     def operand(self, name: str) -> Operand | None:
         """Find an operand by name."""
@@ -6650,6 +7190,7 @@ def cast_op(
     doc: str,
     input_role: OperandRole = OperandRole.NONE,
     traits: list[Trait] | None = None,
+    flags: tuple[str, EnumDef] | None = None,
     **kwargs: Any,
 ) -> Op:
     """Declare a type-casting op: (input) -> result, different types.
@@ -6657,10 +7198,29 @@ def cast_op(
     Format: %r = name %x : input_type to result_type
     """
     from loom.assembly import COLON, Ref, TypeOf, kw
+    from loom.assembly import Flags as FlagsFmt
 
     op_traits = [PURE]
     if traits:
         op_traits.extend(traits)
+
+    attrs: list[AttrDef] = []
+    fmt: list[FormatElement] = []
+    if flags:
+        attr_name, enum_def = flags
+        attrs.append(
+            AttrDef(attr_name, ATTR_TYPE_FLAGS, optional=True, enum_def=enum_def)
+        )
+        fmt.append(FlagsFmt(attr_name))
+    fmt.extend(
+        [
+            Ref("input"),
+            COLON,
+            TypeOf("input"),
+            kw("to"),
+            TypeOf("result"),
+        ]
+    )
 
     return Op(
         name=name,
@@ -6668,14 +7228,9 @@ def cast_op(
         doc=doc,
         operands=[Operand("input", from_constraint, role=input_role)],
         results=[Result("result", to_constraint)],
+        attrs=attrs,
         traits=op_traits,
-        format=[
-            Ref("input"),
-            COLON,
-            TypeOf("input"),
-            kw("to"),
-            TypeOf("result"),
-        ],
+        format=fmt,
         **kwargs,
     )
 

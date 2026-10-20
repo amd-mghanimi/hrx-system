@@ -1,4 +1,23 @@
-// RUN: emit low-allocation-json @copy_input_at_early_tie
+// Non-writing identities share their original storage even when every name
+// remains live. Each name is published without acquiring another register bank.
+// RUN: emit low-allocation-query @live_identity_chain values=%source,%first_identity,%second_identity
+
+test.target<low_core> @target
+
+low.func.def target<test.low.core>(@target) @live_identity_chain(%source: reg<test.i32 x4>) -> (reg<test.i32 x4>, reg<test.i32 x4>, reg<test.i32 x4>) asm {
+  %first_identity = low.assume %source [range(%source, 0, 1024)] : reg<test.i32 x4>
+  %second_identity = low.assume %first_identity [range(%first_identity, 0, 1024)] : reg<test.i32 x4>
+  return %source, %first_identity, %second_identity
+}
+
+// ----
+value %source: test.i32 -> target_id[0:4]
+value %first_identity: test.i32 -> target_id[0:4]
+value %second_identity: test.i32 -> target_id[0:4]
+
+// ====
+
+// RUN: emit low-allocation-query @copy_input_at_early_tie values=%source,%copy,%result copies=%copy
 
 test.target<low_core> @target
 
@@ -9,11 +28,14 @@ low.func.def target<test.low.core>(@target) @copy_input_at_early_tie(%source: re
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"copy_input_at_early_tie","target":"target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":3,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":8,"location":{"kind":"target_id","base":0,"count":8}},{"index":1,"value":{"id":2,"name":"copy","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":3,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":2,"value":{"id":3,"name":"result","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":3,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":0,"name":"source","type":"reg<test.i32 x8>"},"result_value":{"id":2,"name":"copy","type":"reg<test.i32 x8>"},"source_assignment":0,"result_assignment":1}],"remarks":[]}
+value %source: test.i32 -> target_id[0:8]
+value %copy: test.i32 -> target_id[8:8]
+value %result: test.i32 -> target_id[8:8]
+copy %source -> %copy: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @copied_fact_alias_at_early_tie
+// RUN: emit low-allocation-query @copied_fact_alias_at_early_tie values=%source,%copy,%alias,%result copies=%copy
 
 test.target<low_core> @target
 
@@ -25,11 +47,15 @@ low.func.def target<test.low.core>(@target) @copied_fact_alias_at_early_tie(%sou
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"copied_fact_alias_at_early_tie","target":"target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":4,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":0,"count":8}},{"index":1,"value":{"id":2,"name":"copy","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":3,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":2,"value":{"id":3,"name":"alias","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":3,"value":{"id":4,"name":"result","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":0,"name":"source","type":"reg<test.i32 x8>"},"result_value":{"id":2,"name":"copy","type":"reg<test.i32 x8>"},"source_assignment":0,"result_assignment":1}],"remarks":[]}
+value %source: test.i32 -> target_id[0:8]
+value %copy: test.i32 -> target_id[8:8]
+value %alias: test.i32 -> target_id[8:8]
+value %result: test.i32 -> target_id[8:8]
+copy %source -> %copy: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @fact_aliased_input_at_early_tie
+// RUN: emit low-allocation-query @fact_aliased_input_at_early_tie values=%source,%alias,%copy,%result copies=%copy
 
 test.target<low_core> @target
 
@@ -41,4 +67,73 @@ low.func.def target<test.low.core>(@target) @fact_aliased_input_at_early_tie(%so
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"fact_aliased_input_at_early_tie","target":"target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":4,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":0,"count":8}},{"index":1,"value":{"id":2,"name":"alias","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":0,"count":8}},{"index":2,"value":{"id":3,"name":"copy","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":3,"value":{"id":4,"name":"result","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":4,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":2,"name":"alias","type":"reg<test.i32 x8>"},"result_value":{"id":3,"name":"copy","type":"reg<test.i32 x8>"},"source_assignment":1,"result_assignment":2}],"remarks":[]}
+value %source: test.i32 -> target_id[0:8]
+value %alias: test.i32 -> target_id[0:8]
+value %copy: test.i32 -> target_id[8:8]
+value %result: test.i32 -> target_id[8:8]
+copy %alias -> %copy: materialized
+
+// ====
+
+// A slice establishes an alias without reading the producer. Retain the
+// producer's storage and defer the loop-state handoff to the backedge.
+// RUN: emit low-allocation-query @slice_keeps_source_before_backedge values=%state,%fresh,%part fixed=%state:target_id:0:1 fixed=%fresh:target_id:8:4
+
+test.target<low_core> @target
+
+low.func.def target<test.low.core>(@target) @slice_keeps_source_before_backedge(%condition: reg<test.i32>, %initial: reg<test.i32>, %input: reg<test.i32 x4>) asm {
+  low.br ^loop(%initial: reg<test.i32>)
+^loop(%state: reg<test.i32>):
+  %consumed = test.add.i32 %state, %condition
+  %fresh = test.add.v4i32 %input, %input
+  %part = slice %fresh[1] : reg<test.i32 x4> -> reg<test.i32>
+  low.cond_br %condition, ^repeat, ^exit : reg<test.i32>
+^repeat:
+  low.br ^loop(%part: reg<test.i32>)
+^exit:
+  return
+}
+
+// ----
+value %state: test.i32 -> target_id[0:1]
+value %fresh: test.i32 -> target_id[8:4]
+value %part: test.i32 -> target_id[9:1]
+
+// ====
+
+// RUN: emit low-allocation-query @copy_keeps_source_before_backedge values=%state,%fresh,%next copies=%next fixed=%state:target_id:0:1 fixed=%fresh:target_id:8:1
+
+test.target<low_core> @target
+
+low.func.def target<test.low.core>(@target) @copy_keeps_source_before_backedge(%condition: reg<test.i32>, %initial: reg<test.i32>) asm {
+  low.br ^loop(%initial: reg<test.i32>)
+^loop(%state: reg<test.i32>):
+  %fresh = test.add.i32 %state, %condition
+  %next = copy %fresh : reg<test.i32> -> reg<test.i32>
+  low.br ^loop(%next: reg<test.i32>)
+}
+
+// ----
+value %state: test.i32 -> target_id[0:1]
+value %fresh: test.i32 -> target_id[8:1]
+value %next: test.i32 -> target_id[8:1]
+copy %fresh -> %next: coalesced
+
+// ====
+
+// RUN: emit low-allocation-query @move_keeps_source_before_backedge values=%state,%fresh,%next fixed=%state:target_id:0:1 fixed=%fresh:target_id:8:1
+
+test.target<low_core> @target
+
+low.func.def target<test.low.core>(@target) @move_keeps_source_before_backedge(%condition: reg<test.i32>, %initial: reg<test.i32>) asm {
+  low.br ^loop(%initial: reg<test.i32>)
+^loop(%state: reg<test.i32>):
+  %fresh = test.add.i32 %state, %condition
+  %next = move %fresh : reg<test.i32> -> reg<test.i32>
+  low.br ^loop(%next: reg<test.i32>)
+}
+
+// ----
+value %state: test.i32 -> target_id[0:1]
+value %fresh: test.i32 -> target_id[8:1]
+value %next: test.i32 -> target_id[8:1]

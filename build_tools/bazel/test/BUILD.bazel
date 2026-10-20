@@ -17,7 +17,7 @@ load("//build_tools/bazel:glob.bzl", "iree_checked_glob")
 load(":cc_benchmark_rules_test.bzl", "cc_benchmark_rules_test_suite")
 load(":cc_fuzz_rules_test.bzl", "cc_fuzz_rules_test_suite")
 load(":cc_link_test.bzl", "cc_link_test_suite")
-load(":cc_rules_test.bzl", "cc_rules_test_suite")
+load(":cc_rules_test.bzl", "cc_rules_test_suite", "execution_platform_runner")
 load(":compile_commands_rules_test.bzl", "compile_commands_rules_test_suite")
 load(
     ":dynamic_library_bundle_rules_test.bzl",
@@ -31,11 +31,57 @@ load(":executable_rules_test.bzl", "executable_rules_test_suite")
 load(":generate_rules_test.bzl", "generate_rules_test_suite")
 load(":glob_rules_test.bzl", "glob_rules_test_suite")
 load(":package_policy_test.bzl", "package_policy_test_suite")
+load(":python_rules_test.bzl", "python_rules_test_suite")
 load(":query_rules_test.bzl", "query_rules_test_suite")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["empty_suppressions.txt"])
+
+# This extra target constraint is absent from every registered host platform.
+# Analysis tests register its platform explicitly when compatible execution is
+# part of the scenario, independently of the compiler's native OS and CPU.
+constraint_setting(name = "test_execution_requirement")
+
+constraint_value(
+    name = "test_execution_required",
+    constraint_setting = ":test_execution_requirement",
+)
+
+constraint_value(
+    name = "test_execution_incompatible",
+    constraint_setting = ":test_execution_requirement",
+)
+
+platform(
+    name = "test_execution_platform",
+    constraint_values = [":test_execution_required"],
+    parents = ["@platforms//host"],
+)
+
+platform(
+    name = "test_incompatible_execution_platform",
+    constraint_values = [":test_execution_incompatible"],
+    parents = ["@platforms//host"],
+)
+
+execution_platform_runner(name = "compatible_test_runner")
+
+execution_platform_runner(name = "incompatible_test_runner")
+
+toolchain(
+    name = "compatible_test_runner_toolchain",
+    exec_compatible_with = [":test_execution_required"],
+    toolchain = ":compatible_test_runner",
+    toolchain_type = "@bazel_tools//tools/cpp:test_runner_toolchain_type",
+)
+
+toolchain(
+    name = "incompatible_test_runner_toolchain",
+    exec_compatible_with = [":test_execution_incompatible"],
+    toolchain = ":incompatible_test_runner",
+    toolchain_type = "@bazel_tools//tools/cpp:test_runner_toolchain_type",
+)
 
 iree_dynamic_library_bundle(
     name = "dynamic_library_environment_bundle",
@@ -81,9 +127,17 @@ iree_executable_test(
     data = [":dynamic_library_dependency.so"],
 )
 
+_EXECUTABLE_WRAPPER_ARGUMENTS = [
+    "'argument with spaces'",
+    "''",
+    "'embedded\"quote'",
+    "'trailing\\'",
+]
+
 iree_executable_test(
     name = "cross_package_executable_wrapper_test",
     src = "//build_tools/bazel/test/executable_fixture:binary",
+    args = _EXECUTABLE_WRAPPER_ARGUMENTS,
 )
 
 iree_executable_alias(
@@ -91,6 +145,12 @@ iree_executable_alias(
     testonly = True,
     src = "//build_tools/bazel/test/executable_fixture:binary",
     tags = ["manual"],
+)
+
+iree_executable_test(
+    name = "nested_executable_wrapper_test",
+    src = ":cross_package_executable_alias_fixture",
+    args = _EXECUTABLE_WRAPPER_ARGUMENTS,
 )
 
 iree_cc_benchmark(
@@ -140,6 +200,8 @@ filegroup(
 glob_rules_test_suite(name = "glob_tests")
 
 package_policy_test_suite(name = "package_policy_tests")
+
+python_rules_test_suite(name = "python_tests")
 
 query_rules_test_suite(name = "query_tests")
 

@@ -1,0 +1,347 @@
+// RUN: emit source-low target=wasm:simd128 output=low control-flow=structured-low
+
+// A runtime-selected result that crosses a physical packet boundary streams
+// only the selected source packets.
+func.def @dynamic_byte_window(%trial0: index, %input: buffer, %output: buffer) {
+  %trial = index.assume %trial0 [range(%trial0, 0, 28)] : index
+  %base = index.constant 0 : offset
+  %source_view = buffer.view %input[%base] : buffer -> view<48xi8>
+  %result_view = buffer.view %output[%base] : buffer -> view<20xi8>
+  %source = vector.load %source_view[0] : view<48xi8> -> vector<48xi8>
+  %result = vector.slice %source[%trial] : vector<48xi8> -> vector<20xi8>
+  vector.store %result, %result_view[0] : vector<20xi8>, view<20xi8>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @dynamic_byte_window(%trial: reg<wasm.i32>, %input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %26 = i32.add %input, %trial
+  %27 = v128.load %26
+  %29 = i32.load %26 {offset = 16}
+  v128.store %output, %27
+  i32.store %output, %29 {offset = 16}
+  return
+}
+
+// ====
+
+// Two predicate windows may independently replay one ordinary source read
+// when motion analysis proves that neither crosses a write.
+func.def @shared_dynamic_predicate_windows(%trial0: index, %input: buffer, %output: buffer) {
+  %trial = index.assume %trial0 [range(%trial0, 0, 4)] : index
+  %c4 = index.constant 4 : index
+  %second_offset = index.add %trial, %c4 : index
+  %base = index.constant 0 : offset
+  %source_view = buffer.view %input[%base] : buffer -> view<12xi32>
+  %result_view = buffer.view %output[%base] : buffer -> view<8xi8>
+  %source = vector.load %source_view[0] : view<12xi32> -> vector<12xi32>
+  %c0 = vector.constant 0 : vector<12xi32>
+  %predicates = vector.cmpi ne, %source, %c0 : vector<12xi32> -> vector<12xi1>
+  %first = vector.slice %predicates[%trial] : vector<12xi1> -> vector<4xi1>
+  %second = vector.slice %predicates[%second_offset] : vector<12xi1> -> vector<4xi1>
+  %first_bytes = vector.extui %first : vector<4xi1> to vector<4xi8>
+  %second_bytes = vector.extui %second : vector<4xi1> to vector<4xi8>
+  vector.store %first_bytes, %result_view[0] : vector<4xi8>, view<8xi8>
+  vector.store %second_bytes, %result_view[4] : vector<4xi8>, view<8xi8>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @shared_dynamic_predicate_windows(%trial: reg<wasm.i32>, %input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %33 = i32.const 4
+  %34 = i32.mul %trial, %33
+  %35 = i32.add %input, %34
+  %36 = v128.load %35
+  %37 = i32.const 0
+  %38 = i32x4.splat %37
+  %39 = i32x4.ne %36, %38
+  %first = i8x16.shuffle %39, %39, 0, 4, 8, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %42 = v128.load %35 {offset = 16}
+  %43 = i32x4.ne %42, %38
+  %second = i8x16.shuffle %43, %43, 0, 4, 8, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %45 = v128.const 72340172838076673, 72340172838076673
+  %first_bytes = v128.and %first, %45
+  %second_bytes = v128.and %second, %45
+  %49 = i32x4.extract_lane %first_bytes, 0
+  i32.store %output, %49
+  %50 = i32x4.extract_lane %second_bytes, 0
+  i32.store %output, %50 {offset = 4}
+  return
+}
+
+// ====
+
+// A leading dynamic coordinate selects one contiguous shaped tail. Flattening
+// retains the authored packed alignment on both views.
+func.def @dynamic_shaped_tail(%trial0: index, %input: buffer, %output: buffer) {
+  %trial = index.assume %trial0 [range(%trial0, 0, 1)] : index
+  %base = index.constant 0 : offset
+  %source_view = buffer.view %input[%base] : buffer -> view<2x3x4xi16, align(1)>
+  %result_view = buffer.view %output[%base] : buffer -> view<3x4xi16, align(1)>
+  %source = vector.load %source_view[0, 0, 0] : view<2x3x4xi16, align(1)> -> vector<2x3x4xi16>
+  %result = vector.extract %source[%trial] : vector<2x3x4xi16> -> vector<3x4xi16>
+  vector.store %result, %result_view[0, 0] : vector<3x4xi16>, view<3x4xi16, align(1)>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @dynamic_shaped_tail(%trial: reg<wasm.i32>, %input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %38 = i32.const 24
+  %39 = i32.mul %trial, %38
+  %40 = i32.add %input, %39
+  %41 = v128.load %40
+  %43 = i64.load %40 {offset = 16}
+  v128.store %output, %41
+  i64.store %output, %43 {offset = 16}
+  return
+}
+
+// ====
+
+// An authored concat is an SSA snapshot: the runtime window selects from its
+// retained packets instead of replaying the packet producers.
+func.def @materialized_i8_window(%lhs: vector<16xi8>, %rhs: vector<16xi8>, %offset0: index) -> (vector<16xi8>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 16)] : index
+  %source = vector.concat<0> %lhs, %rhs : vector<16xi8>, vector<16xi8> -> vector<32xi8>
+  %result = vector.slice %source[%offset] : vector<32xi8> -> vector<16xi8>
+  func.return %result : vector<16xi8>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @materialized_i8_window(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %offset: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %12 = i32.const 15
+  %13 = i32.and %offset, %12
+  %14 = i8x16.splat %13
+  %15 = v128.const 506097522914230528, 1084818905618843912
+  %16 = i8x16.add %14, %15
+  %17 = v128.const 1157442765409226768, 1157442765409226768
+  %18 = i8x16.sub %16, %17
+  %19 = v128.const 0, 0
+  %20 = i32.const 0
+  %21 = i32.const 16
+  %22 = i32.ge_u %offset, %21
+  %23 = i32.sub %20, %22
+  %24 = i8x16.splat %23
+  %27 = v128.bitselect %rhs, %lhs, %24
+  %28 = v128.bitselect %19, %rhs, %24
+  %29 = i8x16.swizzle %27, %16
+  %30 = i8x16.swizzle %28, %18
+  %result = v128.or %29, %30
+  return %result
+}
+
+// ====
+
+func.def @materialized_bf16_window(%lhs: vector<8xbf16>, %rhs: vector<8xbf16>, %offset0: index) -> (vector<8xbf16>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 8)] : index
+  %source = vector.concat<0> %lhs, %rhs : vector<8xbf16>, vector<8xbf16> -> vector<16xbf16>
+  %result = vector.slice %source[%offset] : vector<16xbf16> -> vector<8xbf16>
+  func.return %result : vector<8xbf16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @materialized_bf16_window(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %offset: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %12 = i32.const 2
+  %13 = i32.mul %offset, %12
+  %14 = i32.const 15
+  %15 = i32.and %13, %14
+  %16 = i8x16.splat %15
+  %17 = v128.const 506097522914230528, 1084818905618843912
+  %18 = i8x16.add %16, %17
+  %19 = v128.const 1157442765409226768, 1157442765409226768
+  %20 = i8x16.sub %18, %19
+  %21 = v128.const 0, 0
+  %22 = i32.const 0
+  %23 = i32.const 16
+  %24 = i32.ge_u %13, %23
+  %25 = i32.sub %22, %24
+  %26 = i8x16.splat %25
+  %29 = v128.bitselect %rhs, %lhs, %26
+  %30 = v128.bitselect %21, %rhs, %26
+  %31 = i8x16.swizzle %29, %18
+  %32 = i8x16.swizzle %30, %20
+  %result = v128.or %31, %32
+  return %result
+}
+
+// ====
+
+func.def @materialized_f32_window(%lhs: vector<4xf32>, %rhs: vector<4xf32>, %offset0: index) -> (vector<4xf32>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 4)] : index
+  %source = vector.concat<0> %lhs, %rhs : vector<4xf32>, vector<4xf32> -> vector<8xf32>
+  %result = vector.slice %source[%offset] : vector<8xf32> -> vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @materialized_f32_window(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %offset: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %12 = i32.const 4
+  %13 = i32.mul %offset, %12
+  %14 = i32.const 15
+  %15 = i32.and %13, %14
+  %16 = i8x16.splat %15
+  %17 = v128.const 506097522914230528, 1084818905618843912
+  %18 = i8x16.add %16, %17
+  %19 = v128.const 1157442765409226768, 1157442765409226768
+  %20 = i8x16.sub %18, %19
+  %21 = v128.const 0, 0
+  %22 = i32.const 0
+  %23 = i32.const 16
+  %24 = i32.ge_u %13, %23
+  %25 = i32.sub %22, %24
+  %26 = i8x16.splat %25
+  %29 = v128.bitselect %rhs, %lhs, %26
+  %30 = v128.bitselect %21, %rhs, %26
+  %31 = i8x16.swizzle %29, %18
+  %32 = i8x16.swizzle %30, %20
+  %result = v128.or %31, %32
+  return %result
+}
+
+// ====
+
+func.def @materialized_i64_window(%lhs: vector<2xi64>, %rhs: vector<2xi64>, %offset0: index) -> (vector<2xi64>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 2)] : index
+  %source = vector.concat<0> %lhs, %rhs : vector<2xi64>, vector<2xi64> -> vector<4xi64>
+  %result = vector.slice %source[%offset] : vector<4xi64> -> vector<2xi64>
+  func.return %result : vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @materialized_i64_window(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %offset: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %12 = i32.const 8
+  %13 = i32.mul %offset, %12
+  %14 = i32.const 15
+  %15 = i32.and %13, %14
+  %16 = i8x16.splat %15
+  %17 = v128.const 506097522914230528, 1084818905618843912
+  %18 = i8x16.add %16, %17
+  %19 = v128.const 1157442765409226768, 1157442765409226768
+  %20 = i8x16.sub %18, %19
+  %21 = v128.const 0, 0
+  %22 = i32.const 0
+  %23 = i32.const 16
+  %24 = i32.ge_u %13, %23
+  %25 = i32.sub %22, %24
+  %26 = i8x16.splat %25
+  %29 = v128.bitselect %rhs, %lhs, %26
+  %30 = v128.bitselect %21, %rhs, %26
+  %31 = i8x16.swizzle %29, %18
+  %32 = i8x16.swizzle %30, %20
+  %result = v128.or %31, %32
+  return %result
+}
+
+// ====
+
+func.def @materialized_predicate_window(%a: vector<16xi1>, %b: vector<16xi1>, %c: vector<16xi1>, %d: vector<16xi1>, %offset0: index) -> (vector<16xi8>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 48)] : index
+  %source = vector.concat<0> %a, %b, %c, %d : vector<16xi1>, vector<16xi1>, vector<16xi1>, vector<16xi1> -> vector<64xi1>
+  %window = vector.slice %source[%offset] : vector<64xi1> -> vector<16xi1>
+  %result = vector.extui %window : vector<16xi1> to vector<16xi8>
+  func.return %result : vector<16xi8>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @materialized_predicate_window(%a: reg<wasm.v128>, %b: reg<wasm.v128>, %c: reg<wasm.v128>, %d: reg<wasm.v128>, %offset: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %26 = i32.const 15
+  %27 = i32.and %offset, %26
+  %28 = i8x16.splat %27
+  %29 = v128.const 506097522914230528, 1084818905618843912
+  %30 = i8x16.add %28, %29
+  %31 = v128.const 1157442765409226768, 1157442765409226768
+  %32 = i8x16.sub %30, %31
+  %33 = v128.const 0, 0
+  %34 = i32.const 0
+  %35 = i32.const 16
+  %36 = i32.ge_u %offset, %35
+  %37 = i32.sub %34, %36
+  %38 = i8x16.splat %37
+  %39 = i32.const 32
+  %40 = i32.ge_u %offset, %39
+  %41 = i32.sub %34, %40
+  %42 = i8x16.splat %41
+  %43 = i32.const 48
+  %44 = i32.ge_u %offset, %43
+  %45 = i32.sub %34, %44
+  %46 = i8x16.splat %45
+  %50 = v128.bitselect %b, %a, %38
+  %51 = v128.bitselect %c, %b, %38
+  %53 = v128.bitselect %c, %50, %42
+  %54 = v128.bitselect %d, %51, %42
+  %55 = v128.bitselect %d, %53, %46
+  %56 = v128.bitselect %33, %54, %46
+  %57 = i8x16.swizzle %55, %30
+  %58 = i8x16.swizzle %56, %32
+  %window = v128.or %57, %58
+  %60 = v128.const 72340172838076673, 72340172838076673
+  %result = v128.and %window, %60
+  return %result
+}
+
+// ====
+
+// RUN: with-checks compile-report target-legalize{mode=final},source-to-low
+
+wasm.target<simd128> @target
+
+// The dynamic window remains one packet-tuple plan while its unsigned
+// extension reaches the store as two native packets. Scalarization would
+// replace these rows with a lane-proportional reference rewrite.
+func.def target(@target) @materialized_predicate_window_report(%a: vector<16xi1>, %b: vector<16xi1>, %c: vector<16xi1>, %d: vector<16xi1>, %offset0: index, %output: buffer) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 32)] : index
+  %source = vector.concat<0> %a, %b, %c, %d : vector<16xi1>, vector<16xi1>, vector<16xi1>, vector<16xi1> -> vector<64xi1>
+  %window = vector.slice %source[%offset] : vector<64xi1> -> vector<32xi1>
+  %result = vector.extui %window : vector<32xi1> to vector<32xi8>
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<32xi8>
+  vector.store %result, %results[0] : vector<32xi8>, view<32xi8>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization * scalarized=0 *
+CHECK: COMPILE-REPORT: source_low[*] function=materialized_predicate_window_report source_op=vector.slice selection=plan plan_key=slice.dynamic-v128-packets emitted_ops=36
+CHECK-COUNT-2: COMPILE-REPORT: source_low[*] function=materialized_predicate_window_report source_op=vector.extui selection=plan plan_key=predicate.extend-unsigned.v128-packets emitted_ops=2
+CHECK-NOT: scalarized=true
+
+// ====
+
+// Runtime packet selection over scalar-authored register values stays in SSA
+// while the target legalizes the oversized source carrier.
+func.def @from_elements_packet_window(%offset0: index, %v0: i32, %v1: i32, %v2: i32, %v3: i32, %v4: i32, %v5: i32, %v6: i32, %v7: i32, %v8: i32, %v9: i32, %v10: i32, %v11: i32, %v12: i32, %v13: i32, %v14: i32, %v15: i32) -> (vector<4xi32>) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 12), multiple_of(%offset0, 4)] : index
+  %source = vector.from_elements %v0, %v1, %v2, %v3, %v4, %v5, %v6, %v7, %v8, %v9, %v10, %v11, %v12, %v13, %v14, %v15 : vector<16xi32>
+  %window = vector.slice %source[%offset] : vector<16xi32> -> vector<4xi32>
+  func.return %window : vector<4xi32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @from_elements_packet_window(%offset: reg<wasm.i32>, %v0: reg<wasm.i32>, %v1: reg<wasm.i32>, %v2: reg<wasm.i32>, %v3: reg<wasm.i32>, %v4: reg<wasm.i32>, %v5: reg<wasm.i32>, %v6: reg<wasm.i32>, %v7: reg<wasm.i32>, %v8: reg<wasm.i32>, %v9: reg<wasm.i32>, %v10: reg<wasm.i32>, %v11: reg<wasm.i32>, %v12: reg<wasm.i32>, %v13: reg<wasm.i32>, %v14: reg<wasm.i32>, %v15: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %68 = i32x4.splat %v0
+  %69 = i32x4.replace_lane %68, %v1, 1
+  %70 = i32x4.replace_lane %69, %v2, 2
+  %71 = i32x4.replace_lane %70, %v3, 3
+  %72 = i32x4.splat %v4
+  %73 = i32x4.replace_lane %72, %v5, 1
+  %74 = i32x4.replace_lane %73, %v6, 2
+  %75 = i32x4.replace_lane %74, %v7, 3
+  %76 = i32.const 4
+  %77 = i32.eq %offset, %76
+  %78 = v128.select %75, %71, %77
+  %79 = i32x4.splat %v8
+  %80 = i32x4.replace_lane %79, %v9, 1
+  %81 = i32x4.replace_lane %80, %v10, 2
+  %82 = i32x4.replace_lane %81, %v11, 3
+  %83 = i32.const 8
+  %84 = i32.eq %offset, %83
+  %85 = v128.select %82, %78, %84
+  %86 = i32x4.splat %v12
+  %87 = i32x4.replace_lane %86, %v13, 1
+  %88 = i32x4.replace_lane %87, %v14, 2
+  %89 = i32x4.replace_lane %88, %v15, 3
+  %90 = i32.const 12
+  %91 = i32.eq %offset, %90
+  %window = v128.select %89, %85, %91
+  return %window
+}

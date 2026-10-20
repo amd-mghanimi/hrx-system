@@ -12,6 +12,7 @@ import struct
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 from loom.target.arch.amdgpu.descriptor_overlay import (
     AMDGPU_D16_PARTIAL_REGISTER_ADDRESSABLE_UNIT_COUNT,
@@ -149,6 +150,8 @@ AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_SCOPE = 8
 AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_LOAD_TEMPORAL = 9
 AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_REQUIRED_NAMED_I64 = 10
 AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_DPP8 = 11
+AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_STORE_TEMPORAL = 12
+AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_ATOMIC_TEMPORAL = 13
 
 _REG_SGPR = "amdgpu.sgpr"
 _REG_VGPR = "amdgpu.vgpr"
@@ -165,6 +168,9 @@ _REG_PART_SGPR_FULL32_MASK = 0x3
 _REG_PART_VGPR_LOW16 = "amdgpu.vgpr.low16"
 _REG_PART_VGPR_HIGH16 = "amdgpu.vgpr.high16"
 _REG_PART_VGPR_FULL32_MASK = 0x3
+_REG_PART_AGPR_LOW16 = "amdgpu.agpr.low16"
+_REG_PART_AGPR_HIGH16 = "amdgpu.agpr.high16"
+_REG_PART_AGPR_FULL32_MASK = 0x3
 
 _RESOURCE_SALU = "amdgpu.salu"
 _RESOURCE_VALU = "amdgpu.valu"
@@ -229,11 +235,6 @@ _SCHEDULE_WAIT_X = "amdgpu.wait.x"
 
 
 def _amdgpu_mfma_schedule_class_name(descriptor_key: str) -> str:
-    if not _amdgpu_mfma_has_qualified_timing(descriptor_key):
-        raise ValueError(
-            f"AMDGPU descriptor '{descriptor_key}' has no qualified GFX9.4 "
-            "matrix timing"
-        )
     return f"{_SCHEDULE_MFMA_QUALIFIED_PREFIX}{descriptor_key.removeprefix('amdgpu.')}"
 
 
@@ -249,7 +250,7 @@ def _amdgpu_mfma_schedule_classes(
             issue_uses=(
                 IssueUse(
                     _RESOURCE_MFMA,
-                    cycles=timing.reciprocal_throughput_cycles,
+                    cycles=timing.execution_passes,
                     units=1,
                 ),
             ),
@@ -266,8 +267,11 @@ _AMDGPU_TRANS_DESCRIPTOR_KEYS = (
     "amdgpu.v_sin_f32",
     "amdgpu.v_cos_f32",
     "amdgpu.v_sqrt_f32",
+    "amdgpu.v_sqrt_f64",
+    "amdgpu.v_rsq_f64",
     "amdgpu.v_rsq_f32",
     "amdgpu.v_rcp_f32",
+    "amdgpu.v_rcp_f64",
 )
 
 _AMDGPU_TRANS_PROXY_LATENCY_CYCLES = 8
@@ -585,11 +589,15 @@ def _predefined(
 
 
 def _instruction_encoding_opcode(
-    spec: AmdgpuIsaFactSource, instruction_name: str, encoding_name: str
+    spec: AmdgpuIsaFactSource,
+    instruction_name: str,
+    encoding_name: str,
+    *,
+    include_aliases: bool = False,
 ) -> int:
     opcodes = set()
     for summary in spec.instruction_encoding_summaries(
-        (instruction_name,), include_aliases=False
+        (instruction_name,), include_aliases=include_aliases
     ):
         if summary.encoding_name == encoding_name:
             opcodes.add(summary.opcode)
@@ -724,6 +732,9 @@ _GLOBAL_SADDR_OFFSET_ONLY_SIZE_REASON = (
     "saddr-enabled-global-address-uses-one-offset-vgpr"
 )
 _D16_PARTIAL_REGISTER_SIZE_REASON = AMDGPU_D16_PARTIAL_REGISTER_SIZE_REASON
+_BYTE_STORE_PARTIAL_REGISTER_SIZE_REASON = (
+    "byte-store-reads-low-8-bits-of-low16-register-part"
+)
 _D16_PARTIAL_REGISTER_ADDRESSABLE_UNIT_COUNT = (
     AMDGPU_D16_PARTIAL_REGISTER_ADDRESSABLE_UNIT_COUNT
 )
@@ -757,6 +768,10 @@ _SGPR_REGISTER_PARTS = (
     RegisterPart(_REG_PART_SGPR_HIGH16, _REG_SGPR, 0x2),
 )
 _AMDGPU_REGISTER_PARTS = (*_VGPR_REGISTER_PARTS, *_SGPR_REGISTER_PARTS)
+_AGPR_REGISTER_PARTS = (
+    RegisterPart(_REG_PART_AGPR_LOW16, _REG_AGPR, 0x1),
+    RegisterPart(_REG_PART_AGPR_HIGH16, _REG_AGPR, 0x2),
+)
 
 
 class AmdgpuAtomicMemorySpace(CEnum):
@@ -783,6 +798,7 @@ class AmdgpuMemoryDescriptorDomain(CEnum):
     GLOBAL_FLAT = "LOOM_AMDGPU_MEMORY_DESCRIPTOR_DOMAIN_GLOBAL_FLAT"
     GLOBAL_SMEM = "LOOM_AMDGPU_MEMORY_DESCRIPTOR_DOMAIN_GLOBAL_SMEM"
     SCRATCH = "LOOM_AMDGPU_MEMORY_DESCRIPTOR_DOMAIN_SCRATCH"
+    GENERIC_FLAT = "LOOM_AMDGPU_MEMORY_DESCRIPTOR_DOMAIN_GENERIC_FLAT"
 
 
 class AmdgpuMemoryOperationKind(CEnum):
@@ -798,6 +814,7 @@ class AmdgpuMemoryPayloadRegisterClass(CEnum):
 class AmdgpuMemoryPayloadFormat(CEnum):
     GENERIC = "LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_GENERIC"
     LOW_16BIT_FLOAT = "LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_LOW_16BIT_FLOAT"
+    SIGNED_8BIT_INTEGER = "LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_SIGNED_8BIT_INTEGER"
     SIGNED_16BIT_INTEGER = "LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_SIGNED_16BIT_INTEGER"
     UNSIGNED_8BIT_INTEGER = "LOOM_AMDGPU_MEMORY_PAYLOAD_FORMAT_UNSIGNED_8BIT_INTEGER"
 
@@ -819,6 +836,7 @@ class AmdgpuAtomicKind(CEnum):
     ORI = "LOOM_ATOMIC_KIND_ORI"
     XORI = "LOOM_ATOMIC_KIND_XORI"
     XCHGI = "LOOM_ATOMIC_KIND_XCHGI"
+    XCHGF = "LOOM_ATOMIC_KIND_XCHGF"
     ADDF = "LOOM_ATOMIC_KIND_ADDF"
     MINNUMF = "LOOM_ATOMIC_KIND_MINNUMF"
     MAXNUMF = "LOOM_ATOMIC_KIND_MAXNUMF"
@@ -830,6 +848,7 @@ class AmdgpuAtomicValueKind(CEnum):
     B64 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_B64"
     I32 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_I32"
     F32 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_F32"
+    F64 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_F64"
     I64 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_I64"
     PACKED_F16 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_PACKED_F16"
     PACKED_BF16 = "LOOM_AMDGPU_ATOMIC_VALUE_KIND_PACKED_BF16"
@@ -855,6 +874,8 @@ class AmdgpuMemoryDescriptorCandidate:
     payload_format: AmdgpuMemoryPayloadFormat
     payload_register_count: int
     descriptor_key: str
+    # Tied destination form for lane-predicated loads; absent for stores/SMEM.
+    preserving_descriptor_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -928,6 +949,7 @@ def _amdgpu_trans_schedule_classes(
 def _common_scalar_vector_memory_schedule_classes(
     *,
     valu_latency_cycles: int,
+    vmem_latency_cycles: int,
     smem_load_hazards: tuple[Hazard, ...],
     smem_store_hazards: tuple[Hazard, ...],
     vmem_load_hazards: tuple[Hazard, ...],
@@ -998,8 +1020,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_VMEM_LOAD,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),),
             hazards=vmem_load_hazards,
             flags=(ScheduleClassFlag.MAY_LOAD,),
@@ -1008,8 +1030,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_VMEM_STORE,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),),
             hazards=vmem_store_hazards,
             flags=(ScheduleClassFlag.MAY_STORE,),
@@ -1018,8 +1040,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_VMEM_ATOMIC_RETURN,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),
                 IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),
@@ -1031,8 +1053,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_VMEM_ATOMIC_NO_RETURN,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),
                 IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),
@@ -1044,8 +1066,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_FLAT_LOAD,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),
                 IssueUse(_RESOURCE_LDS_LOAD, cycles=1, units=1),
@@ -1057,8 +1079,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_FLAT_STORE,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),
                 IssueUse(_RESOURCE_LDS_STORE, cycles=1, units=1),
@@ -1070,8 +1092,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_FLAT_ATOMIC_RETURN,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),
                 IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),
@@ -1088,8 +1110,8 @@ def _common_scalar_vector_memory_schedule_classes(
         ScheduleClass(
             _SCHEDULE_FLAT_ATOMIC_NO_RETURN,
             latency_kind=LatencyKind.VARIABLE,
-            latency_cycles=16,
-            minimum_issue_separation_cycles=16,
+            latency_cycles=vmem_latency_cycles,
+            minimum_issue_separation_cycles=vmem_latency_cycles,
             issue_uses=(
                 IssueUse(_RESOURCE_VMEM_LOAD, cycles=1, units=1),
                 IssueUse(_RESOURCE_VMEM_STORE, cycles=1, units=1),
@@ -1241,6 +1263,10 @@ def _native_operand(field_name: str) -> NativeAsmValue:
     return NativeAsmValue(NativeAsmValueKind.OPERAND, field_name=field_name)
 
 
+def _native_negated_operand(field_name: str) -> NativeAsmValue:
+    return NativeAsmValue(NativeAsmValueKind.NEGATED_OPERAND, field_name=field_name)
+
+
 def _native_register_part(field_name: str) -> NativeAsmValue:
     return NativeAsmValue(NativeAsmValueKind.REGISTER_PART, field_name=field_name)
 
@@ -1361,49 +1387,19 @@ def _native_amdgpu_gfx12_scope_immediate(field_name: str) -> NativeAsmValue:
     )
 
 
-def _native_amdgpu_gfx12_load_temporal_immediate(
-    field_name: str,
+def _native_amdgpu_gfx12_temporal_immediate(
+    field_name: str, operation: Literal["load", "store", "atomic"]
 ) -> NativeAsmValue:
+    format_id = {
+        "load": AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_LOAD_TEMPORAL,
+        "store": AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_STORE_TEMPORAL,
+        "atomic": AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_ATOMIC_TEMPORAL,
+    }[operation]
     return NativeAsmValue(
         NativeAsmValueKind.IMMEDIATE_TARGET_FORMAT,
         field_name=field_name,
         literal="th",
-        target_format_id=AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_LOAD_TEMPORAL,
-    )
-
-
-def _global_vaddr_asm(
-    *,
-    mnemonic: str,
-    results: tuple[str, ...] = (),
-    operands: tuple[str, ...],
-    immediates: tuple[str, ...],
-) -> tuple[AsmForm, ...]:
-    return _asm(
-        mnemonic=f"{mnemonic}_vaddr",
-        results=results,
-        operands=operands,
-        immediates=immediates,
-        named_immediates=True,
-    )
-
-
-def _global_saddr_asm(
-    *,
-    mnemonic: str,
-    results: tuple[str, ...] = (),
-    operands: tuple[str, ...],
-    implicit_m0: bool = False,
-    immediates: tuple[str, ...],
-) -> tuple[AsmForm, ...]:
-    if implicit_m0:
-        operands = (*operands, "m0")
-    return _asm(
-        mnemonic=f"{mnemonic}_saddr",
-        results=results,
-        operands=operands,
-        immediates=immediates,
-        named_immediates=True,
+        target_format_id=format_id,
     )
 
 
@@ -1494,9 +1490,8 @@ def _sgpr_result(
     return Operand(
         field_name,
         OperandRole.RESULT,
-        _SGPR_ALT,
+        (replace(_SGPR_ALT[0], register_part=register_part),),
         unit_count=units,
-        register_part=register_part,
     )
 
 
@@ -1506,9 +1501,8 @@ def _sgpr_operand(
     return Operand(
         field_name,
         OperandRole.OPERAND,
-        _SGPR_ALT,
+        (replace(_SGPR_ALT[0], register_part=register_part),),
         unit_count=units,
-        register_part=register_part,
     )
 
 
@@ -1720,11 +1714,10 @@ def _vgpr_result(
     return Operand(
         field_name,
         OperandRole.RESULT,
-        _VGPR_ALT,
+        (replace(_VGPR_ALT[0], register_part=register_part),),
         unit_count=units,
         address_map_kind=address_map_kind,
         addressable_unit_count=addressable_unit_count,
-        register_part=register_part,
     )
 
 
@@ -1739,11 +1732,10 @@ def _vgpr_operand(
     return Operand(
         field_name,
         OperandRole.OPERAND,
-        _VGPR_ALT,
+        (replace(_VGPR_ALT[0], register_part=register_part),),
         unit_count=units,
         address_map_kind=address_map_kind,
         addressable_unit_count=addressable_unit_count,
-        register_part=register_part,
     )
 
 
@@ -1891,6 +1883,7 @@ _MANUAL_SCALAR_DESCRIPTOR_KEYS = (
     "amdgpu.s_mov_b64_exec",
     "amdgpu.s_mov_b64_exec.full",
     "amdgpu.s_mov_b64_exec_read",
+    "amdgpu.s_andn2_b64_exec",
     "amdgpu.s_xor_b64_exec",
 )
 
@@ -1938,6 +1931,9 @@ def _manual_scalar_descriptors(
     s_mov_b32_opcode = _instruction_encoding_opcode(spec, "S_MOV_B32", "ENC_SOP1")
     s_getpc_b64_opcode = _instruction_encoding_opcode(spec, "S_GETPC_B64", "ENC_SOP1")
     s_mov_b64_opcode = _instruction_encoding_opcode(spec, "S_MOV_B64", "ENC_SOP1")
+    s_andn2_b64_opcode = _instruction_encoding_opcode(
+        spec, "S_ANDN2_B64", "ENC_SOP2", include_aliases=True
+    )
     s_xor_b64_opcode = _instruction_encoding_opcode(spec, "S_XOR_B64", "ENC_SOP2")
     return (
         Descriptor(
@@ -2041,7 +2037,7 @@ def _manual_scalar_descriptors(
             schedule_class=_SCHEDULE_SALU,
             encoding_format_id=AMDGPU_ENCODING_FORMAT_SOP1,
             encoding_id=s_mov_b32_opcode,
-            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+            flags=(DescriptorFlag.DEAD_REMOVABLE, DescriptorFlag.STATE_ASSIGNMENT),
         ),
         Descriptor(
             key="amdgpu.s_mov_b32_m0.imm",
@@ -2069,7 +2065,7 @@ def _manual_scalar_descriptors(
             schedule_class=_SCHEDULE_SALU,
             encoding_format_id=AMDGPU_ENCODING_FORMAT_SOP1,
             encoding_id=s_mov_b32_opcode,
-            flags=(DescriptorFlag.DEAD_REMOVABLE,),
+            flags=(DescriptorFlag.DEAD_REMOVABLE, DescriptorFlag.STATE_ASSIGNMENT),
         ),
         Descriptor(
             key="amdgpu.s_mov_b64_exec",
@@ -2160,6 +2156,51 @@ def _manual_scalar_descriptors(
             encoding_format_id=AMDGPU_ENCODING_FORMAT_SOP1,
             encoding_id=s_mov_b64_opcode,
             flags=(DescriptorFlag.DEAD_REMOVABLE,),
+        ),
+        Descriptor(
+            key="amdgpu.s_andn2_b64_exec",
+            mnemonic="s_andn2_b64",
+            semantic_tag="control.exec.and_not",
+            operands=(
+                _scc_result("active"),
+                Operand(
+                    "saved_exec",
+                    OperandRole.OPERAND,
+                    _SGPR_ALT,
+                    encoding_field_id=amdgpu_encoding_field_id("SSRC0"),
+                    unit_count=2,
+                ),
+                Operand(
+                    "condition",
+                    OperandRole.OPERAND,
+                    _SGPR_ALT,
+                    encoding_field_id=amdgpu_encoding_field_id("SSRC1"),
+                    unit_count=2,
+                ),
+                _exec_clobber("exec_out"),
+            ),
+            encoding_field_values=(
+                EncodingFieldValue(
+                    amdgpu_encoding_field_id("SDST"),
+                    spec.operand_predefined_value("OPR_SDST_EXEC", "EXEC_LO"),
+                ),
+            ),
+            asm_forms=_asm(
+                mnemonic="s_andn2_b64_exec",
+                native_assembly_mnemonic="s_andn2_b64",
+                results=("active",),
+                operands=("saved_exec", "condition"),
+                native_assembly_values=(
+                    _native_literal("exec"),
+                    _native_operand("saved_exec"),
+                    _native_operand("condition"),
+                ),
+            ),
+            effects=(_CONVERGENT_EFFECT,),
+            schedule_class=_SCHEDULE_SALU,
+            encoding_format_id=AMDGPU_ENCODING_FORMAT_SOP2,
+            encoding_id=s_andn2_b64_opcode,
+            flags=(DescriptorFlag.SIDE_EFFECTING,),
         ),
         Descriptor(
             key="amdgpu.s_xor_b64_exec",
@@ -2497,6 +2538,11 @@ _WORKGROUP_BARRIER_EFFECT = Effect(
     flags=(EffectFlag.ORDERED, EffectFlag.DEPENDENCY),
 )
 
+_EXECUTION_BARRIER_EFFECT = Effect(
+    EffectKind.BARRIER,
+    flags=(EffectFlag.ORDERED,),
+)
+
 _CACHE_CONTROL_EFFECT = Effect(
     EffectKind.BARRIER,
     memory_space=MemorySpace.GENERIC,
@@ -2550,8 +2596,6 @@ def _ds_crosslane_effects(width_bits: int) -> tuple[Effect, Effect]:
     return (
         Effect(
             EffectKind.READ,
-            memory_space=MemorySpace.GENERIC,
-            flags=(EffectFlag.DEPENDENCY,),
             counter_id=_COUNTER_LDS,
             width_bits=width_bits,
         ),
@@ -2622,6 +2666,15 @@ def _destructive_accumulator_constraints(
     return (
         Constraint(ConstraintKind.TIED, 0, accumulator_operand_index),
         Constraint(ConstraintKind.DESTRUCTIVE, 0, accumulator_operand_index),
+        Constraint(ConstraintKind.EARLY_CLOBBER, 0),
+    )
+
+
+def _preferred_accumulator_constraints(
+    accumulator_operand_index: int,
+) -> tuple[Constraint, ...]:
+    return (
+        Constraint(ConstraintKind.PREFER_TIED, 0, accumulator_operand_index),
         Constraint(ConstraintKind.EARLY_CLOBBER, 0),
     )
 
@@ -3308,6 +3361,8 @@ __all__ = (
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_DPP_CTRL",
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_DPP8",
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_LOAD_TEMPORAL",
+    "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_STORE_TEMPORAL",
+    "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_ATOMIC_TEMPORAL",
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_GFX12_SCOPE",
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_NAMED_BIT_LIST",
     "AMDGPU_NATIVE_ASM_IMMEDIATE_FORMAT_NAMED_FLAG",
@@ -3411,12 +3466,14 @@ __all__ = (
     "_AMDGPU_DESCRIPTOR_SOURCE_DIR",
     "_AMDGPU_INLINE_F32_ENUM_DOMAIN_NAME",
     "_AMDGPU_REGISTER_PARTS",
+    "_AGPR_REGISTER_PARTS",
     "_AMDGPU_SOURCE_INLINE_F32_ENUM_DOMAIN",
     "_AMDGPU_SOURCE_INLINE_U32_16_ENUM_DOMAIN",
     "_AMDGPU_TRANS_DESCRIPTOR_KEYS",
     "_AMDGPU_TRANS_DESCRIPTOR_LATENCY_CYCLES",
     "_AMDGPU_TRANS_PROXY_LATENCY_CYCLES",
     "_BUFFER_ATOMIC_VDATA_INPUT_REASON",
+    "_BYTE_STORE_PARTIAL_REGISTER_SIZE_REASON",
     "_CACHE_CONTROL_EFFECT",
     "_CDNA_SMEM_OFFSET_ONLY_FIXED_FIELDS",
     "_CDNA_SMEM_SGPR_IMM_FIXED_FIELDS",
@@ -3527,6 +3584,9 @@ __all__ = (
     "_REG_EXEC",
     "_REG_M0",
     "_REG_MODE",
+    "_REG_PART_AGPR_FULL32_MASK",
+    "_REG_PART_AGPR_HIGH16",
+    "_REG_PART_AGPR_LOW16",
     "_REG_PART_SGPR_FULL32_MASK",
     "_REG_PART_SGPR_HIGH16",
     "_REG_PART_SGPR_LOW16",
@@ -3644,6 +3704,7 @@ __all__ = (
     "_X_WAIT_EFFECT",
     "_X_WAIT_HAZARDS",
     "_WORKGROUP_BARRIER_EFFECT",
+    "_EXECUTION_BARRIER_EFFECT",
     "_amdgpu_camel_case",
     "_amdgpu_core_descriptor_set",
     "_amdgpu_core_descriptor_set_intersection",
@@ -3669,6 +3730,7 @@ __all__ = (
     "_ds_offset_immediate",
     "_EARLY_CLOBBER_RESULT_CONSTRAINTS",
     "_destructive_accumulator_constraints",
+    "_preferred_accumulator_constraints",
     "_exec_clobber",
     "_exec_state_read",
     "_exec_value_read",
@@ -3681,8 +3743,6 @@ __all__ = (
     "_global_atomic_effects",
     "_global_read_effect",
     "_global_to_lds_effects",
-    "_global_saddr_asm",
-    "_global_vaddr_asm",
     "_global_write_effect",
     "_hal_buffer_descriptor_pseudos",
     "_ignore_generic_atomic_memory",
@@ -3708,7 +3768,7 @@ __all__ = (
     "_native_amdgpu_dpp_ctrl_immediate",
     "_native_amdgpu_dpp8_immediate",
     "_native_amdgpu_dpp_bank_mask_immediate",
-    "_native_amdgpu_gfx12_load_temporal_immediate",
+    "_native_amdgpu_gfx12_temporal_immediate",
     "_native_amdgpu_gfx12_scope_immediate",
     "_native_amdgpu_named_bit_list_immediate",
     "_native_amdgpu_named_flag_immediate",
@@ -3720,6 +3780,7 @@ __all__ = (
     "_native_literal",
     "_native_modifier_literal",
     "_native_operand",
+    "_native_negated_operand",
     "_native_register_part",
     "_native_result",
     "_native_unsigned_hex_immediate",

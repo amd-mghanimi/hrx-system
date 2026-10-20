@@ -23,7 +23,8 @@ iree_status_t iree_hal_amdgpu_host_queue_read_file(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_read_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_read_flags_t flags);
 
 // Implements queue_write for memory-file, direct mappable, and staged fd-backed
 // file transfers.
@@ -33,7 +34,8 @@ iree_status_t iree_hal_amdgpu_host_queue_write_file(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, iree_hal_write_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_write_flags_t flags);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -33,24 +33,26 @@ static loomc_status_t loomc_module_decode_text_source(
       &parse_options, out_internal_module));
 }
 
-static loomc_status_t loomc_module_text_print_options(
+static void loomc_module_text_print_options(
     const loomc_module_t* module,
     const loomc_module_resolved_serialize_options_t* options,
     loom_text_print_options_t* out_options) {
   *out_options = (loom_text_print_options_t){
       .flags = LOOM_TEXT_PRINT_DEFAULT,
   };
+  if (options->print_locations) {
+    out_options->flags |= LOOM_TEXT_PRINT_LOCATIONS;
+  }
   loomc_target_pass_environment_initialize_text_asm_environment(
       loomc_context_target_pass_environment(loomc_module_context(module)),
       &out_options->low_asm_environment);
   if (options->text_presentation == LOOMC_MODULE_TEXT_PRESENTATION_GENERIC) {
-    return loomc_ok_status();
+    return;
   }
   out_options->flags |= LOOM_TEXT_PRINT_PREFER_LOW_ASM;
   if (options->text_presentation == LOOMC_MODULE_TEXT_PRESENTATION_LOW_ASM) {
     out_options->flags |= LOOM_TEXT_PRINT_REQUIRE_LOW_ASM;
   }
-  return loomc_ok_status();
 }
 
 static loomc_status_t loomc_module_encode_text_source(
@@ -62,13 +64,10 @@ static loomc_status_t loomc_module_encode_text_source(
   iree_string_builder_initialize(iree_allocator_from_loomc(allocator),
                                  &builder);
   loom_text_print_options_t print_options;
+  loomc_module_text_print_options(module, options, &print_options);
   loomc_status_t status =
-      loomc_module_text_print_options(module, options, &print_options);
-  if (loomc_status_is_ok(status)) {
-    status =
-        loomc_status_from_iree(loom_text_print_module_to_builder_with_options(
-            internal_module, &builder, &print_options));
-  }
+      loomc_status_from_iree(loom_text_print_module_to_builder_with_options(
+          internal_module, &builder, &print_options));
   const iree_host_size_t length = iree_string_builder_size(&builder);
   char* storage = NULL;
   if (loomc_status_is_ok(status)) {
@@ -90,16 +89,22 @@ loomc_status_t loomc_module_deserialize_text_from_source(
     const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
     loomc_result_t** out_result) {
-  return loomc_module_deserialize_explicit_source(
+  IREE_TRACE_ZONE_BEGIN(z0);
+  loomc_status_t return_status = loomc_module_deserialize_explicit_source(
       context, workspace, source, options, LOOMC_SOURCE_FORMAT_TEXT,
       loomc_module_decode_text_source, allocator, out_module, out_result);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
 }
 
 loomc_status_t loomc_module_serialize_text_to_source(
     const loomc_module_t* module,
     const loomc_module_serialize_options_t* options,
     loomc_allocator_t allocator, loomc_source_t** out_source) {
-  return loomc_module_serialize_explicit_source(
+  IREE_TRACE_ZONE_BEGIN(z0);
+  loomc_status_t return_status = loomc_module_serialize_explicit_source(
       module, options, LOOMC_SOURCE_FORMAT_TEXT,
       loomc_module_encode_text_source, allocator, out_source);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
 }

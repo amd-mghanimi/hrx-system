@@ -1,0 +1,80 @@
+// RUN: pass vector-memory-footprint
+
+// Lane two wraps to -128. Mathematical affine endpoints cannot bound this
+// gather, even though the unwrapped endpoints would fit inside the view.
+func.def @wrapping_iota_cannot_prove_offsets(%input: buffer) -> (vector<4xi32>) {
+  %base = index.constant 0 : offset
+  %origin = index.constant 0 : index
+  %view = buffer.view %input[%base] : buffer -> view<256xi32>
+  %first = scalar.constant 126 : i8
+  %step = scalar.constant 1 : i8
+  %offsets = vector.iota %first step %step : vector<4xi8>
+  // ERROR@+1: SUBRANGE/013 {op_name="vector.gather"}
+  %result = vector.gather %view[%origin][%offsets] : view<256xi32>, vector<4xi8> -> vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ====
+
+// The adjacent nonwrapping sequence still proves a complete memory footprint.
+func.def @nonwrapping_iota_proves_offsets(%input: buffer) -> (vector<4xi32>) {
+  %base = index.constant 0 : offset
+  %origin = index.constant 0 : index
+  %view = buffer.view %input[%base] : buffer -> view<128xi32>
+  %first = scalar.constant 124 : i8
+  %step = scalar.constant 1 : i8
+  %offsets = vector.iota %first step %step : vector<4xi8>
+  %result = vector.gather %view[%origin][%offsets] : view<128xi32>, vector<4xi8> -> vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ====
+
+// Wrapped mask coordinates re-enable offsets 128 and 129 outside the view.
+func.def @wrapping_mask_is_not_a_tail(%input: buffer) -> (vector<4xi32>) {
+  %lower = scalar.constant 126 : i8
+  %upper = scalar.constant 127 : i8
+  %step = scalar.constant 1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<4xi1>
+  %origin = index.cast %lower : i8 to index
+  %base = index.constant 0 : offset
+  %view = buffer.view %input[%base] : buffer -> view<128xi32>
+  %fallback = vector.constant 0 : vector<4xi32>
+  // ERROR@+1: SUBRANGE/010 {op_name="vector.load.mask", vector_extent="4", view_bound="128", required_origin_upper_bound="124"}
+  %result = vector.load.mask %view[%origin], %mask, %fallback : view<128xi32>, vector<4xi1>, vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ====
+
+// A nonwrapping mask still authorizes a partial final packet.
+func.def @nonwrapping_mask_proves_tail(%input: buffer) -> (vector<4xi32>) {
+  %lower = scalar.constant 124 : i8
+  %upper = scalar.constant 126 : i8
+  %step = scalar.constant 1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<4xi1>
+  %origin = index.cast %lower : i8 to index
+  %base = index.constant 0 : offset
+  %view = buffer.view %input[%base] : buffer -> view<126xi32>
+  %fallback = vector.constant 0 : vector<4xi32>
+  %result = vector.load.mask %view[%origin], %mask, %fallback : view<126xi32>, vector<4xi1>, vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ====
+
+// Bounded dynamic packets obey the same coordinate representability check.
+func.def @bounded_dynamic_mask_proves_tail(%input: buffer, %count_input: index) {
+  %count = index.assume %count_input [range(%count_input, 2, 4)] : index
+  %lower = scalar.constant 124 : i8
+  %upper = scalar.constant 126 : i8
+  %step = scalar.constant 1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<[%count]xi1>
+  %origin = index.cast %lower : i8 to index
+  %base = index.constant 0 : offset
+  %view = buffer.view %input[%base] : buffer -> view<126xi32>
+  %fallback = vector.constant 0 : vector<[%count]xi32>
+  %result = vector.load.mask %view[%origin], %mask, %fallback : view<126xi32>, vector<[%count]xi1>, vector<[%count]xi32>
+  test.use %result : vector<[%count]xi32>
+  func.return
+}

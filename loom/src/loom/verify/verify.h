@@ -26,7 +26,7 @@
 //     SameType, SameElementType, SameEncoding, SameShape, RanksMatch,
 //     OffsetCountMatchesRank, DimIndexInBounds, AllShapesMatch,
 //     BlockArgCount, BlockArgsMatchElementTypes,
-//     YieldCountMatchesResults, YieldTypesMatchResults.
+//     YieldCountMatches, YieldTypesMatch.
 //     Checked by a single interpreter walking per-op constraint tables.
 //
 //   SSA dominance
@@ -40,8 +40,11 @@
 //
 //   Linear ownership transfers
 //     Operands consumed by tied or moved results are not used after the
-//     consuming op. Tied result indices are in range and refer to valid
-//     operands.
+//     consuming op, including through required nonwriting storage aliases.
+//     Independent copies and the consuming operation's results have separate
+//     ownership. Mutually exclusive paths may each consume the same owner;
+//     recurrence is cut by the original owner's definition, not an alias.
+//     Tied result indices are in range and refer to valid operands.
 //
 //   Symbol references
 //     Every symbol reference (@name) resolves to a symbol in the
@@ -57,12 +60,20 @@
 // ==========================================================================
 //
 // Canonical type and symbol facts are prepared before the operation walk.
-// Single-block regions need no CFG analysis. Each multi-block region builds
-// one graph and dominator tree, shared with its ownership queries. Graph
+// A one-block region needs no graph for dominance; consumption extracts its
+// CFG only when required. Each multi-block region builds one graph and
+// dominator tree, shared with ownership verification. Graph
 // extraction is linear in the region's operations and successor edges;
 // dominance construction takes O(B + E log B) time and O(B) additional arena
 // space for B blocks and E edges. Dialect callbacks and ownership queries have
 // their own costs; this is not a whole-verifier constant-work-per-op guarantee.
+// Consumers are grouped by required storage owner, and each consumed family's
+// use lists are distributed once into retained region/block summaries. Each
+// touched region checks the union of its consumers' reachable paths, visiting
+// a block/edge at most once per owner. Existing component and DFS facts bound
+// that search to possible observations. Nested regions propagate observations
+// and returning consumption to their parent; declared repeated and exiting
+// execution preserve the dynamic owner's lifetime across region boundaries.
 //
 // SSA scope tracking uses a definition-depth table (one byte per value_id in
 // the module) and definition-stack watermarks:
@@ -128,25 +139,26 @@
 //
 // When the resolver can't find original source text for an op, the
 // verifier falls back to printing the op and using the printed
-// representation as the diagnostic source. This guarantees every
-// diagnostic has a source line with carets — even for ops created
-// by passes that never existed in any input file.
+// representation in diagnostic.origin for carets, explicitly labeled as IR.
+// diagnostic.source_location retains the recorded original filename and
+// coordinates independently of that fallback.
 //
 // ==========================================================================
 // Usage
 // ==========================================================================
 //
-//   // Verification without carets (e.g., programmatic consumer):
+//   // Verification with locations and printed IR (no original source bytes):
 //   loom_verify_options_t options = {
 //       .sink = my_sink,
 //       .max_errors = 20,
 //   };
 //
-//   // Verification with carets (the common compilation path):
+//   // Verification with original source excerpts and carets:
 //   loom_source_entry_t sources[] = {
 //       {0, source_text, filename},
 //   };
 //   loom_source_table_resolver_t resolver_data = {
+//       .module = module,
 //       .entries = sources,
 //       .count = 1,
 //   };

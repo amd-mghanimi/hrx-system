@@ -38,16 +38,23 @@ enum {
   LOOM_OP_BUFFER_COUNT_ = 14,
 };
 
-// LOOM_OP_BUFFER_ALLOCA: Create a fixed-frame scratch buffer root in an allocatable memory space. Each execution produces a distinct storage identity; identical allocas must not be commoned. The byte length is the requested physical byte count for the execution. Targets requiring a static frame reserve its proven finite non-negative maximum. base_alignment is the minimum byte alignment of the root storage base. Target lowering determines which allocatable spaces are legal for the containing program kind.
+// LOOM_OP_BUFFER_ALLOCA: Create a fixed-frame scratch buffer root in an allocatable memory space. Each execution produces a distinct storage identity; identical allocas must not be commoned. The byte length is the requested physical byte count for the execution. Targets requiring a static frame reserve its proven finite non-negative maximum. base_alignment is the minimum byte alignment of the root storage base. Target lowering determines which allocatable spaces are legal for the containing program kind. The execution frame owns the allocation; the result borrows that storage and has no explicit release obligation. An explicit pool selects the backing allocation resource; memory_space remains an access requirement that resource must satisfy. The pool is borrowed and does not extend the allocation lifetime. Omitting it uses the containing execution's allocation resource for that space, which must be unambiguous before materialization. Lowering cannot replace an explicit pool with an ambient allocation resource.
 // %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer
 LOOM_DEFINE_ISA(loom_buffer_alloca_isa, LOOM_OP_BUFFER_ALLOCA)
-LOOM_DEFINE_OPERAND(loom_buffer_alloca_byte_length, 0)
+LOOM_DEFINE_SEGMENTED_OPTIONAL_OPERAND(loom_buffer_alloca_pool, 0)
+LOOM_DEFINE_SEGMENTED_OPERAND(loom_buffer_alloca_byte_length, 1)
 LOOM_DEFINE_RESULT(loom_buffer_alloca_result, 0)
 LOOM_DEFINE_ATTR_I64(loom_buffer_alloca_base_alignment, 0)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_buffer_alloca_memory_space, 1, loom_value_fact_memory_space_t)
+enum loom_buffer_alloca_build_flag_bits_e {
+  LOOM_BUFFER_ALLOCA_BUILD_FLAG_HAS_POOL = 1u << 0,
+};
+typedef uint32_t loom_buffer_alloca_build_flags_t;
 iree_status_t loom_buffer_alloca_build(
     loom_builder_t* builder,
+    loom_buffer_alloca_build_flags_t build_flags,
     loom_value_fact_memory_space_t memory_space,
+    loom_optional loom_may_consume loom_value_id_t pool,
     int64_t base_alignment,
     loom_may_consume loom_value_id_t byte_length,
     loom_type_t result_type,

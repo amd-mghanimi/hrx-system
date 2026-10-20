@@ -171,19 +171,20 @@ low.func.def target<amdgpu.rdna3_5.core>(@caller_target) abi(hal_kernel) @target
 // and indices without giving low.invoke an interprocedural fact environment.
 amdgpu.target<gfx11-generic> @target
 
-low.func.def target<amdgpu.gfx11.generic.core>(@target) @bounded_identity(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [mul(%value, 16)] asm {
+low.func.def target<amdgpu.gfx11.generic.core>(@target) @bounded_identity(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [multiple_of(%value, 16)] asm {
   return %value
 }
 
-func.def target(@target) @scalar_argument_contract(%value: index) -> (index) where [range(%value, 1, 1024), mul(%value, 16)] {
+func.def target(@target) @scalar_argument_contract(%value: index) -> (index) where [range(%value, 1, 1024), multiple_of(%value, 16)] {
   %result = low.invoke @bounded_identity(%value) : (index) -> (index)
   func.return %result : index
 }
 
 // ----
-low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @scalar_argument_contract(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [range(%value, 1, 1024), mul(%value, 16)] asm {
-  %7 = low.assume %value [mul(%value, 16)] : reg<amdgpu.sgpr>
-  return %7
+low.func.def target<amdgpu.gfx11.generic.core>(@target) abi(hal_kernel) @scalar_argument_contract(%value: reg<amdgpu.sgpr>) -> (reg<amdgpu.sgpr>) where [range(%value, 1, 1024), multiple_of(%value, 16)] asm {
+  %7 = low.assume %value [multiple_of(%value, 16)] : reg<amdgpu.sgpr>
+  %9 = copy %7 : reg<amdgpu.sgpr> -> reg<amdgpu.sgpr>
+  return %9
 }
 
 // ====
@@ -238,6 +239,7 @@ low.func.def target<amdgpu.rdna3_5.core>(@caller_target) abi(hal_kernel) @locked
   low.schedule.fence
   %first = v_add_u32 %value, %value
   low.schedule.fence
+  low.schedule.fence
   %second = v_add_u32 %first, %value
   low.schedule.fence
   return %second
@@ -273,4 +275,34 @@ func.def target(@caller_target) @composed_cfg_caller(%value: vector<1xi32>) -> (
 low.func.def target<amdgpu.rdna3_5.core>(@caller_target) abi(hal_kernel) @composed_cfg_caller(%value: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %doubled = v_add_u32 %value, %value
   return %doubled
+}
+
+// ====
+
+// A same-type tied result retains the consumed buffer's selected native
+// carrier even though the call result has no independent buffer-reference
+// facts. A later assumption can refine its semantic memory space without
+// reconstructing the physical representation selected before the call.
+amdgpu.target<gfx1151> @target
+
+low.func.def target<amdgpu.rdna3_5.core>(@target) @forward_buffer(%base: reg<amdgpu.sgpr x2>) -> (%base as reg<amdgpu.sgpr x2>) asm {
+  return %base
+}
+
+func.def target(@target) @tied_buffer_caller(%input: buffer) -> (i32) {
+  %input_global = buffer.assume.memory_space<global> %input : buffer
+  %forwarded = low.invoke inline @forward_buffer(%input_global) : (buffer) -> (%input_global as buffer)
+  %forwarded_global = buffer.assume.memory_space<global> %forwarded : buffer
+  %base = index.constant 0 : offset
+  %view = buffer.view %forwarded_global[%base] : buffer -> view<1xi32>
+  %value = view.load %view[0] : view<1xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def target<amdgpu.rdna3_5.core>(@target) abi(hal_kernel) @tied_buffer_caller() -> (reg<amdgpu.vgpr>) asm {
+  %input_global = resource<hal_binding> {index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %13 = v_mov_b32 0
+  %value = global_load_b32_saddr %13, %input_global
+  return %value
 }

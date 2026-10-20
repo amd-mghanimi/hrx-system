@@ -13,6 +13,10 @@ test.func @packed_views(%width: index, %layout: encoding<layout>, %value: test.a
   test.yield
 }
 
+test.func @groups(%workers: index, %dynamic: group<[%workers]x4>, %static: group<2x2x2>) {
+  test.yield
+}
+
 // ----
 test.func @nested(%width: index, %height: index, %value: test.array<test.array<vector<[%width]xf32>>, metadata = {shape = vector<[%height]xf32>}>) {
   test.yield
@@ -26,5 +30,9 @@ test.func @type_attribute(%width: index, %value: f32) {
 }
 
 test.func @packed_views(%width: index, %layout: encoding<layout>, %value: test.array<view<[%width]x2x3xi64, %layout, align(2)>, metadata = {callback = (view<[%width]xi32, align(1)>) -> (view<[%width]xi32, align(1)>), fixed = view<4xi32, align(1)>}>) {
+  test.yield
+}
+
+test.func @groups(%workers: index, %dynamic: group<[%workers]x4>, %static: group<2x2x2>) {
   test.yield
 }

@@ -13,6 +13,7 @@
 #include "iree/async/operations/scheduling.h"
 #include "iree/base/internal/atomics.h"
 #include "iree/base/threading/notification.h"
+#include "iree/base/threading/numa.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -100,9 +101,14 @@ static void TestRunnerDestroy(void* user_data, void* runner_ptr) {
 }
 
 struct NopCompletionState {
+  // Publishes completion state to the waiting test thread.
   iree_atomic_int32_t completed = IREE_ATOMIC_VAR_INIT(0);
+  // Wakes the test thread when the callback completes.
   iree_notification_t notification;
+  // Terminal operation status transferred from the callback.
   iree_status_t status = iree_ok_status();
+  // Physical NUMA node observed by the actual polling callback.
+  iree_numa_node_id_t observed_node = IREE_NUMA_NODE_ANY;
 };
 
 static bool NopCompleted(void* user_data) {
@@ -117,8 +123,83 @@ static void NopCompletion(void* user_data, iree_async_operation_t* operation,
   (void)flags;
   NopCompletionState* state = (NopCompletionState*)user_data;
   state->status = status;
+  state->observed_node = iree_numa_node_for_current_thread();
   iree_atomic_store(&state->completed, 1, iree_memory_order_release);
   iree_notification_post(&state->notification, IREE_ALL_WAITERS);
+}
+
+struct ReleaseEntryCompletionState {
+  // Entry whose final reference is released by the completion callback.
+  iree_async_proactor_pool_entry_t* entry = nullptr;
+  // Terminal operation status transferred from the callback.
+  iree_status_t status = iree_ok_status();
+};
+
+static void ReleaseEntryCompletion(void* user_data,
+                                   iree_async_operation_t* operation,
+                                   iree_status_t status,
+                                   iree_async_completion_flags_t flags) {
+  (void)operation;
+  (void)flags;
+  ReleaseEntryCompletionState* state = (ReleaseEntryCompletionState*)user_data;
+  state->status = status;
+  iree_async_proactor_pool_entry_t* entry = state->entry;
+  state->entry = nullptr;
+  iree_async_proactor_pool_entry_release(entry);
+}
+
+struct AllocationLifetimeState {
+  // Number of allocations currently owned by the pool and its runner.
+  iree_atomic_int32_t live_count = IREE_ATOMIC_VAR_INIT(0);
+  // Wakes the test when the final allocation is released.
+  iree_notification_t depleted;
+};
+
+static bool NoLiveAllocations(void* user_data) {
+  AllocationLifetimeState* state = (AllocationLifetimeState*)user_data;
+  return iree_atomic_load(&state->live_count, iree_memory_order_acquire) == 0;
+}
+
+static void ReleaseLiveAllocation(AllocationLifetimeState* state) {
+  int32_t previous_count =
+      iree_atomic_fetch_sub(&state->live_count, 1, iree_memory_order_acq_rel);
+  if (previous_count == 1) {
+    iree_notification_post(&state->depleted, IREE_ALL_WAITERS);
+  }
+}
+
+static iree_status_t AllocationLifetimeCtl(void* self,
+                                           iree_allocator_command_t command,
+                                           const void* params,
+                                           void** inout_ptr) {
+  AllocationLifetimeState* state = (AllocationLifetimeState*)self;
+  void* old_ptr = *inout_ptr;
+  iree_allocator_t system_allocator = iree_allocator_system();
+  iree_status_t status =
+      system_allocator.ctl(system_allocator.self, command, params, inout_ptr);
+  if (!iree_status_is_ok(status)) {
+    return status;
+  }
+
+  if (command == IREE_ALLOCATOR_COMMAND_MALLOC ||
+      command == IREE_ALLOCATOR_COMMAND_CALLOC ||
+      (command == IREE_ALLOCATOR_COMMAND_REALLOC && !old_ptr && *inout_ptr)) {
+    iree_atomic_fetch_add(&state->live_count, 1, iree_memory_order_relaxed);
+  } else if ((command == IREE_ALLOCATOR_COMMAND_FREE && old_ptr) ||
+             (command == IREE_ALLOCATOR_COMMAND_REALLOC && old_ptr &&
+              !*inout_ptr)) {
+    ReleaseLiveAllocation(state);
+  }
+  return iree_ok_status();
+}
+
+static iree_allocator_t AllocationLifetimeAllocator(
+    AllocationLifetimeState* state) {
+  iree_allocator_t allocator = {
+      .self = state,
+      .ctl = AllocationLifetimeCtl,
+  };
+  return allocator;
 }
 
 class ProactorPoolTest : public ::testing::Test {
@@ -231,15 +312,15 @@ TEST_F(ProactorPoolTest, OnDemandGet) {
 }
 
 TEST_F(ProactorPoolTest, CreateWithNodeIds) {
-  uint32_t node_ids[] = {0, 1};
+  uint32_t node_ids[] = {iree_numa_node_for_current_thread(), UINT32_MAX};
   iree_async_proactor_pool_t* pool = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_pool_create(
       2, node_ids, default_options(), iree_allocator_system(), &pool));
   ASSERT_NE(pool, nullptr);
 
   EXPECT_EQ(iree_async_proactor_pool_count(pool), 2u);
-  EXPECT_EQ(iree_async_proactor_pool_node_id(pool, 0), 0u);
-  EXPECT_EQ(iree_async_proactor_pool_node_id(pool, 1), 1u);
+  EXPECT_EQ(iree_async_proactor_pool_node_id(pool, 0), node_ids[0]);
+  EXPECT_EQ(iree_async_proactor_pool_node_id(pool, 1), node_ids[1]);
 
   // Each proactor is distinct (on-demand creation).
   iree_async_proactor_t* proactor_0 = nullptr;
@@ -256,54 +337,73 @@ TEST_F(ProactorPoolTest, CreateWithNodeIds) {
   EXPECT_NE(proactor_1, nullptr);
   EXPECT_NE(proactor_0, proactor_1);
 
+  // An unconstrained request selects the first entry even when a later entry
+  // has explicitly unspecified placement.
+  iree_async_proactor_t* proactor_any = nullptr;
+  IREE_ASSERT_OK(
+      iree_async_proactor_pool_get_for_node(pool, UINT32_MAX, &proactor_any));
+  EXPECT_EQ(proactor_any, proactor_0);
+
   iree_async_proactor_pool_release(pool);
 }
 
 TEST_F(ProactorPoolTest, GetForNodeExactMatch) {
-  uint32_t node_ids[] = {3, 7};
+  uint32_t node_ids[] = {UINT32_MAX, iree_numa_node_for_current_thread()};
   iree_async_proactor_pool_t* pool = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_pool_create(
       2, node_ids, default_options(), iree_allocator_system(), &pool));
 
   // Exact match returns the right proactor.
-  iree_async_proactor_t* proactor_3 = nullptr;
-  iree_async_proactor_t* proactor_7 = nullptr;
+  iree_async_proactor_t* proactor_local = nullptr;
+  iree_async_proactor_t* proactor_any = nullptr;
   iree_status_t status =
-      iree_async_proactor_pool_get_for_node(pool, 3, &proactor_3);
+      iree_async_proactor_pool_get_for_node(pool, node_ids[1], &proactor_local);
   if (iree_status_is_unavailable(status)) {
     iree_status_free(status);
     iree_async_proactor_pool_release(pool);
     GTEST_SKIP() << "Platform proactor unavailable";
   }
   IREE_ASSERT_OK(status);
-  IREE_ASSERT_OK(iree_async_proactor_pool_get_for_node(pool, 7, &proactor_7));
+  IREE_ASSERT_OK(
+      iree_async_proactor_pool_get_for_node(pool, UINT32_MAX, &proactor_any));
 
   iree_async_proactor_t* proactor_0 = nullptr;
   iree_async_proactor_t* proactor_1 = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_pool_get(pool, 0, &proactor_0));
   IREE_ASSERT_OK(iree_async_proactor_pool_get(pool, 1, &proactor_1));
-  EXPECT_EQ(proactor_3, proactor_0);
-  EXPECT_EQ(proactor_7, proactor_1);
+  EXPECT_EQ(proactor_local, proactor_1);
+  EXPECT_EQ(proactor_any, proactor_0);
 
-  // No match falls back to the first proactor.
-  iree_async_proactor_t* proactor_99 = nullptr;
-  IREE_ASSERT_OK(iree_async_proactor_pool_get_for_node(pool, 99, &proactor_99));
-  EXPECT_EQ(proactor_99, proactor_0);
+  // An unplaced entry cannot satisfy a concrete locality request. Failures
+  // clear the output even when the caller provided a non-null value.
+  iree_async_proactor_t* proactor_missing = proactor_local;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_NOT_FOUND,
+                        iree_async_proactor_pool_get_for_node(
+                            pool, UINT32_MAX - 1, &proactor_missing));
+  EXPECT_EQ(proactor_missing, nullptr);
 
-  // Entry acquisition follows the same exact-match and fallback mapping while
+  // Entry acquisition follows the same exact and unconstrained mapping while
   // retaining runner ownership for the caller.
-  iree_async_proactor_pool_entry_t* entry_7 = nullptr;
-  IREE_ASSERT_OK(iree_async_proactor_pool_acquire_for_node(pool, 7, &entry_7));
-  EXPECT_EQ(iree_async_proactor_pool_entry_node_id(entry_7), 7u);
-  EXPECT_EQ(iree_async_proactor_pool_entry_proactor(entry_7), proactor_7);
-  iree_async_proactor_pool_entry_release(entry_7);
+  iree_async_proactor_pool_entry_t* entry_local = nullptr;
+  IREE_ASSERT_OK(iree_async_proactor_pool_acquire_for_node(pool, node_ids[1],
+                                                           &entry_local));
+  EXPECT_EQ(iree_async_proactor_pool_entry_node_id(entry_local), node_ids[1]);
+  EXPECT_EQ(iree_async_proactor_pool_entry_proactor(entry_local),
+            proactor_local);
 
-  iree_async_proactor_pool_entry_t* entry_99 = nullptr;
+  iree_async_proactor_pool_entry_t* entry_any = nullptr;
   IREE_ASSERT_OK(
-      iree_async_proactor_pool_acquire_for_node(pool, 99, &entry_99));
-  EXPECT_EQ(iree_async_proactor_pool_entry_node_id(entry_99), 3u);
-  EXPECT_EQ(iree_async_proactor_pool_entry_proactor(entry_99), proactor_0);
-  iree_async_proactor_pool_entry_release(entry_99);
+      iree_async_proactor_pool_acquire_for_node(pool, UINT32_MAX, &entry_any));
+  EXPECT_EQ(iree_async_proactor_pool_entry_node_id(entry_any), UINT32_MAX);
+  EXPECT_EQ(iree_async_proactor_pool_entry_proactor(entry_any), proactor_any);
+  iree_async_proactor_pool_entry_release(entry_any);
+
+  iree_async_proactor_pool_entry_t* entry_missing = entry_local;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_NOT_FOUND,
+                        iree_async_proactor_pool_acquire_for_node(
+                            pool, UINT32_MAX - 1, &entry_missing));
+  EXPECT_EQ(entry_missing, nullptr);
+  iree_async_proactor_pool_entry_release(entry_local);
 
   iree_async_proactor_pool_release(pool);
 }
@@ -363,10 +463,10 @@ TEST_F(ProactorPoolTest, AcquiredEntryKeepsRunnerAfterPoolRelease) {
 }
 
 TEST_F(ProactorPoolTest, AcquiredEntryMakesProgressAfterPoolRelease) {
+  uint32_t node_id = iree_numa_node_for_current_thread();
   iree_async_proactor_pool_t* pool = nullptr;
   IREE_ASSERT_OK(iree_async_proactor_pool_create(
-      1, /*node_ids=*/nullptr, default_options(), iree_allocator_system(),
-      &pool));
+      1, &node_id, default_options(), iree_allocator_system(), &pool));
 
   iree_async_proactor_pool_entry_t* entry = nullptr;
   iree_status_t status = iree_async_proactor_pool_acquire(pool, 0, &entry);
@@ -403,7 +503,66 @@ TEST_F(ProactorPoolTest, AcquiredEntryMakesProgressAfterPoolRelease) {
   // ensuring the stack operation and callback state are no longer in use.
   iree_async_proactor_pool_entry_release(entry);
   IREE_EXPECT_OK(completion.status);
+  if (node_id != IREE_NUMA_NODE_ANY) {
+    EXPECT_EQ(completion.observed_node, node_id);
+  }
   iree_notification_deinitialize(&completion.notification);
+}
+
+TEST_F(ProactorPoolTest, FinalEntryReleaseFromCompletionRetiresRunner) {
+  AllocationLifetimeState allocations;
+  iree_notification_initialize(&allocations.depleted);
+  iree_async_proactor_pool_t* pool = nullptr;
+  iree_status_t status = iree_async_proactor_pool_create(
+      1, /*node_ids=*/nullptr, default_options(),
+      AllocationLifetimeAllocator(&allocations), &pool);
+  if (!iree_status_is_ok(status)) {
+    iree_notification_deinitialize(&allocations.depleted);
+    IREE_ASSERT_OK(status);
+  }
+
+  iree_async_proactor_pool_entry_t* entry = nullptr;
+  status = iree_async_proactor_pool_acquire(pool, 0, &entry);
+  if (iree_status_is_unavailable(status)) {
+    iree_status_free(status);
+    iree_async_proactor_pool_release(pool);
+    iree_notification_deinitialize(&allocations.depleted);
+    GTEST_SKIP() << "Platform proactor unavailable";
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_async_proactor_pool_release(pool);
+    iree_notification_deinitialize(&allocations.depleted);
+    IREE_ASSERT_OK(status);
+  }
+
+  iree_async_proactor_t* proactor =
+      iree_async_proactor_pool_entry_proactor(entry);
+  iree_async_proactor_pool_release(pool);
+
+  ReleaseEntryCompletionState completion;
+  completion.entry = entry;
+  iree_async_nop_operation_t nop;
+  iree_async_operation_zero(&nop.base, sizeof(nop));
+  iree_async_operation_initialize(&nop.base, IREE_ASYNC_OPERATION_TYPE_NOP,
+                                  IREE_ASYNC_OPERATION_FLAG_NONE,
+                                  ReleaseEntryCompletion, &completion);
+
+  status = iree_async_proactor_submit_one(proactor, &nop.base);
+  if (!iree_status_is_ok(status)) {
+    completion.entry = nullptr;
+    iree_async_proactor_pool_entry_release(entry);
+    iree_notification_deinitialize(&allocations.depleted);
+    IREE_ASSERT_OK(status);
+  }
+
+  // The tracked allocator reaches zero only after the callback has returned,
+  // poll has unwound, and the deferred runner and proactor owners have released
+  // all of their storage. This keeps callback state live through teardown
+  // without a wall-clock timeout.
+  EXPECT_TRUE(iree_notification_await(&allocations.depleted, NoLiveAllocations,
+                                      &allocations, iree_infinite_timeout()));
+  IREE_EXPECT_OK(completion.status);
+  iree_notification_deinitialize(&allocations.depleted);
 }
 
 TEST_F(ProactorPoolTest, PoolReleaseStopsAllEntriesBeforeDestroy) {

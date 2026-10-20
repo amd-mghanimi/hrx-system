@@ -234,9 +234,11 @@ iree_py_library(
   SRCS
     "descriptor_overlay.py"
     "descriptors/__init__.py"
+    "descriptors/alignment.py"
     "descriptors/alu.py"
     "descriptors/api.py"
     "descriptors/atomic.py"
+    "descriptors/bitwise.py"
     "descriptors/candidates.py"
     "descriptors/categories.py"
     "descriptors/cdna.py"
@@ -248,10 +250,15 @@ iree_py_library(
     "descriptors/matrix.py"
     "descriptors/matrix_schedule.py"
     "descriptors/memory.py"
+    "descriptors/memory_assembly.py"
+    "descriptors/memory_banks.py"
+    "descriptors/memory_candidates.py"
+    "descriptors/memory_predication.py"
     "descriptors/rdna3.py"
     "descriptors/rdna35.py"
     "descriptors/rdna4.py"
     "descriptors/rdna4m.py"
+    "descriptors/register_moves.py"
     "descriptors/scalar_carry.py"
     "descriptors/scalar_float.py"
     "descriptors/sets.py"
@@ -261,6 +268,7 @@ iree_py_library(
   DEPS
     loom::py::loom::target::arch::amdgpu::encoding_info
     loom::py::loom::target::arch::amdgpu::isa_xml
+    loom::py::loom::target::arch::amdgpu::matrix_contracts
     loom::py::loom::target::arch::amdgpu::matrix_formats
     loom::py::loom::target::arch::amdgpu::target_info
     loom::py::loom::target::low_descriptors
@@ -296,10 +304,15 @@ iree_py_test(
     "../../../tools/pytest_style_runner.py"
   SRCS
     "descriptor_overlay_test.py"
+    "descriptors/alignment_test.py"
+    "descriptors/alu_test.py"
     "descriptors/atomic_test.py"
+    "descriptors/bitwise_test.py"
+    "descriptors/memory_test.py"
     "descriptors/rdna35_test.py"
     "descriptors/rdna4_test.py"
     "descriptors/rdna4m_test.py"
+    "descriptors/storage_lease_test.py"
     "descriptors/timing_test.py"
     "descriptors_test.py"
     "isa_xml_test.py"
@@ -307,10 +320,15 @@ iree_py_test(
     "../../../tools/pytest_style_runner.py"
   ARGS
     "loom.target.arch.amdgpu.descriptor_overlay_test"
+    "loom.target.arch.amdgpu.descriptors.alu_test"
+    "loom.target.arch.amdgpu.descriptors.alignment_test"
     "loom.target.arch.amdgpu.descriptors.atomic_test"
+    "loom.target.arch.amdgpu.descriptors.bitwise_test"
+    "loom.target.arch.amdgpu.descriptors.memory_test"
     "loom.target.arch.amdgpu.descriptors.rdna4_test"
     "loom.target.arch.amdgpu.descriptors.rdna35_test"
     "loom.target.arch.amdgpu.descriptors.rdna4m_test"
+    "loom.target.arch.amdgpu.descriptors.storage_lease_test"
     "loom.target.arch.amdgpu.descriptors.timing_test"
     "loom.target.arch.amdgpu.descriptors_test"
     "loom.target.arch.amdgpu.low_aliases_test"

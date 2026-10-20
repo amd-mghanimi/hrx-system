@@ -87,31 +87,23 @@ typedef enum iree_hal_amdgpu_pm4_command_buffer_publication_mode_e {
 #define IREE_HAL_AMDGPU_ASAN_DEFAULT_SHADOW_SLAB_SIZE \
   ((iree_device_size_t)128 * 1024 * 1024)
 
+// Allocation redzone size used by ASAN-enabled memory pools by default.
+#define IREE_HAL_AMDGPU_ASAN_DEFAULT_REDZONE_SIZE ((iree_device_size_t)256)
+
 // Freed ASAN allocation mapping budget kept resident for stale-pointer checks.
 #define IREE_HAL_AMDGPU_ASAN_DEFAULT_QUARANTINE_SIZE \
   ((iree_device_size_t)256 * 1024 * 1024)
 
-// Device-visible TSAN shadow entry size in bytes.
-#define IREE_HAL_AMDGPU_TSAN_SHADOW_ENTRY_SIZE 8u
+// Queue-local TSAN shadow arena size used by default. Instrumented dispatches
+// serialize on each queue and consume this arena from byte zero.
+#define IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SIZE \
+  ((iree_device_size_t)512 * 1024 * 1024)
 
-// Per-workgroup TSAN shadow header size in bytes.
-#define IREE_HAL_AMDGPU_TSAN_WORKGROUP_SHADOW_HEADER_SIZE 8u
-
-// Default log2 local-memory bytes represented by one TSAN shadow entry.
-#define IREE_HAL_AMDGPU_TSAN_DEFAULT_MEMORY_GRANULE_SHIFT 2u
-
-// Maximum log2 local-memory bytes represented by one TSAN shadow entry.
-#define IREE_HAL_AMDGPU_TSAN_MAX_MEMORY_GRANULE_SHIFT 16u
-
-// Default local-memory byte capacity represented for each workgroup.
-// Zero selects the backend default group segment limit.
-#define IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_LOCAL_MEMORY_SIZE 0u
-
-// Default number of workgroup ordinals represented by one dispatch shadow.
-#define IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_CAPACITY 256u
-
-// Default number of queue-local dispatch shadow slots.
-#define IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SLOT_COUNT 16u
+// Maximum queue-local TSAN shadow arena size. Instrumented accesses use a
+// 32-bit unsigned byte offset from the arena base, making 2^32 bytes the
+// largest representable exclusive range.
+#define IREE_HAL_AMDGPU_TSAN_MAX_SHADOW_SIZE \
+  ((iree_device_size_t)UINT32_MAX + 1)
 
 // Host-build compatibility for an AMDGPU logical-device option set.
 typedef uint32_t iree_hal_amdgpu_logical_device_host_compatibility_t;
@@ -213,18 +205,6 @@ typedef struct iree_hal_amdgpu_logical_device_options_t {
     } large;
   } device_block_pools;
 
-  // Default queue-allocation pool policy.
-  struct {
-    // Logical byte length of the default TLSF pool range per physical device.
-    iree_device_size_t range_length;
-
-    // Minimum byte alignment for every default-pool reservation.
-    iree_device_size_t alignment;
-
-    // Maximum death-frontier entry count stored per free TLSF block.
-    uint8_t frontier_capacity;
-  } default_pool;
-
   // Controls where queues are placed. ANY and HOST currently select host
   // queues. DEVICE is reserved for future device-side scheduling and fails
   // loudly until that path is implemented.
@@ -267,8 +247,6 @@ typedef struct iree_hal_amdgpu_logical_device_options_t {
     iree_host_size_t slot_size;
     // Number of staging slots. Must be non-zero and a power of two.
     uint32_t slot_count;
-    // True to force fine-grained host memory instead of coarse-grained memory.
-    uint64_t force_fine_host_memory : 1;
   } file_staging;
 
   // Optional device-side feedback channel support.
@@ -303,6 +281,9 @@ typedef struct iree_hal_amdgpu_logical_device_options_t {
     // Physical shadow slab size in bytes.
     iree_device_size_t shadow_slab_size;
 
+    // Redzone bytes added around allocations from ASAN-enabled memory pools.
+    iree_device_size_t redzone_size;
+
     // Freed allocation mapping budget in bytes kept resident and poisoned.
     iree_device_size_t quarantine_size;
   } asan;
@@ -315,20 +296,8 @@ typedef struct iree_hal_amdgpu_logical_device_options_t {
     // Policy applied after a valid TSAN report is emitted.
     iree_hal_amdgpu_tsan_report_policy_t report_policy;
 
-    // Log2 local-memory bytes represented by one shadow entry.
-    uint32_t memory_granule_shift;
-
-    // Local-memory byte capacity represented for each workgroup. Zero selects
-    // the backend default group segment limit.
-    uint32_t workgroup_local_memory_size;
-
-    // Maximum workgroup ordinals represented by one dispatch shadow.
-    uint32_t workgroup_capacity;
-
-    // Number of queue-local dispatch shadow slots available. Command-buffer
-    // recording may insert execution barriers when a TSAN-instrumented span
-    // would otherwise exceed this window.
-    uint32_t shadow_slot_count;
+    // Queue-local shadow arena size in bytes.
+    iree_device_size_t shadow_size;
   } tsan;
 
   // Preallocates a reasonable number of resources in pools to reduce initial
@@ -421,6 +390,13 @@ IREE_API_EXPORT iree_status_t iree_hal_amdgpu_driver_options_parse(
 
 // Creates a AMDGPU HAL driver with the given |options|, from which AMDGPU
 // devices can be enumerated and created with specific parameters.
+//
+// Device creation accepts a `queue_count` parameter specifying the positive
+// decimal number of provisioned queues per selected GPU. It defaults to one
+// and may also be set by URI, such as `amdgpu://0?queue_count=2`. The selected
+// GPU count times queue_count must fit the topology's queue-axis capacity.
+// This changes only driver-constructed topology; direct logical-device
+// creation preserves the caller's supplied topology.
 //
 // The provided |identifier| will be used by programs to distinguish the device
 // type from other HAL implementations. If compiling programs with the IREE

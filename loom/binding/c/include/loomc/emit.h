@@ -106,6 +106,14 @@ typedef enum loomc_emit_artifact_flag_bits_e {
   /// Request the primary loadable artifact. A zero flag value also requests
   /// the primary artifact.
   LOOMC_EMIT_ARTIFACT_FLAG_PRIMARY = 1u << 0,
+
+  /// Request a target-owned textual listing when the emitter supports one.
+  ///
+  /// A produced listing is returned as `LOOMC_ARTIFACT_KIND_TEXT`. Its format
+  /// identifies the target syntax, such as `amdgpu-assembly`, and its
+  /// identifier is derived from the primary artifact identifier by appending
+  /// `.listing`. Emitters without a listing return no listing artifact.
+  LOOMC_EMIT_ARTIFACT_FLAG_TARGET_LISTING = 1u << 1,
 } loomc_emit_artifact_flag_bits_t;
 
 /// Target emission options.

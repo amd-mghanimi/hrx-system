@@ -13,7 +13,7 @@
 #include <stdint.h>
 
 #include "loom/ops/kernel/ops.h"
-#include "loom/target/arch/amdgpu/lower/plan.h"
+#include "loom/target/arch/amdgpu/lower/collective_plan.h"
 #include "loom/target/arch/amdgpu/refs/target_refs.h"
 
 #ifdef __cplusplus
@@ -40,9 +40,16 @@ bool loom_amdgpu_collective_combine_dpp_descriptor_ref(
     loom_amdgpu_collective_combine_dpp_form_t dpp_form,
     loom_amdgpu_descriptor_ref_t* out_descriptor_ref);
 
-// Returns the 32-bit identity bit pattern for a native AMDGPU combining packet.
-bool loom_amdgpu_collective_combine_identity_bits(loom_combining_kind_t kind,
-                                                  uint32_t* out_bits);
+// Returns the 32-bit empty-prefix bit pattern for an admitted native scan kind.
+// Descriptor selection establishes that the combining kind has a native row.
+uint32_t loom_amdgpu_collective_scan_empty_prefix_bits(
+    loom_combining_kind_t kind);
+
+// Returns whether the empty-prefix value is also an arithmetic identity. The
+// infinities used by number-preferring extrema are boundary outputs, not
+// neutral inputs for NaNs.
+bool loom_amdgpu_collective_scan_empty_prefix_is_identity(
+    loom_combining_kind_t kind);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -77,6 +77,132 @@ iree_hal_replay_file_parse_header(iree_const_byte_span_t file_contents,
   return iree_ok_status();
 }
 
+// Validates each nested extent once at the file boundary. Executors and dumpers
+// can then consume the borrowed records without repeating structural checks.
+static iree_status_t iree_hal_replay_file_parse_barrier_list(
+    uint64_t count, bool has_transition_recipes,
+    iree_const_byte_span_t* remaining,
+    iree_hal_replay_barrier_list_view_t* out_list) {
+  out_list->count = count;
+  out_list->payload = iree_make_const_byte_span(remaining->data, 0);
+  if (count == UINT64_MAX) {
+    return iree_ok_status();
+  }
+  for (uint64_t i = 0; i < count; ++i) {
+    iree_hal_replay_command_buffer_execution_barrier_payload_t header;
+    if (remaining->data_length < sizeof(header)) {
+      return iree_make_status(IREE_STATUS_DATA_LOSS,
+                              "replay barrier header is truncated");
+    }
+    memcpy(&header, remaining->data, sizeof(header));
+    iree_host_size_t memory_size = 0, buffer_size = 0, recipe_size = 0;
+    iree_host_size_t operation_count = 0, operation_size = 0, total_size = 0;
+    if (header.source_stage_mask > UINT32_MAX ||
+        header.target_stage_mask > UINT32_MAX ||
+        header.memory_barrier_count > IREE_HOST_SIZE_MAX ||
+        header.buffer_barrier_count > IREE_HOST_SIZE_MAX ||
+        !iree_host_size_checked_mul(
+            (iree_host_size_t)header.memory_barrier_count,
+            sizeof(iree_hal_replay_memory_barrier_payload_t), &memory_size) ||
+        !iree_host_size_checked_mul(
+            (iree_host_size_t)header.buffer_barrier_count,
+            sizeof(iree_hal_replay_buffer_barrier_payload_t), &buffer_size) ||
+        !iree_host_size_checked_add(sizeof(header), memory_size, &total_size) ||
+        !iree_host_size_checked_add(total_size, buffer_size, &total_size)) {
+      return iree_make_status(IREE_STATUS_DATA_LOSS,
+                              "replay barrier extent is invalid");
+    }
+    if (has_transition_recipes) {
+      if (!iree_host_size_checked_mul(
+              (iree_host_size_t)header.buffer_barrier_count,
+              sizeof(iree_hal_replay_memory_transition_recipe_payload_t),
+              &recipe_size) ||
+          !iree_host_size_checked_add(total_size, recipe_size, &total_size) ||
+          total_size > remaining->data_length) {
+        return iree_make_status(IREE_STATUS_DATA_LOSS,
+                                "replay barrier recipe extent is invalid");
+      }
+      const uint8_t* recipe_data = remaining->data + total_size - recipe_size;
+      for (iree_host_size_t j = 0;
+           j < (iree_host_size_t)header.buffer_barrier_count; ++j) {
+        iree_hal_replay_memory_transition_recipe_payload_t recipe;
+        memcpy(&recipe, recipe_data + j * sizeof(recipe), sizeof(recipe));
+        if (IREE_UNLIKELY((recipe.effects == 0) !=
+                          (recipe.operation_count == 0))) {
+          return iree_make_status(
+              IREE_STATUS_DATA_LOSS,
+              "replay barrier recipe effects and operations disagree");
+        }
+        if (!iree_host_size_checked_add(operation_count, recipe.operation_count,
+                                        &operation_count)) {
+          return iree_make_status(
+              IREE_STATUS_DATA_LOSS,
+              "replay barrier recipe operation count overflows");
+        }
+      }
+      if (!iree_host_size_checked_mul(
+              operation_count,
+              sizeof(iree_hal_replay_memory_transition_operation_payload_t),
+              &operation_size) ||
+          !iree_host_size_checked_add(total_size, operation_size,
+                                      &total_size)) {
+        return iree_make_status(
+            IREE_STATUS_DATA_LOSS,
+            "replay barrier recipe operation extent is invalid");
+      }
+    }
+    if (total_size > remaining->data_length) {
+      return iree_make_status(IREE_STATUS_DATA_LOSS,
+                              "replay barrier extent is invalid");
+    }
+    remaining->data += total_size;
+    remaining->data_length -= total_size;
+    out_list->payload.data_length += total_size;
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t iree_hal_replay_file_parse_queue_barriers(
+    iree_hal_replay_file_record_t* record) {
+  if (record->header.record_type !=
+          IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION ||
+      !iree_hal_replay_operation_has_queue_barriers(
+          record->header.operation_code)) {
+    return iree_make_status(IREE_STATUS_DATA_LOSS,
+                            "replay operation cannot carry queue barriers");
+  }
+  iree_hal_replay_queue_barriers_footer_t footer;
+  if (record->payload.data_length < sizeof(footer)) {
+    return iree_make_status(IREE_STATUS_DATA_LOSS,
+                            "replay queue barrier footer is truncated");
+  }
+  iree_host_size_t footer_offset = record->payload.data_length - sizeof(footer);
+  memcpy(&footer, record->payload.data + footer_offset, sizeof(footer));
+  if (footer.payload_length > footer_offset) {
+    return iree_make_status(IREE_STATUS_DATA_LOSS,
+                            "replay queue barrier extension is truncated");
+  }
+  iree_host_size_t barrier_offset = footer_offset - footer.payload_length;
+  iree_const_byte_span_t remaining = iree_make_const_byte_span(
+      record->payload.data + barrier_offset, footer.payload_length);
+  const bool has_transition_recipes = iree_any_bit_set(
+      record->header.record_flags,
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES);
+  IREE_RETURN_IF_ERROR(iree_hal_replay_file_parse_barrier_list(
+      footer.before_count, has_transition_recipes, &remaining,
+      &record->barriers.before));
+  IREE_RETURN_IF_ERROR(iree_hal_replay_file_parse_barrier_list(
+      footer.after_count, has_transition_recipes, &remaining,
+      &record->barriers.after));
+  if (remaining.data_length) {
+    return iree_make_status(
+        IREE_STATUS_DATA_LOSS,
+        "replay queue barrier extension has trailing bytes");
+  }
+  record->payload.data_length = barrier_offset;
+  return iree_ok_status();
+}
+
 IREE_API_EXPORT iree_status_t iree_hal_replay_file_parse_record(
     iree_const_byte_span_t file_contents, iree_host_size_t record_offset,
     iree_hal_replay_file_record_t* out_record,
@@ -107,10 +233,27 @@ IREE_API_EXPORT iree_status_t iree_hal_replay_file_parse_record(
   iree_hal_replay_file_record_header_t header;
   memcpy(&header, record_base, sizeof(header));
   const iree_hal_replay_file_record_flags_t valid_flags =
-      IREE_HAL_REPLAY_FILE_RECORD_FLAG_OPTIONAL;
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_OPTIONAL |
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_QUEUE_BARRIERS |
+      IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES;
   if (IREE_UNLIKELY((header.record_flags & ~valid_flags) != 0)) {
     return iree_make_status(IREE_STATUS_DATA_LOSS,
                             "replay record reserved flags must be zero");
+  }
+  const bool is_command_buffer_barrier =
+      header.record_type == IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION &&
+      header.operation_code ==
+          IREE_HAL_REPLAY_OPERATION_CODE_COMMAND_BUFFER_EXECUTION_BARRIER;
+  if (IREE_UNLIKELY(
+          iree_any_bit_set(
+              header.record_flags,
+              IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES) &&
+          !iree_any_bit_set(header.record_flags,
+                            IREE_HAL_REPLAY_FILE_RECORD_FLAG_QUEUE_BARRIERS) &&
+          !is_command_buffer_barrier)) {
+    return iree_make_status(
+        IREE_STATUS_DATA_LOSS,
+        "replay transition recipes require a barrier-bearing operation");
   }
   if (IREE_UNLIKELY(
           !iree_hal_replay_file_record_type_is_known(header.record_type) &&
@@ -151,6 +294,26 @@ IREE_API_EXPORT iree_status_t iree_hal_replay_file_parse_record(
   out_record->header = header;
   out_record->payload = iree_make_const_byte_span(
       payload, (iree_host_size_t)header.payload_length);
+  if (iree_any_bit_set(header.record_flags,
+                       IREE_HAL_REPLAY_FILE_RECORD_FLAG_QUEUE_BARRIERS)) {
+    IREE_RETURN_IF_ERROR(iree_hal_replay_file_parse_queue_barriers(out_record));
+  }
+  if (header.record_type == IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION &&
+      header.payload_type ==
+          IREE_HAL_REPLAY_PAYLOAD_TYPE_COMMAND_BUFFER_EXECUTION_BARRIER &&
+      header.status_code == IREE_STATUS_OK) {
+    iree_const_byte_span_t remaining = out_record->payload;
+    iree_hal_replay_barrier_list_view_t barrier;
+    const bool has_transition_recipes = iree_any_bit_set(
+        header.record_flags,
+        IREE_HAL_REPLAY_FILE_RECORD_FLAG_MEMORY_TRANSITION_RECIPES);
+    IREE_RETURN_IF_ERROR(iree_hal_replay_file_parse_barrier_list(
+        1, has_transition_recipes, &remaining, &barrier));
+    if (remaining.data_length) {
+      return iree_make_status(IREE_STATUS_DATA_LOSS,
+                              "replay barrier payload has trailing bytes");
+    }
+  }
   *out_next_record_offset = record_offset + record_length;
   return iree_ok_status();
 }

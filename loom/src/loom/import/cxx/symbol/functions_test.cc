@@ -12,7 +12,10 @@
 #include <cxx/symbols.h>
 #include <cxx/types.h>
 
+#include "loom/import/cxx/source/expressions.h"
 #include "loom/import/cxx/value/builder_test.h"
+#include "loom/import/cxx/value/vector.h"
+#include "loom/ops/check/ops.h"
 #include "loom/ops/func/ops.h"
 #include "loom/ops/kernel/ops.h"
 
@@ -23,13 +26,46 @@ using FunctionsTest = ValueBuilderTest;
 class Calls : public cxx::ASTVisitor {
  public:
   void visit(cxx::CallExpressionAST* call) override {
-    auto* id = cxx::ast_cast<cxx::IdExpressionAST>(call->baseExpression);
-    symbols.push_back(cxx::symbol_cast<cxx::FunctionSymbol>(id->symbol));
+    symbols.push_back(direct_callee(call));
     cxx::ASTVisitor::visit(call);
   }
   // Resolved direct calls in the selected source body.
   std::vector<cxx::FunctionSymbol*> symbols;
 };
+
+TEST_F(FunctionsTest, FrontendPreservesCvQualifiedOverloadIdentity) {
+  Source source(IREE_SV(R"(
+    struct Matrix {
+      double& operator()(unsigned row, unsigned column) {
+        return values[row][column];
+      }
+      const double& operator()(unsigned row, unsigned column) const {
+        return values[0][0];
+      }
+      double values[3][4];
+    };
+    double entry(Matrix& matrix, unsigned row, unsigned column) {
+      matrix(row, column) = 1.0;
+      const Matrix& observed = matrix;
+      return observed(row, column);
+    }
+  )"),
+                IREE_SV("overloads.cxx"), options());
+  Calls calls;
+  calls.accept(source.unit().ast());
+  ASSERT_EQ(calls.symbols.size(), 2u);
+  ASSERT_NE(calls.symbols[0], nullptr);
+  ASSERT_NE(calls.symbols[1], nullptr);
+  EXPECT_NE(calls.symbols[0]->canonical(), calls.symbols[1]->canonical());
+  auto* mutable_type =
+      cxx::type_cast<cxx::FunctionType>(calls.symbols[0]->type());
+  auto* const_type =
+      cxx::type_cast<cxx::FunctionType>(calls.symbols[1]->type());
+  ASSERT_NE(mutable_type, nullptr);
+  ASSERT_NE(const_type, nullptr);
+  EXPECT_FALSE(cxx::has_const(mutable_type->cvQualifiers()));
+  EXPECT_TRUE(cxx::has_const(const_type->cvQualifiers()));
+}
 
 TEST_F(FunctionsTest, RootsQueueEachConcreteHelperOnceWithPrivateVisibility) {
   Source source(IREE_SV(R"(
@@ -40,20 +76,31 @@ TEST_F(FunctionsTest, RootsQueueEachConcreteHelperOnceWithPrivateVisibility) {
                 IREE_SV("functions.cxx"), options());
   Types types(source.unit(), source.diagnostics());
   Locations locations(source.unit(), source.diagnostics(), module_);
-  Intrinsics intrinsics(source.unit(), source.diagnostics(), types);
-  LaunchContracts launches(source.unit(), source.diagnostics());
   Scalars scalars(source.unit(), source.diagnostics(), types, locations,
                   builder_);
+  Vectors vectors(source.unit(), source.diagnostics(), types, scalars,
+                  locations, builder_);
   SymbolNames names(source.unit(), source.diagnostics());
+  LaunchContracts launches(source.unit(), source.diagnostics());
+  FastMathContracts fastmath(source.unit(), source.diagnostics());
+  FunctionContracts function_contracts(source.unit(), source.diagnostics());
+  Intrinsics intrinsics(source.unit(), source.diagnostics(), types, scalars,
+                        vectors, locations, names, launches, function_contracts,
+                        module_);
   Configs configs(source.unit(), source.diagnostics(), types, scalars,
                   locations, names);
+  TargetDefinitions target_definitions(source.unit(), source.diagnostics(),
+                                       locations, names, module_);
+  TemplateDefinitions template_definitions(source.unit(), source.diagnostics());
   Functions functions(source.unit(), source.diagnostics(), module_, intrinsics,
-                      launches, configs, names);
+                      launches, configs, fastmath, function_contracts,
+                      target_definitions, template_definitions, names);
   const iree_string_view_t roots[] = {IREE_SV("entry")};
   functions.select(roots);
   ASSERT_EQ(functions.pending().size(), 1u);
-  auto entry =
+  auto entry_definition =
       functions.define(functions.pending()[0], types, locations, &builder_);
+  const auto& entry = entry_definition.body;
   EXPECT_EQ(entry.kind, FunctionKind::Ordinary);
   EXPECT_EQ(loom_func_def_visibility(entry.operation),
             LOOM_FUNC_VISIBILITY_PUBLIC);
@@ -65,8 +112,9 @@ TEST_F(FunctionsTest, RootsQueueEachConcreteHelperOnceWithPrivateVisibility) {
   auto second = functions.declare(calls.symbols[1]);
   EXPECT_EQ(first.symbol_id, second.symbol_id);
   ASSERT_EQ(functions.pending().size(), 2u);
-  auto helper =
+  auto helper_definition =
       functions.define(functions.pending()[1], types, locations, &builder_);
+  const auto& helper = helper_definition.body;
   EXPECT_EQ(loom_func_def_visibility(helper.operation), 0);
   auto name_id = module_->symbols.entries[first.symbol_id].name_id;
   auto name = loom_string_table_get(&module_->strings, name_id);
@@ -85,25 +133,90 @@ TEST_F(FunctionsTest,
                 IREE_SV("visibility.cpp"), options());
   Types types(source.unit(), source.diagnostics());
   Locations locations(source.unit(), source.diagnostics(), module_);
-  Intrinsics intrinsics(source.unit(), source.diagnostics(), types);
-  LaunchContracts launches(source.unit(), source.diagnostics());
   Scalars scalars(source.unit(), source.diagnostics(), types, locations,
                   builder_);
+  Vectors vectors(source.unit(), source.diagnostics(), types, scalars,
+                  locations, builder_);
   SymbolNames names(source.unit(), source.diagnostics());
+  LaunchContracts launches(source.unit(), source.diagnostics());
+  FastMathContracts fastmath(source.unit(), source.diagnostics());
+  FunctionContracts function_contracts(source.unit(), source.diagnostics());
+  Intrinsics intrinsics(source.unit(), source.diagnostics(), types, scalars,
+                        vectors, locations, names, launches, function_contracts,
+                        module_);
   Configs configs(source.unit(), source.diagnostics(), types, scalars,
                   locations, names);
+  TargetDefinitions target_definitions(source.unit(), source.diagnostics(),
+                                       locations, names, module_);
+  TemplateDefinitions template_definitions(source.unit(), source.diagnostics());
   Functions functions(source.unit(), source.diagnostics(), module_, intrinsics,
-                      launches, configs, names);
+                      launches, configs, fastmath, function_contracts,
+                      target_definitions, template_definitions, names);
   functions.select({});
   ASSERT_EQ(functions.pending().size(), 2u);
-  auto definition =
+  auto defined =
       functions.define(functions.pending()[0], types, locations, &builder_);
+  const auto& definition = defined.body;
   EXPECT_EQ(definition.kind, FunctionKind::Kernel);
   EXPECT_TRUE(loom_kernel_def_isa(definition.operation));
   EXPECT_EQ(definition.region, loom_kernel_def_body(definition.operation));
   EXPECT_EQ(definition.return_type->kind(), cxx::TypeKind::kVoid);
   EXPECT_EQ(loom_region_entry_arg_count(definition.region), 1u);
-  EXPECT_EQ(definition.source->symbol, functions.pending()[0]);
+  EXPECT_EQ(definition.source->symbol, functions.pending()[0].symbol);
+}
+
+TEST_F(FunctionsTest, ConfiguredScenarioRetainsItsNativeRegionSignature) {
+  Source source(IREE_SV(R"(
+    namespace loom::type {
+    class [[loom::type("index")]] index {};
+    }
+    namespace loom::check {
+    using ordinal = loom::type::index;
+    class [[loom::type("check.entropy")]] entropy {};
+    }
+    [[loom::check_scenario(7)]]
+    void scenario(loom::check::ordinal configuration,
+                  loom::check::entropy entropy) {}
+  )"),
+                IREE_SV("scenario.cxx"), options());
+  Types types(source.unit(), source.diagnostics(), module_);
+  Locations locations(source.unit(), source.diagnostics(), module_);
+  Scalars scalars(source.unit(), source.diagnostics(), types, locations,
+                  builder_);
+  Vectors vectors(source.unit(), source.diagnostics(), types, scalars,
+                  locations, builder_);
+  SymbolNames names(source.unit(), source.diagnostics());
+  LaunchContracts launches(source.unit(), source.diagnostics());
+  FastMathContracts fastmath(source.unit(), source.diagnostics());
+  FunctionContracts function_contracts(source.unit(), source.diagnostics());
+  Intrinsics intrinsics(source.unit(), source.diagnostics(), types, scalars,
+                        vectors, locations, names, launches, function_contracts,
+                        module_);
+  Configs configs(source.unit(), source.diagnostics(), types, scalars,
+                  locations, names);
+  TargetDefinitions target_definitions(source.unit(), source.diagnostics(),
+                                       locations, names, module_);
+  TemplateDefinitions template_definitions(source.unit(), source.diagnostics());
+  Functions functions(source.unit(), source.diagnostics(), module_, intrinsics,
+                      launches, configs, fastmath, function_contracts,
+                      target_definitions, template_definitions, names);
+
+  functions.select({});
+  ASSERT_EQ(functions.pending().size(), 1u);
+  auto defined =
+      functions.define(functions.pending()[0], types, locations, &builder_);
+  const auto& scenario = defined.body;
+  EXPECT_EQ(scenario.kind, FunctionKind::CheckScenario);
+  ASSERT_TRUE(loom_check_scenario_isa(scenario.operation));
+  EXPECT_EQ(loom_check_scenario_configuration_count(scenario.operation), 7);
+  EXPECT_EQ(scenario.region, loom_check_scenario_body(scenario.operation));
+  ASSERT_EQ(loom_region_entry_arg_count(scenario.region), 2u);
+  auto* block = loom_region_entry_block(scenario.region);
+  EXPECT_EQ(loom_type_element_type(
+                loom_module_value_type(module_, block->arg_ids[0])),
+            LOOM_SCALAR_TYPE_INDEX);
+  EXPECT_TRUE(
+      loom_type_is_dialect(loom_module_value_type(module_, block->arg_ids[1])));
 }
 
 }  // namespace

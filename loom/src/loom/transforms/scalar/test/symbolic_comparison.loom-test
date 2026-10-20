@@ -1,0 +1,77 @@
+// RUN: pass canonicalize
+
+// Both subtractions fit i64. Their normalized difference is 2*value-INT64_MAX,
+// whose interval product does not. At value=2^62 this comparison is false;
+// saturating the product before subtracting INT64_MAX would make it true.
+func.def @positive_interval_product_overflows(%input: i64) -> (i1) {
+  %value = scalar.assume %input [range(%input, 0, 4611686018427387904)] : i64
+  %c0 = scalar.constant 0 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %left = scalar.subi %value, %maximum : i64
+  %right = scalar.subi %c0, %value : i64
+  %result = scalar.cmpi sle, %left, %right : i64
+  func.return %result : i1
+}
+
+// ----
+func.def @positive_interval_product_overflows(%input: i64) -> (i1) {
+  %value = scalar.assume %input [range(%input, 0, 4611686018427387904)] : i64
+  %c0 = scalar.constant 0 : i64
+  %8 = scalar.constant -9223372036854775807 : i64
+  %left = scalar.addi %value, %8 : i64
+  %right = scalar.subi %c0, %value : i64
+  %result = scalar.cmpi sle, %left, %right : i64
+  func.return %result : i1
+}
+
+// ====
+
+// A negative coefficient takes its maximum from the input's lower endpoint.
+// This comparison is false at value=-2^62 and true at -1.
+func.def @negative_coefficient_product_overflows(%input: i64) -> (i1) {
+  %value = scalar.assume %input [range(%input, -4611686018427387904, -1)] : i64
+  %c0 = scalar.constant 0 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %left = scalar.addi %value, %maximum : i64
+  %right = scalar.subi %c0, %value : i64
+  %result = scalar.cmpi sge, %left, %right : i64
+  func.return %result : i1
+}
+
+// ====
+
+// Moving the endpoint inward makes the complete interval representable and
+// the comparison uniformly true; the checked proof still simplifies it.
+func.def @representable_positive_interval_product(%input: i64) -> (i1) {
+  %value = scalar.assume %input [range(%input, 0, 4611686018427387903)] : i64
+  %c0 = scalar.constant 0 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %left = scalar.subi %value, %maximum : i64
+  %right = scalar.subi %c0, %value : i64
+  %result = scalar.cmpi sle, %left, %right : i64
+  func.return %result : i1
+}
+
+// ----
+func.def @representable_positive_interval_product(%input: i64) -> (i1) {
+  %result = scalar.constant true : i1
+  func.return %result : i1
+}
+
+// ====
+
+func.def @representable_negative_coefficient_product(%input: i64) -> (i1) {
+  %value = scalar.assume %input [range(%input, -4611686018427387903, -1)] : i64
+  %c0 = scalar.constant 0 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %left = scalar.addi %value, %maximum : i64
+  %right = scalar.subi %c0, %value : i64
+  %result = scalar.cmpi sge, %left, %right : i64
+  func.return %result : i1
+}
+
+// ----
+func.def @representable_negative_coefficient_product(%input: i64) -> (i1) {
+  %result = scalar.constant true : i1
+  func.return %result : i1
+}

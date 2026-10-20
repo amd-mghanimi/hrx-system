@@ -232,8 +232,7 @@ func.def @if_chains_dialect_condition_refinements(%value: index) {
   %condition = scalar.andi %first, %second : i1
   scf.if %condition {
     %4 = index.assume %value [gt(%value, 0)] : index
-    %5 = index.assume %4 [gt(%4, 0)] : index
-    test.use %5 : index
+    test.use %4 : index
   }
   func.return
 }
@@ -325,6 +324,87 @@ func.def @if_selectifies_vector_float_arithmetic(%cond: i1, %numerator: vector<4
   %scaled = vector.mulf %quotient, %scale : vector<4xf32>
   %selected = scf.select %cond, %scaled, %fallback : vector<4xf32>
   func.return %selected : vector<4xf32>
+}
+
+// ====
+
+// Cheap total float primitives use the same eager budget as ordinary
+// arithmetic and can move into straight-line selection.
+func.def @if_selectifies_cheap_float_primitives(%cond: i1, %a: f32, %b: f32, %c: f32, %values: vector<4xf32>, %scalar_fallback: f32, %vector_fallback: vector<4xf32>) -> (f32, vector<4xf32>) {
+  %selected_scalar, %selected_vector = scf.if %cond -> (f32, vector<4xf32>) {
+    %fused = scalar.fmaf %a, %b, %c : f32
+    %rounded = vector.roundevenf %values : vector<4xf32>
+    scf.yield %fused, %rounded : f32, vector<4xf32>
+  } else {
+    scf.yield %scalar_fallback, %vector_fallback : f32, vector<4xf32>
+  }
+  func.return %selected_scalar, %selected_vector : f32, vector<4xf32>
+}
+
+// ----
+func.def @if_selectifies_cheap_float_primitives(%cond: i1, %a: f32, %b: f32, %c: f32, %values: vector<4xf32>, %scalar_fallback: f32, %vector_fallback: vector<4xf32>) -> (f32, vector<4xf32>) {
+  %fused = scalar.fmaf %a, %b, %c : f32
+  %rounded = vector.roundevenf %values : vector<4xf32>
+  %selected_scalar = scf.select %cond, %fused, %scalar_fallback : f32
+  %selected_vector = scf.select %cond, %rounded, %vector_fallback : vector<4xf32>
+  func.return %selected_scalar, %selected_vector : f32, vector<4xf32>
+}
+
+// ====
+
+// Nonlinear activation is total but deliberately has no generic eager policy.
+// The production-shaped activation-plus-multiply path remains guarded.
+func.def @if_preserves_guard_around_nonlinear_activation(%cond: i1, %input: f32, %scale: f32, %fallback: f32) -> (f32) {
+  %selected = scf.if %cond -> (f32) {
+    %activated = scalar.siluf %input : f32
+    %scaled = scalar.mulf %activated, %scale : f32
+    scf.yield %scaled : f32
+  } else {
+    scf.yield %fallback : f32
+  }
+  func.return %selected : f32
+}
+
+// ----
+func.def @if_preserves_guard_around_nonlinear_activation(%cond: i1, %input: f32, %scale: f32, %fallback: f32) -> (f32) {
+  %selected = scf.if %cond -> (f32) {
+    %activated = scalar.siluf %input : f32
+    %scaled = scalar.mulf %activated, %scale : f32
+    scf.yield %scaled : f32
+  } else {
+    scf.yield %fallback : f32
+  }
+  func.return %selected : f32
+}
+
+// ====
+
+// Total conversions, bit counts, and comparisons can execute on both sides of
+// the condition. Partial neighbors such as fptosi and shifts remain guarded.
+func.def @if_selectifies_total_numeric_families(%cond: i1, %value: i32, %float_fallback: f32, %floats: vector<4xf32>, %vector_fallback: vector<4xf16>, %index: index, %index_fallback: index, %integers: vector<4xi32>, %integer_limits: vector<4xi32>, %mask_fallback: vector<4xi1>) -> (f32, vector<4xf16>, index, vector<4xi1>) {
+  %selected_float, %selected_vector, %selected_index, %selected_mask = scf.if %cond -> (f32, vector<4xf16>, index, vector<4xi1>) {
+    %converted = scalar.uitofp %value : i32 to f32
+    %narrowed = vector.fptrunc %floats : vector<4xf32> to vector<4xf16>
+    %bit_count = index.ctpopi %index : index
+    %less = vector.cmpi slt, %integers, %integer_limits : vector<4xi32> -> vector<4xi1>
+    scf.yield %converted, %narrowed, %bit_count, %less : f32, vector<4xf16>, index, vector<4xi1>
+  } else {
+    scf.yield %float_fallback, %vector_fallback, %index_fallback, %mask_fallback : f32, vector<4xf16>, index, vector<4xi1>
+  }
+  func.return %selected_float, %selected_vector, %selected_index, %selected_mask : f32, vector<4xf16>, index, vector<4xi1>
+}
+
+// ----
+func.def @if_selectifies_total_numeric_families(%cond: i1, %value: i32, %float_fallback: f32, %floats: vector<4xf32>, %vector_fallback: vector<4xf16>, %index: index, %index_fallback: index, %integers: vector<4xi32>, %integer_limits: vector<4xi32>, %mask_fallback: vector<4xi1>) -> (f32, vector<4xf16>, index, vector<4xi1>) {
+  %converted = scalar.uitofp %value : i32 to f32
+  %narrowed = vector.fptrunc %floats : vector<4xf32> to vector<4xf16>
+  %bit_count = index.ctpopi %index : index
+  %less = vector.cmpi slt, %integers, %integer_limits : vector<4xi32> -> vector<4xi1>
+  %selected_float = scf.select %cond, %converted, %float_fallback : f32
+  %selected_vector = scf.select %cond, %narrowed, %vector_fallback : vector<4xf16>
+  %selected_index = scf.select %cond, %bit_count, %index_fallback : index
+  %selected_mask = scf.select %cond, %less, %mask_fallback : vector<4xi1>
+  func.return %selected_float, %selected_vector, %selected_index, %selected_mask : f32, vector<4xf16>, index, vector<4xi1>
 }
 
 // ====
@@ -724,6 +804,29 @@ func.def @if_factors_common_pure_tail(%cond: i1, %a: i32, %b: i32) -> (i32) {
 
 // ====
 
+// Matching dependent operand types refer to the same outer definition. Since
+// each type is valid in both exhaustive branches, the shared extent already
+// dominates the conditional and remains available to the factored tail.
+func.def @if_factors_tail_with_shared_dependent_type(%cond: i1, %extent: index, %a: vector<[%extent]xf32>, %b: vector<[%extent]xf32>) -> (vector<[%extent]xf32>) {
+  %result = scf.if %cond -> (vector<[%extent]xf32>) {
+    %then = test.convergent %a : vector<[%extent]xf32>
+    scf.yield %then : vector<[%extent]xf32>
+  } else {
+    %else = test.convergent %b : vector<[%extent]xf32>
+    scf.yield %else : vector<[%extent]xf32>
+  }
+  func.return %result : vector<[%extent]xf32>
+}
+
+// ----
+func.def @if_factors_tail_with_shared_dependent_type(%cond: i1, %extent: index, %a: vector<[%extent]xf32>, %b: vector<[%extent]xf32>) -> (vector<[%extent]xf32>) {
+  %10 = scf.select %cond, %a, %b : vector<[%extent]xf32>
+  %result = test.convergent %10 : vector<[%extent]xf32>
+  func.return %result : vector<[%extent]xf32>
+}
+
+// ====
+
 // Factoring a segmented tail preserves its independent operand field spans.
 func.def @if_factors_common_segmented_tail(%cond: i1, %a: i32, %b: i32) -> (i32) {
   %result = scf.if %cond -> (i32) {
@@ -796,21 +899,21 @@ func.def @if_factors_tail_and_preserves_branch_effects(%cond: i1, %a: i32, %b: i
 // The common-tail rewrite is not speculation: the tail op executed on every
 // branch before the rewrite, so an effectful result-producing tail can move
 // after the branch once the branch yields its operands.
-func.def @if_factors_common_side_effecting_tail(%cond: i1, %pool: pool<16>, %a: i32, %b: i32) -> (i32) {
+func.def @if_factors_common_side_effecting_tail(%cond: i1, %pool: pool, %a: i32, %b: i32) -> (i32) {
   %result = scf.if %cond -> (i32) {
-    %then = test.mutate_resource %pool, %a : pool<16>, i32 -> i32
+    %then = test.mutate_resource %pool, %a : pool, i32 -> i32
     scf.yield %then : i32
   } else {
-    %else = test.mutate_resource %pool, %b : pool<16>, i32 -> i32
+    %else = test.mutate_resource %pool, %b : pool, i32 -> i32
     scf.yield %else : i32
   }
   func.return %result : i32
 }
 
 // ----
-func.def @if_factors_common_side_effecting_tail(%cond: i1, %pool: pool<16>, %a: i32, %b: i32) -> (i32) {
+func.def @if_factors_common_side_effecting_tail(%cond: i1, %pool: pool, %a: i32, %b: i32) -> (i32) {
   %12 = scf.select %cond, %a, %b : i32
-  %result = test.mutate_resource %pool, %12 : pool<16>, i32 -> i32
+  %result = test.mutate_resource %pool, %12 : pool, i32 -> i32
   func.return %result : i32
 }
 
@@ -1028,6 +1131,63 @@ func.def @for_zero_trip_returns_initial_value(%buffer: buffer, %offset: offset, 
 // ----
 func.def @for_zero_trip_returns_initial_value(%buffer: buffer, %offset: offset, %init: f32) -> (f32) {
   func.return %init : f32
+}
+
+// ====
+
+// Identical runtime index bounds prove an empty domain without range facts.
+// Both carried values forward even when the body changes them and has effects.
+func.def @for_identical_runtime_index_bounds(%output: view<1xf32>, %bound: index, %step: index, %init: f32, %count: i32) -> (f32, i32) {
+  %value, %iterations = scf.for %iv = [%bound to %bound step %step](%acc = %init : f32, %n = %count : i32) -> (f32, i32) {
+    %increment = scalar.constant 1.0 : f32
+    %next = scalar.addf %acc, %increment : f32
+    %count_increment = scalar.constant 1 : i32
+    %next_count = scalar.addi %n, %count_increment : i32
+    view.store %next, %output[0] : f32, view<1xf32>
+    scf.yield %next, %next_count : f32, i32
+  }
+  func.return %value, %iterations : f32, i32
+}
+
+// ----
+func.def @for_identical_runtime_index_bounds(%output: view<1xf32>, %bound: index, %step: index, %init: f32, %count: i32) -> (f32, i32) {
+  func.return %init, %count : f32, i32
+}
+
+// ====
+
+// Physical offset domains have the same exclusive-bound identity rule.
+func.def @for_identical_runtime_offset_bounds(%output: view<1xf32>, %bound: offset, %value: f32) {
+  %step = index.constant 4 : offset
+  scf.for %iv = [%bound to %bound step %step] {
+    view.store %value, %output[0] : f32, view<1xf32>
+  }
+  func.return
+}
+
+// ----
+func.def @for_identical_runtime_offset_bounds(%output: view<1xf32>, %bound: offset, %value: f32) {
+  func.return
+}
+
+// ====
+
+// Distinct SSA bounds with the same unknown range do not establish emptiness.
+func.def @for_distinct_runtime_bounds(%output: view<1xf32>, %lower: index, %upper: index, %value: f32) {
+  %step = index.constant 1 : index
+  scf.for %iv = [%lower to %upper step %step] {
+    view.store %value, %output[0] : f32, view<1xf32>
+  }
+  func.return
+}
+
+// ----
+func.def @for_distinct_runtime_bounds(%output: view<1xf32>, %lower: index, %upper: index, %value: f32) {
+  %step = index.constant 1 : index
+  scf.for %iv = [%lower to %upper step %step] {
+    view.store %value, %output[0] : f32, view<1xf32>
+  }
+  func.return
 }
 
 // ====

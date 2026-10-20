@@ -178,7 +178,8 @@ static iree_status_t iree_hal_amdgpu_executable_global_resolver_create_buffer(
       IREE_HAL_BUFFER_USAGE_DEFAULT,
       IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_NONE, expected_byte_length,
       expected_byte_length, (void*)(uintptr_t)variable_address,
-      release_callback, resolver->host_allocator, out_buffer);
+      /*host_pointer=*/NULL, release_callback, resolver->host_allocator,
+      out_buffer);
 }
 
 iree_status_t iree_hal_amdgpu_executable_global_resolver_initialize_table(

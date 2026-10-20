@@ -31,6 +31,14 @@
 
 #if defined(IREE_PLATFORM_WINDOWS)
 
+static iree_status_t iree_hal_platform_fd_query_requirements(
+    int fd, iree_async_file_flags_t flags,
+    iree_async_file_requirements_t* out_requirements) {
+  return iree_async_file_query_requirements(
+      iree_async_primitive_from_win32_handle((uintptr_t)_get_osfhandle(fd)),
+      flags, out_requirements);
+}
+
 // Returns the allowed access and logical length in bytes of the file
 // descriptor.
 static iree_status_t iree_hal_platform_fd_stat(
@@ -65,7 +73,17 @@ static iree_status_t iree_hal_platform_win32_initialize_overlapped(
     return iree_make_status(iree_status_code_from_win32_error(GetLastError()),
                             "failed to create file I/O completion event");
   }
+  // Duplicated handles share completion-port association. This synchronous
+  // operation owns its stack OVERLAPPED and waits on its event; the low bit
+  // prevents a second completion from being posted to an associated IOCP.
+  out_overlapped->hEvent =
+      (HANDLE)((uintptr_t)out_overlapped->hEvent | (uintptr_t)1);
   return iree_ok_status();
+}
+
+static void iree_hal_platform_win32_deinitialize_overlapped(
+    OVERLAPPED* overlapped) {
+  CloseHandle((HANDLE)((uintptr_t)overlapped->hEvent & ~(uintptr_t)1));
 }
 
 static iree_status_t iree_hal_platform_win32_wait_for_overlapped_file_io(
@@ -99,12 +117,6 @@ static iree_status_t iree_hal_platform_fd_pread(
         "file descriptor is not backed by a valid Win32 HANDLE");
   }
 
-  // Cap at INT32_MAX to prevent silent DWORD truncation for >4GB requests.
-  // Callers retry for the remaining bytes via out_bytes_read.
-  if (count > INT32_MAX) {
-    count = INT32_MAX;
-  }
-
   DWORD bytes_read = 0;
   OVERLAPPED overlapped;
   IREE_RETURN_IF_ERROR(
@@ -112,10 +124,10 @@ static iree_status_t iree_hal_platform_fd_pread(
   if (!ReadFile(handle, buffer, (DWORD)count, &bytes_read, &overlapped)) {
     iree_status_t status = iree_hal_platform_win32_wait_for_overlapped_file_io(
         handle, &overlapped, GetLastError(), IREE_SV("read"), &bytes_read);
-    CloseHandle(overlapped.hEvent);
+    iree_hal_platform_win32_deinitialize_overlapped(&overlapped);
     IREE_RETURN_IF_ERROR(status);
   } else {
-    CloseHandle(overlapped.hEvent);
+    iree_hal_platform_win32_deinitialize_overlapped(&overlapped);
   }
 
   *out_bytes_read = (iree_host_size_t)bytes_read;
@@ -135,12 +147,6 @@ static iree_status_t iree_hal_platform_fd_pwrite(
         "file descriptor is not backed by a valid Win32 HANDLE");
   }
 
-  // Cap at INT32_MAX to prevent silent DWORD truncation for >4GB requests.
-  // Callers retry for the remaining bytes via out_bytes_written.
-  if (count > INT32_MAX) {
-    count = INT32_MAX;
-  }
-
   DWORD bytes_written = 0;
   OVERLAPPED overlapped;
   IREE_RETURN_IF_ERROR(
@@ -148,10 +154,10 @@ static iree_status_t iree_hal_platform_fd_pwrite(
   if (!WriteFile(handle, buffer, (DWORD)count, &bytes_written, &overlapped)) {
     iree_status_t status = iree_hal_platform_win32_wait_for_overlapped_file_io(
         handle, &overlapped, GetLastError(), IREE_SV("write"), &bytes_written);
-    CloseHandle(overlapped.hEvent);
+    iree_hal_platform_win32_deinitialize_overlapped(&overlapped);
     IREE_RETURN_IF_ERROR(status);
   } else {
-    CloseHandle(overlapped.hEvent);
+    iree_hal_platform_win32_deinitialize_overlapped(&overlapped);
   }
 
   *out_bytes_written = (iree_host_size_t)bytes_written;
@@ -159,6 +165,15 @@ static iree_status_t iree_hal_platform_fd_pwrite(
 }
 
 #else
+
+static iree_status_t iree_hal_platform_fd_query_requirements(
+    int fd, iree_async_file_flags_t flags,
+    iree_async_file_requirements_t* out_requirements) {
+  // The descriptor is borrowed even on platforms without a native proactor.
+  iree_async_primitive_t primitive = {.type = IREE_ASYNC_PRIMITIVE_TYPE_FD,
+                                      .value = {.reserved = fd}};
+  return iree_async_file_query_requirements(primitive, flags, out_requirements);
+}
 
 // Returns the allowed access and logical length in bytes of the file
 // descriptor.
@@ -188,11 +203,6 @@ static iree_status_t iree_hal_platform_fd_pread(
     iree_host_size_t* out_bytes_read) {
   IREE_ASSERT_ARGUMENT(out_bytes_read);
   *out_bytes_read = 0;
-  // Cap at INT_MAX: some kernels return -EINVAL for counts exceeding this.
-  // Callers retry for the remaining bytes via out_bytes_read.
-  if (count > INT_MAX) {
-    count = INT_MAX;
-  }
   ssize_t bytes_read = pread(fd, buffer, (size_t)count, (off_t)offset);
   if (bytes_read > 0) {
     *out_bytes_read = (iree_host_size_t)bytes_read;
@@ -211,11 +221,6 @@ static iree_status_t iree_hal_platform_fd_pwrite(
     iree_host_size_t* out_bytes_written) {
   IREE_ASSERT_ARGUMENT(out_bytes_written);
   *out_bytes_written = 0;
-  // Cap at INT_MAX: some kernels return -EINVAL for counts exceeding this.
-  // Callers retry for the remaining bytes via out_bytes_written.
-  if (count > INT_MAX) {
-    count = INT_MAX;
-  }
   ssize_t bytes_written = pwrite(fd, buffer, (size_t)count, (off_t)offset);
   if (bytes_written > 0) {
     *out_bytes_written = (iree_host_size_t)bytes_written;
@@ -287,6 +292,8 @@ typedef struct iree_hal_fd_file_t {
   int fd;
   // Total file (stream) length in bytes as queried on creation.
   uint64_t length;
+  // Immutable host-transfer geometry established before native attachment.
+  iree_async_file_requirements_t requirements;
   // Proactor-managed async file handle created at construction from a
   // duplicated fd. NULL if no proactor was provided at creation time.
   iree_async_file_t* async_file;
@@ -340,6 +347,17 @@ IREE_API_EXPORT iree_status_t iree_hal_fd_file_from_handle(
                             "is not writable");
   }
 
+  // Query before importing any alias into a proactor: Windows IOCP attachment
+  // changes the shared native file object and cannot be rolled back on failure.
+  const iree_async_file_flags_t file_flags =
+      iree_any_bit_set(iree_io_file_handle_mode(handle),
+                       IREE_IO_FILE_MODE_DIRECT)
+          ? IREE_ASYNC_FILE_FLAG_DIRECT
+          : IREE_ASYNC_FILE_FLAG_NONE;
+  iree_async_file_requirements_t requirements;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, iree_hal_platform_fd_query_requirements(
+                                            fd, file_flags, &requirements));
+
   // Allocate object that retains the underlying file handle and our opened
   // descriptor.
   iree_hal_fd_file_t* file = NULL;
@@ -353,6 +371,7 @@ IREE_API_EXPORT iree_status_t iree_hal_fd_file_from_handle(
   iree_io_file_handle_retain(file->handle);
   file->fd = fd;
   file->length = length;
+  file->requirements = requirements;
 
   iree_status_t status = iree_ok_status();
 
@@ -364,8 +383,8 @@ IREE_API_EXPORT iree_status_t iree_hal_fd_file_from_handle(
     iree_async_primitive_t dup_primitive;
     status = iree_hal_platform_fd_dup_for_async(fd, &dup_primitive);
     if (iree_status_is_ok(status)) {
-      status =
-          iree_async_file_import(proactor, dup_primitive, &file->async_file);
+      status = iree_async_file_import(proactor, dup_primitive, file_flags,
+                                      &file->async_file);
     }
     if (!iree_status_is_ok(status)) {
       iree_async_primitive_close(&dup_primitive);
@@ -407,6 +426,11 @@ static uint64_t iree_hal_fd_file_length(iree_hal_file_t* base_file) {
   return file->length;
 }
 
+static const iree_async_file_requirements_t* iree_hal_fd_file_requirements(
+    iree_hal_file_t* base_file) {
+  return &iree_hal_fd_file_cast(base_file)->requirements;
+}
+
 static iree_hal_buffer_t* iree_hal_fd_file_storage_buffer(
     iree_hal_file_t* base_file) {
   // We could map files if we wanted to provide this interface but today leave
@@ -428,81 +452,65 @@ static bool iree_hal_fd_file_supports_synchronous_io(
 
 static iree_status_t iree_hal_fd_file_read(iree_hal_file_t* base_file,
                                            uint64_t file_offset,
-                                           iree_hal_buffer_t* buffer,
-                                           iree_device_size_t buffer_offset,
-                                           iree_device_size_t length) {
-  if (length == 0) {
-    return iree_ok_status();
-  }
+                                           iree_byte_span_t target) {
   iree_hal_fd_file_t* file = iree_hal_fd_file_cast(base_file);
-
-  iree_hal_buffer_mapping_t mapping = {{0}};
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-      buffer, IREE_HAL_MAPPING_MODE_SCOPED,
-      IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE, buffer_offset, length, &mapping));
-
   iree_status_t status = iree_ok_status();
-  uint8_t* buffer_ptr = mapping.contents.data;
-  iree_host_size_t bytes_remaining = mapping.contents.data_length;
+  uint8_t* buffer_ptr = target.data;
+  iree_host_size_t bytes_remaining = target.data_length;
   while (iree_status_is_ok(status) && bytes_remaining > 0) {
-    const iree_host_size_t bytes_requested = iree_min(bytes_remaining, INT_MAX);
+    iree_host_size_t bytes_requested = 0;
+    status = iree_hal_file_prepare_transfer(
+        &file->requirements.read, file_offset, buffer_ptr, bytes_remaining,
+        INT_MAX, &bytes_requested);
     iree_host_size_t bytes_read = 0;
-    status = iree_hal_platform_fd_pread(file->fd, buffer_ptr, bytes_requested,
-                                        file_offset, &bytes_read);
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_platform_fd_pread(file->fd, buffer_ptr, bytes_requested,
+                                          file_offset, &bytes_read);
+    }
+    if (iree_status_is_ok(status) && bytes_read == 0) {
+      status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "file read made no progress");
+    }
     file_offset += bytes_read;
     buffer_ptr += bytes_read;
     bytes_remaining -= bytes_read;
   }
-
-  if (iree_status_is_ok(status) &&
-      !iree_all_bits_set(iree_hal_buffer_memory_type(buffer),
-                         IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
-    status = iree_hal_buffer_mapping_flush_range(&mapping, 0, length);
-  }
-
-  return iree_status_join(status, iree_hal_buffer_unmap_range(&mapping));
+  return status;
 }
 
 static iree_status_t iree_hal_fd_file_write(iree_hal_file_t* base_file,
                                             uint64_t file_offset,
-                                            iree_hal_buffer_t* buffer,
-                                            iree_device_size_t buffer_offset,
-                                            iree_device_size_t length) {
-  if (length == 0) {
-    return iree_ok_status();
-  }
+                                            iree_const_byte_span_t source) {
   iree_hal_fd_file_t* file = iree_hal_fd_file_cast(base_file);
-
-  iree_hal_buffer_mapping_t mapping = {{0}};
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-      buffer, IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_READ,
-      buffer_offset, length, &mapping));
-
   iree_status_t status = iree_ok_status();
-  if (!iree_all_bits_set(iree_hal_buffer_memory_type(buffer),
-                         IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
-    status = iree_hal_buffer_mapping_invalidate_range(&mapping, 0, length);
-  }
-
-  const uint8_t* buffer_ptr = mapping.contents.data;
-  iree_host_size_t bytes_remaining = mapping.contents.data_length;
+  const uint8_t* buffer_ptr = source.data;
+  iree_host_size_t bytes_remaining = source.data_length;
   while (iree_status_is_ok(status) && bytes_remaining > 0) {
-    const iree_host_size_t bytes_requested = iree_min(bytes_remaining, INT_MAX);
+    iree_host_size_t bytes_requested = 0;
+    status = iree_hal_file_prepare_transfer(
+        &file->requirements.write, file_offset, buffer_ptr, bytes_remaining,
+        INT_MAX, &bytes_requested);
     iree_host_size_t bytes_written = 0;
-    status = iree_hal_platform_fd_pwrite(file->fd, buffer_ptr, bytes_requested,
-                                         file_offset, &bytes_written);
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_platform_fd_pwrite(
+          file->fd, buffer_ptr, bytes_requested, file_offset, &bytes_written);
+    }
+    if (iree_status_is_ok(status) && bytes_written == 0) {
+      status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "file write made no progress");
+    }
     file_offset += bytes_written;
     buffer_ptr += bytes_written;
     bytes_remaining -= bytes_written;
   }
-
-  return iree_status_join(status, iree_hal_buffer_unmap_range(&mapping));
+  return status;
 }
 
 static const iree_hal_file_vtable_t iree_hal_fd_file_vtable = {
     .destroy = iree_hal_fd_file_destroy,
     .allowed_access = iree_hal_fd_file_allowed_access,
     .length = iree_hal_fd_file_length,
+    .requirements = iree_hal_fd_file_requirements,
     .storage_buffer = iree_hal_fd_file_storage_buffer,
     .async_handle = iree_hal_fd_file_async_handle,
     .supports_synchronous_io = iree_hal_fd_file_supports_synchronous_io,

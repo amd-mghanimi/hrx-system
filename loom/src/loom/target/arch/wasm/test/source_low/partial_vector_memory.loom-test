@@ -1,0 +1,88 @@
+// RUN: emit source-low target=wasm:simd128 output=low control-flow=structured-low
+
+// Fifteen byte lanes require the maximum four-access decomposition: 8+4+2+1.
+func.def @partial_i8x15(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<15xi8>
+  %result = buffer.view %output[%base] : buffer -> view<15xi8>
+  %value = vector.load %source[0] : view<15xi8> -> vector<15xi8>
+  vector.store %value, %result[0] : vector<15xi8>, view<15xi8>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_i8x15(%input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %55 = i64.load %input
+  %56 = i32.load %input {offset = 8}
+  %57 = i32.load16_u %input {offset = 12}
+  %58 = i32.load8_u %input {offset = 14}
+  i64.store %output, %55
+  i32.store %output, %56 {offset = 8}
+  i32.store16 %output, %57 {offset = 12}
+  i32.store8 %output, %58 {offset = 14}
+  return
+}
+
+// ====
+
+// Seven halfword lanes cover fourteen bytes as 8+4+2.
+func.def @partial_i16x7(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<7xi16>
+  %result = buffer.view %output[%base] : buffer -> view<7xi16>
+  %value = vector.load %source[0] : view<7xi16> -> vector<7xi16>
+  vector.store %value, %result[0] : vector<7xi16>, view<7xi16>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_i16x7(%input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %43 = i64.load %input
+  %44 = i32.load %input {offset = 8}
+  %45 = i32.load16_u %input {offset = 12}
+  i64.store %output, %43
+  i32.store %output, %44 {offset = 8}
+  i32.store16 %output, %45 {offset = 12}
+  return
+}
+
+// ====
+
+// Three packed float lanes cover twelve bytes as 8+4 while retaining the
+// source's one-byte access contract.
+func.def @partial_f32x3_packed(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<3xf32, align(1)>
+  %result = buffer.view %output[%base] : buffer -> view<3xf32, align(1)>
+  %value = vector.load %source[0] : view<3xf32, align(1)> -> vector<3xf32>
+  vector.store %value, %result[0] : vector<3xf32>, view<3xf32, align(1)>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_f32x3_packed(%input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %31 = i64.load %input
+  %32 = i32.load %input {offset = 8}
+  i64.store %output, %31
+  i32.store %output, %32 {offset = 8}
+  return
+}
+
+// ====
+
+// One double lane is one eight-byte scalar access.
+func.def @partial_f64x1(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<1xf64>
+  %result = buffer.view %output[%base] : buffer -> view<1xf64>
+  %value = vector.load %source[0] : view<1xf64> -> vector<1xf64>
+  vector.store %value, %result[0] : vector<1xf64>, view<1xf64>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_f64x1(%input: reg<wasm.i32>, %output: reg<wasm.i32>) asm {
+  %17 = i64.load %input
+  i64.store %output, %17
+  return
+}

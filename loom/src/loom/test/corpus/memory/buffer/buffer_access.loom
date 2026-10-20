@@ -1,0 +1,46 @@
+func.def @byte_checksum(%byte_count: i64, %byte_start: i64, %pattern: i32) -> (i32) {
+  %count_input = scalar.assume %byte_count [range(%byte_count, 0, 65)] : i64
+  %length = index.cast %count_input : i64 to offset
+  %start_input = scalar.assume %byte_start [range(%byte_start, 0, 65)] : i64
+  %start = index.cast %start_input : i64 to offset
+  %extent = index.add %length, %start : offset
+  %storage = buffer.alloca<private> align(8) %extent : buffer
+  %begin = index.constant 0 : offset
+  %stride = index.constant 1 : offset
+  scf.for %i = [%begin to %length step %stride] {
+    %position = index.add %start, %i : offset
+    buffer.store.i8 %pattern, %storage[%position]
+  }
+  %initial = scalar.constant 0 : i32
+  %checksum = scf.for %i = [%begin to %length step %stride](%sum = %initial : i32) -> (i32) {
+    %position = index.add %start, %i : offset
+    %byte = buffer.load.i8.u %storage[%position]
+    %next = scalar.addi %sum, %byte : i32
+    scf.yield %next : i32
+  }
+  func.return %checksum : i32
+}
+
+func.def @byte_checksum_observations(%ordinal: index, %pattern_entropy: i64, %output: buffer) {
+  %count = index.cast %ordinal : index to i64
+  %start = index.cast %ordinal : index to i64
+  %pattern = scalar.trunci %pattern_entropy : i64 to i32
+  %checksum = func.call @byte_checksum(%count, %start, %pattern) : (i64, i64, i32) -> (i32)
+  %values = vector.from_elements %checksum : vector<1xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<1xi32>
+  vector.store %values, %results[0] : vector<1xi32>, view<1xi32>
+  func.return
+}
+
+check.scenario @byte_checksum_values {
+  check.trial[66](%trial: index, %entropy: check.entropy) {
+    %pattern_source = check.entropy.fork %entropy name("pattern") : check.entropy
+    %pattern = check.entropy.read %pattern_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<1xi32>
+    check.compare<@byte_checksum_observations>(%trial, %pattern, %output) : (index, i64, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<1xi32>
+    }
+  }
+  check.return
+}

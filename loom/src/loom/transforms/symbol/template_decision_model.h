@@ -149,13 +149,16 @@ enum loom_template_decision_fact_requirement_bits_e {
   LOOM_TEMPLATE_DECISION_FACT_REQUIREMENT_PATH = 1u << 1,
 };
 
-// Template-specific meaning of one unresolved generic constraint.
+// Template-specific meaning of one generic decision constraint.
 typedef struct loom_template_decision_constraint_info_t {
   // Requirement category used by selection diagnostics.
   loom_template_provider_unresolved_reason_t reason;
 
-  // Unresolved typed target condition, or NULL for other categories.
+  // Decisive typed target condition, or NULL for other categories.
   const loom_target_condition_t* target_condition;
+
+  // Decisive compiled value predicate, or NULL for other categories.
+  const loom_decision_program_predicate_t* value_predicate;
 } loom_template_decision_constraint_info_t;
 
 // Full provider evidence summary used by reports and rejected-site diagnostics.
@@ -243,7 +246,7 @@ loom_template_decision_model_provider(
   return &model->providers.providers[provider_ordinal];
 }
 
-// Describes an unresolved constraint emitted by |model|.
+// Describes a decision constraint emitted by |model|.
 loom_template_decision_constraint_info_t
 loom_template_decision_model_constraint_info(
     const loom_template_decision_model_t* model,

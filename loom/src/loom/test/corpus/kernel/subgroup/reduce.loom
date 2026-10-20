@@ -1,0 +1,806 @@
+// Two independent clusters and four distinct components exercise every combine
+// operation without depending on the target's wave32 or wave64 execution size.
+// Every lane publishes its result, including nonleaders and the second cluster.
+kernel.def @subgroup_integer_reductions() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<64x4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x9x4xi32>
+  %raw = vector.load %source[%lane, 0] : view<64x4xi32> -> vector<4xi32>
+  // Odd factors keep modular multiplication informative instead of collapsing
+  // to zero after a few even inputs.
+  %odd_bit = vector.constant 1 : vector<4xi32>
+  %values = vector.ori %raw, %odd_bit : vector<4xi32>
+  %sum = kernel.subgroup.reduce<addi> %values {cluster_size = 32} : vector<4xi32>
+  %product = kernel.subgroup.reduce<muli> %values {cluster_size = 32} : vector<4xi32>
+  %signed_minimum = kernel.subgroup.reduce<minsi> %values {cluster_size = 32} : vector<4xi32>
+  %signed_maximum = kernel.subgroup.reduce<maxsi> %values {cluster_size = 32} : vector<4xi32>
+  %unsigned_minimum = kernel.subgroup.reduce<minui> %values {cluster_size = 32} : vector<4xi32>
+  %unsigned_maximum = kernel.subgroup.reduce<maxui> %values {cluster_size = 32} : vector<4xi32>
+  %all_bits = kernel.subgroup.reduce<andi> %values {cluster_size = 32} : vector<4xi32>
+  %any_bits = kernel.subgroup.reduce<ori> %values {cluster_size = 32} : vector<4xi32>
+  %odd_bits = kernel.subgroup.reduce<xori> %values {cluster_size = 32} : vector<4xi32>
+  vector.store %sum, %destination[%lane, 0, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %product, %destination[%lane, 1, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %signed_minimum, %destination[%lane, 2, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %signed_maximum, %destination[%lane, 3, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %unsigned_minimum, %destination[%lane, 4, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %unsigned_maximum, %destination[%lane, 5, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %all_bits, %destination[%lane, 6, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %any_bits, %destination[%lane, 7, 0] : vector<4xi32>, view<64x9x4xi32>
+  vector.store %odd_bits, %destination[%lane, 8, 0] : vector<4xi32>, view<64x9x4xi32>
+  kernel.return
+}
+
+// Scalar serial accumulation has no subgroup exchanges or vector components.
+func.def @subgroup_integer_reductions_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<64x4xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x9x4xi32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %items = index.constant 64 : index
+  %width = index.constant 32 : index
+  %components = index.constant 4 : index
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %all = scalar.constant -1 : i32
+  %signed_high = scalar.constant 2147483647 : i32
+  %signed_low = scalar.constant -2147483648 : i32
+  scf.for %cluster = [%begin to %items step %width] {
+    %end = index.add %cluster, %width : index
+    scf.for %component = [%begin to %components step %step] {
+      %sum, %product, %signed_minimum, %signed_maximum, %unsigned_minimum, %unsigned_maximum, %all_bits, %any_bits, %odd_bits = scf.for %lane = [%cluster to %end step %step](%sum_acc = %c0 : i32, %product_acc = %c1 : i32, %signed_min_acc = %signed_high : i32, %signed_max_acc = %signed_low : i32, %unsigned_min_acc = %all : i32, %unsigned_max_acc = %c0 : i32, %all_acc = %all : i32, %any_acc = %c0 : i32, %odd_acc = %c0 : i32) -> (i32, i32, i32, i32, i32, i32, i32, i32, i32) {
+        %raw = view.load %source[%lane, %component] : view<64x4xi32> -> i32
+        %value = scalar.ori %raw, %c1 : i32
+        %next_sum = scalar.addi %sum_acc, %value : i32
+        %next_product = scalar.muli %product_acc, %value : i32
+        %next_signed_min = scalar.minsi %signed_min_acc, %value : i32
+        %next_signed_max = scalar.maxsi %signed_max_acc, %value : i32
+        %next_unsigned_min = scalar.minui %unsigned_min_acc, %value : i32
+        %next_unsigned_max = scalar.maxui %unsigned_max_acc, %value : i32
+        %next_all = scalar.andi %all_acc, %value : i32
+        %next_any = scalar.ori %any_acc, %value : i32
+        %next_odd = scalar.xori %odd_acc, %value : i32
+        scf.yield %next_sum, %next_product, %next_signed_min, %next_signed_max, %next_unsigned_min, %next_unsigned_max, %next_all, %next_any, %next_odd : i32, i32, i32, i32, i32, i32, i32, i32, i32
+      }
+      scf.for %lane = [%cluster to %end step %step] {
+        view.store %sum, %destination[%lane, 0, %component] : i32, view<64x9x4xi32>
+        view.store %product, %destination[%lane, 1, %component] : i32, view<64x9x4xi32>
+        view.store %signed_minimum, %destination[%lane, 2, %component] : i32, view<64x9x4xi32>
+        view.store %signed_maximum, %destination[%lane, 3, %component] : i32, view<64x9x4xi32>
+        view.store %unsigned_minimum, %destination[%lane, 4, %component] : i32, view<64x9x4xi32>
+        view.store %unsigned_maximum, %destination[%lane, 5, %component] : i32, view<64x9x4xi32>
+        view.store %all_bits, %destination[%lane, 6, %component] : i32, view<64x9x4xi32>
+        view.store %any_bits, %destination[%lane, 7, %component] : i32, view<64x9x4xi32>
+        view.store %odd_bits, %destination[%lane, 8, %component] : i32, view<64x9x4xi32>
+      }
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_integer_reduction_values {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<64x4xi32>
+    %output = check.generate.fill value(123) : tensor<64x9x4xi32>
+    check.compare<@subgroup_integer_reductions, @subgroup_integer_reductions_oracle>(%input, %output) : (tensor<64x4xi32>, tensor<64x9x4xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64x4xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64x9x4xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @subgroup_float_reductions() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<64x4xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<4x64x4xf32>
+  %values = vector.load %source[%lane, 0] : view<64x4xf32> -> vector<4xf32>
+  %sum = kernel.subgroup.reduce<addf> %values {cluster_size = 32} : vector<4xf32>
+  %product = kernel.subgroup.reduce<mulf> %values {cluster_size = 32} : vector<4xf32>
+  %minimum = kernel.subgroup.reduce<minnumf> %values {cluster_size = 32} : vector<4xf32>
+  %maximum = kernel.subgroup.reduce<maxnumf> %values {cluster_size = 32} : vector<4xf32>
+  vector.store %sum, %destination[0, %lane, 0] : vector<4xf32>, view<4x64x4xf32>
+  vector.store %product, %destination[1, %lane, 0] : vector<4xf32>, view<4x64x4xf32>
+  vector.store %minimum, %destination[2, %lane, 0] : vector<4xf32>, view<4x64x4xf32>
+  vector.store %maximum, %destination[3, %lane, 0] : vector<4xf32>, view<4x64x4xf32>
+  kernel.return
+}
+
+// Accumulating in F64 separates the oracle's error from the native F32 tree.
+func.def @subgroup_float_reductions_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<64x4xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<4x64x4xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %items = index.constant 64 : index
+  %width = index.constant 32 : index
+  %components = index.constant 4 : index
+  %sum_identity = scalar.constant 0.0 : f64
+  %product_identity = scalar.constant 1.0 : f64
+  scf.for %cluster = [%begin to %items step %width] {
+    %end = index.add %cluster, %width : index
+    scf.for %component = [%begin to %components step %step] {
+      // An actual source value preserves an all-NaN extremum; an infinity seed
+      // would introduce a numeric value that does not belong to the reduction.
+      %first_raw = view.load %source[%cluster, %component] : view<64x4xf32> -> f32
+      %first = scalar.extf %first_raw : f32 to f64
+      %sum, %product, %minimum, %maximum = scf.for %lane = [%cluster to %end step %step](%sum_acc = %sum_identity : f64, %product_acc = %product_identity : f64, %min_acc = %first : f64, %max_acc = %first : f64) -> (f64, f64, f64, f64) {
+        %raw = view.load %source[%lane, %component] : view<64x4xf32> -> f32
+        %value = scalar.extf %raw : f32 to f64
+        %next_sum = scalar.addf %sum_acc, %value : f64
+        %next_product = scalar.mulf %product_acc, %value : f64
+        %next_min = scalar.minnumf %min_acc, %value : f64
+        %next_max = scalar.maxnumf %max_acc, %value : f64
+        scf.yield %next_sum, %next_product, %next_min, %next_max : f64, f64, f64, f64
+      }
+      %sum_f32 = scalar.fptrunc %sum : f64 to f32
+      %product_f32 = scalar.fptrunc %product : f64 to f32
+      %minimum_f32 = scalar.fptrunc %minimum : f64 to f32
+      %maximum_f32 = scalar.fptrunc %maximum : f64 to f32
+      scf.for %lane = [%cluster to %end step %step] {
+        view.store %sum_f32, %destination[0, %lane, %component] : f32, view<4x64x4xf32>
+        view.store %product_f32, %destination[1, %lane, %component] : f32, view<4x64x4xf32>
+        view.store %minimum_f32, %destination[2, %lane, %component] : f32, view<4x64x4xf32>
+        view.store %maximum_f32, %destination[3, %lane, %component] : f32, view<4x64x4xf32>
+      }
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_float_reduction_values {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    // Products remain near one, rather than underflowing to an uninformative zero.
+    %input = check.generate.random.uniform seed(%seed) range(0.9375 to 1.0625) : tensor<64x4xf32>
+    %output = check.generate.fill value(123.0) : tensor<4x64x4xf32>
+    check.compare<@subgroup_float_reductions, @subgroup_float_reductions_oracle>(%input, %output) : (tensor<64x4xf32>, tensor<4x64x4xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64x4xf32>
+      check.expect.close actual(%output) expected(%output) atol(1.9999999999999999e-06) rtol(2.0000000000000002e-05) nan(same) : tensor<4x64x4xf32>
+    }
+  }
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-1.0 to 1.0) : tensor<64x4xf32>
+    %output = check.generate.fill value(123.0) : tensor<4x64x4xf32>
+    check.compare<@subgroup_float_reductions, @subgroup_float_reductions_oracle>(%input, %output) : (tensor<64x4xf32>, tensor<4x64x4xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64x4xf32>
+      check.expect.close actual(%output) expected(%output) atol(1.9999999999999999e-06) rtol(2.0000000000000002e-05) nan(same) : tensor<4x64x4xf32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(nan) : tensor<64x4xf32>
+    %output = check.generate.fill value(123.0) : tensor<4x64x4xf32>
+    // Native sums/products have no portable nonfinite guarantee. Extrema
+    // retain their fixed contract, observed across every lane and component.
+    %extrema = check.tensor.view %output offset(2048) : tensor<4x64x4xf32> -> tensor<2x64x4xf32>
+    check.compare<@subgroup_float_reductions, @subgroup_float_reductions_oracle>(%input, %output) : (tensor<64x4xf32>, tensor<4x64x4xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64x4xf32>
+      check.expect.close actual(%extrema) expected(%extrema) atol(0.0) rtol(0.0) nan(same) : tensor<2x64x4xf32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Raw buffer bits alternate -infinity, quiet NaN and positive zero. The
+    // three-value period gives every component both numeric and NaN inputs.
+    %input = check.generate.iota offset(-8388608) step(4194304) period(3) : tensor<64x4xi32>
+    %output = check.generate.fill value(123.0) : tensor<4x64x4xf32>
+    %extrema = check.tensor.view %output offset(2048) : tensor<4x64x4xf32> -> tensor<2x64x4xf32>
+    check.compare<@subgroup_float_reductions, @subgroup_float_reductions_oracle>(%input, %output) : (tensor<64x4xi32>, tensor<4x64x4xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64x4xi32>
+      check.expect.close actual(%extrema) expected(%extrema) atol(0.0) rtol(0.0) nan(same) : tensor<2x64x4xf32>
+    }
+  }
+  check.return
+}
+
+// Eight-lane clusters exercise partial subgroups. The generated integer range
+// keeps every floating addition exact in BF16/F16/F32/F64 while the byte sum
+// still exercises modular overflow.
+kernel.def @subgroup_extended_reductions() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<64xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x9xi64>
+  %value = view.load %source[%lane] : view<64xi32> -> i32
+  %byte = scalar.trunci %value : i32 to i8
+  %short = scalar.trunci %value : i32 to i16
+  %wide = scalar.extsi %value : i32 to i64
+  %half = scalar.sitofp %value : i32 to f16
+  %single = scalar.sitofp %value : i32 to f32
+  %double = scalar.sitofp %value : i32 to f64
+  %c0 = scalar.constant 0 : i32
+  %predicate = scalar.cmpi ne, %value, %c0 : i32
+  %byte_sum = kernel.subgroup.reduce<addi> %byte {cluster_size = 8} : i8
+  %short_sum = kernel.subgroup.reduce<addi> %short {cluster_size = 8} : i16
+  %wide_sum = kernel.subgroup.reduce<addi> %wide {cluster_size = 8} : i64
+  %half_vector = vector.splat %half : vector<1xf16>
+  %half_vector_sum = kernel.subgroup.reduce<addf> %half_vector {cluster_size = 8} : vector<1xf16>
+  %half_sum = vector.extract %half_vector_sum[0] : vector<1xf16> -> f16
+  %single_sum = kernel.subgroup.reduce<addf> %single {cluster_size = 8} : f32
+  %double_sum = kernel.subgroup.reduce<addf> %double {cluster_size = 8} : f64
+  %parity = kernel.subgroup.reduce<xori> %predicate {cluster_size = 8} : i1
+  %bfloat = scalar.fptrunc %single : f32 to bf16
+  %bfloat_packet = vector.splat %bfloat : vector<1xbf16>
+  %bfloat_packet_sum = kernel.subgroup.reduce<addf> %bfloat_packet {cluster_size = 8} : vector<1xbf16>
+  %bfloat_sum = vector.extract %bfloat_packet_sum[0] : vector<1xbf16> -> bf16
+  %positive = scalar.constant 1.0 : bf16
+  %negative = scalar.constant -1.0 : bf16
+  %factor = scf.select %predicate, %negative, %positive : bf16
+  %bfloat_product = kernel.subgroup.reduce<mulf> %factor {cluster_size = 8} : bf16
+  %bfloat_sum_bits = scalar.bitcast %bfloat_sum : bf16 to i16
+  %bfloat_product_bits = scalar.bitcast %bfloat_product : bf16 to i16
+  %bfloat_sum_result = scalar.extui %bfloat_sum_bits : i16 to i64
+  %bfloat_product_result = scalar.extui %bfloat_product_bits : i16 to i64
+  %byte_result = scalar.extsi %byte_sum : i8 to i64
+  %short_result = scalar.extsi %short_sum : i16 to i64
+  %half_bits = scalar.bitcast %half_sum : f16 to i16
+  %half_result = scalar.extui %half_bits : i16 to i64
+  %single_bits = scalar.bitcast %single_sum : f32 to i32
+  %single_result = scalar.extui %single_bits : i32 to i64
+  %double_result = scalar.bitcast %double_sum : f64 to i64
+  %parity_result = scalar.extui %parity : i1 to i64
+  view.store %byte_result, %destination[%lane, 0] : i64, view<64x9xi64>
+  view.store %short_result, %destination[%lane, 1] : i64, view<64x9xi64>
+  view.store %wide_sum, %destination[%lane, 2] : i64, view<64x9xi64>
+  view.store %half_result, %destination[%lane, 3] : i64, view<64x9xi64>
+  view.store %single_result, %destination[%lane, 4] : i64, view<64x9xi64>
+  view.store %double_result, %destination[%lane, 5] : i64, view<64x9xi64>
+  view.store %parity_result, %destination[%lane, 6] : i64, view<64x9xi64>
+  view.store %bfloat_sum_result, %destination[%lane, 7] : i64, view<64x9xi64>
+  view.store %bfloat_product_result, %destination[%lane, 8] : i64, view<64x9xi64>
+  kernel.return
+}
+
+// One serial integer accumulation supplies the independent mathematical sum;
+// only its final conversion produces each source format's expected payload.
+func.def @subgroup_extended_reductions_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<64xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x9xi64>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %items = index.constant 64 : index
+  %width = index.constant 8 : index
+  %initial = scalar.constant 0 : i64
+  %false = scalar.constant 0 : i1
+  %c0 = scalar.constant 0 : i32
+  scf.for %cluster = [%begin to %items step %width] {
+    %end = index.add %cluster, %width : index
+    %sum, %parity = scf.for %lane = [%cluster to %end step %step](%accumulator = %initial : i64, %parity_accumulator = %false : i1) -> (i64, i1) {
+      %value = view.load %source[%lane] : view<64xi32> -> i32
+      %wide = scalar.extsi %value : i32 to i64
+      %next_sum = scalar.addi %accumulator, %wide : i64
+      %predicate = scalar.cmpi ne, %value, %c0 : i32
+      %next_parity = scalar.xori %parity_accumulator, %predicate : i1
+      scf.yield %next_sum, %next_parity : i64, i1
+    }
+    %byte = scalar.trunci %sum : i64 to i8
+    %byte_result = scalar.extsi %byte : i8 to i64
+    %short = scalar.trunci %sum : i64 to i16
+    %short_result = scalar.extsi %short : i16 to i64
+    %half = scalar.sitofp %sum : i64 to f16
+    %half_bits = scalar.bitcast %half : f16 to i16
+    %half_result = scalar.extui %half_bits : i16 to i64
+    %single = scalar.sitofp %sum : i64 to f32
+    %single_bits = scalar.bitcast %single : f32 to i32
+    %single_result = scalar.extui %single_bits : i32 to i64
+    %double = scalar.sitofp %sum : i64 to f64
+    %double_result = scalar.bitcast %double : f64 to i64
+    %parity_result = scalar.extui %parity : i1 to i64
+    %bfloat_sum = scalar.fptrunc %single : f32 to bf16
+    %bfloat_sum_bits = scalar.bitcast %bfloat_sum : bf16 to i16
+    %bfloat_sum_result = scalar.extui %bfloat_sum_bits : i16 to i64
+    %positive = scalar.constant 16256 : i64
+    %negative = scalar.constant 49024 : i64
+    %bfloat_product_result = scf.select %parity, %negative, %positive : i64
+    scf.for %lane = [%cluster to %end step %step] {
+      view.store %byte_result, %destination[%lane, 0] : i64, view<64x9xi64>
+      view.store %short_result, %destination[%lane, 1] : i64, view<64x9xi64>
+      view.store %sum, %destination[%lane, 2] : i64, view<64x9xi64>
+      view.store %half_result, %destination[%lane, 3] : i64, view<64x9xi64>
+      view.store %single_result, %destination[%lane, 4] : i64, view<64x9xi64>
+      view.store %double_result, %destination[%lane, 5] : i64, view<64x9xi64>
+      view.store %parity_result, %destination[%lane, 6] : i64, view<64x9xi64>
+      view.store %bfloat_sum_result, %destination[%lane, 7] : i64, view<64x9xi64>
+      view.store %bfloat_product_result, %destination[%lane, 8] : i64, view<64x9xi64>
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_extended_reduction_values {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32 to 31) : tensor<64xi32>
+    %output = check.generate.fill value(123) : tensor<64x9xi64>
+    check.compare<@subgroup_extended_reductions, @subgroup_extended_reductions_oracle>(%input, %output) : (tensor<64xi32>, tensor<64x9xi64>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64x9xi64>
+    }
+  }
+  check.return
+}
+
+// IEEE extrema propagate NaNs, unlike the number-preferring reductions above.
+kernel.def @subgroup_ieee_extrema() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %item = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<64x4xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x2x4xf32>
+  %values = vector.load %source[%item, 0] : view<64x4xf32> -> vector<4xf32>
+  %minimum = kernel.subgroup.reduce<minimumf> %values {cluster_size = 32} : vector<4xf32>
+  %maximum = kernel.subgroup.reduce<maximumf> %values {cluster_size = 32} : vector<4xf32>
+  vector.store %minimum, %destination[%item, 0, 0] : vector<4xf32>, view<64x2x4xf32>
+  vector.store %maximum, %destination[%item, 1, 0] : vector<4xf32>, view<64x2x4xf32>
+  kernel.return
+}
+
+func.def @subgroup_ieee_extrema_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<64x4xf32>
+  %destination = buffer.view %output[%base] : buffer -> view<64x2x4xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %width = index.constant 32 : index
+  %items = index.constant 64 : index
+  %components = index.constant 4 : index
+  %positive_infinity = scalar.constant inf : f64
+  %negative_infinity = scalar.constant -inf : f64
+  scf.for %cluster = [%begin to %items step %width] {
+    %end = index.add %cluster, %width : index
+    scf.for %component = [%begin to %components step %step] {
+      %minimum, %maximum = scf.for %item = [%cluster to %end step %step](%min_acc = %positive_infinity : f64, %max_acc = %negative_infinity : f64) -> (f64, f64) {
+        %raw = view.load %source[%item, %component] : view<64x4xf32> -> f32
+        %value = scalar.extf %raw : f32 to f64
+        %next_minimum = scalar.minimumf %min_acc, %value : f64
+        %next_maximum = scalar.maximumf %max_acc, %value : f64
+        scf.yield %next_minimum, %next_maximum : f64, f64
+      }
+      %minimum_f32 = scalar.fptrunc %minimum : f64 to f32
+      %maximum_f32 = scalar.fptrunc %maximum : f64 to f32
+      scf.for %item = [%cluster to %end step %step] {
+        view.store %minimum_f32, %destination[%item, 0, %component] : f32, view<64x2x4xf32>
+        view.store %maximum_f32, %destination[%item, 1, %component] : f32, view<64x2x4xf32>
+      }
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_ieee_extrema_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-100.0 to 100.0) : tensor<64x4xf32>
+    %output = check.generate.fill value(123.0) : tensor<64x2x4xf32>
+    check.compare<@subgroup_ieee_extrema, @subgroup_ieee_extrema_oracle>(%input, %output) : (tensor<64x4xf32>, tensor<64x2x4xf32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64x2x4xf32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Every component sees infinity, NaN, and zero from distinct invocations.
+    %input = check.generate.iota offset(-8388608) step(4194304) period(3) : tensor<64x4xi32>
+    %output = check.generate.fill value(123.0) : tensor<64x2x4xf32>
+    check.compare<@subgroup_ieee_extrema, @subgroup_ieee_extrema_oracle>(%input, %output) : (tensor<64x4xi32>, tensor<64x2x4xf32>) -> () {
+      check.expect.close actual(%output) expected(%output) atol(0.0) rtol(0.0) nan(same) : tensor<64x2x4xf32>
+    }
+  }
+  check.return
+}
+
+// Uniform runtime inputs isolate F16/BF16 encoding and decoding from subgroup
+// packing. Arithmetic quiets NaNs; a singleton subgroup may forward its input.
+func.def inline @narrow_collective_bits(%bits: i16, %infinity: i16, %quiet_mask: i16, %combined: i1) -> (i16) {
+  %mask = scalar.constant 32767 : i16
+  %magnitude = scalar.andi %bits, %mask : i16
+  %nan = scalar.cmpi ugt, %magnitude, %infinity : i16
+  %quiet_bits = scalar.andi %bits, %quiet_mask : i16
+  %quiet = scf.select %combined, %quiet_bits, %quiet_mask : i16
+  %nan_tag = scalar.ori %infinity, %quiet : i16
+  %result = scf.select %nan, %nan_tag, %bits : i16
+  func.return %result : i16
+}
+
+kernel.def @subgroup_half_extrema() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 16 : index
+  %items = index.constant 67 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %group = kernel.workgroup.id<x> : index
+  %item = kernel.workitem.id<x> : index
+  %source = buffer.view %input[%base] : buffer -> view<16xf16>
+  %destination = buffer.view %output[%base] : buffer -> view<16x67x8xi16>
+  %value = view.load %source[%group] : view<16xf16> -> f16
+  %present = scalar.constant 1 : i32
+  %participants = kernel.subgroup.reduce<addi> %present : i32
+  %combined = scalar.cmpi ugt, %participants, %present : i32
+  %minimum = kernel.subgroup.reduce<minnumf> %value : f16
+  %maximum = kernel.subgroup.reduce<maxnumf> %value : f16
+  %nan_minimum = kernel.subgroup.reduce<minimumf> %value : f16
+  %nan_maximum = kernel.subgroup.reduce<maximumf> %value : f16
+  %half_infinity = scalar.constant 31744 : i16
+  %half_quiet = scalar.constant 512 : i16
+  %minimum_raw = scalar.bitcast %minimum : f16 to i16
+  %maximum_raw = scalar.bitcast %maximum : f16 to i16
+  %nan_minimum_raw = scalar.bitcast %nan_minimum : f16 to i16
+  %nan_maximum_raw = scalar.bitcast %nan_maximum : f16 to i16
+  %minimum_bits = func.call @narrow_collective_bits(%minimum_raw, %half_infinity, %half_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %maximum_bits = func.call @narrow_collective_bits(%maximum_raw, %half_infinity, %half_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %nan_minimum_bits = func.call @narrow_collective_bits(%nan_minimum_raw, %half_infinity, %half_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %nan_maximum_bits = func.call @narrow_collective_bits(%nan_maximum_raw, %half_infinity, %half_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %raw = scalar.bitcast %value : f16 to i16
+  %bfloat = scalar.bitcast %raw : i16 to bf16
+  %bfloat_minimum = kernel.subgroup.reduce<minnumf> %bfloat : bf16
+  %bfloat_maximum = kernel.subgroup.reduce<maxnumf> %bfloat : bf16
+  %bfloat_nan_minimum = kernel.subgroup.reduce<minimumf, preserve> %bfloat : bf16
+  %bfloat_nan_maximum = kernel.subgroup.reduce<maximumf, preserve> %bfloat : bf16
+  %bfloat_infinity = scalar.constant 32640 : i16
+  %bfloat_quiet = scalar.constant 64 : i16
+  %bfloat_minimum_raw = scalar.bitcast %bfloat_minimum : bf16 to i16
+  %bfloat_maximum_raw = scalar.bitcast %bfloat_maximum : bf16 to i16
+  %bfloat_nan_minimum_raw = scalar.bitcast %bfloat_nan_minimum : bf16 to i16
+  %bfloat_nan_maximum_raw = scalar.bitcast %bfloat_nan_maximum : bf16 to i16
+  %bfloat_minimum_bits = func.call @narrow_collective_bits(%bfloat_minimum_raw, %bfloat_infinity, %bfloat_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %bfloat_maximum_bits = func.call @narrow_collective_bits(%bfloat_maximum_raw, %bfloat_infinity, %bfloat_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %bfloat_nan_minimum_bits = func.call @narrow_collective_bits(%bfloat_nan_minimum_raw, %bfloat_infinity, %bfloat_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  %bfloat_nan_maximum_bits = func.call @narrow_collective_bits(%bfloat_nan_maximum_raw, %bfloat_infinity, %bfloat_quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  view.store %minimum_bits, %destination[%group, %item, 0] : i16, view<16x67x8xi16>
+  view.store %maximum_bits, %destination[%group, %item, 1] : i16, view<16x67x8xi16>
+  view.store %nan_minimum_bits, %destination[%group, %item, 2] : i16, view<16x67x8xi16>
+  view.store %nan_maximum_bits, %destination[%group, %item, 3] : i16, view<16x67x8xi16>
+  view.store %bfloat_minimum_bits, %destination[%group, %item, 4] : i16, view<16x67x8xi16>
+  view.store %bfloat_maximum_bits, %destination[%group, %item, 5] : i16, view<16x67x8xi16>
+  view.store %bfloat_nan_minimum_bits, %destination[%group, %item, 6] : i16, view<16x67x8xi16>
+  view.store %bfloat_nan_maximum_bits, %destination[%group, %item, 7] : i16, view<16x67x8xi16>
+  kernel.return
+}
+
+func.def @subgroup_half_extrema_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<16xi16>
+  %destination = buffer.view %output[%base] : buffer -> view<16x67x8xi16>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %groups = index.constant 16 : index
+  %items = index.constant 67 : index
+  %mask = scalar.constant 32767 : i16
+  %infinity = scalar.constant 31744 : i16
+  %quiet_nan = scalar.constant 32256 : i16
+  %bfloat_infinity = scalar.constant 32640 : i16
+  %bfloat_quiet_nan = scalar.constant 32704 : i16
+  scf.for %group = [%begin to %groups step %step] {
+    %bits = view.load %source[%group] : view<16xi16> -> i16
+    %magnitude = scalar.andi %bits, %mask : i16
+    %nan = scalar.cmpi ugt, %magnitude, %infinity : i16
+    %expected = scf.select %nan, %quiet_nan, %bits : i16
+    %bfloat_nan = scalar.cmpi ugt, %magnitude, %bfloat_infinity : i16
+    %bfloat_expected = scf.select %bfloat_nan, %bfloat_quiet_nan, %bits : i16
+    %results = vector.from_elements %expected, %expected, %expected, %expected, %bfloat_expected, %bfloat_expected, %bfloat_expected, %bfloat_expected : vector<8xi16>
+    scf.for %item = [%begin to %items step %step] {
+      vector.store %results, %destination[%group, %item, 0] : vector<8xi16>, view<16x67x8xi16>
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_half_extrema_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Signed zero and the smallest subnormal magnitudes, as raw input bits.
+    %input = check.generate.iota offset(-32768) step(1) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<16x67x8xi16>
+    check.compare<@subgroup_half_extrema, @subgroup_half_extrema_oracle>(%input, %output) : (tensor<16xi16>, tensor<16x67x8xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16x67x8xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(0) step(1) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<16x67x8xi16>
+    check.compare<@subgroup_half_extrema, @subgroup_half_extrema_oracle>(%input, %output) : (tensor<16xi16>, tensor<16x67x8xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16x67x8xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Infinity and signaling NaNs must not be confused with numeric extrema.
+    %input = check.generate.iota offset(31744) step(1) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<16x67x8xi16>
+    check.compare<@subgroup_half_extrema, @subgroup_half_extrema_oracle>(%input, %output) : (tensor<16xi16>, tensor<16x67x8xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16x67x8xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-1024) step(64) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<16x67x8xi16>
+    check.compare<@subgroup_half_extrema, @subgroup_half_extrema_oracle>(%input, %output) : (tensor<16xi16>, tensor<16x67x8xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<16x67x8xi16>
+    }
+  }
+  check.return
+}
+
+// Components differ even though every invocation reduces the same vector.
+// Widening and reduction retain exact formats, but varying component selection
+// must not inherit the vector's subgroup-uniform execution distribution.
+kernel.def @subgroup_converted_components() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 4 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %group = kernel.workgroup.id<x> : index
+  %item = kernel.workitem.id<x> : index
+  %components = index.constant 4 : index
+  %component = index.rem %item, %components : index
+  %first = index.mul %group, %components : index
+  %source = buffer.view %input[%base] : buffer -> view<16xbf16>
+  %destination = buffer.view %output[%base] : buffer -> view<4x64x2xi16>
+  %packed = vector.load %source[%first] : view<16xbf16> -> vector<4xbf16>
+  %wide = vector.extf %packed : vector<4xbf16> to vector<4xf32>
+  %minimum = kernel.subgroup.reduce<minnumf> %wide : vector<4xf32>
+  %selected = vector.extract %minimum[%component] : vector<4xf32> -> f32
+  %narrow = scalar.fptrunc %selected : f32 to bf16
+  %bits = scalar.bitcast %narrow : bf16 to i16
+  %infinity = scalar.constant 32640 : i16
+  %quiet = scalar.constant 64 : i16
+  %combined = scalar.constant true : i1
+  %observed = func.call @narrow_collective_bits(%bits, %infinity, %quiet, %combined) : (i16, i16, i16, i1) -> (i16)
+  view.store %observed, %destination[%group, %item, 0] : i16, view<4x64x2xi16>
+  %packed_bits = vector.bitcast %packed : vector<4xbf16> to vector<4xi16>
+  %bytes = vector.trunci %packed_bits : vector<4xi16> to vector<4xi8>
+  %byte_floats = vector.sitofp %bytes : vector<4xi8> to vector<4xf32>
+  %byte_minimum = kernel.subgroup.reduce<minnumf> %byte_floats : vector<4xf32>
+  %selected_byte = vector.extract %byte_minimum[%component] : vector<4xf32> -> f32
+  %narrow_byte = scalar.fptrunc %selected_byte : f32 to bf16
+  %byte_bits = scalar.bitcast %narrow_byte : bf16 to i16
+  view.store %byte_bits, %destination[%group, %item, 1] : i16, view<4x64x2xi16>
+  kernel.return
+}
+
+// BF16 round trips use only raw-bit classification in the oracle. Byte values
+// use scalar conversion, independently of vector summaries and collectives.
+func.def @subgroup_converted_components_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<16xi16>
+  %destination = buffer.view %output[%base] : buffer -> view<4x64x2xi16>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %groups = index.constant 4 : index
+  %items = index.constant 64 : index
+  %components = index.constant 4 : index
+  %mask = scalar.constant 32767 : i16
+  %infinity = scalar.constant 32640 : i16
+  %quiet_nan = scalar.constant 32704 : i16
+  scf.for %group = [%begin to %groups step %step] {
+    %first = index.mul %group, %components : index
+    scf.for %item = [%begin to %items step %step] {
+      %component = index.rem %item, %components : index
+      %selected = index.add %first, %component : index
+      %bits = view.load %source[%selected] : view<16xi16> -> i16
+      %magnitude = scalar.andi %bits, %mask : i16
+      %nan = scalar.cmpi ugt, %magnitude, %infinity : i16
+      %expected = scf.select %nan, %quiet_nan, %bits : i16
+      view.store %expected, %destination[%group, %item, 0] : i16, view<4x64x2xi16>
+      %byte = scalar.trunci %bits : i16 to i8
+      %byte_float = scalar.sitofp %byte : i8 to f32
+      %narrow_byte = scalar.fptrunc %byte_float : f32 to bf16
+      %byte_bits = scalar.bitcast %narrow_byte : bf16 to i16
+      view.store %byte_bits, %destination[%group, %item, 1] : i16, view<4x64x2xi16>
+    }
+  }
+  func.return
+}
+
+check.scenario @subgroup_converted_component_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32768 to 32767) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<4x64x2xi16>
+    check.compare<@subgroup_converted_components, @subgroup_converted_components_oracle>(%input, %output) : (tensor<16xi16>, tensor<4x64x2xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x64x2xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Negative zero and distinct subnormal values must survive unchanged.
+    %input = check.generate.iota offset(-32768) step(1) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<4x64x2xi16>
+    check.compare<@subgroup_converted_components, @subgroup_converted_components_oracle>(%input, %output) : (tensor<16xi16>, tensor<4x64x2xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x64x2xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    // Infinity and signaling NaNs retain the arithmetic quieting requirement.
+    %input = check.generate.iota offset(32640) step(1) : tensor<16xi16>
+    %output = check.generate.fill value(123) : tensor<4x64x2xi16>
+    check.compare<@subgroup_converted_components, @subgroup_converted_components_oracle>(%input, %output) : (tensor<16xi16>, tensor<4x64x2xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x64x2xi16>
+    }
+  }
+  check.return
+}
+
+// Nine components require multiple packets and a one-component tail. The
+// eight-lane sums are exactly representable in every floating format, while
+// I8 sums exercise modular overflow. Recorded topology makes the serial oracle
+// independent of the device's workitem-to-subgroup mapping.
+kernel.def @subgroup_packet_reductions() {
+  %unit = index.constant 1 : index
+  %items = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %item = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %subgroup = kernel.subgroup.id : index
+  %lane_i32 = index.cast %lane : index to i32
+  %subgroup_i32 = index.cast %subgroup : index to i32
+  %topology_bytes = index.constant 256 : offset
+  %scratch = buffer.alloca<workgroup> align(4) %topology_bytes : buffer
+  %topology = buffer.view %scratch[%base] : buffer -> view<32x2xi32>
+  %result_bytes = index.constant 23040 : offset
+  %results = buffer.alloca<workgroup> align(8) %result_bytes : buffer
+  %actual = buffer.view %results[%base] : buffer -> view<32x10x9xi64>
+  view.store %lane_i32, %topology[%item, 0] : i32, view<32x2xi32>
+  view.store %subgroup_i32, %topology[%item, 1] : i32, view<32x2xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %source = buffer.view %input[%base] : buffer -> view<32x9xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<32xi32>
+  %values = vector.load %source[%item, 0] : view<32x9xi32> -> vector<9xi32>
+  %bytes = vector.trunci %values : vector<9xi32> to vector<9xi8>
+  %shorts = vector.trunci %values : vector<9xi32> to vector<9xi16>
+  %wide = vector.extsi %values : vector<9xi32> to vector<9xi64>
+  %half = vector.sitofp %values : vector<9xi32> to vector<9xf16>
+  %single = vector.sitofp %values : vector<9xi32> to vector<9xf32>
+  %double = vector.sitofp %values : vector<9xi32> to vector<9xf64>
+  %bfloat = vector.fptrunc %single : vector<9xf32> to vector<9xbf16>
+  %additive_identity = vector.constant 0 : vector<9xi32>
+  %predicates = vector.cmpi ne, %values, %additive_identity : vector<9xi32> -> vector<9xi1>
+  %positive = vector.constant 1.0 : vector<9xbf16>
+  %negative = vector.constant -1.0 : vector<9xbf16>
+  %factors = vector.select %predicates, %negative, %positive : vector<9xbf16>
+  %byte_sum = kernel.subgroup.reduce<addi> %bytes {cluster_size = 8} : vector<9xi8>
+  %short_sum = kernel.subgroup.reduce<addi> %shorts {cluster_size = 8} : vector<9xi16>
+  %word_sum = kernel.subgroup.reduce<addi> %values {cluster_size = 8} : vector<9xi32>
+  %wide_sum = kernel.subgroup.reduce<addi> %wide {cluster_size = 8} : vector<9xi64>
+  %half_sum = kernel.subgroup.reduce<addf> %half {cluster_size = 8} : vector<9xf16>
+  %single_sum = kernel.subgroup.reduce<addf> %single {cluster_size = 8} : vector<9xf32>
+  %double_sum = kernel.subgroup.reduce<addf> %double {cluster_size = 8} : vector<9xf64>
+  %bfloat_sum = kernel.subgroup.reduce<addf> %bfloat {cluster_size = 8} : vector<9xbf16>
+  %parity = kernel.subgroup.reduce<xori> %predicates {cluster_size = 8} : vector<9xi1>
+  %bfloat_product = kernel.subgroup.reduce<mulf> %factors {cluster_size = 8} : vector<9xbf16>
+  // Integer observations accept either native floating zero sign without
+  // relaxing any nonzero value. Every floating result is a small integer.
+  %byte_result = vector.extsi %byte_sum : vector<9xi8> to vector<9xi64>
+  %short_result = vector.extsi %short_sum : vector<9xi16> to vector<9xi64>
+  %word_result = vector.extsi %word_sum : vector<9xi32> to vector<9xi64>
+  %half_result = vector.fptosi %half_sum : vector<9xf16> to vector<9xi64>
+  %single_result = vector.fptosi %single_sum : vector<9xf32> to vector<9xi64>
+  %double_result = vector.fptosi %double_sum : vector<9xf64> to vector<9xi64>
+  %bfloat_result = vector.fptosi %bfloat_sum : vector<9xbf16> to vector<9xi64>
+  %parity_result = vector.extui %parity : vector<9xi1> to vector<9xi64>
+  %product_result = vector.fptosi %bfloat_product : vector<9xbf16> to vector<9xi64>
+  vector.store %byte_result, %actual[%item, 0, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %short_result, %actual[%item, 1, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %word_result, %actual[%item, 2, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %wide_sum, %actual[%item, 3, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %half_result, %actual[%item, 4, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %single_result, %actual[%item, 5, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %double_result, %actual[%item, 6, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %bfloat_result, %actual[%item, 7, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %parity_result, %actual[%item, 8, 0] : vector<9xi64>, view<32x10x9xi64>
+  vector.store %product_result, %actual[%item, 9, 0] : vector<9xi64>, view<32x10x9xi64>
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %components = index.constant 9 : index
+  %fields = index.constant 10 : index
+  %step = index.constant 1 : index
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %c8 = scalar.constant 8 : i32
+  %cluster = scalar.divui %lane_i32, %c8 : i32
+  %sum_identity = scalar.constant 0 : i64
+  %positive_factor = scalar.constant 1 : i64
+  %negative_factor = scalar.constant -1 : i64
+  %false = scalar.constant false : i1
+  %difference = scf.for %component = [%begin to %components step %step](%previous = %c0 : i32) -> (i32) {
+    %sum, %expected_parity = scf.for %other = [%begin to %end step %step](%accumulator = %sum_identity : i64, %parity_accumulator = %false : i1) -> (i64, i1) {
+      %other_lane = view.load %topology[%other, 0] : view<32x2xi32> -> i32
+      %other_subgroup = view.load %topology[%other, 1] : view<32x2xi32> -> i32
+      %other_cluster = scalar.divui %other_lane, %c8 : i32
+      %same_subgroup = scalar.cmpi eq, %subgroup_i32, %other_subgroup : i32
+      %same_cluster = scalar.cmpi eq, %cluster, %other_cluster : i32
+      %include = scalar.andi %same_subgroup, %same_cluster : i1
+      %value = view.load %source[%other, %component] : view<32x9xi32> -> i32
+      %contribution = scf.select %include, %value, %c0 : i32
+      %wide_contribution = scalar.extsi %contribution : i32 to i64
+      %next_sum = scalar.addi %accumulator, %wide_contribution : i64
+      %predicate = scalar.cmpi ne, %contribution, %c0 : i32
+      %next_parity = scalar.xori %parity_accumulator, %predicate : i1
+      scf.yield %next_sum, %next_parity : i64, i1
+    }
+    %byte = scalar.trunci %sum : i64 to i8
+    %expected_byte = scalar.extsi %byte : i8 to i64
+    %short = scalar.trunci %sum : i64 to i16
+    %expected_short = scalar.extsi %short : i16 to i64
+    %expected_parity_word = scalar.extui %expected_parity : i1 to i64
+    %expected_product = scf.select %expected_parity, %negative_factor, %positive_factor : i64
+    %byte_field = index.constant 0 : index
+    %short_field = index.constant 1 : index
+    %parity_field = index.constant 8 : index
+    %product_field = index.constant 9 : index
+    %next = scf.for %field = [%begin to %fields step %step](%mismatches = %previous : i32) -> (i32) {
+      %is_byte = index.cmp eq, %field, %byte_field : index
+      %is_short = index.cmp eq, %field, %short_field : index
+      %is_parity = index.cmp eq, %field, %parity_field : index
+      %is_product = index.cmp eq, %field, %product_field : index
+      %byte_or_sum = scf.select %is_byte, %expected_byte, %sum : i64
+      %integer_or_sum = scf.select %is_short, %expected_short, %byte_or_sum : i64
+      %parity_or_sum = scf.select %is_parity, %expected_parity_word, %integer_or_sum : i64
+      %expected = scf.select %is_product, %expected_product, %parity_or_sum : i64
+      %observed = view.load %actual[%item, %field, %component] : view<32x10x9xi64> -> i64
+      %matches = scalar.cmpi eq, %observed, %expected : i64
+      %failed = scf.select %matches, %c0, %c1 : i32
+      %updated = scalar.ori %mismatches, %failed : i32
+      scf.yield %updated : i32
+    }
+    scf.yield %next : i32
+  }
+  view.store %difference, %destination[%item] : i32, view<32xi32>
+  kernel.return
+}
+
+func.def @subgroup_packet_reductions_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %no_mismatch = scalar.constant 0 : i32
+  %destination = buffer.view %output[%base] : buffer -> view<32xi32>
+  scf.for %item = [%begin to %end step %step] {
+    view.store %no_mismatch, %destination[%item] : i32, view<32xi32>
+  }
+  func.return
+}
+
+check.scenario @subgroup_packet_reduction_values {
+  // Every full cluster sums to 248, requiring an I8 wrap to -8.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(31) : tensor<32x9xi32>
+    %output = check.generate.fill value(-1) : tensor<32xi32>
+    check.compare<@subgroup_packet_reductions, @subgroup_packet_reductions_oracle>(%input, %output) : (tensor<32x9xi32>, tensor<32xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<32x9xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<32xi32>
+    }
+  }
+  check.trial[3](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32 to 31) : tensor<32x9xi32>
+    %output = check.generate.fill value(-1) : tensor<32xi32>
+    check.compare<@subgroup_packet_reductions, @subgroup_packet_reductions_oracle>(%input, %output) : (tensor<32x9xi32>, tensor<32xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<32x9xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<32xi32>
+    }
+  }
+  check.return
+}

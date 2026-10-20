@@ -36,6 +36,7 @@ static void loom_target_compile_report_pipeline_plan_deinitialize(
   }
   iree_allocator_free(host_allocator, (void*)plan->worker_rows);
   iree_allocator_free(host_allocator, (void*)plan->channel_rows);
+  iree_allocator_free(host_allocator, (void*)plan->memory_rows);
   *plan = (loom_target_compile_report_pipeline_plan_t){0};
 }
 
@@ -62,6 +63,16 @@ static iree_status_t loom_target_compile_report_pipeline_plan_clone(
       out_target->channel_rows = channel_rows;
       out_target->channel_row_count =
           channel_rows != NULL ? source->channel_row_count : 0;
+    }
+  }
+  if (iree_status_is_ok(status)) {
+    void* memory_rows = NULL;
+    status = loom_target_compile_report_pipeline_plan_copy_rows(
+        source->memory_rows, source->memory_row_count,
+        sizeof(*source->memory_rows), &memory_rows, host_allocator);
+    if (iree_status_is_ok(status)) {
+      out_target->memory_rows = memory_rows;
+      out_target->memory_row_count = memory_rows ? source->memory_row_count : 0;
     }
   }
   if (!iree_status_is_ok(status)) {
@@ -137,7 +148,8 @@ iree_status_t loom_target_compile_report_record_pipeline_plan(
   }
   report->pipeline_plans.values[report->pipeline_plans.count++] = copied_plan;
   report->detail_flags |= LOOM_TARGET_COMPILE_REPORT_DETAIL_PIPELINE_PLAN;
-  if (copied_plan.worker_row_count != 0 || copied_plan.channel_row_count != 0) {
+  if (copied_plan.worker_row_count != 0 || copied_plan.channel_row_count != 0 ||
+      copied_plan.memory_row_count != 0) {
     report->detail_flags |=
         LOOM_TARGET_COMPILE_REPORT_DETAIL_PIPELINE_PLAN_ROWS;
   }

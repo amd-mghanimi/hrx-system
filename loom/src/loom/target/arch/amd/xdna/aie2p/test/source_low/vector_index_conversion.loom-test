@@ -1,0 +1,303 @@
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
+
+func.def @predicate_to_index(%input: vector<16xi1>) -> (vector<16xindex>) {
+  %result = vector.index_cast %input : vector<16xi1> to vector<16xindex>
+  func.return %result : vector<16xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @predicate_to_index(%input: reg<aie2p.elpredicate>) -> (reg<aie2p.vec256 x2>) asm {
+  %5 = mov.short 1
+  %6 = vbcst.8 %5
+  %7 = vsub.8 %6, %6
+  %8 = vsel.8 %7, %6, %input
+  %9 = slice %8[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %10 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %11 = vups.4x.w-to-c.signed %9, %10
+  %12 = slice %11[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %result = vmov.accumulator512.to.vector512 %12
+  return %result
+}
+
+// ====
+
+func.def @offset_to_predicate(%input: vector<17xoffset>) -> (vector<17xi1>) {
+  %result = vector.index_cast %input : vector<17xoffset> to vector<17xi1>
+  func.return %result : vector<17xi1>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @offset_to_predicate(%input: reg<aie2p.vec256 x4>) -> (reg<aie2p.elpredicate>) asm {
+  %5 = slice %input[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %6 = slice %input[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %7 = mova.i32 2
+  %8 = vshuffle %5, %6, %7
+  %9 = mova.i32 0
+  %10 = vshuffle %8, %8, %9
+  %11 = mov.short 1
+  %12 = vbcst.8 %11
+  %13 = vsub.8 %12, %12
+  %14 = vband %10, %12
+  %result = vlt.u8x64 %13, %14
+  return %result
+}
+
+// ====
+
+func.def @narrow_to_offset(%input: vector<17xi16>) -> (vector<17xoffset>) {
+  %result = vector.index_cast %input : vector<17xi16> to vector<17xoffset>
+  func.return %result : vector<17xoffset>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @narrow_to_offset(%input: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x4>) asm {
+  %5 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %6 = vups.2x.x-to-c.unsigned %input, %5
+  %7 = slice %6[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %8 = vmov.accumulator512.to.vector512 %7
+  %9 = slice %6[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %10 = vmov.accumulator512.to.vector512 %9
+  %result = concat(%8, %10) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %result
+}
+
+// ====
+
+func.def @index_to_narrow(%input: vector<17xindex>) -> (vector<17xi16>) {
+  %result = vector.index_cast %input : vector<17xindex> to vector<17xi16>
+  func.return %result : vector<17xi16>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @index_to_narrow(%input: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x2>) asm {
+  %5 = slice %input[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %6 = slice %input[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %7 = mova.i32 2
+  %result = vshuffle %5, %6, %7
+  return %result
+}
+
+// ====
+
+func.def @i64_to_addresses(%index: index, %offset: offset) -> (vector<9xindex>, vector<9xoffset>) {
+  %bounded_index, %bounded_offset = index.assume %index, %offset [range(%index, -2147483648, 2147483647), range(%offset, 0, 4294967295)] : index, offset
+  %wide_index = index.cast %bounded_index : index to i64
+  %wide_offset = index.cast %bounded_offset : offset to i64
+  %signed = vector.splat %wide_index : vector<9xi64>
+  %unsigned = vector.splat %wide_offset : vector<9xi64>
+  %indices = vector.index_cast %signed : vector<9xi64> to vector<9xindex>
+  %offsets = vector.index_cast %unsigned : vector<9xi64> to vector<9xoffset>
+  func.return %indices, %offsets : vector<9xindex>, vector<9xoffset>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i64_to_addresses(%bounded_index: reg<aie2p.er>, %bounded_offset: reg<aie2p.er>) -> (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) asm {
+  %22 = mov.short -31
+  %23 = ashl %bounded_index, %22
+  %wide_index = concat(%bounded_index, %23) : (reg<aie2p.er>, reg<aie2p.er>) -> reg<aie2p.er x2>
+  %25 = mov.short 0
+  %wide_offset = concat(%bounded_offset, %25) : (reg<aie2p.er>, reg<aie2p.er>) -> reg<aie2p.er x2>
+  %27 = vbcst.64 %wide_index
+  %30 = vbcst.64 %wide_offset
+  %35 = mova.i32 4
+  %indices = vshuffle %27, %27, %35
+  %offsets = vshuffle %30, %30, %35
+  return %indices, %offsets
+}
+
+// ====
+
+func.def @addresses_to_i64(%indices: vector<9xindex>, %offsets: vector<9xoffset>) -> (vector<9xi64>, vector<9xi64>) {
+  %signed = vector.index_cast %indices : vector<9xindex> to vector<9xi64>
+  %unsigned = vector.index_cast %offsets : vector<9xoffset> to vector<9xi64>
+  func.return %signed, %unsigned : vector<9xi64>, vector<9xi64>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @addresses_to_i64(%indices: reg<aie2p.vec256 x2>, %offsets: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x4>, reg<aie2p.vec256 x4>) asm {
+  %10 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 1
+  %11 = vups.2x.x-to-c.signed %indices, %10
+  %12 = slice %11[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %13 = vmov.accumulator512.to.vector512 %12
+  %14 = slice %11[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %15 = vmov.accumulator512.to.vector512 %14
+  %signed = concat(%13, %15) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  %18 = vups.2x.x-to-c.unsigned %offsets, %10
+  %19 = slice %18[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %20 = vmov.accumulator512.to.vector512 %19
+  %21 = slice %18[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %22 = vmov.accumulator512.to.vector512 %21
+  %unsigned = concat(%20, %22) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %signed, %unsigned
+}
+
+// ====
+
+func.def @i8x33_to_index(%input: vector<33xi8>) -> (vector<33xindex>) {
+  %result = vector.index_cast %input : vector<33xi8> to vector<33xindex>
+  func.return %result : vector<33xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i8x33_to_index(%input: reg<aie2p.vec256 x2>) -> (reg<aie2p.mbms x4>) asm {
+  %10 = slice %input[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %11 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %12 = vups.4x.w-to-c.signed %10, %11
+  %13 = slice %12[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %14 = vmov.accumulator512.to.vector512 %13
+  %15 = slice %12[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %16 = vmov.accumulator512.to.vector512 %15
+  %18 = mova.i32 32
+  %19 = vshift %input, %input, %18
+  %20 = slice %19[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %22 = vups.4x.w-to-c.signed %20, %11
+  %23 = slice %22[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %24 = vmov.accumulator512.to.vector512 %23
+  %26 = vmov.vector512.to.accumulator512 %14
+  %28 = vmov.vector512.to.accumulator512 %16
+  %29 = vmov.vector512.to.accumulator512 %24
+  %result = concat(%26, %28, %29, %29) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  return %result
+}
+
+// ====
+
+func.def @i8x64_to_index(%input: vector<64xi8>) -> (vector<64xindex>) {
+  %result = vector.index_cast %input : vector<64xi8> to vector<64xindex>
+  func.return %result : vector<64xindex>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i8x64_to_index(%input: reg<aie2p.vec256 x2>) -> (reg<aie2p.mbms x4>) asm {
+  %5 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %result = vups.4x.x-to-d.signed %input, %5
+  return %result
+}
+
+// ====
+
+func.def @i8x65_address_roundtrip(%input: vector<65xi8>) -> (vector<65xi8>) {
+  %indices = vector.index_cast %input : vector<65xi8> to vector<65xindex>
+  %result = vector.index_cast %indices : vector<65xindex> to vector<65xi8>
+  func.return %result : vector<65xi8>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i8x65_address_roundtrip(%input: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x4>) asm {
+  %66 = slice %input[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256>
+  %20 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %21 = vups.4x.w-to-c.signed %66, %20
+  %22 = slice %21[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %23 = vmov.accumulator512.to.vector512 %22
+  %24 = slice %21[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %25 = vmov.accumulator512.to.vector512 %24
+  %29 = mova.i32 2
+  %30 = vshuffle %23, %25, %29
+  %31 = mova.i32 0
+  %32 = vshuffle %30, %30, %31
+  %33 = slice %input[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %34 = slice %input[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %35 = mova.i32 32
+  %36 = vshift %33, %34, %35
+  %37 = slice %36[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %39 = vups.4x.w-to-c.signed %37, %20
+  %40 = slice %39[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %41 = vmov.accumulator512.to.vector512 %40
+  %42 = slice %39[1] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %43 = vmov.accumulator512.to.vector512 %42
+  %48 = vshuffle %41, %43, %29
+  %50 = vshuffle %48, %48, %31
+  %65 = slice %input[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256>
+  %54 = vups.4x.w-to-c.signed %65, %20
+  %55 = slice %54[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %56 = vmov.accumulator512.to.vector512 %55
+  %58 = vshuffle %56, %56, %29
+  %60 = vshuffle %58, %58, %31
+  %61 = slice %32[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %62 = slice %50[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %63 = concat(%61, %62) : (reg<aie2p.vec256>, reg<aie2p.vec256>) -> reg<aie2p.vec256 x2>
+  %result = concat(%63, %60) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %result
+}
+
+// ====
+
+func.def @i32_index_alias(%input: vector<17xi32>) -> (vector<17xi32>) {
+  %indices = vector.index_cast %input : vector<17xi32> to vector<17xindex>
+  %result = vector.index_cast %indices : vector<17xindex> to vector<17xi32>
+  func.return %result : vector<17xi32>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i32_index_alias(%result: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x4>) asm {
+  return %result
+}
+
+// ====
+
+func.def @index_table_selector(%table: vector<4xi16>, %input: vector<17xi8>) -> (vector<17xi16>) {
+  %indices = vector.index_cast %input : vector<17xi8> to vector<17xindex>
+  %result = vector.table.lookup %table[%indices] : vector<4xi16>, vector<17xindex> -> vector<17xi16>
+  func.return %result : vector<17xi16>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @index_table_selector(%table: reg<aie2p.vec256 x2>, %input: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %53 = slice %input[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %54 = mov.shift 0
+  set.saturation 0
+  set.ups-mode 0
+  %55 = vups.4x.w-to-c.signed %53, %54
+  %56 = slice %55[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %57 = vmov.accumulator512.to.vector512 %56
+  %58 = mov.short 0
+  %59 = vbcst.32 %58
+  %60 = mov.short 1
+  %61 = vbcst.32 %60
+  %62 = vband %57, %61
+  %63 = vlt.u32x16.el.low32 %59, %62
+  %64 = predicate.complete.zero.high32 %63, 0
+  %65 = mov.short 2
+  %66 = vbcst.32 %65
+  %67 = vband %57, %66
+  %68 = vlt.u32x16.el.low32 %59, %67
+  %69 = predicate.complete.zero.high32 %68, 0
+  %70 = vextbcst.16 %table, 0
+  %71 = vextbcst.16 %table, 1
+  %72 = vsel.16.mask64 %70, %71, %64
+  %73 = vextbcst.16 %table, 2
+  %74 = vextbcst.16 %table, 3
+  %75 = vsel.16.mask64 %73, %74, %64
+  %76 = vsel.16.mask64 %72, %75, %69
+  %77 = mova.i32 16
+  %78 = vshift %input, %input, %77
+  %79 = slice %78[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %81 = vups.4x.w-to-c.signed %79, %54
+  %82 = slice %81[0] : reg<aie2p.mbms x2> -> reg<aie2p.mbms>
+  %83 = vmov.accumulator512.to.vector512 %82
+  %88 = vband %83, %61
+  %89 = vlt.u32x16.el.low32 %59, %88
+  %90 = predicate.complete.zero.high32 %89, 0
+  %93 = vband %83, %66
+  %94 = vlt.u32x16.el.low32 %59, %93
+  %95 = predicate.complete.zero.high32 %94, 0
+  %98 = vsel.16.mask64 %70, %71, %90
+  %101 = vsel.16.mask64 %73, %74, %90
+  %102 = vsel.16.mask64 %98, %101, %95
+  %103 = slice %76[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %104 = slice %102[0] : reg<aie2p.vec256 x2> -> reg<aie2p.vec256>
+  %result = concat(%103, %104) : (reg<aie2p.vec256>, reg<aie2p.vec256>) -> reg<aie2p.vec256 x2>
+  return %result
+}

@@ -8,6 +8,7 @@
 
 #include "loom/error/json_sink.h"
 #include "loom/error/renderer.h"
+#include "loom/tooling/cli/loomc_diagnostic_json.h"
 
 void iree_benchmark_loom_diagnostic_capture_initialize(
     iree_allocator_t allocator,
@@ -66,6 +67,33 @@ iree_status_t iree_benchmark_loom_diagnostic_capture_sink(
       break;
     default:
       break;
+  }
+  return iree_ok_status();
+}
+
+iree_status_t iree_benchmark_loom_diagnostic_capture_loomc_result(
+    iree_benchmark_loom_diagnostic_capture_t* capture,
+    const loomc_result_t* result) {
+  for (loomc_host_size_t i = 0; i < loomc_result_diagnostic_count(result);
+       ++i) {
+    const loomc_diagnostic_t* diagnostic =
+        loomc_result_diagnostic_at(result, i);
+    loom_output_stream_t stream;
+    IREE_RETURN_IF_ERROR(
+        loom_json_value_list_begin_value(&capture->json_values, &stream));
+    IREE_RETURN_IF_ERROR(
+        loom_tooling_cli_write_loomc_diagnostic_json(&stream, diagnostic));
+    switch (diagnostic->severity) {
+      case LOOMC_DIAGNOSTIC_SEVERITY_NOTE:
+        ++capture->remark_count;
+        break;
+      case LOOMC_DIAGNOSTIC_SEVERITY_WARNING:
+        ++capture->warning_count;
+        break;
+      case LOOMC_DIAGNOSTIC_SEVERITY_ERROR:
+        ++capture->error_count;
+        break;
+    }
   }
   return iree_ok_status();
 }

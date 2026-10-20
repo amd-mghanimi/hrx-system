@@ -1,8 +1,6 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/callable_values.loom-test
 // RUN: emit source-low target=x86:avx2 output=low
 
 func.def public @call_mixed_i32(%input: vector<1xi32>, %delta: i32) -> (i32, i32) {
-  // ERROR@+1: TARGET/002 {op_name="vector.extract", field_name="source"}
   %value = vector.extract %input[0] : vector<1xi32> -> i32
   %mixed = func.call @add_i32(%value, %delta) : (i32, i32) -> (i32)
   %uniform = func.call @add_i32(%delta, %delta) : (i32, i32) -> (i32)
@@ -10,19 +8,33 @@ func.def public @call_mixed_i32(%input: vector<1xi32>, %delta: i32) -> (i32, i32
 }
 
 func.def @add_i32(%value: i32, %delta: i32) -> (i32) {
-  // ERROR@+1: TARGET/002 {op_name="scalar.extui", field_name="input"}
   %wide_value = scalar.extui %value : i32 to i64
-  // ERROR@+1: TARGET/002 {op_name="scalar.extui", field_name="input"}
   %wide_delta = scalar.extui %delta : i32 to i64
   %sum = scalar.addi %wide_value, %wide_delta : i64
   %result = scalar.trunci %sum : i64 to i32
   func.return %result : i32
 }
 
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<1xi32>, i32) -> (i32, i32)}) @call_mixed_i32(%input: reg<x86.xmm>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr32>, reg<x86.gpr32>) asm {
+  %value = vpextrd.xmm %input, 0
+  %mixed = low.func.call pure @add_i32(%value, %delta) : (reg<x86.gpr32>, reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  %uniform = low.func.call pure @add_i32(%delta, %delta) : (reg<x86.gpr32>, reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %mixed, %uniform
+}
+
+low.func.def target<x86.avx2.core> @add_i32(%value: reg<x86.gpr32>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %wide_value = movzx.gpr64.gpr32 %value
+  %wide_delta = movzx.gpr64.gpr32 %delta
+  %26 = copy %wide_value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %sum = add.gpr64 %26, %wide_delta
+  %result = mov.trunc.gpr32.gpr64 %sum
+  return %result
+}
+
 // ====
 
 func.def public @call_mixed_i64(%input: vector<1xi64>, %delta: i64) -> (i64, i64) {
-  // ERROR@+1: TARGET/002 {op_name="vector.extract", field_name="source"}
   %value = vector.extract %input[0] : vector<1xi64> -> i64
   %mixed = func.call @add_i64(%value, %delta) : (i64, i64) -> (i64)
   %uniform = func.call @add_i64(%delta, %delta) : (i64, i64) -> (i64)
@@ -34,6 +46,20 @@ func.def @add_i64(%value: i64, %delta: i64) -> (i64) {
   func.return %result : i64
 }
 
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<1xi64>, i64) -> (i64, i64)}) @call_mixed_i64(%input: reg<x86.xmm>, %delta: reg<x86.gpr64>) -> (reg<x86.gpr64>, reg<x86.gpr64>) asm {
+  %value = vpextrq.xmm %input, 0
+  %mixed = low.func.call pure @add_i64(%value, %delta) : (reg<x86.gpr64>, reg<x86.gpr64>) -> (reg<x86.gpr64>)
+  %uniform = low.func.call pure @add_i64(%delta, %delta) : (reg<x86.gpr64>, reg<x86.gpr64>) -> (reg<x86.gpr64>)
+  return %mixed, %uniform
+}
+
+low.func.def target<x86.avx2.core> @add_i64(%value: reg<x86.gpr64>, %delta: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %21 = copy %value : reg<x86.gpr64> -> reg<x86.gpr64>
+  %result = add.gpr64 %21, %delta
+  return %result
+}
+
 // ====
 
 func.def public @call_vector_result(%input: i32, %lane: index) -> (i32) where [range(%lane, 0, 3)] {
@@ -41,7 +67,7 @@ func.def public @call_vector_result(%input: i32, %lane: index) -> (i32) where [r
   %c2 = scalar.constant 2 : i32
   %c3 = scalar.constant 3 : i32
   %values = vector.from_elements %input, %c1, %c2, %c3 : vector<4xi32>
-  %result = func.call @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
+  %result = func.call inline @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
   func.return %result : i32
 }
 
@@ -55,25 +81,18 @@ low.func.def public target<x86.avx2.core> abi(object_function) @call_vector_resu
   %c1 = mov.imm32 1
   %c2 = mov.imm32 2
   %c3 = mov.imm32 3
-  %31 = mov.imm64 3
-  %32 = cmp.eq.gpr64 %lane, %31
-  %33 = mov.imm64 2
-  %34 = cmp.eq.gpr64 %lane, %33
-  %35 = mov.imm64 1
-  %36 = cmp.eq.gpr64 %lane, %35
-  %37 = copy %input : reg<x86.gpr32> -> reg<x86.gpr32>
-  %38 = select.gpr32 %36, %c1, %37
-  %39 = copy %38 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %40 = select.gpr32 %34, %c2, %39
-  %41 = copy %40 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %result = select.gpr32 %32, %c3, %41
+  %27 = copy %input : reg<x86.gpr32> -> reg<x86.gpr32>
+  %28 = cmp.select.imm.gpr64.gpr32 %lane, %c1, %27, 1, "eq"
+  %29 = copy %28 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %30 = cmp.select.imm.gpr64.gpr32 %lane, %c2, %29, 2, "eq"
+  %31 = copy %30 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %result = cmp.select.imm.gpr64.gpr32 %lane, %c3, %31, 3, "eq"
   return %result
 }
 
 // ====
 
 func.def public @call_loop(%input: vector<1xi32>, %delta: i32, %count: index) -> (i32) {
-  // ERROR@+1: TARGET/002 {op_name="vector.extract", field_name="source"}
   %value = vector.extract %input[0] : vector<1xi32> -> i32
   %result = func.call @repeat_add(%value, %delta, %count) : (i32, i32, index) -> (i32)
   func.return %result : i32
@@ -94,6 +113,32 @@ func.def @advance_i32(%value: i32, %delta: i32) -> (i32) {
   func.return %result : i32
 }
 
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<1xi32>, i32, index) -> (i32)}) @call_loop(%input: reg<x86.xmm>, %delta: reg<x86.gpr32>, %count: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
+  %value = vpextrd.xmm %input, 0
+  %result = low.func.call pure @repeat_add(%value, %delta, %count) : (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr64>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+low.func.def target<x86.avx2.core> @repeat_add(%value: reg<x86.gpr32>, %delta: reg<x86.gpr32>, %count: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
+  %c0 = mov.imm64 0
+  low.br ^_bb1(%c0: reg<x86.gpr64>, %value: reg<x86.gpr32>)
+^_bb1(%i: reg<x86.gpr64>, %current: reg<x86.gpr32>):
+  low.op.cond_br<x86.scalar.cmp.branch.gpr64>(%i, %count) {predicate = 12}, ^_bb2, ^_bb3 : (reg<x86.gpr64>, reg<x86.gpr64>)
+^_bb2:
+  %next = low.func.call pure @advance_i32(%current, %delta) : (reg<x86.gpr32>, reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  %40 = lea.disp %i {disp32 = 1}
+  low.br ^_bb1(%40: reg<x86.gpr64>, %next: reg<x86.gpr32>)
+^_bb3:
+  return %current
+}
+
+low.func.def target<x86.avx2.core> @advance_i32(%value: reg<x86.gpr32>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %44 = copy %value : reg<x86.gpr32> -> reg<x86.gpr32>
+  %result = add.gpr32 %44, %delta
+  return %result
+}
+
 // ====
 
 func.def public @call_scalar(%value: i32, %delta: i32) -> (i32) {
@@ -108,9 +153,27 @@ func.def @scalar_add(%value: i32, %delta: i32) -> (i32) {
 
 // ----
 low.func.def public target<x86.avx2.core> abi(object_function) @call_scalar(%value: reg<x86.gpr32>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
-  %11 = copy %value : reg<x86.gpr32> -> reg<x86.gpr32>
-  %result = add.gpr32 %11, %delta
+  %result = low.func.call pure @scalar_add(%value, %delta) : (reg<x86.gpr32>, reg<x86.gpr32>) -> (reg<x86.gpr32>)
   return %result
+}
+
+low.func.def target<x86.avx2.core> @scalar_add(%value: reg<x86.gpr32>, %delta: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %15 = copy %value : reg<x86.gpr32> -> reg<x86.gpr32>
+  %result = add.gpr32 %15, %delta
+  return %result
+}
+
+// ====
+
+// Callable contracts retain argument and result identities across source-to-Low
+// boundary mapping. Results are signature values rather than body-local values.
+func.def public @preserve_contracts(%limit: index, %value: i32) -> (%bounded: index, %echo: i32) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] {
+  func.return %limit, %value : index, i32
+}
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) @preserve_contracts(%limit: reg<x86.gpr64>, %value: reg<x86.gpr32>) -> (%bounded: reg<x86.gpr64>, %echo: reg<x86.gpr32>) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] asm {
+  return %limit, %value
 }
 
 // ====
@@ -118,9 +181,16 @@ low.func.def public target<x86.avx2.core> abi(object_function) @call_scalar(%val
 // A separately compiled definition must use the same signature as its caller's
 // declaration. The declaration is resolved by IR linking, not a runtime import.
 func.def public @call_external(%value: i32) -> (i32) {
-  // ERROR@+1: LOWERING/044 {op_name="func.call", phase_name="inline-callables", callee_name="increment", failure_code="callee_missing_body"}
   %result = func.call @increment(%value) : (i32) -> (i32)
   func.return %result : i32
 }
 
-func.decl @increment(%value: i32) -> (i32)
+func.decl @increment(%value: i32) -> (%result: i32) where [eq(%result, %value)]
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) @call_external(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call @increment(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+low.func.decl target<x86.avx2.core> @increment(%value: reg<x86.gpr32>) -> (%result: reg<x86.gpr32>) where [eq(%result, %value)]

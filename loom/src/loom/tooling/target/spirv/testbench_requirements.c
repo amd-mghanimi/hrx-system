@@ -8,7 +8,8 @@
 
 #include "iree/hal/drivers/vulkan/device_spec.h"
 #include "loom/tooling/execution/hal/testbench_actual.h"
-#include "loom/tooling/target/spirv/vulkan_profile.h"
+#include "loomc/iree.h"
+#include "loomc/target/spirv/profile.h"
 
 typedef struct loom_spirv_vulkan_feature_requirement_t {
   // Stable requirement feature name accepted by hal.vulkan.feature.
@@ -207,9 +208,7 @@ static iree_status_t loom_spirv_vulkan_testbench_decode_device_spec(
 static iree_status_t loom_spirv_vulkan_testbench_require_vulkan_device(
     loom_run_hal_testbench_context_t* context,
     loom_testbench_requirement_provider_result_t* out_result) {
-  if (context->device_provider != NULL &&
-      iree_string_view_equal(context->device_provider->driver_name,
-                             IREE_SV("vulkan"))) {
+  if (iree_string_view_equal(context->driver_name, IREE_SV("vulkan"))) {
     return loom_run_hal_testbench_context_ensure_runtime(context);
   }
   *out_result = (loom_testbench_requirement_provider_result_t){
@@ -268,24 +267,6 @@ static iree_status_t loom_spirv_vulkan_hal_testbench_query_feature_requirement(
   return iree_ok_status();
 }
 
-static const loom_spirv_cooperative_matrix_property_t*
-loom_spirv_vulkan_hal_testbench_find_matrix_row(
-    const loom_spirv_target_profile_t* profile, iree_string_view_t row_name) {
-  if (profile == NULL || profile->cooperative_properties == NULL) {
-    return NULL;
-  }
-  const loom_spirv_cooperative_property_set_t* properties =
-      profile->cooperative_properties;
-  for (uint16_t i = 0; i < properties->matrix_property_count; ++i) {
-    const loom_spirv_cooperative_matrix_property_t* row =
-        &properties->matrix_properties[i];
-    if (iree_string_view_equal(row->name, row_name)) {
-      return row;
-    }
-  }
-  return NULL;
-}
-
 static iree_status_t
 loom_spirv_vulkan_hal_testbench_query_cooperative_matrix_requirement(
     void* user_data, const loom_module_t* module, loom_named_attr_slice_t attrs,
@@ -310,31 +291,35 @@ loom_spirv_vulkan_hal_testbench_query_cooperative_matrix_requirement(
     return iree_ok_status();
   }
 
-  loom_spirv_vulkan_hal_profile_facts_t facts = {0};
-  iree_hal_vulkan_cooperative_matrix_property_t* device_rows = NULL;
-  iree_host_size_t device_row_count = 0;
-  loom_spirv_vulkan_hal_target_profile_storage_t profile_storage = {0};
-  bool profile_storage_initialized = false;
+  loomc_iree_hal_target_selection_t selection = {0};
+  loomc_result_t* result = NULL;
+  iree_status_t status = loom_run_hal_testbench_context_select_target(
+      context, loomc_make_cstring_view("SPIR-V testbench requirement"),
+      /*target_profile=*/NULL, &selection, &result);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_require_successful_result(
+        result, IREE_SV("SPIR-V HAL target selection failed"));
+  }
 
-  iree_status_t status =
-      loom_spirv_vulkan_hal_profile_query(context->runtime.device, &facts);
-  if (iree_status_is_ok(status) &&
-      iree_any_bit_set(
-          facts.flags,
-          LOOM_SPIRV_VULKAN_HAL_PROFILE_FLAG_COOPERATIVE_MATRIX_KHR)) {
-    status = loom_spirv_vulkan_hal_query_cooperative_matrix_properties(
-        context->runtime.device, context->host_allocator, &device_rows,
-        &device_row_count);
+  bool satisfied = false;
+  loomc_spirv_profile_info_t profile_info = {0};
+  if (iree_status_is_ok(status)) {
+    status = iree_status_from_loomc(loomc_spirv_target_profile_query_info(
+        selection.target_profile, &profile_info));
+  }
+  for (loomc_host_size_t i = 0; i < profile_info.cooperative_matrix_row_count &&
+                                iree_status_is_ok(status) && !satisfied;
+       ++i) {
+    loomc_spirv_cooperative_matrix_row_t row = {0};
+    status = iree_status_from_loomc(
+        loomc_spirv_target_profile_cooperative_matrix_row_at(
+            selection.target_profile, i, &row));
+    satisfied = iree_status_is_ok(status) &&
+                loomc_string_view_equal(
+                    row.name, loomc_string_view_from_iree(row_name)) &&
+                row.state == LOOMC_TARGET_FACT_STATE_TRUE;
   }
   if (iree_status_is_ok(status)) {
-    status = loom_spirv_vulkan_hal_target_profile_storage_initialize(
-        &facts, device_rows, device_row_count, context->host_allocator,
-        &profile_storage);
-    profile_storage_initialized = iree_status_is_ok(status);
-  }
-  if (iree_status_is_ok(status)) {
-    const bool satisfied = loom_spirv_vulkan_hal_testbench_find_matrix_row(
-                               &profile_storage.profile, row_name) != NULL;
     out_result->state =
         satisfied ? LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_SATISFIED
                   : LOOM_TESTBENCH_REQUIREMENT_PROVIDER_STATE_UNSATISFIED;
@@ -344,11 +329,8 @@ loom_spirv_vulkan_hal_testbench_query_cooperative_matrix_requirement(
     }
   }
 
-  if (profile_storage_initialized) {
-    loom_spirv_vulkan_hal_target_profile_storage_deinitialize(
-        &profile_storage, context->host_allocator);
-  }
-  iree_allocator_free(context->host_allocator, device_rows);
+  loomc_result_release(result);
+  loomc_target_profile_release(selection.target_profile);
   return status;
 }
 

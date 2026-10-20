@@ -1,5 +1,21 @@
 // RUN: pass canonicalize
 
+// Runtime positive divisors retain a strictly smaller dividend unchanged.
+func.def @remainder_below_runtime_divisor(%numerator: index, %divisor: index) -> (index) {
+  %bounded = index.assume %numerator [range(%numerator, 12, 60), multiple_of(%numerator, 6)] : index
+  %larger = index.assume %divisor [range(%divisor, 61, 100)] : index
+  %result = index.rem %bounded, %larger : index
+  func.return %result : index
+}
+
+// ----
+func.def @remainder_below_runtime_divisor(%numerator: index, %divisor: index) -> (index) {
+  %bounded = index.assume %numerator [range(%numerator, 12, 60), multiple_of(%numerator, 6)] : index
+  func.return %bounded : index
+}
+
+// ====
+
 // Address-domain constants contribute exact value facts.
 func.def @constant_exact() -> (i64, i64) {
   %c = index.constant 42 : index
@@ -38,7 +54,7 @@ func.def @offset_add_sub_exact() -> (i64, i64) {
 
 // index.assume applies predicate facts to matching index and offset results.
 func.def @assume_refines_address_facts(%n: index, %base: offset) -> (i64, i64) {
-  %n2, %base2 = index.assume %n, %base [mul(%n, 16), range(%base, 64, 4096)] : index, offset
+  %n2, %base2 = index.assume %n, %base [multiple_of(%n, 16), range(%base, 64, 4096)] : index, offset
   %n_div = test.fact_divisor %n2 : index -> i64
   %base_lo = test.fact_range_lo %base2 : offset -> i64
   func.return %n_div, %base_lo : i64, i64
@@ -113,6 +129,30 @@ func.def @assume_relational_external_bounds(%value: index, %upper0: index, %lowe
   %upper_hi = scalar.constant 4096 : i64
   %lower_lo = scalar.constant -128 : i64
   func.return %below_hi, %above_lo, %upper_hi, %lower_lo : i64, i64, i64, i64
+}
+
+// ====
+
+// Dynamic RANGE endpoints contribute their retained intervals independently.
+// The mixed form matches descriptor counts bounded by a dynamic row count.
+func.def @assume_symbolic_range_bounds(%value: index, %lower0: index, %upper0: index) -> (i64, i64, i64, i64) {
+  %lower = index.assume %lower0 [range(%lower0, -128, -32)] : index
+  %upper = index.assume %upper0 [range(%upper0, 32, 4096)] : index
+  %bounded = index.assume %value [range(%value, %lower, %upper)] : index
+  %mixed = index.assume %value [range(%value, 0, %upper)] : index
+  %bounded_lo = test.fact_range_lo %bounded : index -> i64
+  %bounded_hi = test.fact_range_hi %bounded : index -> i64
+  %mixed_lo = test.fact_range_lo %mixed : index -> i64
+  %mixed_hi = test.fact_range_hi %mixed : index -> i64
+  func.return %bounded_lo, %bounded_hi, %mixed_lo, %mixed_hi : i64, i64, i64, i64
+}
+// ----
+func.def @assume_symbolic_range_bounds(%value: index, %lower0: index, %upper0: index) -> (i64, i64, i64, i64) {
+  %bounded_lo = scalar.constant -128 : i64
+  %bounded_hi = scalar.constant 4096 : i64
+  %mixed_lo = scalar.constant 0 : i64
+  %mixed_hi = scalar.constant 4096 : i64
+  func.return %bounded_lo, %bounded_hi, %mixed_lo, %mixed_hi : i64, i64, i64, i64
 }
 
 // ====
@@ -324,7 +364,7 @@ func.def @rem_dynamic_divisor_uses_dividend_bound(%x0: index, %d0: index) -> (i6
 // assumptions on every intermediate address expression.
 func.def @matvec_block_lane_linear_range(%lane0: index, %block_base0: index) -> (i64, i64, i1) {
   %lane = index.assume %lane0 [range(%lane0, 0, 63)] : index
-  %block_base = index.assume %block_base0 [range(%block_base0, 0, 8), mul(%block_base0, 4)] : index
+  %block_base = index.assume %block_base0 [range(%block_base0, 0, 8), multiple_of(%block_base0, 4)] : index
   %lanes_per_group = index.constant 16 : index
   %block_stride = index.constant 105 : index
   %lane_group = index.div %lane, %lanes_per_group : index
@@ -564,6 +604,26 @@ func.def @add_mul_canonicalizes_to_madd(%i: index, %j: index) -> (index) {
   %c4 = index.constant 4 : index
   %r = index.madd %i, %c4, %j : index
   func.return %r : index
+}
+
+// ====
+
+// A reused scaled coordinate remains explicit so later address planning can
+// preserve and share its materialized SSA value across distinct accesses.
+func.def @add_shared_mul_preserves_reusable_scale(%i: index, %j: index, %k: index) -> (index, index) {
+  %c4 = index.constant 4 : index
+  %scaled = index.mul %i, %c4 : index
+  %first = index.add %scaled, %j : index
+  %second = index.add %scaled, %k : index
+  func.return %first, %second : index, index
+}
+// ----
+func.def @add_shared_mul_preserves_reusable_scale(%i: index, %j: index, %k: index) -> (index, index) {
+  %c4 = index.constant 4 : index
+  %scaled = index.mul %i, %c4 : index
+  %first = index.add %scaled, %j : index
+  %second = index.add %scaled, %k : index
+  func.return %first, %second : index, index
 }
 
 // ====
@@ -909,9 +969,51 @@ func.def @div_power_of_two_nonnegative(%x: index) -> (index) {
 
 // ====
 
+// A power-of-two division only becomes a target-width logical shift when the
+// complete nonnegative numerator fits that carrier. Wider values retain the
+// division so a target can select its wide arithmetic implementation.
+test.target<quirky> @div_target32
+
+test.target<low_core> @div_target64
+
+func.def target(@div_target32) @div_power_of_two_wide_target32(%x: index) -> (index) where [range(%x, 4294967296, 4294967551)] {
+  %wide = index.assume %x [range(%x, 4294967296, 4294967551)] : index
+  %divisor = index.constant 8 : index
+  %q = index.div %wide, %divisor : index
+  func.return %q : index
+}
+
+func.def target(@div_target64) @div_power_of_two_wide_target64(%x: index) -> (index) where [range(%x, 4294967296, 4294967551)] {
+  %wide = index.assume %x [range(%x, 4294967296, 4294967551)] : index
+  %divisor = index.constant 8 : index
+  %q = index.div %wide, %divisor : index
+  func.return %q : index
+}
+
+// ----
+test.target<quirky> @div_target32
+
+test.target<low_core> @div_target64
+
+func.def target(@div_target32) @div_power_of_two_wide_target32(%x: index) -> (index) where [range(%x, 4294967296, 4294967551)] {
+  %wide = index.assume %x [range(%x, 4294967296, 4294967551)] : index
+  %divisor = index.constant 8 : index
+  %q = index.div %wide, %divisor : index
+  func.return %q : index
+}
+
+func.def target(@div_target64) @div_power_of_two_wide_target64(%x: index) -> (index) where [range(%x, 4294967296, 4294967551)] {
+  %wide = index.assume %x [range(%x, 4294967296, 4294967551)] : index
+  %10 = index.constant 3 : index
+  %q = index.shrui %wide, %10 : index
+  func.return %q : index
+}
+
+// ====
+
 // index.rem materializes zero when divisibility facts prove it.
 func.def @rem_divisible_coordinate(%x: index) -> (index) {
-  %x2 = index.assume %x [range(%x, 0, 4096), mul(%x, 64)] : index
+  %x2 = index.assume %x [range(%x, 0, 4096), multiple_of(%x, 64)] : index
   %c8 = index.constant 8 : index
   %r = index.rem %x2, %c8 : index
   func.return %r : index
@@ -1050,6 +1152,32 @@ func.def @rem_offset_residue_wrap_is_preserved(%x: index) -> (index) {
 
 // ====
 
+// A negative radix-aligned bias preserves signed remainder. For coordinate 1,
+// the shifted dividend is -959 and its remainder is -63, not coordinate 1.
+func.def @rem_negative_aligned_offset_is_preserved(%coordinate_input: index) -> (index, index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 31)] : index
+  %negative_bias = index.constant -960 : index
+  %radix = index.constant 64 : index
+  %biased_left = index.add %negative_bias, %coordinate : index
+  %biased_right = index.add %coordinate, %negative_bias : index
+  %left_remainder = index.rem %biased_left, %radix : index
+  %right_remainder = index.rem %biased_right, %radix : index
+  func.return %left_remainder, %right_remainder : index, index
+}
+// ----
+func.def @rem_negative_aligned_offset_is_preserved(%coordinate_input: index) -> (index, index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 31)] : index
+  %negative_bias = index.constant -960 : index
+  %radix = index.constant 64 : index
+  %biased_left = index.add %negative_bias, %coordinate : index
+  %biased_right = index.add %coordinate, %negative_bias : index
+  %left_remainder = index.rem %biased_left, %radix : index
+  %right_remainder = index.rem %biased_right, %radix : index
+  func.return %left_remainder, %right_remainder : index, index
+}
+
+// ====
+
 // Without non-negative dividend facts, remainder by a positive literal stays
 // conservative.
 func.def @rem_maybe_negative_is_preserved(%x: index) -> (index) {
@@ -1063,8 +1191,8 @@ func.def @rem_maybe_negative_is_preserved(%x: index) -> (index) {
 // index.min/max propagate signed range and common-divisor facts in the index
 // domain.
 func.def @minmax_facts(%x: index, %y: index) -> (i64, i64, i64, i64, i64, i64) {
-  %lo = index.assume %x [range(%x, 4, 20), mul(%x, 4)] : index
-  %hi = index.assume %y [range(%y, 8, 16), mul(%y, 8)] : index
+  %lo = index.assume %x [range(%x, 4, 20), multiple_of(%x, 4)] : index
+  %hi = index.assume %y [range(%y, 8, 16), multiple_of(%y, 8)] : index
   %min = index.min %lo, %hi : index
   %max = index.max %lo, %hi : index
   %min_lo = test.fact_range_lo %min : index -> i64
@@ -1134,7 +1262,7 @@ func.def @bitwise_facts(%x: index) -> (i64, i64, i1, i64, i64) {
   %c1 = index.constant 1 : index
   %shift4 = index.constant 4 : index
   %shift3 = index.constant 3 : index
-  %aligned = index.assume %x [range(%x, 0, 4096), mul(%x, 64)] : index
+  %aligned = index.assume %x [range(%x, 0, 4096), multiple_of(%x, 64)] : index
   %and_aligned = index.andi %x, %mask_aligned : index
   %and_small = index.andi %x, %mask_small : index
   %or_one = index.ori %x, %c1 : index
@@ -1539,28 +1667,40 @@ test.target<quirky> @target32
 
 test.target<low_core> @target64
 
-func.def target(@target32) @target_width_32(%x: index) -> (index, index, index, index) {
+func.def target(@target32) @target_width_32(%x: index) -> (index, index, index, index, index, index, index) {
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %c8 = index.constant 8 : index
+  %c32 = index.constant 32 : index
+  %c33 = index.constant 33 : index
+  %cn1 = index.constant -1 : index
   %count = index.ctlzi %c1 : index
   %rotate = index.rotri %x, %c8 : index
+  %rotate_width = index.rotli %x, %c32 : index
+  %rotate_wrapped = index.rotli %x, %c33 : index
+  %rotate_negative = index.rotri %x, %cn1 : index
   %multiply = index.mul %x, %c8 : index
   %inner_shift = index.shli %x, %c1 : index
   %outer_shift = index.shli %inner_shift, %c2 : index
-  func.return %count, %rotate, %multiply, %outer_shift : index, index, index, index
+  func.return %count, %rotate, %rotate_width, %rotate_wrapped, %rotate_negative, %multiply, %outer_shift : index, index, index, index, index, index, index
 }
 
-func.def target(@target64) @target_width_64(%x: index) -> (index, index, index, index) {
+func.def target(@target64) @target_width_64(%x: index) -> (index, index, index, index, index, index, index) {
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %c8 = index.constant 8 : index
+  %c64 = index.constant 64 : index
+  %c65 = index.constant 65 : index
+  %cn1 = index.constant -1 : index
   %count = index.ctlzi %c1 : index
   %rotate = index.rotri %x, %c8 : index
+  %rotate_width = index.rotli %x, %c64 : index
+  %rotate_wrapped = index.rotli %x, %c65 : index
+  %rotate_negative = index.rotri %x, %cn1 : index
   %multiply = index.mul %x, %c8 : index
   %inner_shift = index.shli %x, %c1 : index
   %outer_shift = index.shli %inner_shift, %c2 : index
-  func.return %count, %rotate, %multiply, %outer_shift : index, index, index, index
+  func.return %count, %rotate, %rotate_width, %rotate_wrapped, %rotate_negative, %multiply, %outer_shift : index, index, index, index, index, index, index
 }
 
 // ----
@@ -1568,26 +1708,34 @@ test.target<quirky> @target32
 
 test.target<low_core> @target64
 
-func.def target(@target32) @target_width_32(%x: index) -> (index, index, index, index) {
+func.def target(@target32) @target_width_32(%x: index) -> (index, index, index, index, index, index, index) {
+  %c8 = index.constant 8 : index
   %count = index.constant 31 : index
-  %30 = index.constant 24 : index
-  %rotate = index.rotli %x, %30 : index
-  %28 = index.constant 3 : index
-  %multiply = index.shli %x, %28 : index
-  %26 = index.constant 3 : index
-  %outer_shift = index.shli %x, %26 : index
-  func.return %count, %rotate, %multiply, %outer_shift : index, index, index, index
+  %rotate = index.rotri %x, %c8 : index
+  %49 = index.constant 1 : index
+  %rotate_wrapped = index.rotli %x, %49 : index
+  %48 = index.constant 31 : index
+  %rotate_negative = index.rotri %x, %48 : index
+  %46 = index.constant 3 : index
+  %multiply = index.shli %x, %46 : index
+  %44 = index.constant 3 : index
+  %outer_shift = index.shli %x, %44 : index
+  func.return %count, %rotate, %x, %rotate_wrapped, %rotate_negative, %multiply, %outer_shift : index, index, index, index, index, index, index
 }
 
-func.def target(@target64) @target_width_64(%x: index) -> (index, index, index, index) {
+func.def target(@target64) @target_width_64(%x: index) -> (index, index, index, index, index, index, index) {
+  %c8 = index.constant 8 : index
   %count = index.constant 63 : index
-  %37 = index.constant 56 : index
-  %rotate = index.rotli %x, %37 : index
-  %35 = index.constant 3 : index
-  %multiply = index.shli %x, %35 : index
-  %33 = index.constant 3 : index
-  %outer_shift = index.shli %x, %33 : index
-  func.return %count, %rotate, %multiply, %outer_shift : index, index, index, index
+  %rotate = index.rotri %x, %c8 : index
+  %56 = index.constant 1 : index
+  %rotate_wrapped = index.rotli %x, %56 : index
+  %55 = index.constant 63 : index
+  %rotate_negative = index.rotri %x, %55 : index
+  %53 = index.constant 3 : index
+  %multiply = index.shli %x, %53 : index
+  %51 = index.constant 3 : index
+  %outer_shift = index.shli %x, %51 : index
+  func.return %count, %rotate, %x, %rotate_wrapped, %rotate_negative, %multiply, %outer_shift : index, index, index, index, index, index, index
 }
 
 // ====
@@ -1601,7 +1749,7 @@ test.target<quirky> @target32
 
 test.target<low_core> @target64
 
-func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) {
+func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) where [range(%x, 2147483648, 2147483663)] {
   %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
   %low = index.assume %y [range(%y, 0, 15)] : index
   %c8 = index.constant 8 : index
@@ -1616,7 +1764,7 @@ func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index)
   func.return %comparison, %unsigned_comparison, %minimum, %quotient, %shifted, %minimum_lo, %minimum_hi : i1, i1, index, index, index, i64, i64
 }
 
-func.def target(@target64) @target_carrier_range_proofs_64(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) {
+func.def target(@target64) @target_carrier_range_proofs_64(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) where [range(%x, 2147483648, 2147483663)] {
   %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
   %low = index.assume %y [range(%y, 0, 15)] : index
   %c8 = index.constant 8 : index
@@ -1636,7 +1784,7 @@ test.target<quirky> @target32
 
 test.target<low_core> @target64
 
-func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) {
+func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) where [range(%x, 2147483648, 2147483663)] {
   %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
   %low = index.assume %y [range(%y, 0, 15)] : index
   %c1 = index.constant 1 : index
@@ -1651,7 +1799,7 @@ func.def target(@target32) @target_carrier_range_proofs_32(%x: index, %y: index)
   func.return %comparison, %unsigned_comparison, %minimum, %quotient, %shifted, %minimum_lo, %minimum_hi : i1, i1, index, index, index, i64, i64
 }
 
-func.def target(@target64) @target_carrier_range_proofs_64(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) {
+func.def target(@target64) @target_carrier_range_proofs_64(%x: index, %y: index) -> (i1, i1, index, index, index, i64, i64) where [range(%x, 2147483648, 2147483663)] {
   %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
   %low = index.assume %y [range(%y, 0, 15)] : index
   %c1 = index.constant 1 : index

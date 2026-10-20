@@ -20,14 +20,66 @@ iree_py_library(
 
 iree_py_library(
   NAME
+    compile_report_suggestions
+  SRCS
+    "compile_report_suggestions.py"
+  DEPS
+    loom::py::loom::target::arch::x86::package_init
+    loom::py::loom::reporting::reporting
+)
+
+iree_py_library(
+  NAME
+    feature_catalog
+  SRCS
+    "feature_catalog.py"
+  DEPS
+    loom::py::loom::target::arch::x86::package_init
+)
+
+iree_py_library(
+  NAME
     target_info
   SRCS
+    "feature_bits.py"
     "packed_dot_data.py"
     "target_info.py"
   DEPS
+    loom::py::loom::target::arch::x86::feature_catalog
     loom::py::loom::target::arch::x86::package_init
     loom::py::loom::target::native_contraction_layout
     loom::py::loom::target::native_layout_facts
+)
+
+iree_py_library(
+  NAME
+    vector_families
+  SRCS
+    "vector_families.py"
+  DEPS
+    loom::py::loom::target::arch::x86::package_init
+)
+
+iree_py_library(
+  NAME
+    scalar_families
+  SRCS
+    "scalar_families.py"
+  DEPS
+    loom::py::loom::target::arch::x86::package_init
+)
+
+iree_py_library(
+  NAME
+    native_vector
+  SRCS
+    "native_conversion.py"
+    "native_vector.py"
+    "vector_encoding.py"
+  DEPS
+    loom::py::loom::target::arch::x86::package_init
+    loom::py::loom::target::arch::x86::scalar_families
+    loom::py::loom::target::low_descriptors
 )
 
 iree_py_library(
@@ -36,6 +88,7 @@ iree_py_library(
   SRCS
     "dialect.py"
   DEPS
+    loom::py::loom::target::arch::x86::feature_catalog
     loom::py::loom::target::arch::x86::package_init
     loom::py::loom::core
     loom::py::loom::dialect::target::target
@@ -48,14 +101,27 @@ iree_py_library(
     "descriptors/__init__.py"
     "descriptors/avx2.py"
     "descriptors/avx512.py"
+    "descriptors/avx512_bf16.py"
+    "descriptors/avx512_fp16.py"
+    "descriptors/avx_ne_convert.py"
     "descriptors/common.py"
     "descriptors/composite.py"
+    "descriptors/encoding.py"
+    "descriptors/f16c.py"
+    "descriptors/float_conversion.py"
+    "descriptors/float_integer.py"
+    "descriptors/half_conversion.py"
+    "descriptors/integer_bits.py"
+    "descriptors/integer_float.py"
+    "descriptors/integer_rotation.py"
     "descriptors/memory.py"
     "descriptors/packed_dot.py"
     "descriptors/scalar.py"
-    "descriptors/simd128.py"
   DEPS
+    loom::py::loom::target::arch::x86::native_vector
+    loom::py::loom::target::arch::x86::scalar_families
     loom::py::loom::target::arch::x86::target_info
+    loom::py::loom::target::arch::x86::vector_families
     loom::py::loom::target::low_descriptors
     loom::py::loom::target::arch::package
 )
@@ -93,6 +159,84 @@ iree_py_test(
     loom::py::loom::target::native_contraction_layout
     loom::py::loom::target::native_coordinate_projection
     loom::py::loom::target::native_layout_facts
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    vector_families_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "vector_families_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.x86.vector_families_test"
+  DEPS
+    loom::py::loom::target::arch::x86::descriptors
+    loom::py::loom::target::arch::x86::vector_families
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    avx512_fp16_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "avx512_fp16_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.x86.avx512_fp16_test"
+  DEPS
+    loom::py::loom::target::arch::x86::descriptors
+    loom::py::loom::target::arch::x86::vector_families
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    avx512_bf16_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "avx512_bf16_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.x86.avx512_bf16_test"
+  DEPS
+    loom::py::loom::target::arch::x86::descriptors
+    loom::py::loom::target::arch::x86::target_info
+    loom::py::loom::target::low_descriptors
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+
+iree_py_test(
+  NAME
+    avx_ne_convert_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "avx_ne_convert_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.x86.avx_ne_convert_test"
+  DEPS
+    loom::py::loom::target::arch::x86::descriptors
+    loom::py::loom::target::arch::x86::target_info
+    loom::py::loom::target::low_descriptors
   PACKAGE_DIRS
     "${PROJECT_SOURCE_DIR}/loom/py"
     "${PROJECT_BINARY_DIR}/loom/py"

@@ -1,0 +1,55 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+// Runtime insertion uses a byte mask and retains the floating payload bits.
+func.def @insert_byte(%input: vector<16xf8E4M3>, %replacement: f8E4M3, %lane: index) -> (vector<16xf8E4M3>) {
+  %result = vector.insert %replacement into %input[%lane] : f8E4M3, vector<16xf8E4M3>
+  func.return %result : vector<16xf8E4M3>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @insert_byte(%input: reg<wasm.v128>, %replacement: reg<wasm.i32>, %lane: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %9 = v128.const 506097522914230528, 1084818905618843912
+  %10 = i8x16.splat %lane
+  %11 = i8x16.eq %9, %10
+  %12 = i8x16.splat %replacement
+  %result = v128.bitselect %12, %input, %11
+  return %result
+}
+
+// ====
+
+// Every byte of a wide lane is selected by the same ordinal comparison.
+func.def @insert_double(%input: vector<2xf64>, %replacement: f64, %lane: index) -> (vector<2xf64>) {
+  %result = vector.insert %replacement into %input[%lane] : f64, vector<2xf64>
+  func.return %result : vector<2xf64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @insert_double(%input: reg<wasm.v128>, %replacement: reg<wasm.f64>, %lane: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %9 = v128.const 0, 72340172838076673
+  %10 = i8x16.splat %lane
+  %11 = i8x16.eq %9, %10
+  %12 = f64x2.splat %replacement
+  %result = v128.bitselect %12, %input, %11
+  return %result
+}
+
+// ====
+
+// Scalar predicates become all-one mask lanes before merging with the vector.
+func.def @insert_predicate(%input: vector<4xi1>, %replacement: i1, %lane: index) -> (vector<4xi1>) {
+  %result = vector.insert %replacement into %input[%lane] : i1, vector<4xi1>
+  func.return %result : vector<4xi1>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @insert_predicate(%input: reg<wasm.v128>, %replacement: reg<wasm.i32>, %lane: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %9 = i32.const 0
+  %10 = i32.sub %9, %replacement
+  %11 = v128.const 72340172821233664, 217020518497387010
+  %12 = i8x16.splat %lane
+  %13 = i8x16.eq %11, %12
+  %14 = i32x4.splat %10
+  %result = v128.bitselect %14, %input, %13
+  return %result
+}

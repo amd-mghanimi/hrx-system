@@ -25,11 +25,14 @@ iree_cc_library(
     ${_hrx_static_platform_copts}
   HDRS
     "${LIBHRX_SOURCE_DIR}/src/iree_hal_compat.h"
+    "buffer.h"
     "buffer_table.h"
+    "device.h"
     "hrx_internal.h"
     "mem_pool.h"
+    "mem_pool_backing.h"
+    "runtime.h"
     "transfer.h"
-    "vmm_slab_provider.h"
   SRCS
     "allocator.c"
     "buffer.c"
@@ -44,14 +47,14 @@ iree_cc_library(
     "graph_exec.c"
     "host_allocator.c"
     "mem_pool.c"
-    "pool.c"
+    "mem_pool_backing.c"
     "queue_ops.c"
     "runtime.c"
     "semaphore.c"
     "status.c"
     "stream.c"
     "transfer.c"
-    "vmm_slab_provider.c"
+    "virtual_buffer.c"
   DEPS
     ${CMAKE_DL_LIBS}
     iree::async
@@ -64,8 +67,8 @@ iree_cc_library(
     iree::hal
     iree::hal::drivers::task::driver
     iree::hal::drivers::task::executable::loaders::registration
-    iree::hal::memory::asan
-    iree::hal::memory::passthrough_pool
+    iree::hal::memory::asan_pool
+    iree::hal::memory::slab_cache
     iree::hal::memory::slab_provider
     iree::hal::memory::tlsf_pool
     iree::hal::utils::profile_file
@@ -98,11 +101,14 @@ iree_cc_library(
     "-DHRX_BUILDING_SHARED"
   HDRS
     "${LIBHRX_SOURCE_DIR}/src/iree_hal_compat.h"
+    "buffer.h"
     "buffer_table.h"
+    "device.h"
     "hrx_internal.h"
     "mem_pool.h"
+    "mem_pool_backing.h"
+    "runtime.h"
     "transfer.h"
-    "vmm_slab_provider.h"
   SRCS
     "allocator.c"
     "buffer.c"
@@ -117,14 +123,14 @@ iree_cc_library(
     "graph_exec.c"
     "host_allocator.c"
     "mem_pool.c"
-    "pool.c"
+    "mem_pool_backing.c"
     "queue_ops.c"
     "runtime.c"
     "semaphore.c"
     "status.c"
     "stream.c"
     "transfer.c"
-    "vmm_slab_provider.c"
+    "virtual_buffer.c"
   DEPS
     ${CMAKE_DL_LIBS}
     iree::async
@@ -137,8 +143,8 @@ iree_cc_library(
     iree::hal
     iree::hal::drivers::task::driver
     iree::hal::drivers::task::executable::loaders::registration
-    iree::hal::memory::asan
-    iree::hal::memory::passthrough_pool
+    iree::hal::memory::asan_pool
+    iree::hal::memory::slab_cache
     iree::hal::memory::slab_provider
     iree::hal::memory::tlsf_pool
     iree::hal::utils::profile_file
@@ -190,6 +196,48 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
+    status_test
+  SRCS
+    "status_test.cc"
+  DEPS
+    ::hrx_static
+    iree::base
+    iree::hal
+    iree::testing::gtest
+    iree::testing::gtest_main
+    libhrx_defs
+)
+
+iree_cc_test(
+  NAME
+    buffer_test
+  SRCS
+    "buffer_test.cc"
+  DEPS
+    ::hrx_static
+    iree::base
+    iree::hal
+    iree::testing::gtest
+    iree::testing::gtest_main
+    libhrx_defs
+)
+
+iree_cc_test(
+  NAME
+    virtual_buffer_test
+  SRCS
+    "virtual_buffer_test.cc"
+  DEPS
+    ::hrx_static
+    iree::base
+    iree::hal
+    iree::testing::gtest
+    iree::testing::gtest_main
+    libhrx_defs
+)
+
+iree_cc_test(
+  NAME
     graph_buffer_test
   SRCS
     "graph_buffer_test.cc"
@@ -218,15 +266,31 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
-    vmm_slab_provider_test
+    mem_pool_backing_test
   SRCS
-    "vmm_slab_provider_test.cc"
+    "mem_pool_backing_test.cc"
   DEPS
     ::hrx_static
     iree::base
     iree::hal
-    iree::hal::memory::slab_provider
-    iree::hal::memory::tlsf_pool
+    iree::hal::memory::slab_cache
+    iree::testing::gtest
+    iree::testing::gtest_main
+    libhrx_defs
+)
+
+iree_cc_test(
+  NAME
+    mem_pool_backing_gpu_test
+  SRCS
+    "mem_pool_backing_test.cc"
+  COPTS
+    "-DHRX_TEST_GPU=1"
+  DEPS
+    ::hrx_static
+    iree::base
+    iree::hal
+    iree::hal::memory::slab_cache
     iree::testing::gtest
     iree::testing::gtest_main
     libhrx_defs

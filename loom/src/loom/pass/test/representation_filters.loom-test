@@ -1,0 +1,149 @@
+// RUN: pass @source_cleanup
+
+// Source cleanup selects functions, kernels and pipeline constructors without
+// touching already-Low callables in the same module.
+pass.pipeline<module> @source_cleanup pipeline {
+  for func {
+    where source {
+      dce
+    }
+  }
+}
+
+test.target<low_core> @target
+
+func.def @source_function(%value: i32) -> (i32) {
+  %unused = scalar.constant 7 : i32
+  func.return %value : i32
+}
+
+kernel.def @source_kernel() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch() {
+  %unused = scalar.constant 7 : i32
+  kernel.return
+}
+
+pipeline.def @source_pipeline() run() {
+  %unused = index.constant 7 : index
+}
+
+low.func.def target<test.low.core>(@target) @low_function(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %unused = test.const.i32 7
+  return %value
+}
+
+low.kernel.def target<test.low.core>(@target) @low_kernel() asm {
+  %unused = test.const.i32 7
+  return
+}
+
+// ----
+pass.pipeline<module> @source_cleanup pipeline {
+  for func {
+    where source {
+      dce
+    }
+  }
+}
+
+test.target<low_core> @target
+
+func.def @source_function(%value: i32) -> (i32) {
+  func.return %value : i32
+}
+
+kernel.def @source_kernel() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch() {
+  kernel.return
+}
+
+pipeline.def @source_pipeline() run() {
+}
+
+low.func.def target<test.low.core>(@target) @low_function(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %unused = test.const.i32 7
+  return %value
+}
+
+low.kernel.def target<test.low.core>(@target) @low_kernel() asm {
+  %unused = test.const.i32 7
+  return
+}
+
+// ====
+// RUN: pass @low_cleanup
+
+// The converse filter leaves source bodies untouched and cleans both kinds
+// of Low executable, with no target symbol required to select the body.
+pass.pipeline<module> @low_cleanup pipeline {
+  for func {
+    where low {
+      dce
+    }
+  }
+}
+
+func.def @source_function(%value: i32) -> (i32) {
+  %unused = scalar.constant 7 : i32
+  func.return %value : i32
+}
+
+kernel.def @source_kernel() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch() {
+  %unused = scalar.constant 7 : i32
+  kernel.return
+}
+
+pipeline.def @source_pipeline() run() {
+  %unused = index.constant 7 : index
+}
+
+low.func.def target<test.low.core> @low_function(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %unused = test.const.i32 7
+  return %value
+}
+
+low.kernel.def target<test.low.core> @low_kernel() asm {
+  %unused = test.const.i32 7
+  return
+}
+
+// ----
+pass.pipeline<module> @low_cleanup pipeline {
+  for func {
+    where low {
+      dce
+    }
+  }
+}
+
+func.def @source_function(%value: i32) -> (i32) {
+  %unused = scalar.constant 7 : i32
+  func.return %value : i32
+}
+
+kernel.def @source_kernel() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch() {
+  %unused = scalar.constant 7 : i32
+  kernel.return
+}
+
+pipeline.def @source_pipeline() run() {
+  %unused = index.constant 7 : index
+}
+
+low.func.def target<test.low.core> @low_function(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  return %value
+}
+
+low.kernel.def target<test.low.core> @low_kernel() asm {
+  return
+}

@@ -21,13 +21,43 @@ loom_cc_library(
     deps = ["//loom/src/loom/ops:op_defs"],
 )
 
+loom_cc_library(
+    name = "cast",
+    srcs = ["cast.c"],
+    hdrs = ["cast.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:facts",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+    ],
+)
+
+loom_cc_library(
+    name = "comparison",
+    srcs = [
+        "carrier.c",
+        "compare.c",
+    ],
+    hdrs = [
+        "carrier.h",
+        "compare.h",
+    ],
+    deps = [
+        ":op_defs",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:facts",
+        "//loom/src/loom/target:facts",
+        "//loom/src/loom/util:fact_table_api",
+    ],
+)
+
 loom_generated_cc_library(
     name = "index",
     srcs = [
         "canonicalize.c",
-        "carrier.c",
-        "compare.c",
         "facts.c",
+        "traits.c",
         "verify.c",
     ],
     hdrs = [
@@ -49,9 +79,12 @@ loom_generated_cc_library(
     generator = "//loom/py/loom/gen/ops:c_tables_index_generator",
     textual_hdrs = ["ops.inc"],
     deps = [
+        ":cast",
+        ":comparison",
         ":op_defs",
         "//loom/src/loom/error:emitter",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops:op_defs",

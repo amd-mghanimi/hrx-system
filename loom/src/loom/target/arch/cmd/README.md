@@ -16,11 +16,13 @@ Four boundaries keep the feature composable:
 
 - Source command programs remain open Loom IR. Normal linking,
   specialization, and canonicalization apply before portability is required.
-- The prepared plan is the sole owner of root, dispatch-count, entry, and
+- The command plan is the sole owner of root, dispatch-count, entry, and
   storage decisions. Later stages consume those indexed results instead of
   reconstructing them from source IR.
-- Logical launch configuration remains ordinary pure computation in the
-  caller until generic inlining, canonicalization, CSE, and folding have run.
+- Logical launch configuration remains ordinary deterministic computation in
+  the caller until generic inlining, canonicalization, CSE, and folding have
+  run. It may load explicit workload buffers or views without opening a device
+  implementation.
 - The serialized artifact contains logical resources and typed arguments, not
   HAL objects, process addresses, native calling conventions, or target code.
 - Optional kernel request publication transfers independently owned ordinary
@@ -87,7 +89,7 @@ command.program.def public @attention(%token_count: index) launch(
 ```
 
 Ordinary function calls, program calls, loops, conditionals, templates, and
-value-fact refinement remain source constructs. Preparation specializes them
+value-fact refinement remain source constructs. Planning specializes them
 until the command schedule is a closed sequence of kernel launches and explicit
 `command.serial` or `command.concurrent` regions. A residual construct without
 a portable command meaning fails at that boundary instead of acquiring an
@@ -99,7 +101,7 @@ does not allocate, load, transfer, or synchronize the content.
 
 ## Compilation Products
 
-Preparation accepts one or more selected program roots and constructs one
+Planning accepts one or more selected program roots and constructs one
 owned plan:
 
 ```text
@@ -132,30 +134,32 @@ The plan owns:
   declaration. Roots reference that table through dense local slots so an
   executable object and its entry token are resolved atomically.
 - Parameter, transient, and physical dispatch-count placement is retained as
-  prepared data consumed directly by Low conversion and serialization.
+  plan data consumed directly by Low conversion and serialization.
 
-Source preparation requires every scheduled `kernel.launch` to resolve to a
+Command planning requires every scheduled `kernel.launch` to resolve to a
 selected launch-configuration facet. Selective materialization reconstructs a
-private `kernel.decl` and pure configuration function without decoding the
-kernel implementation body. A bodyless `kernel.decl` with no configuration is
-diagnosed instead of acquiring guessed launch semantics. An authored
-`kernel.entry.decl` can be dispatched directly when the embedding application
-provides the matching executable entry.
+private `kernel.decl` and a pure or deterministic read-only configuration
+function without decoding the kernel implementation body. A bodyless
+`kernel.decl` with no configuration is diagnosed instead of acquiring guessed
+launch semantics. An authored `kernel.entry.decl` can be dispatched directly
+when the embedding application provides the matching executable entry.
 
-The source providers and index may be released after preparation. The plan owns
+The source providers and index may be released after planning. The plan owns
 the shared lowered root module, parameter keys, requirement tables, and
 root-local entry mappings. It owns no kernel source request: optional requests
-transfer to their recipient during preparation and remain provisional until the
+transfer to their recipient during planning and remain provisional until the
 parent operation succeeds.
 
 ## Launch Counts
 
 Selective linking projects each required kernel launch configuration as an
-ordinary private pure function. Launch resolution replaces `kernel.launch` at
-its caller-owned CFG site with a pure inline call and a `kernel.dispatch` that
-uses the call results. Calls nested only in launch-schedule wrappers move just
-outside the wrapper because schedule regions contain command ordering rather
-than ordinary computation. Calls otherwise stay branch- and loop-local.
+ordinary private function carrying its proven pure or read-only contract.
+Launch resolution replaces `kernel.launch` at its caller-owned CFG site with an
+inline call and a `kernel.dispatch` that uses the call results. Pure calls may
+cross launch-schedule wrappers while all workloads are defined outside them.
+Read-only calls remain beside the lexical launch so they cannot move ahead of a
+command that produces their storage. Ordinary control flow keeps both calls
+branch- and loop-local.
 
 The normal function pipeline owns canonicalization, CSE, unrolling, inlining,
 and dead-symbol elimination. Equal calls can therefore collapse before command
@@ -165,15 +169,19 @@ launch evaluator or result-compaction pass.
 Configured dispatch counts have three portable placements:
 
 - Exact counts are embedded in a direct dispatch command.
-- An exact aligned `view<3xi32>` rooted in command inputs or immutable
-  parameters becomes a static indirect dispatch.
-- An exact aligned `view<3xi32>` rooted in transient command storage becomes a
-  dynamic indirect dispatch after a preceding execution wave.
+- An exact aligned `view<3xi32>` rooted in immutable parameters becomes a
+  static indirect dispatch: its contents stay unchanged throughout execution.
+- An exact aligned `view<3xi32>` rooted in invocation buffers or transient
+  command storage becomes a dynamic indirect dispatch. The device fetches its
+  counts immediately before dispatch issue, after any preceding producer wave.
+  Invocation buffers may already contain valid counts at program entry;
+  transient storage requires a preceding execution wave.
 
-A residual scalar count is not silently outlined or stored. Portable command
-preparation diagnoses it and requires the caller to specialize it to an exact
-value or represent it through explicit indirect storage. The serialized
-artifact therefore remains independent of invocation-time scalar values.
+Residual deterministic read-only count expressions become explicit generated
+device producers writing transient XYZ tuples. Compatible consumers can share
+a producer, while intervening possible writes separate their observations.
+The serialized artifact contains those producers and indirect consumers; it
+never delegates count evaluation to an implicit host callback.
 
 ## Storage
 
@@ -207,7 +215,7 @@ The source schedule describes dependency intent:
 - Siblings in `command.concurrent` have no dependency edges between them and
   join before later work.
 
-Preparation flattens that structure into contiguous waves. Commands within one
+Planning flattens that structure into contiguous waves. Commands within one
 wave retain source traversal order but may execute concurrently. Successive
 waves are separated by a full execution barrier. When a barrier immediately
 precedes a fill, copy, or dispatch, the Low ISA and artifact encode a dedicated
@@ -216,7 +224,7 @@ portable instruction.
 
 ## Portable Low ISA
 
-Prepared roots use `low.func.def target<cmd.core> abi(command_program)`. Their
+Planned roots use `low.func.def target<cmd.core> abi(command_program)`. Their
 zero-argument function signature is intentional: external resources enter
 through dense ABI tables declared by `abi_layout`.
 
@@ -260,7 +268,7 @@ reflected width match.
 
 ## Artifact Boundary
 
-Serialization is the closed portability boundary. It accepts a prepared root
+Serialization is the closed portability boundary. It accepts a planned root
 only when every remaining Low descriptor and operation has a command encoding,
 then writes canonical little-endian tables with no compiler pointers, symbol
 references, or borrowed strings.
@@ -283,12 +291,12 @@ The artifact records:
 | Object | Owns | Borrows |
 | --- | --- | --- |
 | Source module | Authored IR | Nothing |
-| Prepared plan | Root module, entry requirements, root tables, parameter keys | Compiler context and arena block pool |
+| Command plan | Root module, entry requirements, root tables, parameter keys | Compiler context and arena block pool |
 | Kernel request recipient | Independently compilable request modules | Nothing |
 | Serialized bytes | Complete portable program | Nothing |
 | Parsed program view | Nothing | Serialized bytes |
 
-`loom_cmd_program_plan_deinitialize` releases the complete prepared plan.
+`loom_cmd_program_plan_deinitialize` releases the complete command plan.
 Serialized bytes are caller-owned and may outlive that plan. A parsed view is
 valid only while its source byte span remains live.
 
@@ -299,7 +307,7 @@ valid only while its source byte span remains live.
 | `loom/py/loom/dialect/command/defs.py` | Source operations and canonical text syntax |
 | `loom/src/loom/ops/command/verify.c` | Source-level program, launch, and parameter verification |
 | `loom/src/loom/transforms/kernel/resolve_launches.*` | Caller-owned launch-to-call-and-dispatch rewriting |
-| `loom/src/loom/target/arch/cmd/lower/program_plan.*` | Multi-root ownership and product preparation |
+| `loom/src/loom/target/arch/cmd/lower/program_plan.*` | Multi-root ownership and plan construction |
 | `loom/src/loom/target/arch/cmd/lower/dispatch_counts.*` | Direct and explicit indirect count placement |
 | `loom/src/loom/target/arch/cmd/lower/schedule.*` | Structured schedules and execution waves |
 | `loom/src/loom/target/arch/cmd/lower/parameters.*` | Immutable parameter enumeration and placement |
@@ -309,8 +317,8 @@ valid only while its source byte span remains live.
 | `loom/src/loom/target/arch/cmd/format.*` | Canonical binary layout |
 | `loom/src/loom/target/arch/cmd/program.*` | Parsed artifact view and typed accessors |
 
-The production-backed `loom-check` emitter exposes prepared root programs in
+The production-backed `loom-check` emitter exposes planned root programs in
 text and round-trips each root through command serialization and the untrusted
 artifact parser. The `.loom-test` corpus beside this implementation therefore
-exercises the same preparation and serialization path as an embedding
+exercises the same planning and serialization path as an embedding
 application.

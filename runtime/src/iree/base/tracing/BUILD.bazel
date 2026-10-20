@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 load("//runtime/build_tools/bazel:cc.bzl", "iree_runtime_cc_library")
+load("//runtime/build_tools/bazel:cc_test.bzl", "iree_runtime_cc_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -43,6 +44,20 @@ iree_runtime_cc_library(
     ],
 )
 
+iree_runtime_cc_test(
+    name = "console_test",
+    srcs = ["console_test.cc"],
+    target_compatible_with = select({
+        "//runtime/config/base/tracing:provider_console": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":console",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/testing:gtest",
+    ],
+)
+
 #===------------------------------------------------------------------------===#
 # Tracy
 #===------------------------------------------------------------------------===#
@@ -51,6 +66,19 @@ iree_runtime_cc_library(
     name = "tracy",
     srcs = ["tracy.cc"],
     hdrs = ["tracy.h"],
+    copts = select({
+        "//build_tools/bazel:cc_compiler_clang": [
+            "-Wno-implicit-fallthrough",
+            "-Wno-unused-result",
+            "-Wno-unused-variable",
+        ],
+        "//build_tools/bazel:cc_compiler_gcc": [
+            "-Wno-implicit-fallthrough",
+            "-Wno-unused-result",
+            "-Wno-unused-variable",
+        ],
+        "//conditions:default": [],
+    }),
     defines = [
         "IREE_TRACING_PROVIDER_H=\\\"iree/base/tracing/tracy.h\\\"",
         "IREE_TRACING_MODE=2",
@@ -60,7 +88,25 @@ iree_runtime_cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        "//build_tools/bazel:dl",
+        "//build_tools/bazel:pthreads",
         "//runtime/src/iree/base:core_headers",
+        "@tracy_client//:runtime",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "tracy_test",
+    srcs = ["tracy_test.cc"],
+    target_compatible_with = select({
+        "//runtime/config/base/tracing:provider_tracy": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":tracy",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
         "@tracy_client//:runtime",
     ],
 )

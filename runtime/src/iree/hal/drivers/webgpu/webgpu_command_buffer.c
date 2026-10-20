@@ -46,7 +46,7 @@ iree_status_t iree_hal_webgpu_command_buffer_create(
     iree_hal_webgpu_handle_t device_handle,
     iree_hal_webgpu_handle_t queue_handle,
     const iree_hal_webgpu_builtins_t* builtins,
-    iree_arena_block_pool_t* block_pool, iree_hal_allocator_t* device_allocator,
+    iree_arena_block_pool_t* block_pool,
     const iree_hal_queue_family_t* queue_family,
     iree_hal_command_buffer_mode_t mode,
     iree_hal_command_category_t command_categories,
@@ -68,8 +68,8 @@ iree_status_t iree_hal_webgpu_command_buffer_create(
                                     mode, binding_capacity),
                             (void**)&command_buffer));
   iree_hal_command_buffer_initialize(
-      device_allocator, queue_family, mode, command_categories,
-      binding_capacity, (uint8_t*)command_buffer + sizeof(*command_buffer),
+      queue_family, mode, command_categories, binding_capacity,
+      (uint8_t*)command_buffer + sizeof(*command_buffer),
       &iree_hal_webgpu_command_buffer_vtable, &command_buffer->base);
   command_buffer->host_allocator = host_allocator;
   command_buffer->device_handle = device_handle;
@@ -215,25 +215,15 @@ static iree_status_t iree_hal_webgpu_command_buffer_end_debug_group(
   return iree_ok_status();
 }
 
-static iree_status_t iree_hal_webgpu_command_buffer_execution_barrier(
+static iree_status_t iree_hal_webgpu_command_buffer_barrier(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
-  const iree_hal_execution_barrier_flags_t supported_flags =
-      IREE_HAL_EXECUTION_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE |
-      IREE_HAL_EXECUTION_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
-  if (IREE_UNLIKELY(flags & ~supported_flags)) {
+    const iree_hal_barrier_t* barrier) {
+  if (IREE_UNLIKELY(
+          iree_hal_memory_effects_requires_resources(barrier->effects))) {
     return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "unsupported WebGPU execution barrier flags: 0x%016" PRIx64,
-        flags & ~supported_flags);
+        IREE_STATUS_UNIMPLEMENTED,
+        "WebGPU command buffers do not support ranged queue transitions");
   }
-
   // WebGPU excludes simultaneous host and device access. Host/device ownership
   // transitions happen at queue submission and mapping boundaries, so the
   // ordinary barrier already covers every concurrently accessible agent.
@@ -360,7 +350,7 @@ static const iree_hal_command_buffer_vtable_t
         .end = iree_hal_webgpu_command_buffer_end,
         .begin_debug_group = iree_hal_webgpu_command_buffer_begin_debug_group,
         .end_debug_group = iree_hal_webgpu_command_buffer_end_debug_group,
-        .execution_barrier = iree_hal_webgpu_command_buffer_execution_barrier,
+        .barrier = iree_hal_webgpu_command_buffer_barrier,
         .atomic_wait = iree_hal_webgpu_command_buffer_atomic_wait,
         .atomic_store = iree_hal_webgpu_command_buffer_atomic_store,
         .atomic_rmw = iree_hal_webgpu_command_buffer_atomic_rmw,

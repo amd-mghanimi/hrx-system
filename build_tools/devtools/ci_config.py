@@ -29,12 +29,25 @@ SANITIZER_BUILD_CONFIGS = ("msan",)
 # conventional Bazel tag and CTest label.
 HOST_TSAN_INCOMPATIBLE_TEST_LABEL = "notsan"
 
+# Python test processes are qualified once per host platform and build system.
+# Native Python drivers selected by hardware jobs remain admitted because those
+# jobs do not apply these exclusions.
+PYTHON_TEST_BAZEL_LANGUAGE_EXCLUSIONS = ("-py",)
+PYTHON_TEST_CTEST_LABEL_REGEX = r"^python-test$"
+
+# The shared platform-coverage matrix qualifies portable optional dependencies.
+# Other source-tree CI configurations retain built-in media formats.
+OPTIONAL_IMAGE_CODECS = ("png", "jpeg", "gif", "webp")
+OPTIONAL_AUDIO_CODECS = ("wav", "mp3", "flac")
+
 CMAKE_SANITIZER_SMOKE_CTEST_REGEXES = (
     "^iree/base/status_test$",
     "^loom/format/bytecode/varint_test$",
 )
 CMAKE_REPOSITORY_SMOKE_CTEST_REGEXES = (
     "^iree/base/status_test$",
+    "^iree/hal/drivers/amd/xdna/",
+    "^libamdf/src/xdna/",
     "^loom/format/bytecode/varint_test$",
 )
 BAZEL_REPOSITORY_INTEGRATION_DEVICE_TARGETS = (
@@ -132,9 +145,10 @@ CPU_BAZEL_TARGET_EXCLUDES = (
     "-//runtime/src/iree/hal/drivers/webgpu/...",
 )
 CPU_RESOURCE_TAG_EXCLUDES = run_requirements.bazel_exclusions(())
-# A native AMD endpoint and an HSA agent are distinct runner capabilities.
+# GPU jobs explicitly admit both native endpoints and HSA agents. XDNA-only
+# jobs retain their separate device requirement.
 XDNA_RESOURCES = ("libamdf.resource.xdna",)
-AMDGPU_RESOURCES = ("runtime.resource.amd_gpu",)
+AMDGPU_RESOURCES = ("runtime.resource.amd_gpu", "libamdf.resource.amd_gpu")
 VULKAN_RESOURCES = ("vulkan.resource.device",)
 # Each command resets explicit API requests from machine-local Bazel settings.
 # Job options follow these defaults and can select either API independently.
@@ -154,30 +168,43 @@ AMDF_BUILD_REQUIREMENT_TAG = "iree-build-requirement=libamdf"
 XDNA_RUN_REQUIREMENT_TAG = "iree-run-requirement=libamdf.resource.xdna"
 XDNA_CTEST_RESOURCE_LABEL = "runtime-resource=amd-xdna"
 AMDF_CTEST_REGEX = r"^libamdf/"
-XDNA_BAZEL_TARGETS = AMDF_BAZEL_TARGETS + ("//experimental/xdna/...",)
+XDNA_BAZEL_TARGETS = AMDF_BAZEL_TARGETS + (
+    "//runtime/src/iree/hal/drivers/amd/...",
+    "//loom/target/amd/xdna/...",
+    "//loom/src/loom/tooling/target/amd/xdna/...",
+)
 XDNA_BAZEL_TEST_TAG_FILTERS = (AMDF_BUILD_REQUIREMENT_TAG, XDNA_RUN_REQUIREMENT_TAG)
-XDNA_CMAKE_BUILD_TARGETS = ("libamdf/all", "experimental/xdna/all")
-XDNA_CTEST_PACKAGE_REGEX = r"^iree/experimental/xdna/"
+XDNA_CMAKE_BUILD_TARGETS = (
+    "libamdf/all",
+    "runtime/src/iree/hal/drivers/amd/all",
+    "loom/target/amd/xdna/all",
+    "loom/src/loom/tooling/target/amd/xdna/all",
+)
+XDNA_CTEST_PACKAGE_REGEX = (
+    r"^(iree/hal/drivers/amd|loom/(target|tooling/target)/amd/xdna)/"
+)
 # Compile both client families; Linux admits only XDNA hardware execution.
 # Common runtime components enter through the ELF consumers' dependencies.
 AMD_CLIENT_BAZEL_OPTIONS = (
     "--//libamdf/config:enabled=true",
     "--//libamdf/config:families=rdna,xdna",
-    "--//runtime/config/hal:drivers=task",
-    "--//loom/config/target:enable=amdgpu,x86",
+    "--//runtime/config/hal:drivers=task,xdna",
+    "--//loom/config/target:enable=amdgpu,vm,xdna,x86",
     "--//loom/config/execute:enable=iree_hal",
     "--//loom/config/import:enable=",
     "--//loom/config/emit:enable=",
 )
 AMD_CLIENT_BAZEL_TARGETS = (
     *AMDF_BAZEL_TARGETS,
-    "//experimental/xdna/...",
+    "//runtime/src/iree/hal/drivers/amd/...",
+    "//loom/target/amd/xdna/...",
+    "//loom/src/loom/tooling/target/amd/xdna/...",
 )
 AMD_CLIENT_WINDOWS_BAZEL_OPTIONS = AMD_CLIENT_BAZEL_OPTIONS + (
     "--//build_tools/vulkan/config:enabled=true",
     "--//build_tools/d3d12/config:enabled=true",
-    "--//runtime/config/hal:drivers=task,vulkan",
-    "--//loom/config/target:enable=amdgpu,spirv,x86",
+    "--//runtime/config/hal:drivers=task,vulkan,xdna",
+    "--//loom/config/target:enable=amdgpu,spirv,vm,xdna,x86",
 )
 AMD_CLIENT_WINDOWS_BAZEL_TARGETS = AMD_CLIENT_BAZEL_TARGETS + (
     "//runtime/src/iree/hal/drivers/vulkan/...",
@@ -192,13 +219,46 @@ AMD_CLIENT_WINDOWS_RESOURCES = (
         "d3d12.resource.device",
     )
 )
-AMDGPU_CMAKE_DRIVER_TARGETS = ("runtime/src/iree/hal/drivers/amdgpu/all",)
+AMDGPU_CMAKE_BUILD_TARGETS = (
+    "runtime/src/iree/hal/drivers/amdgpu/all",
+    "libamdf/all",
+)
+AMDGPU_BAZEL_OPTIONS = (
+    "--//libamdf/config:enabled=true",
+    "--//libamdf/config:families=rdna,cdna",
+)
+# Native Windows queue coverage has no HSA runtime or NPU requirement. Keep
+# shader and cross-engine synchronization corpora separate from this admission
+# check: a finite command must retire before exercising queue capacity or wakes.
+AMDGPU_WINDOWS_BAZEL_OPTIONS = (
+    "--//libamdf/config:enabled=true",
+    "--//libamdf/config:families=rdna",
+    "--//runtime/config/hal:drivers=task",
+    "--//loom/config/target:enable=amdgpu,vm,x86",
+    "--//loom/config/execute:enable=",
+    "--//loom/config/import:enable=",
+    "--//loom/config/emit:enable=amdgpu",
+)
+AMDGPU_WINDOWS_RESOURCES = ("libamdf.resource.amd_gpu",)
+AMDGPU_WINDOWS_BAZEL_TARGETS = (
+    "//libamdf/src/gpu/umd/wddm/wkmi:allocation_test",
+    "//libamdf/src/gpu/umd/wddm/wkmi:kernel_queue_test",
+    "//libamdf/cts/gpu:gpu_extension_dynamic",
+    "//libamdf/cts/gpu:kernel_queue_dynamic",
+    "//libamdf/cts/gpu:native_lifetime",
+)
+AMDGPU_WINDOWS_QUEUE_TARGET = "//libamdf/cts/gpu:kernel_queue_dynamic"
+AMDGPU_WINDOWS_COPY_FILTER = (
+    "Pm4KernelQueueTest.ExecutesMaterializedCopyData:"
+    "SdmaKernelQueueTest.ExecutesMaterializedSdmaCopy"
+)
 DEFAULT_AMDGPU_TARGET_SELECTOR = "gfx942"
 AMDGPU_BUILD_REQUIREMENT_TAG = "iree-build-requirement=runtime.hal.amdgpu"
 AMDGPU_RUN_REQUIREMENT_TAG = "iree-run-requirement=runtime.resource.amd_gpu"
 AMDGPU_BAZEL_TEST_TAG_FILTERS = (
     AMDGPU_BUILD_REQUIREMENT_TAG,
     AMDGPU_RUN_REQUIREMENT_TAG,
+    AMDF_BUILD_REQUIREMENT_TAG,
 )
 AMDGPU_BAZEL_TARGET_EXCLUDES = (
     "-//runtime/src/iree/hal/drivers/vulkan/...",
@@ -251,7 +311,7 @@ AMDGPU_SANITIZERS_XFAILS = ()
 AMDGPU_TSAN_XFAILS = ()
 AMDGPU_BAZEL_XFAILS_BY_TARGET_SELECTOR = {
     # gfx1151 currently hangs while waiting for manually instrumented ASAN
-    # feedback. Keep the ordinary ASAN executable coverage active.
+    # feedback. Keep the remaining gfx1151 coverage active.
     "gfx1151": (
         bazel_xfail(
             "//runtime/src/iree/hal/drivers/amdgpu/cts:manual_asan_executable_tests"

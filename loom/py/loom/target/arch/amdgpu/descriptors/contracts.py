@@ -12,10 +12,12 @@
 from __future__ import annotations
 
 from .alu import *
+from .bitwise import *
 from .categories import *
 from .common import *
 from .integer_multiply import *
 from .matrix import *
+from .scalar_carry import *
 from .scalar_float import *
 from .sets import *
 
@@ -42,18 +44,24 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     "amdgpu.s_mov_b64_exec_read": _s_mov_b64_exec_read_contract_overlay,
     "amdgpu.s_add_u32": _s_add_u32_overlay,
     "amdgpu.s_sub_u32": _s_sub_u32_overlay,
+    "amdgpu.s_sub_co_u32": _s_sub_co_u32_overlay,
     "amdgpu.s_mul_i32": _s_mul_i32_overlay,
     "amdgpu.s_mul_hi_u32": _s_mul_hi_u32_overlay,
-    "amdgpu.s_min_i32": _s_min_i32_overlay,
-    "amdgpu.s_max_i32": _s_max_i32_overlay,
-    "amdgpu.s_min_u32": _s_min_u32_overlay,
-    "amdgpu.s_max_u32": _s_max_u32_overlay,
+    "amdgpu.s_mul_hi_u32.lit": _s_mul_hi_u32_literal_overlay,
+    "amdgpu.s_mul_hi_i32": _s_mul_hi_i32_overlay,
+    "amdgpu.s_mul_hi_i32.lit": _s_mul_hi_i32_literal_overlay,
+    **_contract_overlay_builders_from_overlays(_s_min_i32_overlays()),
+    **_contract_overlay_builders_from_overlays(_s_max_i32_overlays()),
+    **_contract_overlay_builders_from_overlays(_s_min_u32_overlays()),
+    **_contract_overlay_builders_from_overlays(_s_max_u32_overlays()),
     "amdgpu.s_cselect_b32": _s_cselect_b32_overlay,
     **_contract_overlay_builders_from_overlays(_s_float_arithmetic_overlays()),
     **_contract_overlay_builders_from_overlays(_s_float_compare_overlays()),
     **_contract_overlay_builders_from_overlays(_s_float_conversion_overlays()),
     "amdgpu.v_mov_b32": _v_mov_b32_literal_overlay,
     "amdgpu.v_mov_b32_copy": _v_mov_b32_copy_overlay,
+    "amdgpu.v_readfirstlane_b32": _v_readfirstlane_b32_overlay,
+    "amdgpu.v_cndmask_b32": _v_cndmask_b32_overlay,
     "amdgpu.v_add_u32": lambda: _v_add_u32_overlay("V_ADD_NC_U32"),
     "amdgpu.v_add_u32.rhs_tied": lambda: _v_add_u32_rhs_tied_overlay("V_ADD_NC_U32"),
     "amdgpu.v_add_u32.src0_inline": lambda: _v_add_u32_src0_inline_overlay(
@@ -61,24 +69,31 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     ),
     "amdgpu.v_add_u32.lit": lambda: _v_add_u32_literal_overlay("V_ADD_NC_U32"),
     "amdgpu.v_sub_u32": lambda: _v_sub_u32_overlay("V_SUB_NC_U32", "v_sub_nc_u32"),
+    "amdgpu.v_sub_u32.src0_inline": lambda: _v_sub_u32_src0_inline_overlay(
+        "V_SUB_NC_U32", "v_sub_nc_u32"
+    ),
     "amdgpu.v_sub_u32.lhs_tied": lambda: _v_sub_u32_lhs_tied_overlay(
         "V_SUB_NC_U32", "v_sub_nc_u32"
     ),
+    "amdgpu.v_sub_co_u32": _v_sub_co_u32_overlay,
     **_contract_overlay_builders_from_overlays(_v_mul_integer_overlays()),
     "amdgpu.v_mul_u32_u24": _v_mul_u32_u24_overlay,
     "amdgpu.v_mul_u32_u24.src0_inline": _v_mul_u32_u24_src0_inline_overlay,
     "amdgpu.v_mul_u32_u24.lit": _v_mul_u32_u24_literal_overlay,
     "amdgpu.v_mad_u32_u24": _v_mad_u32_u24_overlay,
+    "amdgpu.v_mad_u32_u24.src0_inline": lambda: _v_mad_u32_u24_inline_overlay("src0"),
+    "amdgpu.v_mad_u32_u24.src1_inline": lambda: _v_mad_u32_u24_inline_overlay("src1"),
+    "amdgpu.v_mad_u32_u24.src2_inline": lambda: _v_mad_u32_u24_inline_overlay("src2"),
     "amdgpu.v_mad_u32_u24.src0_lit": lambda: _v_mad_u32_u24_literal_overlay("src0"),
     "amdgpu.v_mad_u32_u24.src1_lit": lambda: _v_mad_u32_u24_literal_overlay("src1"),
     "amdgpu.v_mad_u32_u24.src2_lit": lambda: _v_mad_u32_u24_literal_overlay("src2"),
     "amdgpu.v_lshl_add_u32.shift_imm.src2_lit": (
         _v_lshl_add_u32_shift_immediate_src2_literal_overlay
     ),
-    "amdgpu.v_min_i32": _v_min_i32_overlay,
-    "amdgpu.v_max_i32": _v_max_i32_overlay,
-    "amdgpu.v_min_u32": _v_min_u32_overlay,
-    "amdgpu.v_max_u32": _v_max_u32_overlay,
+    **_contract_overlay_builders_from_overlays(_v_min_i32_overlays()),
+    **_contract_overlay_builders_from_overlays(_v_max_i32_overlays()),
+    **_contract_overlay_builders_from_overlays(_v_min_u32_overlays()),
+    **_contract_overlay_builders_from_overlays(_v_max_u32_overlays()),
     "amdgpu.v_add_f32": _v_add_f32_overlay,
     "amdgpu.v_add_f32.lit": _v_add_f32_literal_overlay,
     "amdgpu.v_add_f32.src0_inline": _v_add_f32_src0_inline_overlay,
@@ -95,12 +110,15 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     "amdgpu.v_max_f32.lit": _v_max_f32_literal_overlay,
     "amdgpu.v_max_f32.src0_inline": _v_max_f32_src0_inline_overlay,
     "amdgpu.v_add_f16": _v_add_f16_overlay,
+    "amdgpu.v_sub_f64": _v_sub_f64_overlay,
     "amdgpu.v_sub_f16": _v_sub_f16_overlay,
     "amdgpu.v_mul_f16": _v_mul_f16_overlay,
-    "amdgpu.v_fma_f32": _v_fma_f32_overlay,
+    **_contract_overlay_builders_from_overlays(_v_binary_f64_overlays()),
+    **_contract_overlay_builders_from_overlays(_v_fma_overlays(32)),
     "amdgpu.v_fmaak_f32": _v_fmaak_f32_overlay,
     "amdgpu.v_fmac_f32": _v_fmac_f32_overlay,
     "amdgpu.v_fmamk_f32": _v_fmamk_f32_overlay,
+    "amdgpu.v_fmamk_f32.flush_product": (_v_fmamk_f32_product_flushing_overlay),
     "amdgpu.v_pk_fmac_f16": _v_pk_fmac_f16_overlay,
     "amdgpu.v_pk_fma_f16": _v_pk_fma_f16_overlay,
     "amdgpu.v_pk_add_f16": _v_pk_add_f16_overlay,
@@ -121,6 +139,26 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     "amdgpu.v_pk_add_f32": _v_pk_add_f32_overlay,
     "amdgpu.v_pk_mul_f32": _v_pk_mul_f32_overlay,
     "amdgpu.v_pk_fma_f32": _v_pk_fma_f32_overlay,
+    **_contract_overlay_builders_from_overlays(
+        tuple(
+            variant
+            for overlay in (
+                _v_pk_add_f32_overlay(),
+                _v_pk_mul_f32_overlay(),
+                _v_pk_fma_f32_overlay(),
+                _v_pk_mul_f16_overlay(),
+                _v_pk_add_f16_overlay(),
+                _v_pk_minnum_f16_overlay(),
+                _v_pk_maxnum_f16_overlay(),
+                _v_pk_minimum_f16_overlay(),
+                _v_pk_maximum_f16_overlay(),
+                _v_pk_add_bf16_overlay(),
+                _v_pk_mul_bf16_overlay(),
+                *_v_pk_i16_binary_overlays(),
+            )
+            for variant in _v_pk_broadcast_overlays(overlay)
+        )
+    ),
     **_contract_overlay_builders_from_overlays(_v_fma_mix_f32_overlays()),
     **_contract_overlay_builders_from_overlays(_v_fma_mixlo_f16_overlays()),
     **_contract_overlay_builders_from_overlays(_v_fma_mixhi_f16_overlays()),
@@ -132,19 +170,36 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     "amdgpu.v_sin_f32": _v_sin_f32_overlay,
     "amdgpu.v_cos_f32": _v_cos_f32_overlay,
     "amdgpu.v_floor_f32": _v_floor_f32_overlay,
+    "amdgpu.v_floor_f64": _v_floor_f64_overlay,
     "amdgpu.v_ceil_f32": _v_ceil_f32_overlay,
+    "amdgpu.v_ceil_f64": _v_ceil_f64_overlay,
     "amdgpu.v_rndne_f32": _v_rndne_f32_overlay,
+    "amdgpu.v_rndne_f64": _v_rndne_f64_overlay,
     "amdgpu.v_trunc_f32": _v_trunc_f32_overlay,
+    "amdgpu.v_trunc_f64": _v_trunc_f64_overlay,
     "amdgpu.v_sqrt_f32": _v_sqrt_f32_overlay,
+    "amdgpu.v_sqrt_f64": _v_sqrt_f64_overlay,
+    "amdgpu.v_rsq_f64": _v_rsq_f64_overlay,
+    "amdgpu.v_ldexp_f32": _v_ldexp_f32_overlay,
+    "amdgpu.v_ldexp_f64": _v_ldexp_f64_overlay,
     "amdgpu.v_rsq_f32": _v_rsq_f32_overlay,
     "amdgpu.v_rcp_f32": _v_rcp_f32_overlay,
+    "amdgpu.v_rcp_f64": _v_rcp_f64_overlay,
     "amdgpu.v_div_scale_f32": _v_div_scale_f32_overlay,
     "amdgpu.v_div_fmas_f32": _v_div_fmas_f32_overlay,
     "amdgpu.v_div_fixup_f32": _v_div_fixup_f32_overlay,
+    "amdgpu.v_div_scale_f64": _v_div_scale_f64_overlay,
+    "amdgpu.v_div_fmas_f64": _v_div_fmas_f64_overlay,
+    "amdgpu.v_div_fixup_f64": _v_div_fixup_f64_overlay,
+    **_contract_overlay_builders_from_overlays(_v_fma_overlays(64)),
     "amdgpu.v_cvt_f32_f16": _v_cvt_f32_f16_overlay,
     "amdgpu.v_cvt_f16_f32": _v_cvt_f16_f32_overlay,
     "amdgpu.v_pack_b32_f16": _v_pack_b32_f16_overlay,
     "amdgpu.v_cvt_f32_i32": _v_cvt_f32_i32_overlay,
+    **_contract_overlay_builders_from_overlays(_v_cvt_f64_integer_overlays()),
+    **_contract_overlay_builders_from_overlays(_v_cvt_integer_f64_overlays()),
+    "amdgpu.v_cvt_f64_f32": _v_cvt_f64_f32_overlay,
+    "amdgpu.v_cvt_f32_f64": _v_cvt_f32_f64_overlay,
     "amdgpu.v_cvt_i32_f32": _v_cvt_i32_f32_overlay,
     "amdgpu.v_cvt_f32_u32": _v_cvt_f32_u32_overlay,
     "amdgpu.v_cvt_u32_f32": _v_cvt_u32_f32_overlay,
@@ -191,6 +246,7 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
         rhs_type="bf8",
     ),
     **_contract_overlay_builders_from_overlays(_integer_bit_count_overlays()),
+    "amdgpu.v_alignbit_b32": _v_alignbit_b32_overlay,
     **_contract_overlay_builders_from_overlays(_integer_bitwise_shift_overlays()),
     **_contract_overlay_builders_from_overlays(
         _v_cvt_f32_packed8_selection_overlays("ocp", op_sel_field="OPSEL")
@@ -199,6 +255,10 @@ _AMDGPU_CONTRACT_DESCRIPTOR_OVERLAY_BUILDERS: dict[
     **_contract_overlay_builders_from_overlays(_s_cmp_i32_overlays()),
     **_contract_overlay_builders_from_overlays(_s_cmp_u64_overlays()),
     **_contract_overlay_builders_from_overlays(_v_cmp_overlays()),
+    **_contract_overlay_builders_from_overlays(
+        _v_cndmask_b32_overlays(include_literal_forms=False)
+    ),
+    **_contract_overlay_builders_from_overlays(_v_cmp_class_overlays()),
     **_contract_overlay_builders_from_overlays(_rdna4m_minmax_overlays()),
 }
 

@@ -30,7 +30,8 @@
 enum {
   LOOMC_LINK_KNOWN_FLAGS = LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS |
                            LOOMC_LINK_FLAG_ALLOW_UNRESOLVED_SYMBOLS |
-                           LOOMC_LINK_FLAG_STRIP_TEST_SYMBOLS,
+                           LOOMC_LINK_FLAG_STRIP_TEST_SYMBOLS |
+                           LOOMC_LINK_FLAG_INCLUDE_INPUT_TESTS,
 };
 
 struct loomc_linker_t {
@@ -44,9 +45,32 @@ struct loomc_linker_t {
   loomc_string_view_t module_name;
 };
 
+// Invocation-local module index combining an optional immutable library prefix
+// with borrowed materialized module providers.
+typedef struct loomc_link_module_overlay_t {
+  // Index consumed by planning and materialization.
+  const loom_link_module_index_t* module_index;
+  // Owned overlay when direct providers are present, or NULL.
+  loom_link_module_index_t* owned_index;
+  // Number of provider ordinals owned by the immutable prefix.
+  iree_host_size_t base_provider_count;
+} loomc_link_module_overlay_t;
+
 static bool loomc_link_any_flag_set(loomc_link_flags_t flags,
                                     loomc_link_flags_t bits) {
   return (flags & bits) != 0;
+}
+
+static loom_link_provider_role_t loomc_link_provider_role_to_loom(
+    loomc_link_provider_role_t role) {
+  switch (role) {
+    case LOOMC_LINK_PROVIDER_ROLE_INPUT:
+      return LOOM_LINK_PROVIDER_ROLE_INPUT;
+    case LOOMC_LINK_PROVIDER_ROLE_LIBRARY:
+      return LOOM_LINK_PROVIDER_ROLE_LIBRARY;
+  }
+  IREE_ASSERT_UNREACHABLE("unknown public link provider role");
+  return LOOM_LINK_PROVIDER_ROLE_INPUT;
 }
 
 static loomc_status_t loomc_link_validate_linker_options(
@@ -73,7 +97,7 @@ static loomc_status_t loomc_link_validate_linker_options(
 
 static loomc_status_t loomc_link_validate_options(
     const loomc_linker_t* linker, loomc_workspace_t* workspace,
-    const loomc_link_options_t* options,
+    const loomc_link_options_t* options, loomc_link_options_t* out_options,
     const loomc_target_specialization_options_t** out_target_specialization) {
   *out_target_specialization = NULL;
   if (linker == NULL || workspace == NULL || options == NULL) {
@@ -87,19 +111,81 @@ static loomc_status_t loomc_link_validate_options(
                              "link options have an unknown structure type");
   }
   if (options->structure_size != 0 &&
-      options->structure_size < sizeof(*options)) {
+      options->structure_size <
+          offsetof(loomc_link_options_t, kernel_target_profile)) {
     return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
                              "link options structure_size is too small");
   }
+  // Zero-sized descriptors use the original prefix. Read each appended field
+  // only when the caller supplies its complete storage.
+  *out_options = (loomc_link_options_t){0};
+  memcpy(out_options, options,
+         offsetof(loomc_link_options_t, kernel_target_profile));
+  if (options->structure_size >=
+      offsetof(loomc_link_options_t, kernel_target_profile) +
+          sizeof(options->kernel_target_profile)) {
+    out_options->kernel_target_profile = options->kernel_target_profile;
+  }
+  if (options->structure_size >=
+      offsetof(loomc_link_options_t, artifact_flags) +
+          sizeof(options->artifact_flags)) {
+    out_options->artifact_flags = options->artifact_flags;
+  }
+  options = out_options;
+  if ((options->artifact_flags & ~LOOMC_LINK_ARTIFACT_FLAG_PLAN_TEXT) != 0) {
+    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                             "link options contain unknown artifact flag bits");
+  }
   LOOMC_RETURN_IF_ERROR(loomc_target_specialization_options_resolve(
       options->next, out_target_specialization));
-  if (options->link_index == NULL) {
+  if (options->link_index == NULL && options->module_provider_count == 0) {
     return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "link_index must not be NULL");
+                             "linking requires at least one provider");
   }
-  if (loomc_link_index_context(options->link_index) != linker->context) {
+  if (options->link_index != NULL &&
+      loomc_link_index_context(options->link_index) != linker->context) {
     return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
                              "link index was created with another context");
+  }
+  if (options->module_provider_count != 0 &&
+      options->module_providers == NULL) {
+    return loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT,
+        "module_provider_count is non-zero but module_providers is NULL");
+  }
+  if (options->module_provider_count != 0 && options->link_index != NULL &&
+      loom_link_module_index_input_provider_count(
+          loomc_link_index_module_index(options->link_index)) != 0) {
+    return loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT,
+        "a link index combined with module providers must contain only "
+        "libraries");
+  }
+  for (loomc_host_size_t i = 0; i < options->module_provider_count; ++i) {
+    const loomc_link_module_provider_t* provider =
+        &options->module_providers[i];
+    if (provider->module == NULL) {
+      return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                               "module provider must not be NULL");
+    }
+    if (loomc_module_context(provider->module) != linker->context) {
+      return loomc_make_status(
+          LOOMC_STATUS_INVALID_ARGUMENT,
+          "module provider was created with another context");
+    }
+    if (provider->provider_name.data == NULL &&
+        provider->provider_name.size != 0) {
+      return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                               "module provider name has length but no data");
+    }
+    switch (provider->role) {
+      case LOOMC_LINK_PROVIDER_ROLE_INPUT:
+      case LOOMC_LINK_PROVIDER_ROLE_LIBRARY:
+        break;
+      default:
+        return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                                 "module provider has an unknown role");
+    }
   }
   if (options->root_symbol_count != 0 && options->root_symbols == NULL) {
     return loomc_make_status(
@@ -124,21 +210,21 @@ static loomc_status_t loomc_link_validate_options(
   const bool has_roots =
       options->root_symbol_count != 0 || options->root_provider_count != 0 ||
       loomc_link_any_flag_set(options->flags,
-                              LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS);
+                              LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS |
+                                  LOOMC_LINK_FLAG_INCLUDE_INPUT_TESTS);
   if (options->mode == LOOMC_LINK_MODE_MERGE && has_roots) {
     return loomc_make_status(
         LOOMC_STATUS_INVALID_ARGUMENT,
-        "merge mode does not accept roots or include input exports");
+        "merge mode does not accept roots or include input exports/tests");
   }
   if (options->mode == LOOMC_LINK_MODE_LINK && !has_roots) {
     return loomc_make_status(
         LOOMC_STATUS_INVALID_ARGUMENT,
-        "link mode requires roots or include input exports");
+        "link mode requires roots or include input exports/tests");
   }
-  LOOMC_RETURN_IF_ERROR(
-      loomc_target_specialization_options_validate_environment(
-          *out_target_specialization,
-          loomc_context_target_environment(linker->context)));
+  LOOMC_RETURN_IF_ERROR(loomc_link_materialization_validate_targets(
+      options->kernel_target_profile, *out_target_specialization,
+      loomc_context_target_environment(linker->context)));
   return loomc_config_validate_text_options(&options->config);
 }
 
@@ -199,26 +285,12 @@ static loomc_status_t loomc_link_validate_request_options(
   return loomc_config_validate_text_options(&options->config);
 }
 
-static loomc_status_t loomc_link_result_set_failed(loomc_result_t* result) {
-  return loomc_result_set_state(result, LOOMC_RESULT_STATE_FAILED);
-}
-
-static loomc_status_t loomc_link_result_fail_status(
-    loomc_result_t* result, const loomc_source_t* source,
-    loomc_string_view_t code, loomc_status_t status) {
-  LOOMC_RETURN_IF_ERROR(loomc_result_add_status_diagnostic(
-      result, source, LOOMC_DIAGNOSTIC_SEVERITY_ERROR, code, status));
-  return loomc_link_result_set_failed(result);
-}
-
 static loomc_status_t loomc_link_result_fail_iree_status(
     loomc_result_t* result, const loomc_source_t* source,
     loomc_string_view_t code, iree_status_t status) {
-  loomc_status_t public_status = loomc_status_from_iree(status);
-  loomc_status_t add_status =
-      loomc_link_result_fail_status(result, source, code, public_status);
-  loomc_status_free(public_status);
-  return add_status;
+  return loomc_result_fail_status_diagnostic_consume(
+      result, source, LOOMC_DIAGNOSTIC_SEVERITY_ERROR, code,
+      loomc_status_from_iree(status));
 }
 
 static iree_string_view_t loomc_link_module_name(
@@ -296,24 +368,179 @@ static loomc_status_t loomc_link_translate_operation_status(
     return loomc_link_result_fail_iree_status(result, /*source=*/NULL, code,
                                               status);
   }
+  loomc_result_set_status_code(result,
+                               (loomc_status_code_t)iree_status_code(status));
   iree_status_free(status);
-  return loomc_link_result_set_failed(result);
+  return loomc_ok_status();
+}
+
+static loomc_status_t loomc_link_module_overlay_initialize(
+    const loomc_linker_t* linker, loomc_workspace_t* workspace,
+    const loomc_link_options_t* options,
+    loomc_link_module_overlay_t* out_overlay) {
+  *out_overlay = (loomc_link_module_overlay_t){0};
+  const loom_link_module_index_t* base_index =
+      loomc_link_index_module_index(options->link_index);
+  const iree_host_size_t base_provider_count =
+      loom_link_module_index_provider_count(base_index);
+  if (options->module_provider_count == 0) {
+    out_overlay->module_index = base_index;
+    out_overlay->base_provider_count = base_provider_count;
+    return loomc_ok_status();
+  }
+
+  loom_link_module_index_t* module_index = NULL;
+  const iree_allocator_t allocator =
+      iree_allocator_from_loomc(linker->allocator);
+  loomc_status_t status =
+      base_index != NULL
+          ? loomc_status_from_iree(loom_link_module_index_allocate_overlay(
+                base_index, loomc_workspace_block_pool(workspace), allocator,
+                &module_index))
+          : loomc_status_from_iree(loom_link_module_index_allocate(
+                loomc_context_loom_context(linker->context),
+                loomc_workspace_block_pool(workspace), allocator,
+                &module_index));
+  for (loomc_host_size_t i = 0;
+       loomc_status_is_ok(status) && i < options->module_provider_count; ++i) {
+    const loomc_link_module_provider_t* provider =
+        &options->module_providers[i];
+    const loom_link_module_index_add_options_t add_options = {
+        .provider_name = iree_string_view_from_loomc(provider->provider_name),
+        .role = loomc_link_provider_role_to_loom(provider->role),
+    };
+    status = loomc_status_from_iree(loom_link_module_index_add_materialized(
+        module_index, loomc_module_const_loom_module(provider->module),
+        &add_options, /*out_provider_ordinal=*/NULL));
+  }
+  if (loomc_status_is_ok(status)) {
+    *out_overlay = (loomc_link_module_overlay_t){
+        .module_index = module_index,
+        .owned_index = module_index,
+        .base_provider_count = base_provider_count,
+    };
+    module_index = NULL;
+  }
+  loom_link_module_index_free(module_index);
+  return status;
+}
+
+static void loomc_link_module_overlay_deinitialize(
+    loomc_link_module_overlay_t* overlay) {
+  loom_link_module_index_free(overlay->owned_index);
+  *overlay = (loomc_link_module_overlay_t){0};
+}
+
+static loomc_status_t loomc_link_capture_source_table(
+    const loom_source_table_resolver_t* source_table,
+    const loom_link_source_projection_t* projection,
+    loomc_module_t* target_module) {
+  for (iree_host_size_t i = 0; i < source_table->count; ++i) {
+    const loom_source_entry_t* entry = &source_table->entries[i];
+    if (entry->source_id == LOOM_SOURCE_ID_INVALID) {
+      continue;
+    }
+    IREE_ASSERT_LT(entry->source_id, projection->count);
+    const loom_source_id_t target_source_id =
+        projection->values[entry->source_id];
+    if (target_source_id == LOOM_SOURCE_ID_INVALID) {
+      continue;
+    }
+    LOOMC_RETURN_IF_ERROR(loomc_module_insert_source_snapshot(
+        target_module, target_source_id, entry->filename, entry->source));
+  }
+  return loomc_ok_status();
+}
+
+// Copies exact source snapshots through the source-ID projection produced by
+// linking. Bytecode providers have no source projection because their container
+// does not carry authored source contents.
+static loomc_status_t loomc_link_capture_source_snapshots(
+    loomc_context_t* context, const loomc_link_index_t* link_index,
+    const loomc_link_module_provider_t* module_providers,
+    loomc_host_size_t module_provider_count,
+    const loomc_link_module_overlay_t* overlay,
+    const loom_link_plan_materialization_t* materialization,
+    loomc_module_t* target_module) {
+  if (loomc_context_source_retention(context) ==
+      LOOMC_SOURCE_RETENTION_METADATA_ONLY) {
+    return loomc_ok_status();
+  }
+
+  for (iree_host_size_t i = 0; i < materialization->target_sources.count; ++i) {
+    const loom_link_source_projection_t* projection =
+        &materialization->target_sources.values[i];
+    if (projection->count == 0) {
+      continue;
+    }
+    const loom_link_module_index_module_t* indexed_module =
+        loom_link_module_index_module_at(overlay->module_index, i);
+    if (indexed_module == NULL || indexed_module->materialized_module == NULL) {
+      continue;
+    }
+
+    if (indexed_module->provider_ordinal >= overlay->base_provider_count) {
+      const iree_host_size_t provider_index =
+          indexed_module->provider_ordinal - overlay->base_provider_count;
+      IREE_ASSERT_LT(provider_index, module_provider_count);
+      LOOMC_RETURN_IF_ERROR(loomc_link_capture_source_table(
+          loomc_module_source_table(module_providers[provider_index].module),
+          projection, target_module));
+      continue;
+    }
+
+    const loomc_module_t* snapshot = loomc_link_index_module_for_provider(
+        link_index, indexed_module->provider_ordinal);
+    if (snapshot != NULL) {
+      LOOMC_RETURN_IF_ERROR(loomc_link_capture_source_table(
+          loomc_module_source_table(snapshot), projection, target_module));
+      continue;
+    }
+
+    const loomc_source_t* source = loomc_link_index_source_for_provider(
+        link_index, indexed_module->provider_ordinal);
+    if (source == NULL) {
+      continue;
+    }
+
+    if (indexed_module->primary_source_id == LOOM_SOURCE_ID_INVALID) {
+      continue;
+    }
+    const loom_source_id_t target_source_id =
+        projection->values[indexed_module->primary_source_id];
+    if (target_source_id == LOOM_SOURCE_ID_INVALID) {
+      continue;
+    }
+    const iree_string_view_t identifier =
+        iree_string_view_from_loomc(loomc_source_identifier(source));
+    const loomc_byte_span_t contents = loomc_source_contents(source);
+    LOOMC_RETURN_IF_ERROR(loomc_module_insert_source_snapshot(
+        target_module, target_source_id, identifier,
+        iree_make_string_view((const char*)contents.data,
+                              contents.data_length)));
+  }
+  return loomc_ok_status();
 }
 
 loomc_status_t loomc_linker_create(loomc_context_t* context,
                                    const loomc_linker_options_t* options,
                                    loomc_allocator_t allocator,
                                    loomc_linker_t** out_linker) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (context == NULL || out_linker == NULL) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "context and out_linker must not be NULL");
+    loomc_status_t return_status =
+        loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                          "context and out_linker must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   *out_linker = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_link_validate_linker_options(options));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_link_validate_linker_options(options));
 
   loomc_linker_t* linker = NULL;
-  LOOMC_RETURN_IF_ERROR(
-      loomc_allocator_malloc(allocator, sizeof(*linker), (void**)&linker));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_allocator_malloc(allocator, sizeof(*linker), (void**)&linker));
   memset(linker, 0, sizeof(*linker));
   iree_atomic_ref_count_init(&linker->ref_count);
   linker->allocator = allocator;
@@ -328,6 +555,7 @@ loomc_status_t loomc_linker_create(loomc_context_t* context,
   } else {
     loomc_linker_release(linker);
   }
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -351,34 +579,185 @@ void loomc_linker_release(loomc_linker_t* linker) {
   loomc_allocator_free(allocator, linker);
 }
 
+static const char* loomc_link_mode_name(loom_link_plan_mode_t mode) {
+  switch (mode) {
+    case LOOM_LINK_PLAN_MERGE:
+      return "merge";
+    case LOOM_LINK_PLAN_LINK:
+      return "link";
+  }
+  return "unknown";
+}
+
+static const char* loomc_link_reason_name(loom_link_plan_live_reason_t reason) {
+  switch (reason) {
+    case LOOM_LINK_PLAN_LIVE_MERGE:
+      return "merge";
+    case LOOM_LINK_PLAN_LIVE_ROOT:
+      return "root";
+    case LOOM_LINK_PLAN_LIVE_DEPENDENCY:
+      return "dependency";
+    case LOOM_LINK_PLAN_LIVE_PROVIDER:
+      return "provider";
+  }
+  return "unknown";
+}
+
+static iree_status_t loomc_link_append_flag(iree_string_builder_t* builder,
+                                            bool* needs_separator,
+                                            iree_string_view_t flag_name) {
+  if (*needs_separator) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, ","));
+  }
+  *needs_separator = true;
+  return iree_string_builder_append_string(builder, flag_name);
+}
+
+static iree_status_t loomc_link_append_symbol_flags(
+    iree_string_builder_t* builder, loom_link_symbol_flags_t flags) {
+  bool needs_separator = false;
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_PUBLIC)) {
+    IREE_RETURN_IF_ERROR(
+        loomc_link_append_flag(builder, &needs_separator, IREE_SV("public")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_IMPORT)) {
+    IREE_RETURN_IF_ERROR(
+        loomc_link_append_flag(builder, &needs_separator, IREE_SV("import")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_EXPORT)) {
+    IREE_RETURN_IF_ERROR(
+        loomc_link_append_flag(builder, &needs_separator, IREE_SV("export")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_DECLARATION)) {
+    IREE_RETURN_IF_ERROR(loomc_link_append_flag(builder, &needs_separator,
+                                                IREE_SV("declaration")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_CONCRETE_DEFINITION)) {
+    IREE_RETURN_IF_ERROR(loomc_link_append_flag(builder, &needs_separator,
+                                                IREE_SV("definition")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_CONFIG)) {
+    IREE_RETURN_IF_ERROR(
+        loomc_link_append_flag(builder, &needs_separator, IREE_SV("config")));
+  }
+  if (iree_any_bit_set(flags, LOOM_LINK_SYMBOL_FLAG_TEST_ONLY)) {
+    IREE_RETURN_IF_ERROR(loomc_link_append_flag(builder, &needs_separator,
+                                                IREE_SV("test-only")));
+  }
+  if (!needs_separator) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "-"));
+  }
+  return iree_ok_status();
+}
+
+static loomc_status_t loomc_link_add_plan_report(const loom_link_plan_t* plan,
+                                                 loom_link_plan_mode_t mode,
+                                                 loomc_result_t* result) {
+  const loomc_allocator_t allocator = loomc_result_allocator(result);
+  const loom_link_module_index_t* index = loom_link_plan_index(plan);
+  iree_string_builder_t builder;
+  iree_string_builder_initialize(iree_allocator_from_loomc(allocator),
+                                 &builder);
+
+  iree_status_t status = iree_string_builder_append_format(
+      &builder, "plan mode=%s symbols=%" PRIhsz "\n",
+      loomc_link_mode_name(mode), loom_link_plan_symbol_count(plan));
+  for (iree_host_size_t i = 0;
+       i < loom_link_plan_symbol_count(plan) && iree_status_is_ok(status);
+       ++i) {
+    const loom_link_plan_symbol_t* planned_symbol =
+        loom_link_plan_symbol_at(plan, i);
+    const loom_link_module_index_symbol_t* symbol =
+        loom_link_module_index_symbol_at(index, planned_symbol->symbol_ordinal);
+    const loom_link_module_index_provider_t* provider =
+        loom_link_module_index_symbol_provider(index, symbol);
+    const loom_link_module_index_module_t* module =
+        loom_link_module_index_symbol_module(index, symbol);
+    status = iree_string_builder_append_format(
+        &builder, "[%" PRIhsz "] %s @%.*s provider=%.*s module=%.*s cause=", i,
+        loomc_link_reason_name(planned_symbol->reason), (int)symbol->name.size,
+        symbol->name.data, provider ? (int)provider->name.size : 0,
+        provider ? provider->name.data : "",
+        module ? (int)module->name.size : 0, module ? module->name.data : "");
+    if (iree_status_is_ok(status)) {
+      if (planned_symbol->cause_ordinal ==
+          LOOM_LINK_MODULE_INDEX_INVALID_ORDINAL) {
+        status = iree_string_builder_append_cstring(&builder, "-");
+      } else {
+        status = iree_string_builder_append_format(
+            &builder, "%" PRIhsz, planned_symbol->cause_ordinal);
+      }
+    }
+    if (iree_status_is_ok(status)) {
+      status = iree_string_builder_append_cstring(&builder, " flags=");
+    }
+    if (iree_status_is_ok(status)) {
+      status = loomc_link_append_symbol_flags(&builder, symbol->flags);
+    }
+    if (iree_status_is_ok(status)) {
+      status = iree_string_builder_append_cstring(&builder, "\n");
+    }
+  }
+
+  if (iree_status_is_ok(status)) {
+    const iree_host_size_t length = iree_string_builder_size(&builder);
+    char* storage = iree_string_builder_take_storage(&builder);
+    status = iree_status_from_loomc(loomc_result_add_artifact_take_contents(
+        result, LOOMC_ARTIFACT_KIND_REPORT,
+        loomc_make_cstring_view(LOOMC_ARTIFACT_FORMAT_LINK_PLAN_TEXT),
+        loomc_make_cstring_view("link-plan.txt"),
+        loomc_make_byte_span(storage, length)));
+    if (!iree_status_is_ok(status)) {
+      loomc_allocator_free(allocator, storage);
+    }
+  }
+  iree_string_builder_deinitialize(&builder);
+  return loomc_status_from_iree(status);
+}
+
 loomc_status_t loomc_link_module(loomc_linker_t* linker,
                                  loomc_workspace_t* workspace,
                                  const loomc_link_options_t* options,
                                  loomc_module_t** out_module,
                                  loomc_result_t** out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_module == NULL || out_result == NULL) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "out_module and out_result must not be NULL");
+    loomc_status_t return_status =
+        loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                          "out_module and out_result must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   *out_module = NULL;
   *out_result = NULL;
   const loomc_target_specialization_options_t* target_specialization = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_link_validate_options(linker, workspace, options,
-                                                    &target_specialization));
+  loomc_link_options_t resolved_options;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0,
+      loomc_link_validate_options(linker, workspace, options, &resolved_options,
+                                  &target_specialization));
+  options = &resolved_options;
 
   loomc_result_t* result = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_result_create(LOOMC_RESULT_STATE_SUCCEEDED,
-                                            linker->allocator, &result));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_result_create(LOOMC_STATUS_OK,
+                              loomc_context_source_retention(linker->context),
+                              linker->allocator, &result));
 
   iree_arena_allocator_t arena = {0};
   iree_arena_initialize(loomc_workspace_block_pool(workspace), &arena);
+  loomc_link_module_overlay_t overlay = {0};
   loomc_link_materialization_state_t materialization_state = {0};
   loom_link_index_materialization_t index_materialization = {0};
   loomc_module_t* module = NULL;
   loomc_link_materialization_state_initialize(
       linker->context, workspace, options->link_index, &options->config,
-      target_specialization, result, linker->allocator, &materialization_state);
-  loomc_status_t status = loomc_ok_status();
+      target_specialization, result, &arena, linker->allocator,
+      &materialization_state);
+  materialization_state.specialization.kernel_profile =
+      options->kernel_target_profile;
+  loomc_status_t status = loomc_link_module_overlay_initialize(
+      linker, workspace, options, &overlay);
 
   iree_string_view_t* root_symbols = NULL;
   if (loomc_status_is_ok(status) && options->root_symbol_count != 0) {
@@ -401,6 +780,8 @@ loomc_status_t loomc_link_module(loomc_linker_t* linker,
           },
       .include_input_exports = loomc_link_any_flag_set(
           options->flags, LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS),
+      .include_input_tests = loomc_link_any_flag_set(
+          options->flags, LOOMC_LINK_FLAG_INCLUDE_INPUT_TESTS),
       .root_providers =
           {
               .count = options->root_provider_count,
@@ -423,16 +804,26 @@ loomc_status_t loomc_link_module(loomc_linker_t* linker,
   loomc_host_size_t before_diagnostics = loomc_result_diagnostic_count(result);
   if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
     iree_status_t operation_status = loom_link_index_materialize(
-        loomc_link_index_module_index(options->link_index), &plan_options,
-        &environment, loomc_link_module_name(linker, options),
-        &index_materialization);
+        overlay.module_index, &plan_options, &environment,
+        loomc_link_module_name(linker, options), &index_materialization);
     status = loomc_link_translate_operation_status(
         result, before_diagnostics, loomc_make_cstring_view("LINK/MATERIALIZE"),
         operation_status);
   }
+  if (loomc_status_is_ok(status) && loomc_result_succeeded(result) &&
+      (options->artifact_flags & LOOMC_LINK_ARTIFACT_FLAG_PLAN_TEXT)) {
+    status = loomc_link_add_plan_report(index_materialization.plan,
+                                        plan_options.mode, result);
+  }
   if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
     status = loomc_module_create_empty(linker->context, workspace,
                                        linker->allocator, &module);
+  }
+  if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
+    status = loomc_link_capture_source_snapshots(
+        linker->context, options->link_index, options->module_providers,
+        options->module_provider_count, &overlay,
+        &index_materialization.product, module);
   }
   if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
     loomc_module_set_loom_module(module, index_materialization.product.module,
@@ -450,9 +841,11 @@ loomc_status_t loomc_link_module(loomc_linker_t* linker,
   }
 
   loom_link_index_materialization_deinitialize(&index_materialization);
+  loomc_link_module_overlay_deinitialize(&overlay);
   loomc_module_release(module);
   iree_arena_deinitialize(&arena);
   loomc_result_release(result);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -463,20 +856,27 @@ loomc_status_t loomc_link_request(loomc_linker_t* linker,
                                   loomc_allocator_t allocator,
                                   loomc_request_t** out_request,
                                   loomc_result_t** out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_request == NULL || out_result == NULL) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "out_request and out_result must not be NULL");
+    loomc_status_t return_status =
+        loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                          "out_request and out_result must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   *out_request = NULL;
   *out_result = NULL;
   const loomc_target_specialization_options_t* target_specialization = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_link_validate_request_options(
-      linker, workspace, input_request, options, allocator,
-      &target_specialization));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_link_validate_request_options(linker, workspace, input_request,
+                                              options, allocator,
+                                              &target_specialization));
 
   loomc_result_t* result = NULL;
-  LOOMC_RETURN_IF_ERROR(
-      loomc_result_create(LOOMC_RESULT_STATE_SUCCEEDED, allocator, &result));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_result_create(LOOMC_STATUS_OK,
+                              loomc_context_source_retention(linker->context),
+                              allocator, &result));
 
   const loomc_config_options_t empty_config = {0};
   const loomc_config_options_t* config =
@@ -532,7 +932,8 @@ loomc_status_t loomc_link_request(loomc_linker_t* linker,
   loomc_link_materialization_state_initialize_overlay(
       linker->context, workspace, library_index,
       request_overlay.request_provider_ordinal, input_source, config,
-      target_specialization, result, allocator, &materialization_state);
+      target_specialization, result, &scratch_arena, allocator,
+      &materialization_state);
   const loom_link_plan_materialization_environment_t environment =
       loomc_link_materialization_state_environment(&materialization_state);
   const loomc_host_size_t before_diagnostics =
@@ -595,5 +996,6 @@ loomc_status_t loomc_link_request(loomc_linker_t* linker,
   loomc_request_index_overlay_deinitialize(&request_overlay);
   iree_arena_deinitialize(&scratch_arena);
   loomc_result_release(result);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }

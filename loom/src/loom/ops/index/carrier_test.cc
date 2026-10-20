@@ -17,8 +17,7 @@ TEST(IndexCarrierTest, ReadsTypedTargetWidths) {
   loom_target_facts_t target_facts = {};
   target_facts.storage.snapshot.index_bitwidth = 32;
   target_facts.storage.snapshot.offset_bitwidth = 64;
-  loom_fact_context_t context = {};
-  context.target_facts = &target_facts;
+  loom_fact_context_t context = {.target_facts = &target_facts};
 
   EXPECT_EQ(
       loom_index_target_carrier_bitwidth(&context, LOOM_SCALAR_TYPE_INDEX), 32);
@@ -39,6 +38,29 @@ TEST(IndexCarrierTest, DistinguishesTargetlessAndInvalidCarriers) {
   context.target_facts = &target_facts;
   EXPECT_EQ(
       loom_index_target_carrier_bitwidth(&context, LOOM_SCALAR_TYPE_INDEX), -1);
+}
+
+TEST(IndexCarrierTest, WrapsOffsetFactsAtSelectedWidth) {
+  loom_target_facts_t target_facts = {};
+  loom_fact_context_t context = {.target_facts = &target_facts};
+  const loom_value_facts_t negative_one = loom_value_facts_exact_i64(-1);
+
+  target_facts.storage.snapshot.offset_bitwidth = 32;
+  loom_value_facts_t narrow =
+      loom_index_wrap_offset_facts(&context, negative_one);
+  EXPECT_TRUE(loom_value_facts_is_exact(narrow));
+  EXPECT_EQ(narrow.range_lo, (int64_t)UINT32_MAX);
+
+  target_facts.storage.snapshot.offset_bitwidth = 64;
+  loom_value_facts_t wide =
+      loom_index_wrap_offset_facts(&context, negative_one);
+  EXPECT_EQ(wide.range_lo, 0);
+  EXPECT_EQ(wide.range_hi, INT64_MAX);
+  EXPECT_FALSE(loom_value_facts_is_exact(wide));
+
+  loom_value_facts_t targetless =
+      loom_index_wrap_offset_facts(nullptr, negative_one);
+  EXPECT_TRUE(loom_value_facts_equal(targetless, wide));
 }
 
 }  // namespace

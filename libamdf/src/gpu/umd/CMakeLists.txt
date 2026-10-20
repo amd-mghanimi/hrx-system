@@ -12,6 +12,22 @@ iree_add_all_subdirs()
 if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
 iree_cc_library(
   NAME
+    sparse_mapping_test_support
+  HDRS
+    "sparse_mapping_test.h"
+  DEPS
+    amdf::headers
+    iree::third_party::google_test
+    libamdf::cts::gpu::sdma::encoding::commands
+    libamdf::cts::gpu::util::sparse_mapping_layout
+  TESTONLY
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
     instance
   HDRS
     "instance.h"
@@ -31,6 +47,19 @@ iree_cc_library(
     ::instance
     amdf::headers
     libamdf::src::platform
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
+    clock
+  HDRS
+    "clock.h"
+  DEPS
+    ::device
+    amdf::headers
   PUBLIC
 )
 endif()
@@ -85,6 +114,20 @@ endif()
 if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
 iree_cc_library(
   NAME
+    memory_reservation
+  HDRS
+    "memory_reservation.h"
+  DEPS
+    ::kernel_queue
+    ::memory
+    amdf::headers
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
     kernel_queue
   HDRS
     "kernel_queue.h"
@@ -110,6 +153,19 @@ iree_cc_library(
 )
 endif()
 
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
+    event
+  HDRS
+    "event.h"
+  DEPS
+    ::device
+    amdf::headers
+  PUBLIC
+)
+endif()
+
 if(IREE_ARCH STREQUAL "x86_64" AND AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA) AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
 set(_umd_platform_deps "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -123,6 +179,7 @@ iree_cc_library(
   DEPS
     ::device
     ::endpoint_profile
+    ::event
     ::instance
     ::kernel_queue
     ::memory

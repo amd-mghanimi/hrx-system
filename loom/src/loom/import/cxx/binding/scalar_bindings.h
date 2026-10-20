@@ -30,6 +30,8 @@ typedef struct loom_cxx_scalar_binding_t {
   uint8_t operand_count;
   // Whether the operation carries canonical scalar fast-math flags.
   bool has_fastmath;
+  // Positive zero-sign preservation flag, or zero when unsupported by the op.
+  uint8_t preserve_flag;
   // Typed operation builder adapted to the fixed operand array.
   iree_status_t (*build)(loom_builder_t* builder, uint8_t flags,
                          const loom_value_id_t* operands,
@@ -42,7 +44,7 @@ const loom_cxx_scalar_binding_t* loom_cxx_scalar_binding_find(
     iree_string_view_t name);
 
 // Resolves one canonical scalar fast-math flag spelling.
-bool loom_cxx_scalar_flag_parse(iree_string_view_t name, uint8_t* out_flag);
+bool loom_cxx_fastmath_flag_parse(iree_string_view_t name, uint8_t* out_flag);
 
 #ifdef __cplusplus
 }

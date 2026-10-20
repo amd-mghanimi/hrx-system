@@ -9,7 +9,7 @@
 import pytest
 
 from loom.assembly import COMMA, EncodingOf, OptionalGroup, ScalarOf, ShapeOf, kw
-from loom.builtin_types import view_type
+from loom.builtin_types import channel_type, read_type, view_type, write_type
 from loom.dsl import EncodingParam, ScalarParam, ShapeParam, TypeDef
 from loom.gen.ops.type_registry import generate_type_registry
 
@@ -18,6 +18,13 @@ def test_view_alignment_is_part_of_the_declared_format() -> None:
     _, _, source = generate_type_registry([view_type])
     assert "{LOOM_TYPE_FMT_ALIGNMENT, 3, 0}" in source
     assert "LOOM_KW_ALIGN" in source
+
+
+@pytest.mark.parametrize("type_def", [channel_type, read_type, write_type])
+def test_parameterized_channel_types_retain_their_fact_domain(type_def: TypeDef) -> None:
+    _, _, source = generate_type_registry([type_def])
+    descriptor = source.split(f"const loom_parameterized_type_descriptor_t loom_{type_def.name}_type_parameterized_descriptor = {{", 1)[1].split("};", 1)[0]
+    assert ".fact_domain = &loom_view_fact_domain," in descriptor
 
 
 def _compact_tensor_type_def(name: str) -> TypeDef:

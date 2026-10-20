@@ -214,6 +214,10 @@ TEST(FactsExactI64, Zero) {
   EXPECT_FALSE(loom_value_facts_is_positive(f));
   EXPECT_FALSE(loom_value_facts_is_power_of_two(f));
   EXPECT_EQ(f.known_divisor, 1);
+  EXPECT_TRUE(loom_value_facts_divisible_by(f, 1));
+  EXPECT_TRUE(loom_value_facts_divisible_by(f, 3));
+  EXPECT_TRUE(loom_value_facts_divisible_by(f, 16));
+  EXPECT_TRUE(loom_value_facts_divisible_by(f, INT64_MAX));
 }
 
 TEST(FactsExactI64, One) {
@@ -675,6 +679,147 @@ TEST(FactsWrapInteger, PreservesDistributionButNotNonzero) {
   EXPECT_FALSE(loom_value_facts_is_non_negative(result));
 }
 
+TEST(FactsWrapUnsignedInteger, ExactAndCrossingRanges) {
+  loom_value_facts_t exact = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_exact_i64(-1), 32);
+  EXPECT_TRUE(loom_value_facts_is_exact(exact));
+  EXPECT_EQ(exact.range_lo, (int64_t)UINT32_MAX);
+
+  loom_value_facts_t crossing = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_make(-4, 0, 4), 32);
+  EXPECT_EQ(crossing.range_lo, 0);
+  EXPECT_EQ(crossing.range_hi, (int64_t)UINT32_MAX);
+  EXPECT_EQ(crossing.known_divisor, 4);
+
+  loom_value_facts_t wrapped = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_make(INT64_C(4294967296), INT64_C(4294967299), 1), 32);
+  EXPECT_EQ(wrapped.range_lo, 0);
+  EXPECT_EQ(wrapped.range_hi, 3);
+
+  loom_value_facts_t signed_midpoint = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_make(INT32_MAX, (int64_t)INT32_MAX + 1, 1), 32);
+  EXPECT_EQ(signed_midpoint.range_lo, INT32_MAX);
+  EXPECT_EQ(signed_midpoint.range_hi, (int64_t)INT32_MAX + 1);
+}
+
+TEST(FactsWrapUnsignedInteger, ExactBitPatterns) {
+  for (int32_t bit_count : {1, 4, 8, 16, 32, 63}) {
+    for (int64_t value :
+         {INT64_MIN, int64_t{-257}, int64_t{-129}, int64_t{-1}, int64_t{0},
+          int64_t{1}, int64_t{128}, int64_t{256}, INT64_MAX}) {
+      SCOPED_TRACE(bit_count);
+      SCOPED_TRACE(value);
+      const loom_value_facts_t result = loom_value_facts_wrap_unsigned_integer(
+          loom_value_facts_exact_i64(value), bit_count);
+      const uint64_t mask = (UINT64_C(1) << bit_count) - 1;
+      EXPECT_TRUE(loom_value_facts_is_exact(result));
+      EXPECT_EQ((uint64_t)result.range_lo, (uint64_t)value & mask);
+      EXPECT_GE(result.range_lo, 0);
+      EXPECT_LE((uint64_t)result.range_hi, mask);
+    }
+  }
+
+  const loom_value_facts_t positive64 = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_exact_i64(INT64_MAX), 64);
+  EXPECT_TRUE(loom_value_facts_is_exact(positive64));
+  EXPECT_EQ(positive64.range_lo, INT64_MAX);
+}
+
+TEST(FactsWrapUnsignedInteger, RangesContainEveryPossibleValue) {
+  for (int64_t divisor : {1, 2, 3, 6, 16, 256, 512}) {
+    for (int64_t lo : {-300, -128, -32, 0, 30, 120, 255}) {
+      for (int64_t length : {0, 4, 20, 300}) {
+        SCOPED_TRACE(divisor);
+        SCOPED_TRACE(lo);
+        SCOPED_TRACE(length);
+        loom_value_facts_t source =
+            loom_value_facts_make(lo, lo + length, divisor);
+        if (length != 0) {
+          loom_value_facts_mark_lane_varying(&source);
+        }
+        const loom_value_facts_t result =
+            loom_value_facts_wrap_unsigned_integer(source, 8);
+        for (int64_t value = lo; value <= lo + length; ++value) {
+          if (value % source.known_divisor != 0) {
+            continue;
+          }
+          const int64_t wrapped = (uint64_t)value & UINT64_C(255);
+          EXPECT_LE(result.range_lo, wrapped);
+          EXPECT_GE(result.range_hi, wrapped);
+          EXPECT_EQ(wrapped % result.known_divisor, 0);
+        }
+        EXPECT_EQ(loom_value_facts_is_lane_varying(result), length != 0);
+      }
+    }
+  }
+}
+
+TEST(FactsWrapUnsignedInteger, ReducesDivisibilityAcrossWrap) {
+  loom_value_facts_t odd = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_make(-15, -3, 3), 32);
+  EXPECT_EQ(odd.range_lo, INT64_C(4294967281));
+  EXPECT_EQ(odd.range_hi, INT64_C(4294967293));
+  EXPECT_EQ(odd.known_divisor, 1);
+
+  loom_value_facts_t power_of_two = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_make(-16, -4, 4), 32);
+  EXPECT_EQ(power_of_two.range_lo, INT64_C(4294967280));
+  EXPECT_EQ(power_of_two.range_hi, INT64_C(4294967292));
+  EXPECT_EQ(power_of_two.known_divisor, 4);
+}
+
+TEST(FactsWrapUnsignedInteger, RetainsRepresentableWideValues) {
+  loom_value_facts_t source =
+      loom_value_facts_make(INT64_C(4611686018427387904), INT64_MAX - 7, 8);
+  loom_value_facts_mark_workgroup_uniform(&source);
+
+  loom_value_facts_t unsigned63 =
+      loom_value_facts_wrap_unsigned_integer(source, 63);
+  EXPECT_TRUE(loom_value_facts_unsigned_wrap_is_identity(source, 63));
+  EXPECT_TRUE(loom_value_facts_equal(unsigned63, source));
+
+  loom_value_facts_t unsigned64 =
+      loom_value_facts_wrap_unsigned_integer(source, 64);
+  EXPECT_TRUE(loom_value_facts_unsigned_wrap_is_identity(source, 64));
+  EXPECT_TRUE(loom_value_facts_equal(unsigned64, source));
+
+  // A nonexact range ending at INT64_MAX may extend past the fact lattice's
+  // saturation sentinel. Preserve soundness instead of treating the endpoint
+  // as a proven mathematical bound.
+  loom_value_facts_t saturated_source =
+      loom_value_facts_make(INT64_C(4611686018427387904), INT64_MAX, 8);
+  EXPECT_FALSE(
+      loom_value_facts_unsigned_wrap_is_identity(saturated_source, 64));
+  loom_value_facts_t saturated =
+      loom_value_facts_wrap_unsigned_integer(saturated_source, 64);
+  EXPECT_EQ(saturated.range_lo, 0);
+  EXPECT_EQ(saturated.range_hi, INT64_MAX);
+  EXPECT_EQ(saturated.known_divisor, 8);
+
+  loom_value_facts_t saturated63 =
+      loom_value_facts_wrap_unsigned_integer(saturated_source, 63);
+  EXPECT_EQ(saturated63.range_lo, 0);
+  EXPECT_EQ(saturated63.range_hi, INT64_MAX);
+  EXPECT_EQ(saturated63.known_divisor, 8);
+}
+
+TEST(FactsWrapUnsignedInteger, WidensUnrepresentableU64Results) {
+  loom_value_facts_t exact = loom_value_facts_wrap_unsigned_integer(
+      loom_value_facts_exact_i64(-1), 64);
+  EXPECT_EQ(exact.range_lo, 0);
+  EXPECT_EQ(exact.range_hi, INT64_MAX);
+  EXPECT_FALSE(loom_value_facts_is_exact(exact));
+
+  loom_value_facts_t source = loom_value_facts_make(-15, -3, 3);
+  loom_value_facts_mark_lane_varying(&source);
+  loom_value_facts_t result =
+      loom_value_facts_wrap_unsigned_integer(source, 64);
+  EXPECT_EQ(result.range_lo, 0);
+  EXPECT_EQ(result.range_hi, INT64_MAX);
+  EXPECT_EQ(result.known_divisor, 1);
+  EXPECT_TRUE(loom_value_facts_is_lane_varying(result));
+}
+
 TEST(FactsMaximum, NonNegativeFiniteRange) {
   int64_t maximum = -1;
   EXPECT_TRUE(loom_value_facts_as_non_negative_i64_maximum(
@@ -773,481 +918,6 @@ TEST(FactsMeet, OverlappingRanges) {
   EXPECT_EQ(out.range_lo, 0);
   EXPECT_EQ(out.range_hi, 200);
   EXPECT_EQ(out.known_divisor, 4);  // gcd(8, 12) = 4.
-}
-
-//===----------------------------------------------------------------------===//
-// Predicate application
-//===----------------------------------------------------------------------===//
-
-static loom_predicate_t make_predicate_1(loom_predicate_kind_t kind,
-                                         int64_t arg) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)kind;
-  pred.arg_count = 2;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  pred.arg_tags[1] = LOOM_PRED_ARG_CONST;
-  pred.args[1] = arg;
-  return pred;
-}
-
-static loom_predicate_t make_predicate_range(int64_t lo, int64_t hi) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)LOOM_PREDICATE_RANGE;
-  pred.arg_count = 3;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  pred.arg_tags[1] = LOOM_PRED_ARG_CONST;
-  pred.arg_tags[2] = LOOM_PRED_ARG_CONST;
-  pred.args[1] = lo;
-  pred.args[2] = hi;
-  return pred;
-}
-
-static loom_predicate_t make_predicate_pow2(void) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)LOOM_PREDICATE_POW2;
-  pred.arg_count = 1;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  return pred;
-}
-
-static loom_predicate_t make_predicate_not_nan(void) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)LOOM_PREDICATE_NOT_NAN;
-  pred.arg_count = 1;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  return pred;
-}
-
-static loom_predicate_t make_predicate_not_inf(void) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)LOOM_PREDICATE_NOT_INF;
-  pred.arg_count = 1;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  return pred;
-}
-
-static loom_predicate_t make_predicate_finite(void) {
-  loom_predicate_t pred = {0};
-  pred.kind = (uint8_t)LOOM_PREDICATE_FINITE;
-  pred.arg_count = 1;
-  pred.arg_tags[0] = LOOM_PRED_ARG_VALUE;
-  return pred;
-}
-
-TEST(FactsPredicateConflict, RangeDisjointFromKnownRange) {
-  loom_value_facts_t f = loom_value_facts_make(0, 63, 1);
-  loom_predicate_t pred = make_predicate_range(128, 255);
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_RANGE);
-  EXPECT_EQ(conflict.known_minimum, 0);
-  EXPECT_EQ(conflict.known_maximum, 63);
-  EXPECT_EQ(conflict.required_minimum, 128);
-  EXPECT_EQ(conflict.required_maximum, 255);
-}
-
-TEST(FactsPredicateConflict, RangeOverlappingKnownRangeIsSatisfiable) {
-  loom_value_facts_t f = loom_value_facts_make(0, 255, 1);
-  loom_predicate_t pred = make_predicate_range(128, 511);
-  EXPECT_FALSE(loom_value_facts_predicate_conflict(f, &pred, NULL));
-}
-
-TEST(FactsPredicateConflict, EmptyPredicateRangeAlwaysConflicts) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_LT, INT64_MIN);
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_RANGE);
-  EXPECT_GT(conflict.required_minimum, conflict.required_maximum);
-}
-
-TEST(FactsPredicateConflict, NotEqualExcludesExactKnownValue) {
-  loom_value_facts_t f = loom_value_facts_exact_i64(64);
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_NE, 64);
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_EXACT_I64);
-  EXPECT_EQ(conflict.known_value, 64);
-  EXPECT_EQ(conflict.predicate_value, 64);
-}
-
-TEST(FactsPredicateConflict, DivisibilityRejectsExactNonMultiple) {
-  loom_value_facts_t f = loom_value_facts_exact_i64(66);
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_MUL, 64);
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_EXACT_I64);
-  EXPECT_EQ(conflict.known_value, 66);
-  EXPECT_EQ(conflict.predicate_value, 64);
-}
-
-TEST(FactsPredicateConflict, PowerOfTwoRejectsExactNonPower) {
-  loom_value_facts_t f = loom_value_facts_exact_i64(66);
-  loom_predicate_t pred = make_predicate_pow2();
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_EXACT_I64);
-  EXPECT_EQ(conflict.known_value, 66);
-}
-
-TEST(FactsPredicateConflict, NotNanRejectsExactNan) {
-  loom_value_facts_t f = loom_value_facts_exact_float(
-      LOOM_SCALAR_TYPE_F64, std::numeric_limits<double>::quiet_NaN());
-  loom_predicate_t pred = make_predicate_not_nan();
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS);
-  EXPECT_EQ(conflict.known_float_class,
-            LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS_NAN);
-}
-
-TEST(FactsPredicateConflict, NotInfRejectsExactInfinity) {
-  loom_value_facts_t f = loom_value_facts_exact_float(
-      LOOM_SCALAR_TYPE_F64, std::numeric_limits<double>::infinity());
-  loom_predicate_t pred = make_predicate_not_inf();
-  loom_value_fact_predicate_conflict_t conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(f, &pred, &conflict));
-  EXPECT_EQ(conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS);
-  EXPECT_EQ(conflict.known_float_class,
-            LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS_INFINITY);
-}
-
-TEST(FactsPredicateConflict, FiniteRejectsExactNanAndInfinity) {
-  loom_predicate_t pred = make_predicate_finite();
-
-  loom_value_fact_predicate_conflict_t nan_conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(
-      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F64,
-                                   std::numeric_limits<double>::quiet_NaN()),
-      &pred, &nan_conflict));
-  EXPECT_EQ(nan_conflict.kind, LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS);
-  EXPECT_EQ(nan_conflict.known_float_class,
-            LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS_NAN);
-
-  loom_value_fact_predicate_conflict_t infinity_conflict = {};
-  ASSERT_TRUE(loom_value_facts_predicate_conflict(
-      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F64,
-                                   -std::numeric_limits<double>::infinity()),
-      &pred, &infinity_conflict));
-  EXPECT_EQ(infinity_conflict.kind,
-            LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS);
-  EXPECT_EQ(infinity_conflict.known_float_class,
-            LOOM_VALUE_FACT_PREDICATE_CONFLICT_FLOAT_CLASS_INFINITY);
-}
-
-TEST(FactsPredicateConflict, FiniteAcceptsExactFiniteFloat) {
-  loom_value_facts_t f =
-      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F64, 1.5);
-  loom_predicate_t pred = make_predicate_finite();
-  EXPECT_FALSE(loom_value_facts_predicate_conflict(f, &pred, NULL));
-}
-
-TEST(FactsApplyPredicate, Eq) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_EQ, 42);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_exact(f));
-  EXPECT_EQ(f.range_lo, 42);
-  EXPECT_EQ(f.range_hi, 42);
-}
-
-TEST(FactsApplyPredicate, ValueBoundDoesNotCorruptRange) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_LT, 42);
-  pred.arg_tags[1] = LOOM_PRED_ARG_VALUE;
-  pred.args[1] = 7;
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_unknown(f));
-}
-
-TEST(FactsApplyPredicate, NeIsRepresentedButDoesNotTightenInterval) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_NE, 42);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_unknown(f));
-}
-
-TEST(FactsApplyPredicate, NeTightensExcludedIntervalEdge) {
-  loom_predicate_t ne_pred = make_predicate_1(LOOM_PREDICATE_NE, 0);
-
-  loom_value_facts_t lower_edge = loom_value_facts_make(0, 1024, 1);
-  loom_value_facts_apply_predicate(&lower_edge, &ne_pred);
-  EXPECT_EQ(lower_edge.range_lo, 1);
-  EXPECT_EQ(lower_edge.range_hi, 1024);
-  EXPECT_TRUE(loom_value_facts_is_positive(lower_edge));
-
-  ne_pred.args[1] = 1024;
-  loom_value_facts_t upper_edge = loom_value_facts_make(0, 1024, 1);
-  loom_value_facts_apply_predicate(&upper_edge, &ne_pred);
-  EXPECT_EQ(upper_edge.range_lo, 0);
-  EXPECT_EQ(upper_edge.range_hi, 1023);
-
-  ne_pred.args[1] = 512;
-  loom_value_facts_t interior = loom_value_facts_make(0, 1024, 1);
-  loom_value_facts_apply_predicate(&interior, &ne_pred);
-  EXPECT_EQ(interior.range_lo, 0);
-  EXPECT_EQ(interior.range_hi, 1024);
-}
-
-TEST(FactsApplyPredicate, NeZeroSetsNonzeroWithoutTighteningInterval) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t ne_pred = make_predicate_1(LOOM_PREDICATE_NE, 0);
-  loom_value_facts_apply_predicate(&f, &ne_pred);
-  EXPECT_EQ(f.range_lo, INT64_MIN);
-  EXPECT_EQ(f.range_hi, INT64_MAX);
-  EXPECT_TRUE(loom_value_facts_is_non_zero(f));
-  EXPECT_FALSE(loom_value_facts_is_positive(f));
-
-  loom_predicate_t max_pred = make_predicate_1(LOOM_PREDICATE_MAX, 1024);
-  loom_value_facts_apply_predicate(&f, &max_pred);
-  EXPECT_EQ(f.range_lo, INT64_MIN);
-  EXPECT_EQ(f.range_hi, 1024);
-  EXPECT_TRUE(loom_value_facts_is_non_zero(f));
-  EXPECT_FALSE(loom_value_facts_is_positive(f));
-}
-
-TEST(FactsApplyPredicate, Ge) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_GE, 10);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.range_lo, 10);
-  EXPECT_EQ(f.range_hi, INT64_MAX);
-  EXPECT_TRUE(loom_value_facts_is_non_negative(f));
-  EXPECT_TRUE(loom_value_facts_is_positive(f));
-}
-
-TEST(FactsApplyPredicate, Le) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_LE, 100);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.range_lo, INT64_MIN);
-  EXPECT_EQ(f.range_hi, 100);
-}
-
-TEST(FactsApplyPredicate, Mul) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_MUL, 16);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.known_divisor, 16);
-  EXPECT_TRUE(loom_value_facts_divisible_by(f, 16));
-  EXPECT_TRUE(loom_value_facts_divisible_by(f, 8));
-  EXPECT_TRUE(loom_value_facts_divisible_by(f, 4));
-}
-
-TEST(FactsApplyPredicate, MulComposition) {
-  // mul(16) then mul(24) → lcm(16, 24) = 48.
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred1 = make_predicate_1(LOOM_PREDICATE_MUL, 16);
-  loom_predicate_t pred2 = make_predicate_1(LOOM_PREDICATE_MUL, 24);
-  loom_value_facts_apply_predicate(&f, &pred1);
-  loom_value_facts_apply_predicate(&f, &pred2);
-  EXPECT_EQ(f.known_divisor, 48);
-}
-
-TEST(FactsApplyPredicate, Min) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_MIN, 64);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.range_lo, 64);
-  EXPECT_TRUE(loom_value_facts_is_positive(f));
-}
-
-TEST(FactsApplyPredicate, Max) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_1(LOOM_PREDICATE_MAX, 1024);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.range_hi, 1024);
-}
-
-TEST(FactsApplyPredicate, Pow2) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_pow2();
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_power_of_two(f));
-}
-
-TEST(FactsApplyPredicate, NotNan) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_not_nan();
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_float(f));
-  EXPECT_TRUE(loom_value_facts_is_not_nan(f));
-  EXPECT_FALSE(loom_value_facts_is_finite(f));
-}
-
-TEST(FactsApplyPredicate, NotInf) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_not_inf();
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_float(f));
-  EXPECT_TRUE(loom_value_facts_is_not_inf(f));
-  EXPECT_FALSE(loom_value_facts_is_finite(f));
-}
-
-TEST(FactsApplyPredicate, Finite) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_finite();
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_TRUE(loom_value_facts_is_float(f));
-  EXPECT_TRUE(loom_value_facts_is_not_nan(f));
-  EXPECT_TRUE(loom_value_facts_is_not_inf(f));
-  EXPECT_TRUE(loom_value_facts_is_finite(f));
-}
-
-TEST(FactsApplyPredicate, Range) {
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t pred = make_predicate_range(10, 100);
-  loom_value_facts_apply_predicate(&f, &pred);
-  EXPECT_EQ(f.range_lo, 10);
-  EXPECT_EQ(f.range_hi, 100);
-  EXPECT_TRUE(loom_value_facts_is_positive(f));
-}
-
-TEST(FactsApplyPredicate, ComposedTilePredicate) {
-  // Typical tile dimension: mul(64), min(64).
-  loom_value_facts_t f = loom_value_facts_unknown();
-  loom_predicate_t mul_pred = make_predicate_1(LOOM_PREDICATE_MUL, 64);
-  loom_predicate_t min_pred = make_predicate_1(LOOM_PREDICATE_MIN, 64);
-  loom_value_facts_apply_predicate(&f, &mul_pred);
-  loom_value_facts_apply_predicate(&f, &min_pred);
-  EXPECT_EQ(f.range_lo, 64);
-  EXPECT_EQ(f.range_hi, INT64_MAX);
-  EXPECT_EQ(f.known_divisor, 64);
-  EXPECT_TRUE(loom_value_facts_is_positive(f));
-  EXPECT_TRUE(loom_value_facts_divisible_by(f, 16));
-}
-
-TEST(FactsApplyPredicate, BoundsRetainDivisibility) {
-  struct TestCase {
-    // Predicate applied to multiples of four in [-64, 64].
-    loom_predicate_kind_t kind;
-    // Predicate's literal operand.
-    int64_t constant;
-    // Inclusive refined lower bound.
-    int64_t lower;
-    // Inclusive refined upper bound.
-    int64_t upper;
-  };
-  const TestCase cases[] = {
-      {LOOM_PREDICATE_LT, 64, -64, 60},   {LOOM_PREDICATE_LE, 63, -64, 60},
-      {LOOM_PREDICATE_LT, -60, -64, -64}, {LOOM_PREDICATE_LE, -61, -64, -64},
-      {LOOM_PREDICATE_GT, -64, -60, 64},  {LOOM_PREDICATE_GE, -63, -60, 64},
-      {LOOM_PREDICATE_GT, 60, 64, 64},    {LOOM_PREDICATE_GE, 61, 64, 64},
-      {LOOM_PREDICATE_MIN, 1, 4, 64},     {LOOM_PREDICATE_MAX, -1, -64, -4},
-      {LOOM_PREDICATE_NE, -64, -60, 64},  {LOOM_PREDICATE_NE, 64, -64, 60},
-  };
-  for (const TestCase& test_case : cases) {
-    SCOPED_TRACE(test_case.kind);
-    SCOPED_TRACE(test_case.constant);
-    loom_value_facts_t facts = loom_value_facts_make(-64, 64, 4);
-    loom_value_facts_mark_workgroup_uniform(&facts);
-    const loom_predicate_t predicate =
-        make_predicate_1(test_case.kind, test_case.constant);
-    loom_value_facts_apply_predicate(&facts, &predicate);
-    EXPECT_EQ(facts.range_lo, test_case.lower);
-    EXPECT_EQ(facts.range_hi, test_case.upper);
-    EXPECT_EQ(facts.known_divisor, 4);
-    EXPECT_TRUE(loom_value_facts_is_workgroup_uniform(facts));
-    EXPECT_EQ(loom_value_facts_is_exact(facts),
-              test_case.lower == test_case.upper);
-  }
-}
-
-TEST(FactsApplyPredicate, DivisorAndRangeOrderAgree) {
-  const loom_predicate_t range = make_predicate_range(-11, 23);
-  const loom_predicate_t multiple = make_predicate_1(LOOM_PREDICATE_MUL, 6);
-  loom_value_facts_t range_first = loom_value_facts_unknown();
-  loom_value_facts_apply_predicate(&range_first, &range);
-  loom_value_facts_apply_predicate(&range_first, &multiple);
-  loom_value_facts_t divisor_first = loom_value_facts_unknown();
-  loom_value_facts_apply_predicate(&divisor_first, &multiple);
-  loom_value_facts_apply_predicate(&divisor_first, &range);
-  EXPECT_TRUE(loom_value_facts_equal(range_first, divisor_first));
-  EXPECT_EQ(range_first.range_lo, -6);
-  EXPECT_EQ(range_first.range_hi, 18);
-  EXPECT_EQ(range_first.known_divisor, 6);
-}
-
-TEST(FactsApplyPredicate, NotEqualPreservesEarlierNonzeroConstraint) {
-  loom_value_facts_t facts = loom_value_facts_make(-8, 8, 4);
-  const loom_predicate_t nonzero = make_predicate_1(LOOM_PREDICATE_NE, 0);
-  const loom_predicate_t exclude_upper = make_predicate_1(LOOM_PREDICATE_NE, 8);
-  loom_value_facts_apply_predicate(&facts, &nonzero);
-  loom_value_facts_apply_predicate(&facts, &exclude_upper);
-  EXPECT_EQ(facts.range_lo, -8);
-  EXPECT_EQ(facts.range_hi, 4);
-  EXPECT_TRUE(loom_value_facts_is_non_zero(facts));
-}
-
-TEST(FactsApplyPredicate, DivisibleRangesMatchEnumeratedIntegers) {
-  for (int64_t divisor = 1; divisor <= 8; ++divisor) {
-    for (int64_t lower = -16; lower <= 16; ++lower) {
-      for (int64_t upper = lower; upper <= 16; ++upper) {
-        SCOPED_TRACE(divisor);
-        SCOPED_TRACE(lower);
-        SCOPED_TRACE(upper);
-        int64_t expected_lower = INT64_MAX;
-        int64_t expected_upper = INT64_MIN;
-        for (int64_t value = lower; value <= upper; ++value) {
-          if (value % divisor != 0) {
-            continue;
-          }
-          if (expected_lower == INT64_MAX) {
-            expected_lower = value;
-          }
-          expected_upper = value;
-        }
-        // Empty branch domains have no representable bottom in this lattice.
-        if (expected_lower > expected_upper) {
-          continue;
-        }
-        loom_value_facts_t facts = loom_value_facts_make(-32, 32, divisor);
-        const loom_predicate_t predicate = make_predicate_range(lower, upper);
-        loom_value_facts_apply_predicate(&facts, &predicate);
-        EXPECT_EQ(facts.range_lo, expected_lower);
-        EXPECT_EQ(facts.range_hi, expected_upper);
-      }
-    }
-  }
-}
-
-TEST(FactsApplyPredicate, DivisibleBoundsPreserveUnboundedAndOverflowDomains) {
-  struct TestCase {
-    // Inclusive incoming lower bound.
-    int64_t lower;
-    // Inclusive incoming upper bound.
-    int64_t upper;
-    // Known divisor applied to the interval.
-    int64_t divisor;
-    // Inclusive refined lower bound.
-    int64_t expected_lower;
-    // Inclusive refined upper bound.
-    int64_t expected_upper;
-  };
-  const TestCase cases[] = {
-      {INT64_MIN, INT64_MAX, 4, INT64_MIN, INT64_MAX},
-      {INT64_MIN, -1, 4, INT64_MIN, -4},
-      {1, INT64_MAX, 4, 4, INT64_MAX},
-      {INT64_MAX - 1, INT64_MAX, 4, INT64_MAX - 1, INT64_MAX},
-      {INT64_MIN, INT64_MIN + 1, 3, INT64_MIN, INT64_MIN + 1},
-      {INT64_MIN + 1, INT64_MAX - 1, INT64_MAX, -INT64_MAX, 0},
-      {-3, -1, 4, -3, -1},
-      {1, 3, 4, 1, 3},
-      {-1, 1, 4, 0, 0},
-  };
-  for (const TestCase& test_case : cases) {
-    SCOPED_TRACE(test_case.lower);
-    SCOPED_TRACE(test_case.upper);
-    SCOPED_TRACE(test_case.divisor);
-    loom_value_facts_t facts = loom_value_facts_make(
-        test_case.lower, test_case.upper, test_case.divisor);
-    const loom_predicate_t predicate =
-        make_predicate_range(test_case.lower, test_case.upper);
-    loom_value_facts_apply_predicate(&facts, &predicate);
-    EXPECT_EQ(facts.range_lo, test_case.expected_lower);
-    EXPECT_EQ(facts.range_hi, test_case.expected_upper);
-    EXPECT_EQ(facts.known_divisor, test_case.divisor);
-  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -1510,127 +1180,6 @@ TEST(MuliTransfer, InPlaceAccumulation) {
 }
 
 //===----------------------------------------------------------------------===//
-// Transfer functions: divui
-//===----------------------------------------------------------------------===//
-
-TEST(DivuiTransfer, ExactDivExact) {
-  loom_value_facts_t a = loom_value_facts_exact_i64(42);
-  loom_value_facts_t b = loom_value_facts_exact_i64(7);
-  loom_value_facts_t out;
-  loom_value_facts_divui(&a, &b, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 6);
-}
-
-TEST(DivuiTransfer, DivisorPreserved) {
-  // [0, 1000] with divisor 64 / exact 16 → divisor 64/16 = 4.
-  loom_value_facts_t a = loom_value_facts_make(0, 1000, 64);
-  loom_value_facts_t b = loom_value_facts_exact_i64(16);
-  loom_value_facts_t out;
-  loom_value_facts_divui(&a, &b, &out);
-  EXPECT_EQ(out.known_divisor, 4);
-}
-
-TEST(DivuiTransfer, NegativeDividend) {
-  // Negative dividend is not supported for unsigned division.
-  loom_value_facts_t a = loom_value_facts_make(-10, 10, 1);
-  loom_value_facts_t b = loom_value_facts_exact_i64(2);
-  loom_value_facts_t out;
-  loom_value_facts_divui(&a, &b, &out);
-  EXPECT_TRUE(loom_value_facts_is_unknown(out));
-}
-
-//===----------------------------------------------------------------------===//
-// Transfer functions: remui
-//===----------------------------------------------------------------------===//
-
-TEST(RemuiTransfer, ExactDivisible) {
-  // 64 % 16 = 0 (exact and divisible).
-  loom_value_facts_t a = loom_value_facts_exact_i64(64);
-  loom_value_facts_t b = loom_value_facts_exact_i64(16);
-  loom_value_facts_t out;
-  loom_value_facts_remui(&a, &b, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 0);
-}
-
-TEST(RemuiTransfer, ExactNonDivisible) {
-  loom_value_facts_t a = loom_value_facts_exact_i64(18);
-  loom_value_facts_t b = loom_value_facts_exact_i64(5);
-  loom_value_facts_t out;
-  loom_value_facts_remui(&a, &b, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 3);
-}
-
-TEST(RemuiTransfer, DivisibleByDivisor) {
-  // Range with divisor 64, mod by 16 → always 0.
-  loom_value_facts_t a = loom_value_facts_make(64, 1024, 64);
-  loom_value_facts_t b = loom_value_facts_exact_i64(16);
-  loom_value_facts_t out;
-  loom_value_facts_remui(&a, &b, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 0);
-}
-
-TEST(RemuiTransfer, NotDivisible) {
-  // Range not divisible by divisor: result in [0, divisor - 1].
-  loom_value_facts_t a = loom_value_facts_make(0, 100, 1);
-  loom_value_facts_t b = loom_value_facts_exact_i64(16);
-  loom_value_facts_t out;
-  loom_value_facts_remui(&a, &b, &out);
-  EXPECT_EQ(out.range_lo, 0);
-  EXPECT_EQ(out.range_hi, 15);
-}
-
-TEST(RemuiTransfer, DynamicDivisorClampedByDividend) {
-  loom_value_facts_t a = loom_value_facts_make(0, 63, 1);
-  loom_value_facts_t b = loom_value_facts_make(1, 1024, 1);
-  loom_value_facts_t out;
-  loom_value_facts_remui(&a, &b, &out);
-  EXPECT_EQ(out.range_lo, 0);
-  EXPECT_EQ(out.range_hi, 63);
-}
-
-//===----------------------------------------------------------------------===//
-// Transfer functions: remsi
-//===----------------------------------------------------------------------===//
-
-TEST(RemsiTransfer, ExactMinimumOverflowPair) {
-  loom_value_facts_t dividend = loom_value_facts_exact_i64(INT64_MIN);
-  loom_value_facts_t divisor = loom_value_facts_exact_i64(-1);
-  loom_value_facts_t out;
-  loom_value_facts_remsi(&dividend, &divisor, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 0);
-}
-
-TEST(RemsiTransfer, ExactRemainderPreservesDividendSign) {
-  loom_value_facts_t out;
-
-  loom_value_facts_t negative_dividend = loom_value_facts_exact_i64(-17);
-  loom_value_facts_t positive_divisor = loom_value_facts_exact_i64(5);
-  loom_value_facts_remsi(&negative_dividend, &positive_divisor, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, -2);
-
-  loom_value_facts_t positive_dividend = loom_value_facts_exact_i64(17);
-  loom_value_facts_t negative_divisor = loom_value_facts_exact_i64(-5);
-  loom_value_facts_remsi(&positive_dividend, &negative_divisor, &out);
-  EXPECT_TRUE(loom_value_facts_is_exact(out));
-  EXPECT_EQ(out.range_lo, 2);
-}
-
-TEST(RemsiTransfer, MinimumDivisorHasRepresentableRemainderBounds) {
-  loom_value_facts_t dividend = loom_value_facts_unknown();
-  loom_value_facts_t divisor = loom_value_facts_exact_i64(INT64_MIN);
-  loom_value_facts_t out;
-  loom_value_facts_remsi(&dividend, &divisor, &out);
-  EXPECT_EQ(out.range_lo, -INT64_MAX);
-  EXPECT_EQ(out.range_hi, INT64_MAX);
-}
-
-//===----------------------------------------------------------------------===//
 // Transfer functions: negi / absi
 //===----------------------------------------------------------------------===//
 
@@ -1798,6 +1347,76 @@ TEST(IntegerExtremaTransfer, BooleanAndNarrowRanges) {
 }
 
 //===----------------------------------------------------------------------===//
+// Transfer functions: rotates
+//===----------------------------------------------------------------------===//
+
+TEST(IntegerRotateTransfer, SignedAmountsWrapModuloEveryIntegerWidth) {
+  struct Case {
+    int32_t bit_count;
+    int64_t value;
+    int64_t left_one;
+    int64_t right_one;
+  };
+  static constexpr Case kCases[] = {
+      {1, 1, 1, 1},
+      {8, -127, 3, -64},
+      {16, -32767, 3, -16384},
+      {32, INT32_MIN + INT64_C(1), 3, INT64_C(-1073741824)},
+      {64, INT64_MIN + INT64_C(1), 3, INT64_C(-4611686018427387904)},
+  };
+  using Transfer =
+      void (*)(const loom_value_facts_t*, const loom_value_facts_t*, int32_t,
+               loom_value_facts_t*);
+  auto evaluate = [](Transfer transfer, int32_t bit_count, int64_t value,
+                     int64_t amount) {
+    loom_value_facts_t lhs = loom_value_facts_exact_i64(value);
+    loom_value_facts_t rhs = loom_value_facts_exact_i64(amount);
+    loom_value_facts_t result = loom_value_facts_unknown();
+    transfer(&lhs, &rhs, bit_count, &result);
+    EXPECT_TRUE(loom_value_facts_is_exact(result));
+    return result.range_lo;
+  };
+
+  for (const auto& test_case : kCases) {
+    SCOPED_TRACE(test_case.bit_count);
+    EXPECT_EQ(evaluate(loom_value_facts_rotli, test_case.bit_count,
+                       test_case.value, 1),
+              test_case.left_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotli, test_case.bit_count,
+                       test_case.value, test_case.bit_count + 1),
+              test_case.left_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotli, test_case.bit_count,
+                       test_case.value, -1),
+              test_case.right_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotri, test_case.bit_count,
+                       test_case.value, 1),
+              test_case.right_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotri, test_case.bit_count,
+                       test_case.value, test_case.bit_count + 1),
+              test_case.right_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotri, test_case.bit_count,
+                       test_case.value, -1),
+              test_case.left_one);
+    EXPECT_EQ(evaluate(loom_value_facts_rotli, test_case.bit_count,
+                       test_case.value, test_case.bit_count),
+              test_case.value);
+  }
+}
+
+TEST(IntegerRotateTransfer, PreservesDistributionWithoutExactValues) {
+  loom_value_facts_t lhs = loom_value_facts_unknown();
+  loom_value_facts_mark_workgroup_uniform(&lhs);
+  loom_value_facts_t rhs = loom_value_facts_unknown();
+  loom_value_facts_mark_subgroup_uniform(&rhs);
+  loom_value_facts_t result = loom_value_facts_unknown();
+
+  loom_value_facts_rotli(&lhs, &rhs, 32, &result);
+
+  EXPECT_TRUE(loom_value_facts_is_subgroup_uniform(result));
+  EXPECT_FALSE(loom_value_facts_is_workgroup_uniform(result));
+}
+
+//===----------------------------------------------------------------------===//
 // Shaped type helpers
 //===----------------------------------------------------------------------===//
 
@@ -1852,9 +1471,10 @@ TEST(ElementCountFacts, OverflowDimensionsUseDimensionFacts) {
       loom_dim_pack_dynamic(1),
       loom_dim_pack_static(8),
   };
-  loom_type_t type = {};
-  type.header =
-      loom_type_make_header(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I8, 3, 0);
+  loom_type_t type = {
+      .header =
+          loom_type_make_header(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I8, 3, 0),
+  };
   type.dims[0] = (uint64_t)(uintptr_t)dimensions;
   loom_value_facts_t facts[2] = {loom_value_facts_unknown(),
                                  loom_value_facts_make(4, 12, 4)};
@@ -1867,9 +1487,10 @@ TEST(ElementCountFacts, OverflowDimensionsUseDimensionFacts) {
 }
 
 TEST(ElementCountFacts, MalformedInlineRankDegradesSafely) {
-  loom_type_t type = {};
-  type.header = loom_type_make_header(LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I32, 3,
-                                      LOOM_TYPE_FLAG_INLINE_DIMS);
+  loom_type_t type = {
+      .header = loom_type_make_header(LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I32, 3,
+                                      LOOM_TYPE_FLAG_INLINE_DIMS),
+  };
   type.dims[0] = loom_dim_pack_static(2);
   type.dims[1] = loom_dim_pack_static(4);
 
@@ -1878,25 +1499,6 @@ TEST(ElementCountFacts, MalformedInlineRankDegradesSafely) {
   EXPECT_EQ(count.range_lo, 0);
   EXPECT_EQ(count.range_hi, INT64_MAX);
   EXPECT_TRUE(loom_value_facts_is_non_negative(count));
-}
-
-TEST(ElementCountFacts, DynamicShapeUsesPredicateRefinedFacts) {
-  loom_value_facts_t facts[3] = {loom_value_facts_unknown(),
-                                 loom_value_facts_unknown(),
-                                 loom_value_facts_unknown()};
-  loom_predicate_t range_pred = make_predicate_range(16, 128);
-  loom_predicate_t multiple_pred = make_predicate_1(LOOM_PREDICATE_MUL, 16);
-  loom_value_facts_apply_predicate(&facts[2], &range_pred);
-  loom_value_facts_apply_predicate(&facts[2], &multiple_pred);
-  loom_type_t type =
-      loom_type_shaped_2d(LOOM_TYPE_VIEW, LOOM_SCALAR_TYPE_I8,
-                          loom_dim_pack_static(3), loom_dim_pack_dynamic(2), 0);
-
-  loom_value_facts_t count = {};
-  loom_value_facts_element_count(type, facts, IREE_ARRAYSIZE(facts), &count);
-  EXPECT_EQ(count.range_lo, 48);
-  EXPECT_EQ(count.range_hi, 384);
-  EXPECT_EQ(count.known_divisor, 48);
 }
 
 TEST(ElementCountFacts, MissingDynamicFactsDegradeToNonNegativeExtent) {

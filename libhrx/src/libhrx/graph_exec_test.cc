@@ -14,14 +14,15 @@ namespace {
 static constexpr iree_hal_queue_priority_t kQueuePriority =
     IREE_HAL_QUEUE_PRIORITY_NORMAL;
 static const iree_hal_queue_family_spec_t kQueueFamilySpec = [] {
-  iree_hal_queue_family_spec_t spec = {};
-  spec.name = IREE_SV("test");
-  spec.priority_count = 1;
-  spec.priorities = &kQueuePriority;
-  spec.physical_device_affinity = 1;
-  spec.role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH |
+  iree_hal_queue_family_spec_t spec = {
+      .name = IREE_SV("test"),
+      .priority_count = 1,
+      .priorities = &kQueuePriority,
+      .physical_device_affinity = 1,
+      .role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH |
                     IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_TRANSFER |
-                    IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC;
+                    IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC,
+  };
   return spec;
 }();
 
@@ -55,7 +56,7 @@ typedef struct BarrierSpyCommandBuffer {
   uint32_t barrier_count;
   iree_hal_execution_stage_t source_stage;
   iree_hal_execution_stage_t target_stage;
-  iree_hal_execution_barrier_flags_t flags;
+  iree_hal_barrier_flags_t flags;
   iree_host_size_t memory_barrier_count;
   iree_hal_memory_barrier_t memory_barrier;
   iree_host_size_t buffer_barrier_count;
@@ -65,48 +66,42 @@ static void BarrierSpyDestroy(iree_hal_command_buffer_t* base_command_buffer) {}
 
 static iree_status_t BarrierSpyExecutionBarrier(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_execution_stage_t source_stage,
-    iree_hal_execution_stage_t target_stage,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
+    const iree_hal_barrier_t* barrier) {
   auto* command_buffer =
       reinterpret_cast<BarrierSpyCommandBuffer*>(base_command_buffer);
   if (command_buffer->failure_code != IREE_STATUS_OK) {
     return iree_make_status(command_buffer->failure_code);
   }
   ++command_buffer->barrier_count;
-  command_buffer->source_stage = source_stage;
-  command_buffer->target_stage = target_stage;
-  command_buffer->flags = flags;
-  command_buffer->memory_barrier_count = memory_barrier_count;
-  if (memory_barrier_count > 0) {
-    command_buffer->memory_barrier = memory_barriers[0];
+  command_buffer->source_stage = barrier->source_stage_mask;
+  command_buffer->target_stage = barrier->target_stage_mask;
+  command_buffer->flags = barrier->flags;
+  command_buffer->memory_barrier_count = barrier->memory_barrier_count;
+  if (barrier->memory_barrier_count > 0) {
+    command_buffer->memory_barrier = barrier->memory_barriers[0];
   }
-  command_buffer->buffer_barrier_count = buffer_barrier_count;
+  command_buffer->buffer_barrier_count = barrier->buffer_barrier_count;
   return iree_ok_status();
 }
 
 static const iree_hal_command_buffer_vtable_t kBarrierSpyVtable = {
-    /*.destroy=*/BarrierSpyDestroy,
-    /*.begin=*/nullptr,
-    /*.end=*/nullptr,
-    /*.begin_debug_group=*/nullptr,
-    /*.end_debug_group=*/nullptr,
-    /*.execution_barrier=*/BarrierSpyExecutionBarrier,
+    .destroy = BarrierSpyDestroy,
+    .begin = nullptr,
+    .end = nullptr,
+    .begin_debug_group = nullptr,
+    .end_debug_group = nullptr,
+    .barrier = BarrierSpyExecutionBarrier,
 };
 
 class GraphBarrierTest : public ::testing::Test {
  protected:
   void SetUp() override {
     memset(&command_buffer_, 0, sizeof(command_buffer_));
-    iree_hal_device_queue_spec_t queues = {};
-    queues.family_count = 1;
-    queues.families = &kQueueFamilySpec;
-    iree_hal_device_spec_params_t spec_params = {};
-    spec_params.queues = &queues;
+    iree_hal_device_queue_spec_t queues = {
+        .family_count = 1,
+        .families = &kQueueFamilySpec,
+    };
+    iree_hal_device_spec_params_t spec_params = {.queues = &queues};
     iree_hal_device_spec_t* device_spec = nullptr;
     IREE_ASSERT_OK(iree_hal_device_spec_create(
         &spec_params, iree_allocator_system(), &device_spec));
@@ -119,10 +114,10 @@ class GraphBarrierTest : public ::testing::Test {
     IREE_ASSERT_OK(status);
     queue_family_ = iree_hal_device_queue_family(device_, 0);
     iree_hal_command_buffer_initialize(
-        /*device_allocator=*/nullptr, queue_family_,
-        IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED, IREE_HAL_COMMAND_CATEGORY_ANY,
-        /*binding_capacity=*/0, /*validation_state=*/nullptr,
-        &kBarrierSpyVtable, &command_buffer_.base);
+        queue_family_, IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED,
+        IREE_HAL_COMMAND_CATEGORY_ANY, /*binding_capacity=*/0,
+        /*validation_state=*/nullptr, &kBarrierSpyVtable,
+        &command_buffer_.base);
     hrx_graph_barrier_state_reset(&state_);
   }
 
@@ -204,8 +199,7 @@ TEST_F(GraphBarrierTest, OverflowForcesConservativeDependencyBarrier) {
 TEST_F(GraphBarrierTest, AdditionalDependencyEdgeBarriersLikeInlineEdge) {
   TestNode a(0, {});
   TestNode b(1, {});
-  hrx_graph_edge_t edge = {/*.next=*/nullptr, /*.from=*/a.get(),
-                           /*.to=*/b.get()};
+  hrx_graph_edge_t edge = {.next = nullptr, .from = a.get(), .to = b.get()};
   EXPECT_FALSE(Record(a, &edge));
   EXPECT_TRUE(Record(b, &edge));
   EXPECT_EQ(command_buffer_.barrier_count, 1u);
@@ -220,12 +214,14 @@ TEST_F(GraphBarrierTest, BarrierUsesRetireIssueAndAllMemoryScopes) {
             IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE);
   EXPECT_EQ(command_buffer_.target_stage,
             IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE);
-  EXPECT_EQ(command_buffer_.flags, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE);
+  EXPECT_EQ(command_buffer_.flags, IREE_HAL_BARRIER_FLAG_NONE);
   EXPECT_EQ(command_buffer_.memory_barrier_count, 1u);
-  EXPECT_EQ(command_buffer_.memory_barrier.source_scope,
-            IREE_HAL_MEMORY_ACCESS_ALL);
-  EXPECT_EQ(command_buffer_.memory_barrier.target_scope,
-            IREE_HAL_MEMORY_ACCESS_ALL);
+  EXPECT_EQ(
+      command_buffer_.memory_barrier.source_scope,
+      IREE_HAL_ACCESS_SCOPE_MEMORY_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE);
+  EXPECT_EQ(
+      command_buffer_.memory_barrier.target_scope,
+      IREE_HAL_ACCESS_SCOPE_MEMORY_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE);
   EXPECT_EQ(command_buffer_.buffer_barrier_count, 0u);
 }
 
@@ -266,8 +262,11 @@ TEST(GraphScheduleTest, AdditionalDependencyStaysOnProducerWorkstream) {
     block->nodes[i] = nodes[i]->get();
   }
 
-  hrx_graph_edge_t edge = {/*.next=*/nullptr, /*.from=*/nodes[0]->get(),
-                           /*.to=*/nodes[16]->get()};
+  hrx_graph_edge_t edge = {
+      .next = nullptr,
+      .from = nodes[0]->get(),
+      .to = nodes[16]->get(),
+  };
   iree_arena_block_pool_t block_pool;
   iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
   iree_arena_allocator_t arena;
@@ -316,8 +315,8 @@ TEST_F(GraphExecSemaphoreTest,
   // Host calls are not recordable so each one forms its own partition; a chain
   // of three yields two internal semaphores.
   const hrx_graph_host_call_node_attrs_t attrs = {
-      /*.fn=*/[](void* user_data) -> hrx_status_t { return hrx_ok_status(); },
-      /*.user_data=*/nullptr,
+      .fn = [](void* user_data) -> hrx_status_t { return hrx_ok_status(); },
+      .user_data = nullptr,
   };
   hrx_graph_node_t previous_node = nullptr;
   for (int i = 0; i < 3; ++i) {

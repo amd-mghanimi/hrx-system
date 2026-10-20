@@ -10,6 +10,7 @@
 #include "loom/target/arch/amdgpu/facts.h"
 #include "loom/target/arch/amdgpu/hal/kernel_abi.h"
 #include "loom/target/arch/amdgpu/lower/emit.h"
+#include "loom/target/arch/amdgpu/lower/preamble.h"
 #include "loom/target/arch/amdgpu/lower/types.h"
 #include "loom/target/arch/amdgpu/refs/target_refs.h"
 
@@ -106,18 +107,11 @@ static iree_status_t loom_amdgpu_cluster_preamble_state(
       context, &loom_amdgpu_cluster_preamble_state_key, sizeof(*state),
       (void**)&state));
   if (!state->initialized) {
-    const bool has_nontrivial_cluster =
-        loom_amdgpu_cluster_preamble_required_nontrivial_size(
-            loom_low_lower_context_module(context),
-            loom_low_lower_context_source_function(context).op,
-            loom_low_lower_context_fact_table(context), &state->cluster_size);
-    if (!has_nontrivial_cluster) {
-      state->cluster_size = (loom_target_workgroup_cluster_size_t){
-          .x = 1,
-          .y = 1,
-          .z = 1,
-      };
-    }
+    const loom_target_workgroup_cluster_size_t* cluster_size =
+        loom_low_lower_context_workgroup_cluster_size(context);
+    state->cluster_size = cluster_size
+                              ? *cluster_size
+                              : (loom_target_workgroup_cluster_size_t){1, 1, 1};
     // Architected workgroup identity uses TTMP9/TTMP7 even for ordinary
     // dispatches with a trivial 1x1x1 source cluster.
     const loom_amdgpu_target_facts_t* target_facts =
@@ -130,7 +124,7 @@ static iree_status_t loom_amdgpu_cluster_preamble_state(
         loom_amdgpu_cluster_preamble_target_supports_cluster_launch_state(
             target_facts);
     state->uses_clustered_dispatch =
-        has_nontrivial_cluster && supports_cluster_launch_state;
+        cluster_size != NULL && supports_cluster_launch_state;
     state->cluster_workgroup_info = LOOM_VALUE_ID_INVALID;
     state->cluster_id_yz = LOOM_VALUE_ID_INVALID;
     state->cluster_id_x = LOOM_VALUE_ID_INVALID;
@@ -494,8 +488,8 @@ static iree_status_t loom_amdgpu_cluster_preamble_bind_identity_queries(
     if (low_result == LOOM_VALUE_ID_INVALID) {
       continue;
     }
-    IREE_RETURN_IF_ERROR(
-        loom_low_lower_bind_value(context, source_result, low_result));
+    IREE_RETURN_IF_ERROR(loom_amdgpu_preamble_bind_query_result(
+        context, source_op, source_result, low_result));
   }
   return iree_ok_status();
 }

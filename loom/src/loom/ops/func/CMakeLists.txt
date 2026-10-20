@@ -16,6 +16,7 @@ loom_generated_cc_library(
     loom::py::loom::gen::ops::c_tables_func_generator
   SRCS
     "canonicalize.c"
+    "facts.c"
     "location.c"
     "verify.c"
   TEXTUAL_HDRS
@@ -38,6 +39,7 @@ loom_generated_cc_library(
   DEPS
     iree::base::core_headers
     loom::error::error_defs
+    loom::error::parameter
     loom::format::location
     loom::ir
     loom::ops::callable_effects
@@ -46,6 +48,7 @@ loom_generated_cc_library(
     loom::ops::op_defs
     loom::rewrite::rewriter
     loom::target::types
+    loom::util::fact_table_api
 )
 
 loom_cc_test(
@@ -60,6 +63,20 @@ loom_cc_test(
     iree::testing::gtest_main
     loom::format::text::printer
     loom::ir
+)
+
+loom_cc_test(
+  NAME
+    facts_test
+  SRCS
+    "facts_test.cc"
+  DEPS
+    ::func
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::util::fact_table
 )
 
 loom_cc_library(
@@ -97,7 +114,6 @@ loom_cc_test(
     loom::ops::op_defs
     loom::ops::op_registry
     loom::tooling::input
-    loom::tooling::io::source
 )
 
 iree_c_embed_data(

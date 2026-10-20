@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_index_operands.loom-test
 // RUN: emit source-low target=wasm:simd128 output=low
 
 func.def @uniform_lhs_index_operands(%input: buffer, %uniform: index) -> (index, index, index, index, index) {
@@ -16,8 +15,8 @@ func.def @uniform_lhs_index_operands(%input: buffer, %uniform: index) -> (index,
 }
 
 // ----
-low.func.def target<wasm.core.simd128> abi(wasm_function) @uniform_lhs_index_operands(%input_view: reg<wasm.i32>, %uniform: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
-  %value = i32.load %input_view
+low.func.def target<wasm.core.simd128> abi(wasm_function) @uniform_lhs_index_operands(%aligned_input: reg<wasm.i32>, %uniform: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %value = i32.load %aligned_input
   %multiply = i32.mul %uniform, %value
   %and = i32.and %uniform, %value
   %or = i32.or %uniform, %value
@@ -43,8 +42,8 @@ func.def @uniform_rhs_index_operands(%input: buffer, %uniform: index) -> (index,
 }
 
 // ----
-low.func.def target<wasm.core.simd128> abi(wasm_function) @uniform_rhs_index_operands(%input_view: reg<wasm.i32>, %uniform: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
-  %value = i32.load %input_view
+low.func.def target<wasm.core.simd128> abi(wasm_function) @uniform_rhs_index_operands(%aligned_input: reg<wasm.i32>, %uniform: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %value = i32.load %aligned_input
   %multiply = i32.mul %value, %uniform
   %and = i32.and %value, %uniform
   %or = i32.or %value, %uniform
@@ -73,8 +72,8 @@ func.def @constant_index_operands(%input: buffer) -> (index, index, index, index
 }
 
 // ----
-low.func.def target<wasm.core.simd128> abi(wasm_function) @constant_index_operands(%input_view: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
-  %value = i32.load %input_view
+low.func.def target<wasm.core.simd128> abi(wasm_function) @constant_index_operands(%aligned_input: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %value = i32.load %aligned_input
   %inline = i32.const 64
   %literal = i32.const 128
   %negative = i32.const -16
@@ -126,9 +125,9 @@ func.def @varying_index_operands(%input: buffer) -> (index, index, index, index,
 }
 
 // ----
-low.func.def target<wasm.core.simd128> abi(wasm_function) @varying_index_operands(%input_view: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
-  %lhs = i32.load %input_view
-  %rhs = i32.load %input_view {offset = 4}
+low.func.def target<wasm.core.simd128> abi(wasm_function) @varying_index_operands(%aligned_input: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %lhs = i32.load %aligned_input
+  %rhs = i32.load %aligned_input {offset = 4}
   %multiply = i32.mul %lhs, %rhs
   %and = i32.and %lhs, %rhs
   %or = i32.or %lhs, %rhs
@@ -152,8 +151,8 @@ func.def @bounded_offset_difference(%input: buffer, %wide_limit: offset) -> (off
 }
 
 // ----
-low.func.def target<wasm.core.simd128> abi(wasm_function) @bounded_offset_difference(%input_view: reg<wasm.i32>, %limit: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
-  %position = i32.load %input_view
+low.func.def target<wasm.core.simd128> abi(wasm_function) @bounded_offset_difference(%aligned_input: reg<wasm.i32>, %limit: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
+  %position = i32.load %aligned_input
   %remaining = i32.sub %limit, %position
   return %remaining
 }
@@ -220,7 +219,7 @@ low.func.def target<wasm.core.simd128> abi(wasm_function) @high_bit_offset_add(%
 
 // Every result keeps its matching input, including mixed address domains.
 func.def @bounded_addresses(%row: index, %column: index, %byte_offset: offset) -> (index, index, offset) {
-  %bounded_row, %bounded_column, %aligned_offset = index.assume %row, %column, %byte_offset [range(%row, 0, 31), range(%column, 0, 63), mul(%byte_offset, 16)] : index, index, offset
+  %bounded_row, %bounded_column, %aligned_offset = index.assume %row, %column, %byte_offset [range(%row, 0, 31), range(%column, 0, 63), multiple_of(%byte_offset, 16)] : index, index, offset
   func.return %bounded_row, %bounded_column, %aligned_offset : index, index, offset
 }
 

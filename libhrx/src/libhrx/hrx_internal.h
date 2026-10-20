@@ -6,7 +6,9 @@
 
 #include <assert.h>
 
+#include "buffer.h"
 #include "buffer_table.h"
+#include "device.h"
 #include "hrx_runtime.h"
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
@@ -15,6 +17,8 @@
 #include "iree/hal/drivers/task/executable/loaders/registration/init.h"
 #include "iree/hal/utils/resource_set.h"
 #include "iree_hal_compat.h"
+#include "mem_pool_backing.h"
+#include "runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -130,8 +134,6 @@ static_assert(HRX_MEMORY_ACCESS_READ == IREE_HAL_MEMORY_ACCESS_READ,
               "memory access mismatch");
 static_assert(HRX_MEMORY_ACCESS_WRITE == IREE_HAL_MEMORY_ACCESS_WRITE,
               "memory access mismatch");
-static_assert(HRX_MEMORY_ACCESS_DISCARD == IREE_HAL_MEMORY_ACCESS_DISCARD,
-              "memory access mismatch");
 static_assert(HRX_MEMORY_ACCESS_ALL == IREE_HAL_MEMORY_ACCESS_ALL,
               "memory access mismatch");
 
@@ -210,12 +212,10 @@ static_assert(HRX_MEMORY_PROTECTION_READ == IREE_HAL_MEMORY_PROTECTION_READ,
 static_assert(HRX_MEMORY_PROTECTION_WRITE == IREE_HAL_MEMORY_PROTECTION_WRITE,
               "memory protection mismatch");
 
-// Map flags reuse memory access values.
+// Map permissions share memory access values; operation flags are translated.
 static_assert(HRX_MAP_READ == IREE_HAL_MEMORY_ACCESS_READ,
               "map flags mismatch");
 static_assert(HRX_MAP_WRITE == IREE_HAL_MEMORY_ACCESS_WRITE,
-              "map flags mismatch");
-static_assert(HRX_MAP_DISCARD == IREE_HAL_MEMORY_ACCESS_DISCARD,
               "map flags mismatch");
 
 //===----------------------------------------------------------------------===//
@@ -250,6 +250,8 @@ typedef struct hrx_device_s {
   // |hal_device|, which must outlive every use.
   iree_hal_queue_t* dispatch_queue;
   iree_hal_device_group_t* hal_device_group;
+  // Shared native backing and retention coordination for public memory pools.
+  hrx_mem_pool_backing_t mem_pool_backing;
   bool profiling_active;
   hrx_allocator_s allocator;           // Inline, owned by device.
   hrx_buffer_table_t buffer_table;     // Device-pointer-to-buffer lookup.
@@ -473,65 +475,22 @@ iree_status_t hrx_graph_exec_instantiate_locked(
     hrx_graph_exec_t exec, hrx_graph_node_block_t* node_blocks,
     iree_host_size_t node_count);
 
-//===----------------------------------------------------------------------===//
-// Buffer
-//===----------------------------------------------------------------------===//
-
-// Buffer allocation.
-typedef struct hrx_buffer_s {
-  // References held by callers of the public buffer handle.
-  iree_atomic_ref_count_t ref_count;
-
-  // HAL buffer owning the underlying allocation.
-  iree_hal_buffer_t* hal_buffer;
-
-  // HAL pool that materialized |hal_buffer|.
-  iree_hal_pool_t* hal_pool;
-
-  // Device associated with the buffer's allocation.
-  hrx_device_t device;
-
-  // Memory properties selected for the allocation.
-  hrx_memory_type_t mem_type;
-
-  // User-visible allocation length in bytes.
-  size_t size;
-
-  // Optional bounded pool that charged |allocation_budget_size|.
-  hrx_mem_pool_t allocation_budget_pool;
-
-  // Bytes charged against |allocation_budget_pool|.
-  size_t allocation_budget_size;
-
-  // Active scoped mapping, valid only while |is_mapped| is true.
-  iree_hal_buffer_mapping_t mapping;
-
-  // True when |mapping| currently owns an active mapping.
-  bool is_mapped;
-
-  // Cached host pointer for the active mapping.
-  void* mapped_ptr;
-} hrx_buffer_s;
-
 // Memory pool (stream-ordered memory management).
 typedef struct hrx_mem_pool_s {
   // References held by public handles and bounded allocations.
   iree_atomic_ref_count_t ref_count;
 
-  // Device whose HAL pool backend supplies this pool's backing storage.
+  // Retained device owning the cache shared by compatible public pools.
   hrx_device_t device;
 
   // HIP/CUDA-style creation properties used for attribute queries.
   hrx_mem_pool_props_t props;
 
-  // TLSF HAL pool serving allocations up to |suballocation_max_size|.
+  // TLSF HAL pool serving suballocated and dedicated ordinary backing.
   iree_hal_pool_t* hal_pool;
 
-  // Pass-through HAL pool serving allocations larger than the TLSF slab size.
-  iree_hal_pool_t* oversized_hal_pool;
-
-  // Largest request routed to |hal_pool| rather than |oversized_hal_pool|.
-  iree_device_size_t suballocation_max_size;
+  // Embedded request linked into the device's shared retention policy.
+  hrx_mem_pool_retention_t retention;
 
   // Bytes charged to the immutable |props.max_size| allocation limit.
   size_t allocation_budget_current;
@@ -551,10 +510,10 @@ typedef struct hrx_mem_pool_s {
   // True when opportunistic reuse is allowed.
   bool reuse_allow_opportunistic;
 
-  // Current bytes reserved from the system for this pool.
+  // Current backing borrowed by this child, excluding shared idle storage.
   uint64_t reserved_mem_current;
 
-  // Peak bytes reserved from the system for this pool.
+  // Peak backing borrowed by this child, including padding and fragmentation.
   uint64_t reserved_mem_high;
 
   // Current backing bytes charged to live allocations.
@@ -629,28 +588,8 @@ hrx_shared_state_t* hrx_get_shared_state(void);
 hrx_gpu_state_t* hrx_get_gpu_state(void);
 hrx_cpu_state_t* hrx_get_cpu_state(void);
 
-// Returns the configured application event sink translated to the HAL event
-// ABI. Returns false when HRX would otherwise discard device events.
-bool hrx_runtime_try_get_hal_device_event_sink(
-    iree_hal_device_event_sink_t* out_sink);
-
-// Initializes GPU devices with one immutable HAL device-creation extension
-// chain. The chain and all transitively referenced provider data must remain
-// valid until hrx_gpu_shutdown().
-hrx_status_t hrx_gpu_initialize_with_device_extensions(
-    uint32_t flags,
-    const iree_hal_device_create_params_extension_t* device_extensions);
-
 // Ensure shared infrastructure is created (idempotent).
 hrx_status_t hrx_ensure_shared_state(void);
-
-// Queries immutable total device memory from the HAL device spec.
-//
-// Returns OK with |out_known| false when the HAL spec does not describe a
-// known total capacity. Returns an error only when the spec data is invalid or
-// cannot be represented.
-hrx_status_t hrx_device_query_total_memory_from_spec(
-    hrx_device_t device, bool* out_known, iree_device_size_t* out_total);
 
 // Returns whether a topology edge can provide read/write access to the
 // non-coherent allocation surface used for ordinary device allocations.
@@ -697,10 +636,6 @@ hrx_status_t hrx_status_from_iree(iree_status_t iree_status);
 
 // Convert hrx_status_t back to iree_status_t and consume the hrx status.
 iree_status_t hrx_status_to_iree(hrx_status_t status);
-
-iree_status_t hrx_iree_exact_pool_create(iree_hal_allocator_t* allocator,
-                                         iree_hal_buffer_params_t params,
-                                         iree_hal_pool_t** out_pool);
 
 #ifdef __cplusplus
 }

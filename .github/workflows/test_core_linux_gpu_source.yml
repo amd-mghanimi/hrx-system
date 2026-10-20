@@ -154,7 +154,6 @@ jobs:
       HRX_TEST_TMPDIR: ${{ github.workspace }}/build/linux-gpu/test-tmp
       HRX_PYTHON: ${{ github.workspace }}/build/linux-gpu/python/bin/python3
       PIP_CACHE_DIR: ${{ github.workspace }}/build/linux-gpu/caches/pip
-      ROCR_VISIBLE_DEVICES: "0"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

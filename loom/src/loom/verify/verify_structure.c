@@ -366,6 +366,20 @@ static void loom_verify_emit_placement_diagnostic(
                               IREE_ARRAYSIZE(params));
 }
 
+static void loom_verify_emit_named_placement_diagnostic(
+    loom_verify_state_t* state, const loom_op_t* op,
+    const loom_op_vtable_t* vtable, iree_string_view_t constraint_kind,
+    iree_string_view_t ancestor_names, iree_string_view_t actual_ancestor) {
+  loom_diagnostic_param_t params[] = {
+      loom_param_string(loom_op_vtable_name(vtable)),
+      loom_param_string(constraint_kind),
+      loom_param_string(ancestor_names),
+      loom_param_string(actual_ancestor),
+  };
+  loom_verify_emit_structured(state, op, LOOM_ERR_STRUCTURE_029, params,
+                              IREE_ARRAYSIZE(params));
+}
+
 void loom_verify_op_placement(loom_verify_state_t* state, const loom_op_t* op,
                               const loom_op_vtable_t* vtable) {
   if (iree_any_bit_set(vtable->traits, LOOM_TRAIT_MODULE_SCOPE) &&
@@ -406,6 +420,22 @@ void loom_verify_op_placement(loom_verify_state_t* state, const loom_op_t* op,
         state, op, vtable, IREE_SV("required"), ancestor_kind,
         loom_verify_parent_context_name(state, op));
   }
+  if (placement->required_any_ancestor_count > 0) {
+    bool found_required_ancestor = false;
+    for (uint8_t i = 0; i < placement->required_any_ancestor_count; ++i) {
+      if (loom_verify_find_ancestor(op, placement->required_any_ancestors[i])) {
+        found_required_ancestor = true;
+        break;
+      }
+    }
+    if (!found_required_ancestor &&
+        !loom_verify_has_deferred_required_ancestor(state, op)) {
+      loom_verify_emit_named_placement_diagnostic(
+          state, op, vtable, IREE_SV("one-of-required"),
+          iree_make_cstring_view(placement->required_any_ancestor_names),
+          loom_verify_parent_context_name(state, op));
+    }
+  }
   for (uint8_t i = 0; i < placement->forbidden_ancestor_count; ++i) {
     loom_op_kind_t ancestor_kind = placement->forbidden_ancestors[i];
     const loom_op_t* ancestor = loom_verify_find_ancestor(op, ancestor_kind);
@@ -441,14 +471,14 @@ static uint8_t loom_verify_required_region_count(
   return fixed_region_count;
 }
 
-void loom_verify_func_purity_body_effects(loom_verify_state_t* state,
-                                          const loom_op_t* op,
-                                          const loom_op_vtable_t* vtable) {
+void loom_verify_func_effect_contract_body_effects(
+    loom_verify_state_t* state, const loom_op_t* op,
+    const loom_op_vtable_t* vtable) {
   const loom_func_like_vtable_t* func_vtable = vtable->func_like;
   if (!func_vtable) {
     return;
   }
-  if (func_vtable->purity_attr_index == LOOM_ATTR_INDEX_NONE) {
+  if (func_vtable->effect_contract_attr_index == LOOM_ATTR_INDEX_NONE) {
     return;
   }
   if (func_vtable->body_region_index == LOOM_REGION_INDEX_NONE) {
@@ -458,18 +488,28 @@ void loom_verify_func_purity_body_effects(loom_verify_state_t* state,
     return;
   }
   const loom_attribute_t* attrs = loom_op_const_attrs(op);
-  if (loom_attr_as_enum(attrs[func_vtable->purity_attr_index]) == 0) {
+  const loom_callable_effect_contract_t contract =
+      (loom_callable_effect_contract_t)loom_attr_as_enum(
+          attrs[func_vtable->effect_contract_attr_index]);
+  if (contract == 0) {
+    return;
+  }
+  if (contract != LOOM_CALLABLE_EFFECT_CONTRACT_PURE &&
+      contract != LOOM_CALLABLE_EFFECT_CONTRACT_READONLY) {
     return;
   }
   loom_region_t* body = loom_op_regions(op)[func_vtable->body_region_index];
-  if (!loom_region_has_read_effects(body) &&
-      !loom_region_has_write_effects(body) &&
-      !loom_region_has_convergent_effects(body) &&
-      !loom_region_has_observable_effects(body)) {
+  const bool valid = loom_callable_effects_contract_satisfies(
+      loom_callable_effects_classify_body(state->module, body), contract);
+  if (valid) {
     return;
   }
+  const iree_string_view_t contract_name =
+      contract == LOOM_CALLABLE_EFFECT_CONTRACT_PURE ? IREE_SV("pure")
+                                                     : IREE_SV("readonly");
   loom_diagnostic_param_t params[] = {
       loom_param_string(loom_op_vtable_name(vtable)),
+      loom_param_string(contract_name),
       loom_param_u32(body ? body->read_effect_count : 0),
       loom_param_u32(body ? body->write_effect_count : 0),
       loom_param_u32(body ? body->convergent_effect_count : 0),
@@ -479,14 +519,23 @@ void loom_verify_func_purity_body_effects(loom_verify_state_t* state,
                               IREE_ARRAYSIZE(params));
 }
 
-void loom_verify_call_purity(loom_verify_state_t* state, const loom_op_t* op,
-                             const loom_op_vtable_t* vtable) {
+void loom_verify_call_effect_contract(loom_verify_state_t* state,
+                                      const loom_op_t* op,
+                                      const loom_op_vtable_t* vtable) {
   const loom_call_like_vtable_t* call_vtable = vtable->call_like;
-  if (!call_vtable || call_vtable->purity_attr_index == LOOM_ATTR_INDEX_NONE) {
+  if (!call_vtable ||
+      call_vtable->effect_contract_attr_index == LOOM_ATTR_INDEX_NONE) {
     return;
   }
   const loom_attribute_t* attrs = loom_op_const_attrs(op);
-  if (loom_attr_as_enum(attrs[call_vtable->purity_attr_index]) == 0) {
+  const loom_callable_effect_contract_t contract =
+      (loom_callable_effect_contract_t)loom_attr_as_enum(
+          attrs[call_vtable->effect_contract_attr_index]);
+  if (contract == 0) {
+    return;
+  }
+  if (contract != LOOM_CALLABLE_EFFECT_CONTRACT_PURE &&
+      contract != LOOM_CALLABLE_EFFECT_CONTRACT_READONLY) {
     return;
   }
 
@@ -501,16 +550,21 @@ void loom_verify_call_purity(loom_verify_state_t* state, const loom_op_t* op,
   if (!symbol->defining_op) {
     return;
   }
-  const loom_func_like_t function =
-      loom_func_like_const_cast(state->module, symbol->defining_op);
-  if (!loom_func_like_isa(function) ||
-      loom_callable_effects_is_pure(function)) {
+  const loom_callable_effect_contract_t callee_contract =
+      loom_callable_effects_classify_function(
+          state->module,
+          loom_func_like_cast(state->module, symbol->defining_op));
+  if (loom_callable_effects_contract_satisfies(callee_contract, contract)) {
     return;
   }
 
   const iree_string_view_t callee_name = loom_verify_symbol_name(state, callee);
+  const iree_string_view_t contract_name =
+      contract == LOOM_CALLABLE_EFFECT_CONTRACT_PURE ? IREE_SV("pure")
+                                                     : IREE_SV("readonly");
   const loom_diagnostic_param_t params[] = {
-      loom_param_string(callee_name),
+      loom_param_string(loom_op_vtable_name(vtable)),
+      loom_param_string(contract_name),
       loom_param_string(callee_name),
   };
   const loom_diagnostic_related_op_t related_ops[] = {{
@@ -733,6 +787,18 @@ static void loom_verify_predicate_list_attr(loom_verify_state_t* state,
          ++argument_index) {
       uint8_t tag = predicate->arg_tags[argument_index];
       if (tag > LOOM_PRED_ARG_NONE && tag < LOOM_PRED_ARG_COUNT_) {
+        if (tag == LOOM_PRED_ARG_VALUE &&
+            (predicate->args[argument_index] < 0 ||
+             predicate->args[argument_index] > UINT32_MAX ||
+             (loom_value_id_t)predicate->args[argument_index] >=
+                 state->module->values.count)) {
+          loom_diagnostic_param_t params[] = {
+              loom_param_u32((uint32_t)predicate->args[argument_index]),
+              loom_param_u32((uint32_t)state->module->values.count),
+          };
+          loom_verify_emit_structured(state, op, LOOM_ERR_DOMINANCE_003, params,
+                                      IREE_ARRAYSIZE(params));
+        }
         continue;
       }
       loom_diagnostic_param_t params[] = {
@@ -753,7 +819,7 @@ static void loom_verify_predicate_list_attr(loom_verify_state_t* state,
     uint8_t constrained_argument_index = UINT8_MAX;
     int64_t constrained_argument_value = 0;
     iree_string_view_t expected_constraint = iree_string_view_empty();
-    if (predicate->kind == LOOM_PREDICATE_MUL &&
+    if (predicate->kind == LOOM_PREDICATE_MULTIPLE_OF &&
         predicate->arg_count == expected_argument_count &&
         predicate->arg_tags[1] == LOOM_PRED_ARG_CONST &&
         predicate->args[1] <= 0) {
@@ -1585,6 +1651,7 @@ static iree_string_view_t loom_verify_encoding_attr_kind_name(
       [LOOM_ATTR_I64] = IREE_SVL("integer"),
       [LOOM_ATTR_F64] = IREE_SVL("float"),
       [LOOM_ATTR_STRING] = IREE_SVL("string"),
+      [LOOM_ATTR_STRING_ARRAY] = IREE_SVL("string array"),
       [LOOM_ATTR_BOOL] = IREE_SVL("boolean"),
       [LOOM_ATTR_ENUM] = IREE_SVL("enum"),
       [LOOM_ATTR_I64_ARRAY] = IREE_SVL("integer array"),
@@ -2180,18 +2247,6 @@ static bool loom_verify_op_is_terminator(loom_verify_state_t* state,
   return vtable && iree_any_bit_set(vtable->traits, LOOM_TRAIT_TERMINATOR);
 }
 
-static bool loom_verify_region_terminator_matches(
-    const loom_region_descriptor_t* region_descriptor,
-    const loom_op_t* terminator) {
-  if (!terminator) {
-    return false;
-  }
-  if (region_descriptor->terminator == LOOM_OP_KIND_UNKNOWN) {
-    return true;
-  }
-  return terminator->kind == region_descriptor->terminator;
-}
-
 bool loom_verify_region_entry_yield(
     loom_verify_state_t* state, const loom_op_t* op,
     const loom_op_vtable_t* vtable, uint8_t region_index,
@@ -2216,7 +2271,8 @@ bool loom_verify_region_entry_yield(
   const loom_block_t* entry = loom_region_const_entry_block(region);
   const loom_op_t* terminator = loom_verify_block_last_live_op(entry);
   if (terminator && loom_verify_op_is_terminator(state, terminator) &&
-      loom_verify_region_terminator_matches(region_descriptor, terminator)) {
+      loom_region_descriptor_matches_terminator(region_descriptor,
+                                                terminator->kind)) {
     *out_yield_count = terminator->operand_count;
     if (out_yield_operands) {
       *out_yield_operands = loom_op_const_operands(terminator);

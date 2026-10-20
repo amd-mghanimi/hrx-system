@@ -1,10 +1,6 @@
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
-// Independent dispatches share one threading edit and one cleanup.
+// Each selected dispatch removes its redundant comparison and failure edge.
 func.def @independent_conditional_edges(%x: i32, %y: i32, %value: i32) -> (i32) {
   cfg.br ^check_0
 ^check_0:
@@ -44,19 +40,36 @@ func.def @independent_conditional_edges(%x: i32, %y: i32, %value: i32) -> (i32) 
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"edges-forwarded":3,*
-CHECK: *"blocks-removed":3,*
+func.def @independent_conditional_edges(%x: i32, %y: i32, %value: i32) -> (i32) {
+  %key_0 = scalar.constant 0 : i32
+  %choose_0 = scalar.cmpi eq, %x, %key_0 : i32
+  cfg.cond_br %choose_0, ^selected_0, ^check_1
+^check_1:
+  %key_1 = scalar.constant 1 : i32
+  %choose_1 = scalar.cmpi eq, %x, %key_1 : i32
+  cfg.cond_br %choose_1, ^selected_1, ^check_2
+^check_2:
+  %key_2 = scalar.constant 2 : i32
+  %choose_2 = scalar.cmpi eq, %x, %key_2 : i32
+  cfg.cond_br %choose_2, ^selected_2, ^other
+^selected_2:
+  %result_2 = scalar.addi %value, %key_2 : i32
+  func.return %result_2 : i32
+^selected_1:
+  %result_1 = scalar.addi %value, %key_1 : i32
+  func.return %result_1 : i32
+^selected_0:
+  %result_0 = scalar.addi %value, %key_0 : i32
+  func.return %result_0 : i32
+^other:
+  func.return %y : i32
+}
 
 // ====
 
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
-// Independent dispatches share one threading edit and one cleanup.
+// Each selected dispatch removes its redundant comparison and failure edge.
 func.def @independent_payload_edges(%x: i32, %y: i32, %value: i32) -> (i32) {
   cfg.br ^check_0
 ^check_0:
@@ -102,9 +115,30 @@ func.def @independent_payload_edges(%x: i32, %y: i32, %value: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"iterations":4,*
-CHECK: *"edges-forwarded":3,*
-CHECK: *"blocks-removed":3,*
+func.def @independent_payload_edges(%x: i32, %y: i32, %value: i32) -> (i32) {
+  %key_0 = scalar.constant 0 : i32
+  %choose_0 = scalar.cmpi eq, %x, %key_0 : i32
+  cfg.cond_br %choose_0, ^selected_0, ^check_1
+^check_1:
+  %key_1 = scalar.constant 1 : i32
+  %choose_1 = scalar.cmpi eq, %x, %key_1 : i32
+  cfg.cond_br %choose_1, ^selected_1, ^check_2
+^check_2:
+  %key_2 = scalar.constant 2 : i32
+  %choose_2 = scalar.cmpi eq, %x, %key_2 : i32
+  cfg.cond_br %choose_2, ^selected_2, ^other
+^selected_2:
+  %result_2 = scalar.addi %value, %key_2 : i32
+  func.return %result_2 : i32
+^selected_1:
+  %result_1 = scalar.addi %value, %key_1 : i32
+  func.return %result_1 : i32
+^selected_0:
+  %result_0 = scalar.addi %value, %key_0 : i32
+  func.return %result_0 : i32
+^other:
+  func.return %y : i32
+}
 
 // ====
 

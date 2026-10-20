@@ -1,0 +1,154 @@
+func.def @arithmetic(%a: i32, %b: i32, %c: i32) -> (i32) {
+  %sum = scalar.addi %a, %b : i32
+  %scaled = scalar.muli %sum, %c : i32
+  %result = scalar.subi %scaled, %b : i32
+  func.return %result : i32
+}
+
+func.def @swap(%a: i64, %b: i64) -> (i64, i64) {
+  func.return %b, %a : i64, i64
+}
+
+// A return cycle must preserve values already in their ABI destination. The
+// parallel-move solver elides identity moves before requesting cycle scratch.
+func.def @swap_preserving_middle(%a: i64, %b: i64, %c: i64) -> (i64, i64, i64) {
+  func.return %c, %b, %a : i64, i64, i64
+}
+
+func.def @passthrough(%a: i64, %b: i64) -> (i64, i64) {
+  func.return %a, %b : i64, i64
+}
+
+func.def @empty() {
+  func.return
+}
+
+func.def @mixed(%a: i32, %b: i64) -> (i64, i32) {
+  func.return %b, %a : i64, i32
+}
+
+func.def @fanout(%a: i64, %b: i64) -> (i64, i64, i64) {
+  func.return %a, %a, %b : i64, i64, i64
+}
+
+func.def @constant_bits() -> (i32, i64, i64, i32) {
+  %narrow = scalar.constant -1 : i32
+  %wide = scalar.constant 4294967297 : i64
+  %minimum = scalar.constant -9223372036854775808 : i64
+  %c0 = scalar.constant 0 : i32
+  func.return %narrow, %wide, %minimum, %c0 : i32, i64, i64, i32
+}
+
+// Return values preserve loaded and argument payloads across conditional paths.
+func.def @loaded_or_argument(%input: buffer, %load: i1, %fallback: i32) -> (i32) {
+  %origin = index.constant 0 : offset
+  %view = buffer.view %input[%origin] : buffer -> view<1xi32>
+  %result = scf.if %load -> (i32) {
+    %value = view.load %view[0] : view<1xi32> -> i32
+    scf.yield %value : i32
+  } else {
+    scf.yield %fallback : i32
+  }
+  func.return %result : i32
+}
+
+func.def @wide_loaded_or_argument(%input: buffer, %load: i1, %fallback: i64) -> (i64) {
+  %origin = index.constant 0 : offset
+  %view = buffer.view %input[%origin] : buffer -> view<1xi64>
+  %result = scf.if %load -> (i64) {
+    %value = view.load %view[0] : view<1xi64> -> i64
+    scf.yield %value : i64
+  } else {
+    scf.yield %fallback : i64
+  }
+  func.return %result : i64
+}
+
+func.def @mixed_returns(%input: buffer, %load: i1, %integer: i32, %real: f32, %tag: i32) -> (i32, f32, i32) {
+  %origin = index.constant 0 : offset
+  %integers = buffer.view %input[%origin] : buffer -> view<2xi32>
+  %reals = buffer.view %input[%origin] : buffer -> view<2xf32>
+  %result_integer, %result_real = scf.if %load -> (i32, f32) {
+    %loaded_integer = view.load %integers[0] : view<2xi32> -> i32
+    %loaded_real = view.load %reals[1] : view<2xf32> -> f32
+    scf.yield %loaded_integer, %loaded_real : i32, f32
+  } else {
+    scf.yield %integer, %real : i32, f32
+  }
+  func.return %result_integer, %result_real, %tag : i32, f32, i32
+}
+
+func.def @predicate_return(%input: buffer, %load: i1, %fallback: i1) -> (i1) {
+  %origin = index.constant 0 : offset
+  %view = buffer.view %input[%origin] : buffer -> view<1xi32>
+  %result = scf.if %load -> (i1) {
+    %value = view.load %view[0] : view<1xi32> -> i32
+    %threshold = scalar.constant 0 : i32
+    %positive = scalar.cmpi slt, %threshold, %value : i32
+    scf.yield %positive : i1
+  } else {
+    scf.yield %fallback : i1
+  }
+  func.return %result : i1
+}
+
+// Observes scalar arithmetic and the full family of ordinary call signatures
+// without exposing any trial values to target specialization.
+func.def export("call_value_artifact") @call_value_observations(%input: buffer, %a: i64, %b: i64, %c: i64, %word_output: buffer, %wide_output: buffer, %return_word_output: buffer) {
+  %a_word = scalar.trunci %a : i64 to i32
+  %b_word = scalar.trunci %b : i64 to i32
+  %c_word = scalar.trunci %c : i64 to i32
+  %c_real = scalar.bitcast %c_word : i32 to f32
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %load_bits = scalar.andi %a_word, %c1 : i32
+  %load = scalar.cmpi ne, %load_bits, %c0 : i32
+  %origin = index.constant 0 : offset
+  %arithmetic = func.call @arithmetic(%a_word, %b_word, %c_word) : (i32, i32, i32) -> (i32)
+  %swap0, %swap1 = func.call @swap(%a, %b) : (i64, i64) -> (i64, i64)
+  %again0, %again1 = func.call @swap(%swap0, %swap1) : (i64, i64) -> (i64, i64)
+  %middle0, %middle1, %middle2 = func.call @swap_preserving_middle(%a, %b, %c) : (i64, i64, i64) -> (i64, i64, i64)
+  %pass0, %pass1 = func.call @passthrough(%a, %b) : (i64, i64) -> (i64, i64)
+  func.call @empty() : ()
+  %mixed0, %mixed1 = func.call @mixed(%a_word, %b) : (i32, i64) -> (i64, i32)
+  %fanout0, %fanout1, %fanout2 = func.call @fanout(%a, %b) : (i64, i64) -> (i64, i64, i64)
+  %constant0, %constant1, %constant2, %constant3 = func.call @constant_bits() : () -> (i32, i64, i64, i32)
+  %return0 = func.call @loaded_or_argument(%input, %load, %b_word) : (buffer, i1, i32) -> (i32)
+  %wide_return = func.call @wide_loaded_or_argument(%input, %load, %b) : (buffer, i1, i64) -> (i64)
+  %return_integer, %return_real, %return_tag = func.call @mixed_returns(%input, %load, %b_word, %c_real, %a_word) : (buffer, i1, i32, f32, i32) -> (i32, f32, i32)
+  %return_real_bits = scalar.bitcast %return_real : f32 to i32
+  %returned_predicate = func.call @predicate_return(%input, %load, %load) : (buffer, i1, i1) -> (i1)
+  %predicate_word = scalar.extui %returned_predicate : i1 to i32
+  %word_values = vector.from_elements %arithmetic, %mixed1, %constant0, %constant3 : vector<4xi32>
+  %wide_values = vector.from_elements %swap0, %swap1, %again0, %again1, %middle0, %middle1, %middle2, %pass0, %pass1, %mixed0, %fanout0, %fanout1, %fanout2, %constant1, %constant2, %wide_return : vector<16xi64>
+  %return_word_values = vector.from_elements %return0, %return_integer, %return_real_bits, %return_tag, %predicate_word : vector<5xi32>
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<4xi32>
+  %wide_results = buffer.view %wide_output[%origin] : buffer -> view<16xi64>
+  %return_word_results = buffer.view %return_word_output[%origin] : buffer -> view<5xi32>
+  vector.store %word_values, %word_results[0] : vector<4xi32>, view<4xi32>
+  vector.store %wide_values, %wide_results[0] : vector<16xi64>, view<16xi64>
+  vector.store %return_word_values, %return_word_results[0] : vector<5xi32>, view<5xi32>
+  func.return
+}
+
+check.scenario @call_values {
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %a_source = check.entropy.fork %entropy name("a") : check.entropy
+    %b_source = check.entropy.fork %entropy name("b") : check.entropy
+    %c_source = check.entropy.fork %entropy name("c") : check.entropy
+    %a = check.entropy.read %a_source[%trial] : check.entropy -> i64
+    %b = check.entropy.read %b_source[%trial] : check.entropy -> i64
+    %c = check.entropy.read %c_source[%trial] : check.entropy -> i64
+    %input = check.generate.iota offset(17) step(19) : tensor<4xi32>
+    %word_output = check.generate.fill value(0) : tensor<4xi32>
+    %wide_output = check.generate.fill value(0) : tensor<16xi64>
+    %return_word_output = check.generate.fill value(0) : tensor<5xi32>
+    check.compare<@call_value_observations>(%input, %a, %b, %c, %word_output, %wide_output, %return_word_output) : (tensor<4xi32>, i64, i64, i64, tensor<4xi32>, tensor<16xi64>, tensor<5xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<4xi32>
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<4xi32>
+      check.expect.bitwise actual(%wide_output) expected(%wide_output) : tensor<16xi64>
+      check.expect.bitwise actual(%return_word_output) expected(%return_word_output) : tensor<5xi32>
+    }
+  }
+  check.return
+}

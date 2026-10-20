@@ -73,6 +73,31 @@ iree_py_library(
     ],
 )
 
+iree_py_library(
+    name = "barrier",
+    srcs = [
+        "__init__.py",
+        "barrier.py",
+    ],
+)
+
+iree_py_test(
+    name = "barrier_test",
+    size = "small",
+    srcs = [
+        "barrier_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.spirv.barrier_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":barrier",
+        ":descriptors",
+        "//loom/py/loom/dialect/kernel",
+        "//loom/py/loom/target:low_descriptors",
+    ],
+)
+
 iree_py_test(
     name = "atomic_test",
     size = "small",
@@ -95,6 +120,16 @@ iree_py_library(
         "__init__.py",
         "builtins.py",
     ],
+    deps = [":features"],
+)
+
+iree_py_library(
+    name = "extended_math",
+    srcs = ["extended_math.py"],
+    deps = [
+        ":features",
+        ":ordinary_vector",
+    ],
 )
 
 iree_py_library(
@@ -105,18 +140,21 @@ iree_py_library(
     ],
     deps = [
         ":atomic",
+        ":barrier",
         ":builtins",
         ":cooperative_matrix",
+        ":extended_math",
         ":features",
         ":ordinary_vector",
         ":ordinary_vector_bit_layout",
+        ":ordinary_vector_conversion",
         ":ordinary_vector_float",
         ":ordinary_vector_integer",
-        ":ordinary_vector_integer_conversion",
         ":scalar_alu",
         ":scalar_constant",
         ":scalar_conversion",
         ":scalar_memory",
+        ":subgroup",
         "//loom/py/loom:core",
         "//loom/py/loom/target:low_descriptors",
         "//loom/py/loom/target/arch:package",
@@ -143,18 +181,21 @@ iree_py_test(
     main = "pytest_style_runner.py",
     deps = [
         ":atomic",
+        ":barrier",
         ":builtins",
         ":cooperative_matrix",
         ":descriptors",
+        ":extended_math",
         ":ordinary_vector",
         ":ordinary_vector_bit_layout",
+        ":ordinary_vector_conversion",
         ":ordinary_vector_float",
         ":ordinary_vector_integer",
-        ":ordinary_vector_integer_conversion",
         ":scalar_alu",
         ":scalar_constant",
         ":scalar_conversion",
         ":scalar_memory",
+        ":subgroup",
         "//loom/py/loom:core",
         "//loom/py/loom/target:low_descriptors",
     ],
@@ -245,8 +286,8 @@ iree_py_test(
     deps = [
         ":ordinary_vector",
         ":ordinary_vector_bit_layout",
+        ":ordinary_vector_conversion",
         ":ordinary_vector_integer",
-        ":ordinary_vector_integer_conversion",
         ":scalar_conversion",
     ],
 )
@@ -280,10 +321,10 @@ iree_py_test(
 )
 
 iree_py_library(
-    name = "ordinary_vector_integer_conversion",
+    name = "ordinary_vector_conversion",
     srcs = [
         "__init__.py",
-        "ordinary_vector_integer_conversion.py",
+        "ordinary_vector_conversion.py",
     ],
     deps = [
         ":ordinary_vector",
@@ -294,18 +335,18 @@ iree_py_library(
 )
 
 iree_py_test(
-    name = "ordinary_vector_integer_conversion_test",
+    name = "ordinary_vector_conversion_test",
     size = "small",
     srcs = [
-        "ordinary_vector_integer_conversion_test.py",
+        "ordinary_vector_conversion_test.py",
         "//loom/py/loom/tools:pytest_style_runner.py",
     ],
-    args = ["loom.target.arch.spirv.ordinary_vector_integer_conversion_test"],
+    args = ["loom.target.arch.spirv.ordinary_vector_conversion_test"],
     main = "pytest_style_runner.py",
     deps = [
         ":ordinary_vector",
+        ":ordinary_vector_conversion",
         ":ordinary_vector_integer",
-        ":ordinary_vector_integer_conversion",
         ":scalar_conversion",
     ],
 )
@@ -318,6 +359,32 @@ iree_py_library(
     ],
     deps = [
         ":features",
+    ],
+)
+
+iree_py_library(
+    name = "subgroup",
+    srcs = ["subgroup.py"],
+    deps = [
+        ":features",
+        ":ordinary_vector",
+        ":ordinary_vector_integer",
+    ],
+)
+
+iree_py_test(
+    name = "subgroup_test",
+    size = "small",
+    srcs = [
+        "subgroup_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.spirv.subgroup_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":features",
+        ":ordinary_vector",
+        ":subgroup",
     ],
 )
 

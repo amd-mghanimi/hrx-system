@@ -310,6 +310,56 @@ static void loom_amdgpu_wait_memory_state_add_node(
           << LOOM_AMDGPU_WAIT_MEMORY_WRITE_COUNTER_SHIFT);
 }
 
+static void loom_amdgpu_wait_memory_states_add_node(
+    loom_amdgpu_wait_memory_state_t* conservative_state,
+    loom_amdgpu_wait_memory_state_t* refined_state,
+    const loom_amdgpu_wait_frontier_node_t* node, uint32_t read_counter_mask,
+    uint32_t write_counter_mask) {
+  const bool refines_reads = iree_any_bit_set(
+      node->flags, LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_READ);
+  const bool refines_writes = iree_any_bit_set(
+      node->flags, LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_WRITE);
+  loom_amdgpu_wait_memory_state_add_node(
+      conservative_state, node, refines_reads ? 0 : read_counter_mask,
+      refines_writes ? 0 : write_counter_mask);
+  if (refined_state != NULL) {
+    loom_amdgpu_wait_memory_state_add_node(
+        refined_state, node, refines_reads ? read_counter_mask : 0,
+        refines_writes ? write_counter_mask : 0);
+  }
+}
+
+static uint32_t loom_amdgpu_wait_memory_state_query(
+    const loom_amdgpu_wait_memory_state_t* state,
+    loom_amdgpu_wait_memory_space_flags_t space_flags,
+    loom_amdgpu_wait_memory_access_flags_t access_flags) {
+  if (state == NULL || space_flags == 0 || access_flags == 0) {
+    return 0;
+  }
+  IREE_ASSERT_EQ(
+      (uint32_t)space_flags & ~LOOM_AMDGPU_WAIT_MEMORY_SPACE_FLAG_MASK, 0u);
+  space_flags >>= LOOM_LOW_MEMORY_SPACE_GENERIC;
+  uint32_t counter_mask = 0;
+  while (space_flags != 0) {
+    const uint32_t space_index =
+        (uint32_t)iree_math_count_trailing_zeros_u32(space_flags);
+    IREE_ASSERT_LT(space_index, LOOM_AMDGPU_WAIT_MEMORY_SPACE_COUNT);
+    const uint16_t access_counter_masks =
+        state->access_counter_masks[space_index];
+    if (iree_any_bit_set(access_flags,
+                         LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ)) {
+      counter_mask |= (uint32_t)(uint8_t)access_counter_masks;
+    }
+    if (iree_any_bit_set(access_flags,
+                         LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE)) {
+      counter_mask |= (uint32_t)(access_counter_masks >>
+                                 LOOM_AMDGPU_WAIT_MEMORY_WRITE_COUNTER_SHIFT);
+    }
+    space_flags &= space_flags - 1;
+  }
+  return counter_mask;
+}
+
 static void loom_amdgpu_wait_frontier_publish_packet_storage_leases(
     const loom_amdgpu_wait_frontier_t* frontier, uint64_t* words,
     iree_host_size_t packet_index, uint32_t excluded_counter_mask,
@@ -384,6 +434,10 @@ static void loom_amdgpu_wait_frontier_build_local_states(
         frontier->memory.static_outgoing_states == NULL
             ? NULL
             : &frontier->memory.static_outgoing_states[block_index];
+    loom_amdgpu_wait_memory_state_t* refined_memory_state =
+        frontier->memory.refined_static_outgoing_states == NULL
+            ? NULL
+            : &frontier->memory.refined_static_outgoing_states[block_index];
     uint64_t* storage_lease_words =
         frontier->storage_leases.static_outgoing_words == NULL
             ? NULL
@@ -416,8 +470,12 @@ static void loom_amdgpu_wait_frontier_build_local_states(
           drain_counter_mask | completed_counter_mask;
       if (memory_state != NULL) {
         loom_amdgpu_wait_memory_state_drain(memory_state, drain_counter_mask);
-        loom_amdgpu_wait_memory_state_add_node(
-            memory_state, node,
+        if (refined_memory_state != NULL) {
+          loom_amdgpu_wait_memory_state_drain(refined_memory_state,
+                                              drain_counter_mask);
+        }
+        loom_amdgpu_wait_memory_states_add_node(
+            memory_state, refined_memory_state, node,
             node->read_counter_mask & ~completed_counter_mask,
             node->write_counter_mask & ~completed_counter_mask);
       }
@@ -559,6 +617,17 @@ static bool loom_amdgpu_wait_frontier_block_state_union_changed(
         &frontier->memory.static_outgoing_states[target_block],
         &incoming_state);
   }
+  if (frontier->memory.refined_static_outgoing_states != NULL) {
+    loom_amdgpu_wait_memory_state_t incoming_state =
+        frontier->memory.refined_static_outgoing_states[source_block];
+    loom_amdgpu_wait_memory_state_drain(&incoming_state, drain_counter_mask);
+    loom_amdgpu_wait_memory_state_t* target_state =
+        source_block < target_block
+            ? &frontier->memory.refined_static_outgoing_states[target_block]
+            : &frontier->memory.static_outgoing_states[target_block];
+    changed |= loom_amdgpu_wait_memory_state_union_changed(target_state,
+                                                           &incoming_state);
+  }
   if (frontier->storage_leases.static_outgoing_words != NULL) {
     const uint64_t* completed_words =
         frontier->storage_leases.completed_incoming_words == NULL
@@ -592,6 +661,11 @@ static bool loom_amdgpu_wait_frontier_block_state_is_empty(
   if (frontier->memory.static_outgoing_states != NULL &&
       !loom_amdgpu_wait_memory_state_is_empty(
           &frontier->memory.static_outgoing_states[block_index])) {
+    return false;
+  }
+  if (frontier->memory.refined_static_outgoing_states != NULL &&
+      !loom_amdgpu_wait_memory_state_is_empty(
+          &frontier->memory.refined_static_outgoing_states[block_index])) {
     return false;
   }
   if (frontier->storage_leases.static_outgoing_words != NULL &&
@@ -693,10 +767,18 @@ iree_status_t loom_amdgpu_wait_frontier_initialize(
   };
 
   bool has_memory_producer = false;
+  bool has_refined_memory_producer = false;
   bool has_xcnt_producer = false;
   for (iree_host_size_t i = 0; i < schedule->node_count; ++i) {
     has_memory_producer |=
         nodes[i].read_counter_mask != 0 || nodes[i].write_counter_mask != 0;
+    has_refined_memory_producer |=
+        (nodes[i].read_counter_mask != 0 &&
+         iree_any_bit_set(nodes[i].flags,
+                          LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_READ)) ||
+        (nodes[i].write_counter_mask != 0 &&
+         iree_any_bit_set(nodes[i].flags,
+                          LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_WRITE));
     has_xcnt_producer |= nodes[i].xcnt_group_flags != 0;
   }
 
@@ -765,20 +847,28 @@ iree_status_t loom_amdgpu_wait_frontier_initialize(
   }
 
   if (has_memory_producer) {
+    const iree_host_size_t memory_state_count =
+        schedule->block_count * (has_refined_memory_producer ? 2u : 1u);
     IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        arena, schedule->block_count,
+        arena, memory_state_count,
         sizeof(*out_frontier->memory.static_outgoing_states),
         (void**)&out_frontier->memory.static_outgoing_states));
     IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        arena, schedule->block_count,
+        arena, memory_state_count,
         sizeof(*out_frontier->memory.resolved_outgoing_states),
         (void**)&out_frontier->memory.resolved_outgoing_states));
     memset(out_frontier->memory.static_outgoing_states, 0,
-           schedule->block_count *
+           memory_state_count *
                sizeof(*out_frontier->memory.static_outgoing_states));
     memset(out_frontier->memory.resolved_outgoing_states, 0,
-           schedule->block_count *
+           memory_state_count *
                sizeof(*out_frontier->memory.resolved_outgoing_states));
+    if (has_refined_memory_producer) {
+      out_frontier->memory.refined_static_outgoing_states =
+          out_frontier->memory.static_outgoing_states + schedule->block_count;
+      out_frontier->memory.refined_resolved_outgoing_states =
+          out_frontier->memory.resolved_outgoing_states + schedule->block_count;
+    }
   }
   if (out_frontier->storage_leases.active_words != NULL) {
     const iree_host_size_t state_word_count =
@@ -844,6 +934,7 @@ void loom_amdgpu_wait_frontier_begin_block(
   IREE_ASSERT(block_index < frontier->schedule->block_count);
   IREE_ASSERT(frontier->active_block_index == UINT16_MAX);
   frontier->memory.active_state = (loom_amdgpu_wait_memory_state_t){0};
+  frontier->memory.refined_active_state = (loom_amdgpu_wait_memory_state_t){0};
   if (frontier->storage_leases.active_words != NULL) {
     memset(frontier->storage_leases.active_words, 0,
            frontier->storage_leases.word_count *
@@ -876,6 +967,20 @@ void loom_amdgpu_wait_frontier_begin_block(
       loom_amdgpu_wait_memory_state_union_changed(
           &frontier->memory.active_state, predecessor_state);
     }
+    if (frontier->memory.refined_static_outgoing_states != NULL) {
+      const loom_amdgpu_wait_memory_state_t* predecessor_state =
+          predecessor_resolved
+              ? &frontier->memory
+                     .refined_resolved_outgoing_states[predecessor_index]
+              : &frontier->memory
+                     .refined_static_outgoing_states[predecessor_index];
+      loom_amdgpu_wait_memory_state_t* active_state =
+          predecessor_index < block_index
+              ? &frontier->memory.refined_active_state
+              : &frontier->memory.active_state;
+      loom_amdgpu_wait_memory_state_union_changed(active_state,
+                                                  predecessor_state);
+    }
     if (frontier->storage_leases.static_outgoing_words != NULL) {
       const uint64_t* predecessor_words =
           predecessor_resolved
@@ -905,29 +1010,11 @@ uint32_t loom_amdgpu_wait_frontier_memory_query(
     loom_amdgpu_wait_memory_access_flags_t access_flags) {
   IREE_ASSERT_ARGUMENT(frontier);
   IREE_ASSERT(frontier->active_block_index < frontier->schedule->block_count);
-  if (space_flags == 0 || access_flags == 0) {
-    return 0;
-  }
-  IREE_ASSERT_EQ(
-      (uint32_t)space_flags & ~LOOM_AMDGPU_WAIT_MEMORY_SPACE_FLAG_MASK, 0u);
-  space_flags >>= LOOM_LOW_MEMORY_SPACE_GENERIC;
-  uint32_t counter_mask = 0;
-  while (space_flags != 0) {
-    const uint32_t space_index =
-        (uint32_t)iree_math_count_trailing_zeros_u32(space_flags);
-    IREE_ASSERT_LT(space_index, LOOM_AMDGPU_WAIT_MEMORY_SPACE_COUNT);
-    const uint16_t access_counter_masks =
-        frontier->memory.active_state.access_counter_masks[space_index];
-    if (iree_any_bit_set(access_flags,
-                         LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ)) {
-      counter_mask |= (uint32_t)(uint8_t)access_counter_masks;
-    }
-    if (iree_any_bit_set(access_flags,
-                         LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE)) {
-      counter_mask |= (uint32_t)(access_counter_masks >>
-                                 LOOM_AMDGPU_WAIT_MEMORY_WRITE_COUNTER_SHIFT);
-    }
-    space_flags &= space_flags - 1;
+  uint32_t counter_mask = loom_amdgpu_wait_memory_state_query(
+      &frontier->memory.active_state, space_flags, access_flags);
+  if (frontier->memory.refined_static_outgoing_states != NULL) {
+    counter_mask |= loom_amdgpu_wait_memory_state_query(
+        &frontier->memory.refined_active_state, space_flags, access_flags);
   }
   return counter_mask;
 }
@@ -937,22 +1024,37 @@ uint32_t loom_amdgpu_wait_frontier_memory_dependency_mask(
     const loom_amdgpu_wait_frontier_node_t* node) {
   IREE_ASSERT_ARGUMENT(frontier);
   IREE_ASSERT_ARGUMENT(node);
-  if (frontier->memory.static_outgoing_states == NULL ||
-      (node->read_space_flags == 0 && node->write_space_flags == 0)) {
+  if (frontier->memory.static_outgoing_states == NULL) {
     return 0;
   }
-  const uint32_t prior_writes =
-      node->read_space_flags == 0
-          ? 0
-          : loom_amdgpu_wait_frontier_memory_query(
-                frontier, node->read_space_flags,
-                LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE);
-  const uint32_t prior_reads =
-      node->write_space_flags == 0
-          ? 0
-          : loom_amdgpu_wait_frontier_memory_query(
-                frontier, node->write_space_flags,
-                LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ);
+  if (iree_any_bit_set(node->flags,
+                       LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_ORDERS_MEMORY)) {
+    return loom_amdgpu_wait_frontier_memory_query(
+        frontier,
+        loom_amdgpu_wait_memory_space_flag(LOOM_LOW_MEMORY_SPACE_GENERIC),
+        LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ |
+            LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE);
+  }
+  uint32_t prior_writes = loom_amdgpu_wait_memory_state_query(
+      &frontier->memory.active_state, node->read_space_flags,
+      LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE);
+  if (frontier->memory.refined_static_outgoing_states != NULL &&
+      !iree_any_bit_set(node->flags,
+                        LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_READ)) {
+    prior_writes |= loom_amdgpu_wait_memory_state_query(
+        &frontier->memory.refined_active_state, node->read_space_flags,
+        LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_WRITE);
+  }
+  uint32_t prior_reads = loom_amdgpu_wait_memory_state_query(
+      &frontier->memory.active_state, node->write_space_flags,
+      LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ);
+  if (frontier->memory.refined_static_outgoing_states != NULL &&
+      !iree_any_bit_set(node->flags,
+                        LOOM_AMDGPU_WAIT_FRONTIER_NODE_FLAG_REFINED_WRITE)) {
+    prior_reads |= loom_amdgpu_wait_memory_state_query(
+        &frontier->memory.refined_active_state, node->write_space_flags,
+        LOOM_AMDGPU_WAIT_MEMORY_ACCESS_FLAG_READ);
+  }
   return prior_writes | prior_reads;
 }
 
@@ -1095,6 +1197,8 @@ void loom_amdgpu_wait_frontier_drain(loom_amdgpu_wait_frontier_t* frontier,
   frontier->incoming_drain_counter_mask |= counter_mask;
   loom_amdgpu_wait_memory_state_drain(&frontier->memory.active_state,
                                       counter_mask);
+  loom_amdgpu_wait_memory_state_drain(&frontier->memory.refined_active_state,
+                                      counter_mask);
   if (frontier->storage_leases.active_words != NULL) {
     loom_amdgpu_wait_storage_lease_state_drain(
         frontier, frontier->storage_leases.active_words, counter_mask,
@@ -1114,6 +1218,13 @@ void loom_amdgpu_wait_frontier_end_block(
   if (outgoing_memory_state != NULL) {
     *outgoing_memory_state = frontier->memory.active_state;
   }
+  loom_amdgpu_wait_memory_state_t* outgoing_refined_memory_state =
+      frontier->memory.refined_resolved_outgoing_states == NULL
+          ? NULL
+          : &frontier->memory.refined_resolved_outgoing_states[block_index];
+  if (outgoing_refined_memory_state != NULL) {
+    *outgoing_refined_memory_state = frontier->memory.refined_active_state;
+  }
   uint64_t* outgoing_storage_lease_words =
       frontier->storage_leases.resolved_outgoing_words == NULL
           ? NULL
@@ -1132,7 +1243,8 @@ void loom_amdgpu_wait_frontier_end_block(
   if (outgoing_xcnt_group_flags != NULL) {
     *outgoing_xcnt_group_flags = frontier->xcnt.active_flags;
   }
-  if (outgoing_memory_state != NULL || outgoing_storage_lease_words != NULL) {
+  if (outgoing_memory_state != NULL || outgoing_refined_memory_state != NULL ||
+      outgoing_storage_lease_words != NULL) {
     const loom_low_schedule_block_t* block =
         &frontier->schedule->blocks[block_index];
     iree_host_size_t next_storage_lease_index =
@@ -1154,8 +1266,9 @@ void loom_amdgpu_wait_frontier_end_block(
         const uint32_t write_counter_mask =
             node->write_counter_mask &
             ~node->drained_after_production_counter_mask;
-        loom_amdgpu_wait_memory_state_add_node(
-            outgoing_memory_state, node, read_counter_mask, write_counter_mask);
+        loom_amdgpu_wait_memory_states_add_node(
+            outgoing_memory_state, outgoing_refined_memory_state, node,
+            read_counter_mask, write_counter_mask);
       }
       if (outgoing_storage_lease_words != NULL) {
         loom_amdgpu_wait_frontier_publish_packet_storage_leases(
@@ -1170,6 +1283,7 @@ void loom_amdgpu_wait_frontier_end_block(
         LOOM_AMDGPU_WAIT_FRONTIER_BLOCK_FLAG_RESOLVED;
   }
   frontier->memory.active_state = (loom_amdgpu_wait_memory_state_t){0};
+  frontier->memory.refined_active_state = (loom_amdgpu_wait_memory_state_t){0};
   if (frontier->storage_leases.active_words != NULL) {
     for (iree_host_size_t word_index = 0;
          word_index < frontier->storage_leases.word_count; ++word_index) {

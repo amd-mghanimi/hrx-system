@@ -82,6 +82,7 @@ iree_cc_library(
     "connection.c"
   DEPS
     ::carrier
+    ::completion_queue
     ::connection_control
     ::direct_endpoint
     iree::async

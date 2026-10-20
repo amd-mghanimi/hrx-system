@@ -105,6 +105,8 @@ loom_cc_library(
     iree::base::internal::arena
     loom::analysis::symbol_facts
     loom::analysis::symbol_references
+    loom::codegen::low::loop_execution
+    loom::codegen::low::memory_access
     loom::error::error_defs
     loom::ir
     loom::ops::func_symbol_facts
@@ -112,7 +114,6 @@ loom_cc_library(
     loom::ops::target
     loom::pass::types
     loom::rewrite::callable
-    loom::util::walk
   PUBLIC
 )
 
@@ -168,10 +169,13 @@ loom_cc_library(
   SRCS
     "function_version_projection.c"
   DEPS
+    ::facts_builder
     ::function_version
     ::provider
     iree::base
     iree::base::internal::arena
+    loom::codegen::low::loop_execution
+    loom::codegen::low::memory_access
     loom::ir
     loom::ops::op_defs
     loom::rewrite::module_projection
@@ -210,13 +214,17 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::codegen::low::loop_execution
+    loom::codegen::low::text_asm
     loom::format::text::parser
     loom::format::text::printer
     loom::ir
     loom::ops::func
+    loom::ops::low
     loom::ops::op_defs
     loom::ops::target
     loom::ops::test
+    loom::target::test::low_registry
     loom::target::test::target_record_table
     loom::testing::module_ptr
 )
@@ -387,6 +395,7 @@ loom_cc_library(
     loom::ir
     loom::ops::func_symbol_facts
     loom::ops::op_defs
+    loom::ops::target
     loom::pass::environment
     loom::pass::types
   PUBLIC
@@ -498,6 +507,7 @@ loom_cc_library(
     loom::analysis::symbol_facts
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::func_symbol_facts
     loom::ops::target
@@ -531,6 +541,7 @@ loom_cc_library(
     loom::ir
     loom::pass::environment
     loom::pass::types
+    loom::util::string_pool
   PUBLIC
 )
 
@@ -547,7 +558,7 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     loom::codegen::low::descriptors
-    loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::func
     loom::util::fact_table
@@ -619,6 +630,7 @@ loom_cc_library(
     loom::analysis::view_regions
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::buffer
     loom::ops::cfg
@@ -647,6 +659,7 @@ loom_cc_library(
     loom::codegen::low::packet
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
   PUBLIC
 )
@@ -681,6 +694,7 @@ loom_cc_library(
     ::profile
     ::resolved_target
     iree::base
+    iree::base::cpu_data
     iree::base::internal::arena
     loom::codegen::low::lower
     loom::codegen::low::verify
@@ -760,6 +774,7 @@ loom_cc_library(
     loom::ir
     loom::ops::func_symbol_facts
     loom::ops::pass
+    loom::ops::target
     loom::pass::predicate
   PUBLIC
 )
@@ -771,6 +786,7 @@ loom_cc_test(
     "provider_test.cc"
   DEPS
     ::provider
+    iree::base
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
@@ -847,6 +863,8 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::analysis::symbol_facts
+    loom::error::parameter
+    loom::error::source
     loom::format::text::parser
     loom::ir
     loom::ops::func

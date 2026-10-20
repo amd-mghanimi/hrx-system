@@ -24,6 +24,8 @@ from loom.target.contracts import (
     EmitDescriptorOp,
     Guard,
     RecipeRule,
+    SourceNode,
+    UnsupportedRule,
     ValueAliasRule,
     ValueElideRule,
     ValueRef,
@@ -34,6 +36,7 @@ from loom.target.contracts.compile import (
     CONTRACT_ROW_NONE,
     CompiledCase,
     CompiledContractFragment,
+    CompiledDescriptorMatrix,
     CompiledIndexCase,
     CompiledOpSpan,
     compile_contract_index,
@@ -56,7 +59,7 @@ def _index_fragment(op_kind: int, *rows: int) -> CompiledContractFragment:
     )
 
 
-def test_compile_index_preserves_binding_and_local_order() -> None:
+def test_compile_index_orders_priority_then_binding_and_local_order() -> None:
     first = _index_fragment(0x703, 4, 2)
     second = _index_fragment(0x703, 9)
     for fragments, rows in (
@@ -65,11 +68,22 @@ def test_compile_index_preserves_binding_and_local_order() -> None:
     ):
         index = compile_contract_index(fragments)
         assert index.dialect_base_id == 7
-        assert index.dialects == (((CONTRACT_ROW_NONE, 0),) * 3 + ((0, 3),),)
+        assert index.dialects == (((CONTRACT_ROW_NONE, 0, 0),) * 3 + ((0, 3, 3),),)
         assert index.cases == tuple(
             CompiledIndexCase(ContractSystem.VALUE_ALIAS, binding, row)
             for binding, row in rows
         )
+
+    prioritized_second = replace(
+        second,
+        cases=(replace(second.cases[0], priority=1),),
+    )
+    index = compile_contract_index((first, prioritized_second))
+    assert index.cases == (
+        CompiledIndexCase(ContractSystem.VALUE_ALIAS, 1, 9),
+        CompiledIndexCase(ContractSystem.VALUE_ALIAS, 0, 4),
+        CompiledIndexCase(ContractSystem.VALUE_ALIAS, 0, 2),
+    )
 
 
 def test_compile_index_preserves_dialect_holes_and_fragment_ordinals() -> None:
@@ -78,7 +92,7 @@ def test_compile_index_preserves_dialect_holes_and_fragment_ordinals() -> None:
     empty = replace(high, op_spans=(), cases=())
     index = compile_contract_index((high, empty, low))
     assert index.dialect_base_id == 7
-    assert index.dialects == (((CONTRACT_ROW_NONE, 0), (0, 1)), (), ((1, 1),))
+    assert index.dialects == (((CONTRACT_ROW_NONE, 0, 0), (0, 1, 1)), (), ((1, 1, 1),))
     assert [(case.binding_index, case.row_index) for case in index.cases] == [
         (2, 7),
         (0, 3),
@@ -94,6 +108,42 @@ def test_compile_index_preserves_metadata_only_rows() -> None:
     )
     assert compile_contract_index((fragment,)).cases == (
         CompiledIndexCase(ContractSystem.DESCRIPTOR_MATRIX, 0, 0),
+    )
+
+
+@pytest.mark.parametrize("target_query", [False, True])
+@pytest.mark.parametrize(
+    ("system", "row_index", "query_rule_count"),
+    [
+        (ContractSystem.DESCRIPTOR_RULE, 0, 1),
+        (ContractSystem.DESCRIPTOR_RULE_LOWERING_ONLY, 0, 0),
+        (ContractSystem.VALUE_ALIAS, 0, 1),
+        (ContractSystem.VALUE_ALIAS, CONTRACT_ROW_NONE, 0),
+        (ContractSystem.VALUE_ELIDE, 0, 1),
+        (ContractSystem.VALUE_ELIDE, CONTRACT_ROW_NONE, 0),
+        (ContractSystem.RECIPE_RULE, 0, 1),
+        (ContractSystem.RECIPE_RULE, CONTRACT_ROW_NONE, 0),
+        (ContractSystem.SOURCE_MEMORY, CONTRACT_ROW_NONE, 0),
+        (ContractSystem.ENVIRONMENT, CONTRACT_ROW_NONE, 0),
+        (ContractSystem.DESCRIPTOR_MATRIX, 0, 0),
+        (ContractSystem.UNSUPPORTED, CONTRACT_ROW_NONE, 0),
+    ],
+)
+def test_compile_index_counts_only_target_query_lower_rules(
+    system: ContractSystem, target_query: bool, row_index: int, query_rule_count: int
+) -> None:
+    fragment = replace(
+        _index_fragment(0x703, 0),
+        target_contract_query=target_query,
+        cases=(CompiledCase(system, row_index),),
+        descriptor_rules=(CompiledDescriptorRule(0),),
+        descriptor_matrices=(CompiledDescriptorMatrix("vector_mma"),),
+    )
+    entry = compile_contract_index((fragment,)).dialects[0][3]
+    assert (entry.case_start, entry.case_count, entry.query_rule_count) == (
+        0,
+        1,
+        query_rule_count if target_query else 0,
     )
 
 
@@ -177,10 +227,13 @@ def test_compile_contract_fragment_uses_supplied_descriptor_rule_rows() -> None:
             DescriptorRule(
                 source_op=vector.vector_reduce,
                 descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+                guards=(Guard.value_no_uses("result"),),
             ),
             DescriptorRule(
                 source_op=vector.vector_addi,
                 descriptor=TEST_LOW_ADD_V4I32_DESCRIPTOR,
+                guards=(Guard.value_no_uses("result"),),
+                target_query=False,
             ),
         ],
     )
@@ -199,11 +252,84 @@ def test_compile_contract_fragment_uses_supplied_descriptor_rule_rows() -> None:
     addi_span = spans_by_name["vector.addi"]
     reduce_span = spans_by_name["vector.reduce"]
     assert addi_span.case_start == 0
+    assert (
+        compiled.cases[addi_span.case_start].system
+        is ContractSystem.DESCRIPTOR_RULE_LOWERING_ONLY
+    )
     assert compiled.cases[addi_span.case_start].row_index == 1
     assert compiled.descriptor_rules[1].rule_index == 2
     assert reduce_span.case_start == 1
     assert compiled.cases[reduce_span.case_start].row_index == 0
     assert compiled.descriptor_rules[0].rule_index == 9
+
+
+@pytest.mark.parametrize(
+    ("fragment_query", "rule_query", "emitted"),
+    [(True, True, True), (False, True, True), (True, False, True), (True, True, False)],
+)
+def test_compile_contract_fragment_tracks_query_visible_source_graphs(
+    fragment_query: bool, rule_query: bool, emitted: bool
+) -> None:
+    graph_rule = DescriptorRule(
+        source_op=scalar_arithmetic.scalar_muli,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+        source_nodes=(
+            SourceNode.adjacent_definition(
+                "producer",
+                source_op=scalar_arithmetic.scalar_addi,
+                parent_operand=ValueRef.operand("lhs"),
+                node_result=ValueRef.result("result"),
+            ),
+            SourceNode.adjacent_definition(
+                "nested_producer",
+                source_op=scalar_arithmetic.scalar_subi,
+                parent="producer",
+                parent_operand=ValueRef.operand("lhs"),
+                node_result=ValueRef.result("result"),
+            ),
+            SourceNode.adjacent_unique_user(
+                "consumer",
+                source_op=scalar_arithmetic.scalar_addi,
+                parent_result=ValueRef.result("result"),
+                node_operand=ValueRef.operand("lhs"),
+                guards=(Guard.value_no_uses("result"),),
+            ),
+        ),
+        target_query=rule_query,
+    )
+    fragment = ContractFragment(
+        name="test-low.query-source-graph",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        cases=(graph_rule,),
+        target_contract_query=fragment_query,
+    )
+    compiled = compile_contract_fragment(
+        fragment,
+        dialect_ops={"scalar": ALL_SCALAR_OPS},
+        descriptor_rule_rows={0: CompiledDescriptorRule(0)} if emitted else {},
+        lower_rule_indices={0: 0} if emitted else {},
+    )
+    if fragment_query and rule_query and emitted:
+        # Include roots, nested definitions, and users, deduplicated by kind.
+        assert compiled.source_graph_op_kinds == tuple(
+            sorted(
+                (op.group.dialect_id << 8) | ALL_SCALAR_OPS.index(op)
+                for op in (
+                    scalar_arithmetic.scalar_addi,
+                    scalar_arithmetic.scalar_subi,
+                    scalar_arithmetic.scalar_muli,
+                )
+            )
+        )
+    else:
+        assert compiled.source_graph_op_kinds == ()
+    if emitted:
+        expected_system = (
+            ContractSystem.DESCRIPTOR_RULE
+            if rule_query
+            else ContractSystem.DESCRIPTOR_RULE_LOWERING_ONLY
+        )
+        assert compiled.cases[0].system is expected_system
 
 
 def test_compile_contract_fragment_orders_cases_by_priority() -> None:
@@ -214,15 +340,18 @@ def test_compile_contract_fragment_orders_cases_by_priority() -> None:
             DescriptorRule(
                 source_op=vector.vector_addi,
                 descriptor=TEST_LOW_ADD_V4I32_DESCRIPTOR,
+                guards=(Guard.value_no_uses("result"),),
             ),
             DescriptorRule(
                 source_op=vector.vector_addi,
                 descriptor=TEST_LOW_ADD_V4I32_DESCRIPTOR,
+                guards=(Guard.value_no_uses("result"),),
                 priority=2,
             ),
             DescriptorRule(
                 source_op=vector.vector_addi,
                 descriptor=TEST_LOW_ADD_V4I32_DESCRIPTOR,
+                guards=(Guard.value_no_uses("result"),),
                 priority=2,
             ),
         ],
@@ -241,6 +370,7 @@ def test_compile_contract_fragment_orders_cases_by_priority() -> None:
 
     assert compiled.op_spans[0].case_count == 3
     assert [row.row_index for row in compiled.cases] == [1, 2, 0]
+    assert [row.priority for row in compiled.cases] == [2, 2, 0]
     assert [row.rule_index for row in compiled.descriptor_rules] == [10, 11, 12]
 
 
@@ -300,6 +430,27 @@ def test_compile_contract_fragment_records_recipe_cases() -> None:
     assert addi_span.case_count == 1
     assert compiled.cases[0].system == ContractSystem.RECIPE_RULE
     assert compiled.cases[0].row_index == 11
+
+
+def test_compile_contract_fragment_records_explicit_unsupported_cases() -> None:
+    table = ContractFragment(
+        name="test-low.unsupported",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        cases=[UnsupportedRule(source_op=vector.vector_fptrunc)],
+    )
+
+    compiled = compile_contract_fragment(
+        table,
+        dialect_ops={"vector": ALL_VECTOR_OPS},
+        descriptor_rule_rows={},
+        lower_rule_indices={},
+    )
+
+    assert compiled.op_spans[0].op_name == "vector.fptrunc"
+    assert compiled.op_spans[0].case_count == 1
+    assert compiled.cases == (
+        CompiledCase(ContractSystem.UNSUPPORTED, CONTRACT_ROW_NONE),
+    )
 
 
 def test_compile_contract_fragment_records_descriptor_matrix_cases() -> None:

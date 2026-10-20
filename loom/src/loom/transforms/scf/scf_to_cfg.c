@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
@@ -24,6 +25,7 @@
 #include "loom/rewrite/remap.h"
 #include "loom/rewrite/rewriter.h"
 #include "loom/target/function_version.h"
+#include "loom/util/predicate_facts.h"
 
 //===----------------------------------------------------------------------===//
 // Statistics
@@ -513,59 +515,14 @@ static iree_status_t loom_scf_to_cfg_lower_if(
 // scf.for
 //===----------------------------------------------------------------------===//
 
-// Keep materialized IV facts compact. Very wide dynamic ranges remain true in
-// the structured source, but printing them after CFG lowering would obscure the
-// control flow without helping target address legality.
-#define LOOM_SCF_TO_CFG_MATERIALIZED_IV_RANGE_MAX UINT32_MAX
 #define LOOM_SCF_TO_CFG_FOR_IV_PREDICATE_CAPACITY 4
-
-static uint16_t loom_scf_to_cfg_for_iv_predicates_from_facts(
-    loom_value_id_t value, loom_value_facts_t facts,
-    loom_predicate_t* predicates) {
-  if (value == LOOM_VALUE_ID_INVALID || loom_value_facts_is_float(facts) ||
-      loom_value_facts_is_unknown(facts)) {
-    return 0;
-  }
-
-  uint16_t count = 0;
-  if (loom_value_facts_is_exact(facts)) {
-    predicates[count++] = (loom_predicate_t){
-        .kind = LOOM_PREDICATE_EQ,
-        .arg_count = 2,
-        .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
-                     LOOM_PRED_ARG_NONE},
-        .args = {value, facts.range_lo, 0},
-    };
-  } else if (facts.range_hi >= facts.range_lo &&
-             facts.range_hi <= LOOM_SCF_TO_CFG_MATERIALIZED_IV_RANGE_MAX) {
-    predicates[count++] = (loom_predicate_t){
-        .kind = LOOM_PREDICATE_RANGE,
-        .arg_count = 3,
-        .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
-                     LOOM_PRED_ARG_CONST},
-        .args = {value, facts.range_lo, facts.range_hi},
-    };
-  }
-
-  if (count < LOOM_SCF_TO_CFG_FOR_IV_PREDICATE_CAPACITY &&
-      facts.known_divisor > 1 && !loom_value_facts_is_exact(facts)) {
-    predicates[count++] = (loom_predicate_t){
-        .kind = LOOM_PREDICATE_MUL,
-        .arg_count = 2,
-        .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
-                     LOOM_PRED_ARG_NONE},
-        .args = {value, facts.known_divisor, 0},
-    };
-  }
-
-  return count;
-}
 
 static bool loom_scf_to_cfg_for_iv_facts_are_materializable(
     loom_value_facts_t facts) {
   loom_predicate_t predicates[LOOM_SCF_TO_CFG_FOR_IV_PREDICATE_CAPACITY];
-  return loom_scf_to_cfg_for_iv_predicates_from_facts((loom_value_id_t)0, facts,
-                                                      predicates) > 0;
+  return loom_value_facts_export_integer_refinements(
+             (loom_value_id_t)0, loom_value_facts_unknown(), facts, predicates,
+             IREE_ARRAYSIZE(predicates)) > 0;
 }
 
 static bool loom_scf_to_cfg_value_has_exact_integer_facts(
@@ -674,8 +631,11 @@ static iree_status_t loom_scf_to_cfg_build_for_iv_assume(
   *out_iv = header_iv;
 
   loom_predicate_t predicate_storage[LOOM_SCF_TO_CFG_FOR_IV_PREDICATE_CAPACITY];
-  uint16_t predicate_count = loom_scf_to_cfg_for_iv_predicates_from_facts(
-      header_iv, original_iv_facts, predicate_storage);
+  // The structured domain disappears here. Its facts must survive on the
+  // lowered induction value, including when a bound was dynamic.
+  uint16_t predicate_count = loom_value_facts_export_integer_refinements(
+      header_iv, loom_value_facts_unknown(), original_iv_facts,
+      predicate_storage, LOOM_SCF_TO_CFG_FOR_IV_PREDICATE_CAPACITY);
   predicate_count += loom_scf_to_cfg_for_iv_bound_predicates(
       state->fact_table, header_iv, loom_scf_for_lower_bound(op),
       loom_scf_for_upper_bound(op), predicate_storage + predicate_count);
@@ -1456,6 +1416,10 @@ iree_status_t loom_scf_to_cfg_run(loom_pass_t* pass, loom_module_t* module,
 
   bool any_changed = false;
   while (iree_status_is_ok(status) && !loom_pass_has_error_diagnostics(pass)) {
+    status = loom_scf_to_cfg_collect_frontier(&state, function);
+    if (!iree_status_is_ok(status) || state.frontier.count == 0) {
+      break;
+    }
     status = loom_pass_value_facts_acquire(
         pass, module,
         loom_pass_value_fact_scope_function_for_target(
@@ -1463,10 +1427,6 @@ iree_status_t loom_scf_to_cfg_run(loom_pass_t* pass, loom_module_t* module,
             loom_target_function_version_target_facts(pass->function_version)),
         &state.fact_table);
     if (!iree_status_is_ok(status)) {
-      break;
-    }
-    status = loom_scf_to_cfg_collect_frontier(&state, function);
-    if (!iree_status_is_ok(status) || state.frontier.count == 0) {
       break;
     }
     status = loom_scf_to_cfg_lower_frontier(&state);

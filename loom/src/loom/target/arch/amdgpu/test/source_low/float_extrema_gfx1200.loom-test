@@ -1,0 +1,18 @@
+// RUN: emit source-low target=amdgpu:gfx1200 output=low
+
+func.def @float_extrema_f32(%lhs: f32, %rhs: f32) -> (f32, f32, f32, f32) {
+  %minimum = scalar.minimumf %lhs, %rhs : f32
+  %maximum = scalar.maximumf %lhs, %rhs : f32
+  %minnum = scalar.minnumf %lhs, %rhs : f32
+  %maxnum = scalar.maxnumf %lhs, %rhs : f32
+  func.return %minimum, %maximum, %minnum, %maxnum : f32, f32, f32, f32
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.core> abi(hal_kernel) @float_extrema_f32(%lhs: reg<amdgpu.vgpr>, %rhs: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  %minimum = v_minimum_f32 %lhs, %rhs
+  %maximum = v_maximum_f32 %lhs, %rhs
+  %minnum = v_min_f32 %lhs, %rhs
+  %maxnum = v_max_f32 %lhs, %rhs
+  return %minimum, %maximum, %minnum, %maxnum
+}

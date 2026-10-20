@@ -80,6 +80,46 @@ iree_status_t iree_hal_amdgpu_atomic_memory_select_source_cells(
   return iree_ok_status();
 }
 
+iree_status_t iree_hal_amdgpu_atomic_memory_query_source_cells(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t source_agent,
+    hsa_amd_memory_pool_t memory_pool, uint32_t global_flags,
+    uint32_t allocation_flags, hsa_amd_memory_pool_access_t access,
+    iree_hal_amdgpu_atomic_memory_cell_flags_t* out_cell_flags) {
+  uint32_t link_hop_count = 0;
+  hsa_amd_memory_pool_link_info_t
+      link_hops[IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS];
+  if (access != HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED) {
+    IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
+        IREE_LIBHSA(libhsa), source_agent, memory_pool,
+        HSA_AMD_AGENT_MEMORY_POOL_INFO_NUM_LINK_HOPS, &link_hop_count));
+    if (IREE_UNLIKELY(link_hop_count >
+                      IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS)) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "HSA reports %" PRIu32
+                              " link hops from HSA agent 0x%016" PRIx64
+                              " to a memory pool (maximum %u)",
+                              link_hop_count, source_agent.handle,
+                              IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS);
+    }
+    if (link_hop_count) {
+      memset(link_hops, 0, sizeof(link_hops[0]) * link_hop_count);
+      IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
+          IREE_LIBHSA(libhsa), source_agent, memory_pool,
+          HSA_AMD_AGENT_MEMORY_POOL_INFO_LINK_INFO, link_hops));
+    }
+  }
+
+  const iree_hal_amdgpu_atomic_memory_source_selection_t selection = {
+      .global_flags = global_flags,
+      .allocation_flags = allocation_flags,
+      .access = access,
+      .link_hop_count = link_hop_count,
+      .link_hops = link_hops,
+  };
+  return iree_hal_amdgpu_atomic_memory_select_source_cells(&selection,
+                                                           out_cell_flags);
+}
+
 iree_status_t iree_hal_amdgpu_atomic_memory_query_source_masks(
     const iree_hal_amdgpu_libhsa_t* libhsa,
     const iree_hal_amdgpu_topology_t* topology,
@@ -103,43 +143,11 @@ iree_status_t iree_hal_amdgpu_atomic_memory_query_source_masks(
         IREE_LIBHSA(libhsa), topology->gpu_agents[source_ordinal], memory_pool,
         HSA_AMD_AGENT_MEMORY_POOL_INFO_ACCESS, &access));
 
-    uint32_t link_hop_count = 0;
-    hsa_amd_memory_pool_link_info_t
-        link_hops[IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS];
-    if (access != HSA_AMD_MEMORY_POOL_ACCESS_NEVER_ALLOWED) {
-      IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
-          IREE_LIBHSA(libhsa), topology->gpu_agents[source_ordinal],
-          memory_pool, HSA_AMD_AGENT_MEMORY_POOL_INFO_NUM_LINK_HOPS,
-          &link_hop_count));
-      if (IREE_UNLIKELY(link_hop_count >
-                        IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS)) {
-        return iree_make_status(
-            IREE_STATUS_OUT_OF_RANGE,
-            "HSA reports %" PRIu32
-            " link hops from AMDGPU physical device %" PRIhsz
-            " to a memory pool (maximum %u)",
-            link_hop_count, source_ordinal,
-            IREE_HAL_AMDGPU_ATOMIC_MEMORY_MAX_LINK_HOPS);
-      }
-      if (link_hop_count) {
-        memset(link_hops, 0, sizeof(link_hops[0]) * link_hop_count);
-        IREE_RETURN_IF_ERROR(iree_hsa_amd_agent_memory_pool_get_info(
-            IREE_LIBHSA(libhsa), topology->gpu_agents[source_ordinal],
-            memory_pool, HSA_AMD_AGENT_MEMORY_POOL_INFO_LINK_INFO, link_hops));
-      }
-    }
-
-    const iree_hal_amdgpu_atomic_memory_source_selection_t selection = {
-        .global_flags = global_flags,
-        .allocation_flags = allocation_flags,
-        .access = access,
-        .link_hop_count = link_hop_count,
-        .link_hops = link_hops,
-    };
     iree_hal_amdgpu_atomic_memory_cell_flags_t cell_flags =
         IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_NONE;
-    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_atomic_memory_select_source_cells(
-        &selection, &cell_flags));
+    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_atomic_memory_query_source_cells(
+        libhsa, topology->gpu_agents[source_ordinal], memory_pool, global_flags,
+        allocation_flags, access, &cell_flags));
 
     const iree_hal_amdgpu_gpu_agent_mask_t source_bit =
         ((iree_hal_amdgpu_gpu_agent_mask_t)1) << source_ordinal;
@@ -346,4 +354,28 @@ iree_hal_amdgpu_atomic_memory_expand_capabilities(
               ? IREE_HAL_ATOMIC_OPERATION_FLAGS_ALL
               : IREE_HAL_ATOMIC_OPERATION_FLAG_NONE,
   };
+}
+
+iree_hal_amdgpu_atomic_memory_cell_flags_t
+iree_hal_amdgpu_atomic_memory_collapse_capabilities(
+    iree_hal_atomic_operation_capabilities_t capabilities) {
+  iree_hal_amdgpu_atomic_memory_cell_flags_t cells =
+      IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_NONE;
+  if (iree_all_bits_set(capabilities.device_scope_32,
+                        IREE_HAL_ATOMIC_OPERATION_FLAGS_ALL)) {
+    cells |= IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_DEVICE_SCOPE_32;
+  }
+  if (iree_all_bits_set(capabilities.device_scope_64,
+                        IREE_HAL_ATOMIC_OPERATION_FLAGS_ALL)) {
+    cells |= IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_DEVICE_SCOPE_64;
+  }
+  if (iree_all_bits_set(capabilities.system_scope_32,
+                        IREE_HAL_ATOMIC_OPERATION_FLAGS_ALL)) {
+    cells |= IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_SYSTEM_SCOPE_32;
+  }
+  if (iree_all_bits_set(capabilities.system_scope_64,
+                        IREE_HAL_ATOMIC_OPERATION_FLAGS_ALL)) {
+    cells |= IREE_HAL_AMDGPU_ATOMIC_MEMORY_CELL_FLAG_SYSTEM_SCOPE_64;
+  }
+  return cells;
 }

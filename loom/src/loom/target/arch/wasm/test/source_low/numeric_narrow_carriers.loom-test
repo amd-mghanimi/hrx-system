@@ -1,0 +1,208 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+// Narrow floating constants retain their source bits in integer carriers.
+func.def @narrow_float_constants() -> (f8E4M3, f8E5M2, f16, bf16) {
+  %e4_value = scalar.constant -2.0 : f8E4M3
+  %e5_zero = scalar.constant -0.0 : f8E5M2
+  %half_subnormal = scalar.constant 5.9604644775390625e-08 : f16
+  %bfloat_infinity = scalar.constant inf : bf16
+  func.return %e4_value, %e5_zero, %half_subnormal, %bfloat_infinity : f8E4M3, f8E5M2, f16, bf16
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @narrow_float_constants() -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %e4_value = i32.const 192
+  %e5_zero = i32.const 128
+  %half_subnormal = i32.const 1
+  %bfloat_infinity = i32.const 32640
+  return %e4_value, %e5_zero, %half_subnormal, %bfloat_infinity
+}
+
+// ====
+
+// Narrow integer constants use their signed source domains while occupying
+// Wasm i32 registers.
+func.def @scalar_integer_constants() -> (i8, i8, i16, i16) {
+  %byte_min = scalar.constant -128 : i8
+  %byte_max = scalar.constant 127 : i8
+  %word_min = scalar.constant -32768 : i16
+  %word_max = scalar.constant 32767 : i16
+  func.return %byte_min, %byte_max, %word_min, %word_max : i8, i8, i16, i16
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @scalar_integer_constants() -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %byte_min = i32.const -128
+  %byte_max = i32.const 127
+  %word_min = i32.const -32768
+  %word_max = i32.const 32767
+  return %byte_min, %byte_max, %word_min, %word_max
+}
+
+// ====
+
+func.def @narrow_integer_extensions(%byte: i8, %halfword: i16) -> (i16, i16, i32, i32, i64, i64, i32, i32, i64, i64) {
+  %byte_signed_halfword = scalar.extsi %byte : i8 to i16
+  %byte_unsigned_halfword = scalar.extui %byte : i8 to i16
+  %byte_signed_word = scalar.extsi %byte : i8 to i32
+  %byte_unsigned_word = scalar.extui %byte : i8 to i32
+  %byte_signed_wide = scalar.extsi %byte : i8 to i64
+  %byte_unsigned_wide = scalar.extui %byte : i8 to i64
+  %halfword_signed_word = scalar.extsi %halfword : i16 to i32
+  %halfword_unsigned_word = scalar.extui %halfword : i16 to i32
+  %halfword_signed_wide = scalar.extsi %halfword : i16 to i64
+  %halfword_unsigned_wide = scalar.extui %halfword : i16 to i64
+  func.return %byte_signed_halfword, %byte_unsigned_halfword, %byte_signed_word, %byte_unsigned_word, %byte_signed_wide, %byte_unsigned_wide, %halfword_signed_word, %halfword_unsigned_word, %halfword_signed_wide, %halfword_unsigned_wide : i16, i16, i32, i32, i64, i64, i32, i32, i64, i64
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @narrow_integer_extensions(%byte: reg<wasm.i32>, %halfword: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i64>, reg<wasm.i64>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i64>, reg<wasm.i64>) asm {
+  %63 = i32.const 255
+  %byte_unsigned_halfword = i32.and %byte, %63
+  %65 = i32.const 24
+  %66 = i32.shl %byte_unsigned_halfword, %65
+  %byte_signed_halfword = i32.shr_s %66, %65
+  %byte_signed_wide = i64.extend_i32_s %byte_signed_halfword
+  %byte_unsigned_wide = i64.extend_i32_u %byte_unsigned_halfword
+  %70 = i32.const 65535
+  %71 = i32.and %halfword, %70
+  %72 = i32.const 16
+  %73 = i32.shl %71, %72
+  %halfword_signed_word = i32.shr_s %73, %72
+  %halfword_signed_wide = i64.extend_i32_s %halfword_signed_word
+  %halfword_unsigned_wide = i64.extend_i32_u %71
+  return %byte_signed_halfword, %byte_unsigned_halfword, %byte_signed_halfword, %byte_unsigned_halfword, %byte_signed_wide, %byte_unsigned_wide, %halfword_signed_word, %71, %halfword_signed_wide, %halfword_unsigned_wide
+}
+
+// ====
+
+// Truncation changes the physical carrier only when leaving i64. Every
+// narrower non-predicate result retains the low bits of its i32 carrier.
+func.def @integer_truncations(%wide: i64, %word: i32, %half: i16) -> (i8, i16, i32, i8, i16, i8) {
+  %wide_byte = scalar.trunci %wide : i64 to i8
+  %wide_half = scalar.trunci %wide : i64 to i16
+  %wide_word = scalar.trunci %wide : i64 to i32
+  %word_byte = scalar.trunci %word : i32 to i8
+  %word_half = scalar.trunci %word : i32 to i16
+  %half_byte = scalar.trunci %half : i16 to i8
+  func.return %wide_byte, %wide_half, %wide_word, %word_byte, %word_half, %half_byte : i8, i16, i32, i8, i16, i8
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @integer_truncations(%wide: reg<wasm.i64>, %word_half: reg<wasm.i32>, %half_byte: reg<wasm.i32>) -> (reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>, reg<wasm.i32>) asm {
+  %wide_byte = i32.wrap_i64 %wide
+  return %wide_byte, %wide_byte, %wide_byte, %word_half, %word_half, %half_byte
+}
+
+// ====
+
+// Narrow floating values use unsigned integer lane payloads without conversion.
+func.def @byte_lanes(%input: vector<16xf8E4M3>, %replacement: f8E4M3, %condition: i1) -> (vector<16xi8>, f8E4M3) {
+  %last = vector.extract %input[15] : vector<16xf8E4M3> -> f8E4M3
+  %broadcast = vector.splat %last : vector<16xf8E4M3>
+  %updated = vector.insert %replacement into %broadcast[0] : f8E4M3, vector<16xf8E4M3>
+  %reversed = vector.shuffle<[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]> %input : vector<16xf8E4M3>
+  %selected = scf.select %condition, %reversed, %updated : vector<16xf8E4M3>
+  %bits = vector.bitcast %selected : vector<16xf8E4M3> to vector<16xi8>
+  func.return %bits, %last : vector<16xi8>, f8E4M3
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @byte_lanes(%input: reg<wasm.v128>, %replacement: reg<wasm.i32>, %condition: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.i32>) asm {
+  %last = i8x16.extract_lane_u %input, 15
+  %20 = i8x16.splat %last
+  %updated = i8x16.replace_lane %20, %replacement, 0
+  %reversed = i8x16.shuffle %input, %input, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
+  %bits = v128.select %reversed, %updated, %condition
+  return %bits, %last
+}
+
+// ====
+
+func.def @word_lanes(%input: vector<8xbf16>, %replacement: bf16, %condition: i1) -> (vector<8xi16>, bf16) {
+  %last = vector.extract %input[7] : vector<8xbf16> -> bf16
+  %broadcast = vector.splat %last : vector<8xbf16>
+  %updated = vector.insert %replacement into %broadcast[0] : bf16, vector<8xbf16>
+  %reversed = vector.shuffle<[7, 6, 5, 4, 3, 2, 1, 0]> %input : vector<8xbf16>
+  %selected = scf.select %condition, %reversed, %updated : vector<8xbf16>
+  %bits = vector.bitcast %selected : vector<8xbf16> to vector<8xi16>
+  func.return %bits, %last : vector<8xi16>, bf16
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @word_lanes(%input: reg<wasm.v128>, %replacement: reg<wasm.i32>, %condition: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.i32>) asm {
+  %last = i16x8.extract_lane_u %input, 7
+  %20 = i16x8.splat %last
+  %updated = i16x8.replace_lane %20, %replacement, 0
+  %reversed = i8x16.shuffle %input, %input, 14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1
+  %bits = v128.select %reversed, %updated, %condition
+  return %bits, %last
+}
+
+// ====
+
+// Integer immediates retain float payload bits, including signed zero.
+func.def @narrow_constants() -> (vector<16xi8>, vector<16xf8E4M3>, vector<16xf8E5M2>, vector<8xi16>, vector<8xf16>, vector<8xbf16>) {
+  %bytes = vector.constant -91 : vector<16xi8>
+  %e4m3 = vector.constant -2.0 : vector<16xf8E4M3>
+  %e5m2 = vector.constant -0.0 : vector<16xf8E5M2>
+  %words = vector.constant -21846 : vector<8xi16>
+  %half = vector.constant -0.0 : vector<8xf16>
+  %bfloat = vector.constant -2.0 : vector<8xbf16>
+  func.return %bytes, %e4m3, %e5m2, %words, %half, %bfloat : vector<16xi8>, vector<16xf8E4M3>, vector<16xf8E5M2>, vector<8xi16>, vector<8xf16>, vector<8xbf16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @narrow_constants() -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %18 = i32.const -91
+  %bytes = i8x16.splat %18
+  %20 = i32.const 192
+  %e4m3 = i8x16.splat %20
+  %22 = i32.const 128
+  %e5m2 = i8x16.splat %22
+  %24 = i32.const -21846
+  %words = i16x8.splat %24
+  %26 = i32.const 32768
+  %half = i16x8.splat %26
+  %28 = i32.const 49152
+  %bfloat = i16x8.splat %28
+  return %bytes, %e4m3, %e5m2, %words, %half, %bfloat
+}
+
+// ====
+
+// Changing numeric lane widths leaves the carrier bits unchanged. A 64-bit
+// lane permutation moves all eight bytes of each lane together.
+func.def @wide_lane_shuffle(%input: vector<16xi8>) -> (vector<8xf16>) {
+  %wide = vector.bitcast %input : vector<16xi8> to vector<2xf64>
+  %reversed = vector.shuffle<[1, 0]> %wide : vector<2xf64>
+  %result = vector.bitcast %reversed : vector<2xf64> to vector<8xf16>
+  func.return %result : vector<8xf16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @wide_lane_shuffle(%wide: reg<wasm.v128>) -> (reg<wasm.v128>) asm {
+  %result = i8x16.shuffle %wide, %wide, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7
+  return %result
+}
+
+// ====
+
+// Partial narrow floating and integer vectors share the same v128 payload.
+// The bitcasts remain aliases when a following descriptor consumes the value.
+func.def @partial_float_bitcast_alias(%input: vector<8xf16>) -> (vector<8xf16>) {
+  %head = vector.slice %input[0] : vector<8xf16> -> vector<3xf16>
+  %tail = vector.slice %input[3] : vector<8xf16> -> vector<5xf16>
+  %head_bits = vector.bitcast %head : vector<3xf16> to vector<3xi16>
+  %preserved_bits = vector.ori %head_bits, %head_bits : vector<3xi16>
+  %preserved = vector.bitcast %preserved_bits : vector<3xi16> to vector<3xf16>
+  %result = vector.concat<0> %preserved, %tail : vector<3xf16>, vector<5xf16> -> vector<8xf16>
+  func.return %result : vector<8xf16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_float_bitcast_alias(%head: reg<wasm.v128>) -> (reg<wasm.v128>) asm {
+  %tail = i8x16.shuffle %head, %head, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0
+  %result = i8x16.shuffle %head, %tail, 0, 1, 2, 3, 4, 5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
+  return %result
+}

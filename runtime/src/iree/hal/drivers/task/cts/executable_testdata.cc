@@ -17,7 +17,8 @@ namespace iree::hal::cts {
 static iree_const_byte_span_t GetTaskExecutableData(
     iree_string_view_t file_name) {
   if (!iree_string_view_equal(file_name,
-                              IREE_SV("command_buffer_dispatch_test.bin"))) {
+                              IREE_SV("command_buffer_dispatch_test.bin")) &&
+      !iree_string_view_equal(file_name, IREE_SV("elementwise_mul.bin"))) {
     return iree_const_byte_span_empty();
   }
 

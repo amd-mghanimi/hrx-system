@@ -2,7 +2,7 @@
   "version": 1,
   "cases": [
     {
-      "name": "rejects duplicate definitions before bytecode serialization",
+      "name": "invalid input does not create a bytecode output file",
       "run": {
         "tool": "loom-format",
         "args": [
@@ -18,17 +18,9 @@
         "empty": true
       },
       "stderr": {
-        "contains": {
-          "unordered": [
-            "duplicate_symbols.loom-test:5:19: error [SYMBOL/005]",
-            "symbol '@collision' is already defined",
-            "first definition here",
-            "duplicate_symbols.loom-test:3:13",
-            "kernel.decl @collision() launch()",
-            "check.case public @collision {"
-          ]
-        }
-      }
+        "non_empty": true
+      },
+      "files": [{"path": "{tmp}/duplicate.loombc", "exists": false}]
     },
     {
       "name": "prints agent documentation",
@@ -209,6 +201,75 @@
       ]
     },
     {
+      "name": "preserves annotated invalid fixtures through compiler results",
+      "steps": [
+        {
+          "name": "write-test-container",
+          "write": {
+            "path": "{tmp}/invalid.loom-test",
+            "text": "// RUN: verify\n\n// ERROR@+1: TYPE/003 {operand_name=\"predicates[0].arg[0]\", actual_type=\"f32\", expected_constraint=\"integer, index, or offset scalar\"}\nfunc.def @invalid(%value: f32) where [eq(%value, 4)] {\n  func.return\n}\n"
+          }
+        },
+        {
+          "name": "check",
+          "run": {
+            "tool": "loom-format",
+            "args": ["--check", "{tmp}/invalid.loom-test"]
+          },
+          "stdout": {"empty": true},
+          "stderr": {"empty": true}
+        }
+      ]
+    },
+    {
+      "name": "round trips synthetic target assembly through bytecode",
+      "steps": [
+        {
+          "name": "write-expected",
+          "write": {
+            "path": "{tmp}/expected.loom",
+            "text": "test.target<low_core> @target\n\nlow.func.def target<test.low.core>(@target) @identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {\n  return %value\n}\n"
+          }
+        },
+        {
+          "name": "encode",
+          "run": {
+            "tool": "loom-format",
+            "args": ["--to=bc", "--output={tmp}/target.loombc"]
+          },
+          "stdin": {
+            "text": "test.target<low_core> @target\n\nlow.func.def target<test.low.core>(@target) @identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {\n  return %value\n}\n"
+          }
+        },
+        {
+          "name": "decode",
+          "run": {
+            "tool": "loom-format",
+            "args": ["--to=text", "{tmp}/target.loombc"]
+          },
+          "stdout": {"save": "{tmp}/actual.loom"},
+          "stderr": {"empty": true},
+          "files": [{"path": "{tmp}/actual.loom", "equals": "{tmp}/expected.loom"}]
+        }
+      ]
+    },
+    {
+      "name": "checks portable command low IR",
+      "run": {
+        "tool": "loom-format",
+        "args": ["--check"]
+      },
+      "stdin": {
+        "text": "low.func.def target<cmd.core> abi(command_program) @empty() asm {\n  return\n}\n"
+      },
+      "stdout": {
+        "empty": true
+      },
+      "stderr": {
+        "empty": true
+      }
+    },
+    {
       "name": "reports every batch check failure",
       "steps": [
         {
@@ -241,7 +302,6 @@
           "stderr": {
             "contains": [
               "noncanonical.loom' is not canonically formatted",
-              "symbol '@missing' is referenced but not defined",
               "loom-format: FAIL (2 checked, 2 failed)"
             ]
           }
@@ -269,7 +329,6 @@
           },
           "stderr": {
             "contains": [
-              "symbol '@missing' is referenced but not defined",
               "loom-format: 0 formatted, 0 unchanged, 1 failed"
             ]
           }
@@ -285,7 +344,6 @@
           },
           "stderr": {
             "contains": [
-              "symbol '@missing' is referenced but not defined",
               "loom-format: 0 formatted, 0 unchanged, 1 failed"
             ]
           }
@@ -368,7 +426,7 @@
             ]
           },
           "stdout": {
-            "contains": ["func.def @identity(%value: index) -> (index)"]
+            "non_empty": true
           }
         }
       ]

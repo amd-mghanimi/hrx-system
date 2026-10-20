@@ -62,11 +62,12 @@
 //
 // ## NUMA mapping
 //
-// When |node_ids| are provided, each proactor's runner is pinned to the
-// corresponding NUMA node (if the runner supports affinity). When |node_ids|
-// is NULL, all runners get unspecified affinity (OS chooses). On single-node
-// systems (node_count=1), the pool degenerates to a single proactor — this is
-// the common case and works well.
+// A specified node applies to both backend-owned workers and the poll runner.
+// The default thread runner establishes affinity before polling; lazy entry
+// creation fails if affinity cannot be established. Custom runner factories
+// must honor the node, or report failure. Caller-driven polling is responsible
+// for establishing its own affinity. NULL node_ids or UINT32_MAX entries leave
+// runner placement unspecified. These constraints do not bind allocations.
 
 #ifndef IREE_ASYNC_UTIL_PROACTOR_POOL_H_
 #define IREE_ASYNC_UTIL_PROACTOR_POOL_H_
@@ -85,7 +86,8 @@ extern "C" {
 
 // Options for configuring proactor pool creation.
 typedef struct iree_async_proactor_pool_options_t {
-  // Options applied to each proactor created by the pool.
+  // Options applied to each proactor created by the pool. An explicit entry
+  // node overrides worker_affinity with that node's CPU affinity.
   iree_async_proactor_options_t proactor_options;
 
   // Optional proactor creator. NULL selects the platform-optimal creator.
@@ -119,8 +121,8 @@ typedef struct iree_async_proactor_pool_entry_t
 //
 // If |node_ids| is non-NULL, it must point to |node_count| NUMA node IDs.
 // When a runner is created on-demand, the node ID is passed to the runner
-// factory for NUMA-aware pinning. If |node_ids| is NULL, runners get no
-// affinity hint (suitable for single-node systems).
+// factory and backend workers for NUMA-aware pinning. If |node_ids| is NULL,
+// runner placement is unconstrained (suitable for single-node systems).
 //
 // The pool owns one reference to every created entry. Releasing the pool drops
 // those references and stops entries with no other owners. Entries retained by
@@ -172,8 +174,9 @@ uint32_t iree_async_proactor_pool_node_id(
 // Acquires the entry associated with |node_id|, creating it on-demand if this
 // is the first access for that node.
 //
-// An exact match returns that entry. If the pool has no exact match, the first
-// entry is returned as a fallback. The returned entry must be released with
+// A concrete node requires an exact match; otherwise returns NOT_FOUND and
+// clears the output. UINT32_MAX selects the first entry without a locality
+// constraint. Release the returned entry with
 // iree_async_proactor_pool_entry_release().
 iree_status_t iree_async_proactor_pool_acquire_for_node(
     iree_async_proactor_pool_t* pool, uint32_t node_id,
@@ -182,9 +185,10 @@ iree_status_t iree_async_proactor_pool_acquire_for_node(
 // Returns the proactor associated with the given NUMA |node_id|, creating it
 // on-demand if this is the first access for that node.
 //
-// If an exact match exists, returns that proactor. If no exact match is found
-// (e.g., the pool was created for a subset of nodes), returns the first
-// proactor in the pool as a fallback.
+// A concrete node requires an exact match; otherwise returns NOT_FOUND and
+// clears the output. UINT32_MAX selects the first entry without a locality
+// constraint. An entry with unspecified placement does not match a concrete
+// node request.
 //
 // The returned proactor is borrowed from its entry. The caller must retain the
 // aggregate pool or acquire the entry for as long as automatic progress is
@@ -198,7 +202,9 @@ void iree_async_proactor_pool_entry_retain(
     iree_async_proactor_pool_entry_t* entry);
 
 // Releases an entry reference. The final release requests its runner to stop,
-// waits for runner teardown, releases the proactor, and frees the entry.
+// relinquishes runner ownership, releases the proactor, and frees the entry.
+// An external caller waits for runner teardown. A final release from a runner
+// callback defers runner teardown until the callback and poll call return.
 void iree_async_proactor_pool_entry_release(
     iree_async_proactor_pool_entry_t* entry);
 

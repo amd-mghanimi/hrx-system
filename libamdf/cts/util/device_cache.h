@@ -7,6 +7,8 @@
 #ifndef AMDF_CTS_UTIL_DEVICE_CACHE_H_
 #define AMDF_CTS_UTIL_DEVICE_CACHE_H_
 
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "amdf/amdf.h"
@@ -23,6 +25,33 @@ class CtsDeviceCache {
     native_lifetime_ = native_lifetime;
   }
   amdf_native_lifetime_t native_lifetime() const { return native_lifetime_; }
+
+  // Optional canonical gfx target selected before any GPU is activated.
+  void SetGpuTarget(const char* target) { gpu_target_ = target; }
+  const std::string& gpu_target() const { return gpu_target_; }
+
+  // Optional exact endpoint selected before any GPU fixture activates a device.
+  void SetGpuEndpointId(amdf_endpoint_id_t id) { gpu_endpoint_id_ = id; }
+  const std::optional<amdf_endpoint_id_t>& gpu_endpoint_id() const {
+    return gpu_endpoint_id_;
+  }
+  // Resolves the runner's native allocation through passive endpoint queries.
+  // An existing opaque selection must identify the same endpoint.
+  amdf_status_t ResolveGpuEndpoint(
+      const amdf_endpoint_native_identity_t& native_identity);
+  // Applies primary GPU selection to every fixture that can activate a GPU.
+  bool IsGpuEndpointSelected(const amdf_endpoint_id_t& id) const {
+    return !gpu_endpoint_id_.has_value() ||
+           amdf_endpoint_id_is_equal(&id, &*gpu_endpoint_id_);
+  }
+
+  // Explicit second endpoint reserved by the runner for peer GPU corpora.
+  void SetGpuPeerEndpointId(amdf_endpoint_id_t id) {
+    gpu_peer_endpoint_id_ = id;
+  }
+  const std::optional<amdf_endpoint_id_t>& gpu_peer_endpoint_id() const {
+    return gpu_peer_endpoint_id_;
+  }
 
   amdf_status_t GetInstance(amdf_instance_t** out_instance);
   amdf_status_t OpenEndpoint(const amdf_endpoint_id_t& id,
@@ -65,6 +94,12 @@ class CtsDeviceCache {
 
   // Core table borrowed from the initialized CTS provider.
   const amdf_api_t* api_ = nullptr;
+  // Empty selects any endpoint; qualification can require a compiler target.
+  std::string gpu_target_;
+  // Exact enumerated identity of the primary GPU, absent for normal discovery.
+  std::optional<amdf_endpoint_id_t> gpu_endpoint_id_;
+  // Exact reserved peer identity; absence never authorizes peer discovery.
+  std::optional<amdf_endpoint_id_t> gpu_peer_endpoint_id_;
   // Native lifetime selected once by the test executable's arguments.
   amdf_native_lifetime_t native_lifetime_ = AMDF_NATIVE_LIFETIME_PROCESS;
   // Shared instance owned until all cached descendants have been released.

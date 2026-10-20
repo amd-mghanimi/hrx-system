@@ -1,0 +1,33 @@
+# Copyright 2026 The IREE Authors
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//libamdf/build_tools/bazel:cts.bzl", "amdf_cts_test_suite")
+
+package(
+    default_visibility = ["//visibility:private"],
+    features = ["layering_check"],
+    licenses = ["notice"],
+)
+
+amdf_cts_test_suite(
+    name = "file_channel",
+    srcs = ["file_channel_test.cc"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ] + select({
+        "//loom/config/target:xdna_artifacts": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//libamdf/cts/util:mapped_memory",
+        "//libamdf/cts/util:wait",
+        "//libamdf/cts/xdna:xdna_device_fixture",
+        "//libamdf/cts/xdna/programs:resident_file_channel",
+        "//libamdf/cts/xdna/util:executable",
+        "//libamdf/cts/xdna/util:execution",
+        "//libamdf/cts/xdna/util:resident_transaction",
+        "//third_party:google_test",
+    ],
+)

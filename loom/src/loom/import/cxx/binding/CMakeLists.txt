@@ -26,6 +26,25 @@ endif()
 if(LOOM_IMPORT_CXX)
 loom_cc_library(
   NAME
+    combining
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "combining.h"
+  SRCS
+    "combining.cc"
+  DEPS
+    loom::ops::combining
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
     assembly
   CXX_STANDARD
     23
@@ -40,6 +59,7 @@ loom_cc_library(
     iree::third_party::cxx_parser
     loom::error::source
     loom::format::text::parser
+    loom::import::cxx::source
     loom::import::cxx::source::attributes
     loom::import::cxx::source::error
     loom::import::cxx::symbol::names
@@ -47,6 +67,30 @@ loom_cc_library(
     loom::ir
     loom::ops::low
     loom::verify
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    async
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "async.h"
+  SRCS
+    "async.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::types
+    loom::ops::cache
+    loom::ops::kernel
   PUBLIC
 )
 endif()
@@ -65,6 +109,7 @@ loom_cc_library(
   SRCS
     "atomic.cc"
   DEPS
+    ::index_values
     iree::third_party::cxx_parser
     loom::import::cxx::source::constants
     loom::import::cxx::source::error
@@ -74,6 +119,27 @@ loom_cc_library(
     loom::ops::scalar
     loom::ops::scf
     loom::ops::view
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    buffer
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "buffer.h"
+  SRCS
+    "buffer.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::storage
   PUBLIC
 )
 endif()
@@ -92,9 +158,131 @@ loom_cc_library(
   SRCS
     "assumptions.cc"
   DEPS
+    ::predicates
+    iree::third_party::cxx_parser
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    predicates
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "predicates.h"
+  SRCS
+    "predicates.cc"
+  DEPS
     iree::third_party::cxx_parser
     loom::import::cxx::source
+    loom::import::cxx::source::attributes
     loom::import::cxx::source::constants
+    loom::import::cxx::source::expressions
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    function_contracts
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "function_contracts.h"
+  SRCS
+    "function_contracts.cc"
+  DEPS
+    ::predicates
+    ::target_requirements
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::source::expressions
+    loom::import::cxx::value::types
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    function_imports
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "function_imports.h"
+  SRCS
+    "function_imports.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    fastmath
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "fastmath.h"
+  SRCS
+    "fastmath.cc"
+  DEPS
+    ::scalar_bindings
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::ops::scalar
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    target_requirements
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "target_requirements.h"
+  SRCS
+    "target_requirements.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::constants
+    loom::import::cxx::source::error
+    loom::import::cxx::source::expressions
+    loom::ir
+    loom::ops::target
   PUBLIC
 )
 endif()
@@ -113,7 +301,9 @@ loom_cc_library(
   SRCS
     "config.cc"
   DEPS
+    ::predicates
     iree::third_party::cxx_parser
+    loom::analysis::symbol_value_constraints
     loom::import::cxx::source::attributes
     loom::import::cxx::source::error
     loom::import::cxx::source::locations
@@ -123,6 +313,159 @@ loom_cc_library(
     loom::ir
     loom::ops::config
     loom::ops::scalar
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    constexpr
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "constexpr.h"
+  SRCS
+    "constexpr.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::source::locations
+    loom::import::cxx::value::types
+    loom::ir
+    loom::ops::index
+    loom::ops::op_defs
+    loom::ops::scalar
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    constant_attributes
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "constant_attributes.h"
+  SRCS
+    "constant_attributes.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::error
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    decode
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "decode.h"
+  SRCS
+    "decode.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::types
+    loom::ir
+    loom::ops::encoding
+    loom::ops::vector
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    target_definitions
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "target_definitions.h"
+  SRCS
+    "target_definitions.cc"
+  DEPS
+    ::constant_attributes
+    iree::base
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::source::locations
+    loom::import::cxx::symbol::names
+    loom::ir
+    loom::ops::op_defs
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    encoding
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "encoding.h"
+  SRCS
+    "encoding.cc"
+  DEPS
+    ::constant_attributes
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::types
+    loom::ir
+    loom::ops::encoding
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    fragment
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "fragment.h"
+  SRCS
+    "fragment.cc"
+  DEPS
+    ::index_values
+    iree::base
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::types
+    loom::ir
+    loom::ops::encoding
+    loom::ops::vector
   PUBLIC
 )
 endif()
@@ -141,10 +484,91 @@ loom_cc_library(
   SRCS
     "shaped.cc"
   DEPS
+    ::combining
+    ::index_values
+    ::scalar_bindings
     iree::third_party::cxx_parser
     loom::import::cxx::source::error
+    loom::import::cxx::value::representation
     loom::import::cxx::value::types
+    loom::ops::combining
     loom::ops::vector
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    template_apply
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "template_apply.h"
+  SRCS
+    "template_apply.cc"
+  DEPS
+    ::function_contracts
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::symbol::names
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::signature
+    loom::import::cxx::value::types
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::template
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    template_definitions
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "template_definitions.h"
+  SRCS
+    "template_definitions.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::value::types
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    index_values
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "index_values.h"
+  SRCS
+    "index_values.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::types
+    loom::ops::index
+    loom::ops::scalar
   PUBLIC
 )
 endif()
@@ -163,18 +587,99 @@ loom_cc_library(
   SRCS
     "view.cc"
   DEPS
+    ::index_values
     iree::base
     iree::third_party::cxx_parser
     loom::import::cxx::source
     loom::import::cxx::source::error
     loom::import::cxx::value::representation
+    loom::import::cxx::value::storage
     loom::import::cxx::value::types
     loom::ir
     loom::ops::buffer
     loom::ops::encoding
     loom::ops::index
     loom::ops::op_defs
+    loom::ops::scalar
     loom::ops::view
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    vector_arithmetic
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "vector_arithmetic.h"
+  SRCS
+    "vector_arithmetic.cc"
+  DEPS
+    ::scalar_bindings
+    iree::base
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::types
+    loom::ops::vector
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    numeric_conversion
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "numeric_conversion.h"
+  SRCS
+    "numeric_conversion.cc"
+  DEPS
+    iree::base
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::scalar
+    loom::import::cxx::value::types
+    loom::import::cxx::value::vector
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    vector_memory
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "vector_memory.h"
+  SRCS
+    "vector_memory.cc"
+  DEPS
+    ::index_values
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::error
+    loom::import::cxx::value::representation
+    loom::import::cxx::value::types
+    loom::ops::vector
   PUBLIC
 )
 endif()
@@ -193,6 +698,7 @@ loom_cc_library(
   SRCS
     "check.cc"
   DEPS
+    ::launch
     iree::third_party::cxx_parser
     loom::import::cxx::source::attributes
     loom::import::cxx::value::types
@@ -214,13 +720,38 @@ loom_cc_library(
   SRCS
     "kernel.cc"
   DEPS
+    ::combining
     iree::third_party::cxx_parser
     loom::import::cxx::source::error
     loom::import::cxx::value::types
     loom::ir::facts
     loom::ops::atomic
+    loom::ops::combining
     loom::ops::index
     loom::ops::kernel
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    target
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "target.h"
+  SRCS
+    "target.cc"
+  DEPS
+    iree::third_party::cxx_parser
+    loom::import::cxx::source::error
+    loom::import::cxx::value::types
+    loom::ops::index
+    loom::ops::target
   PUBLIC
 )
 endif()
@@ -240,17 +771,33 @@ loom_cc_library(
     "intrinsics.cc"
   DEPS
     ::assembly
+    ::async
     ::atomic
+    ::buffer
     ::check
+    ::decode
+    ::encoding
+    ::fragment
+    ::function_contracts
+    ::index_values
     ::kernel
+    ::launch
+    ::numeric_conversion
     ::scalar_bindings
     ::shaped
+    ::target
+    ::template_apply
+    ::vector_arithmetic
+    ::vector_memory
     ::view
     iree::third_party::cxx_parser
     loom::import::cxx::source
     loom::import::cxx::source::attributes
     loom::import::cxx::source::error
+    loom::import::cxx::source::locations
+    loom::import::cxx::symbol::names
     loom::import::cxx::value::types
+    loom::ir
   PUBLIC
 )
 endif()
@@ -274,6 +821,7 @@ loom_cc_library(
     loom::import::cxx::source::attributes
     loom::import::cxx::source::error
     loom::import::cxx::symbol::names
+    loom::import::cxx::value::types
     loom::ir
     loom::ops::config
     loom::ops::index
@@ -328,6 +876,7 @@ loom_cc_library(
     loom::import::cxx::source
     loom::import::cxx::source::attributes
     loom::import::cxx::source::error
+    loom::import::cxx::value::types
     loom::ir
     loom::ops::index
     loom::ops::scalar
@@ -384,6 +933,54 @@ endif()
 if(LOOM_IMPORT_CXX)
 loom_cc_test(
   NAME
+    predicates_test
+  SRCS
+    "predicates_test.cc"
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  DEPS
+    ::predicates
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+  LABELS
+    "iree-build-requirement=loom.import.cxx"
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_test(
+  NAME
+    target_requirements_test
+  SRCS
+    "target_requirements_test.cc"
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  DEPS
+    ::target_requirements
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::third_party::cxx_parser
+    loom::import::cxx::source
+    loom::import::cxx::source::attributes
+    loom::import::cxx::source::error
+  LABELS
+    "iree-build-requirement=loom.import.cxx"
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_test(
+  NAME
     config_test
   SRCS
     "config_test.cc"
@@ -401,6 +998,29 @@ loom_cc_test(
     loom::import::cxx::value::builder_test
     loom::ops::config
     loom::ops::scalar
+  LABELS
+    "iree-build-requirement=loom.import.cxx"
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_test(
+  NAME
+    encoding_test
+  SRCS
+    "encoding_test.cc"
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  DEPS
+    ::encoding
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::third_party::cxx_parser
+    loom::import::cxx::value::builder_test
+    loom::ops::encoding
   LABELS
     "iree-build-requirement=loom.import.cxx"
 )

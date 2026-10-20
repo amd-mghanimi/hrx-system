@@ -60,6 +60,30 @@ typedef struct iree_hal_replay_dump_queue_transfer_layout_t {
   iree_host_size_t data_size;
 } iree_hal_replay_dump_queue_transfer_layout_t;
 
+// Byte ranges within a validated slab-pool construction payload.
+typedef struct iree_hal_replay_dump_pool_create_slab_layout_t {
+  // Byte offset of the queue-family access rows.
+  iree_host_size_t families_offset;
+  // Byte length of the queue-family access rows.
+  iree_host_size_t families_size;
+  // Byte offset of the owned allocation export classes.
+  iree_host_size_t owned_exports_offset;
+  // Byte length of the owned allocation export classes.
+  iree_host_size_t owned_exports_size;
+  // Byte offset of the admitted import rows.
+  iree_host_size_t imports_offset;
+  // Byte length of the admitted import rows.
+  iree_host_size_t imports_size;
+  // Byte offset of the flattened import export classes.
+  iree_host_size_t import_exports_offset;
+  // Byte length of the flattened import export classes.
+  iree_host_size_t import_exports_size;
+  // Byte offset of the pool trace name.
+  iree_host_size_t trace_name_offset;
+  // Byte length of the pool trace name.
+  iree_host_size_t trace_name_size;
+} iree_hal_replay_dump_pool_create_slab_layout_t;
+
 iree_status_t iree_hal_replay_dump_payload_length_check(
     const iree_hal_replay_file_record_t* record,
     iree_host_size_t expected_payload_length);
@@ -91,6 +115,16 @@ iree_status_t iree_hal_replay_dump_dynamic_queue_layout(
     const iree_hal_replay_file_record_t* record,
     const iree_hal_replay_dynamic_queue_object_payload_t* payload,
     iree_host_size_t* out_execution_resources_offset);
+
+iree_status_t iree_hal_replay_dump_pool_create_slab_layout(
+    const iree_hal_replay_file_record_t* record,
+    const iree_hal_replay_pool_create_slab_payload_t* payload,
+    iree_hal_replay_dump_pool_create_slab_layout_t* out_layout);
+
+iree_status_t iree_hal_replay_dump_pool_import_buffer_layout(
+    const iree_hal_replay_file_record_t* record,
+    const iree_hal_replay_pool_import_buffer_payload_t* payload,
+    iree_host_size_t* out_data_offset);
 
 iree_status_t iree_hal_replay_dump_compute_executable_load_ranges(
     const iree_hal_replay_file_record_t* record,
@@ -129,6 +163,18 @@ iree_status_t iree_hal_replay_dump_queue_payload_layout(
     const iree_hal_replay_file_record_t* record, iree_host_size_t header_size,
     uint64_t wait_semaphore_count, uint64_t signal_semaphore_count,
     uint64_t trailing_payload_length,
+    iree_hal_replay_dump_queue_payload_layout_t* out_layout);
+
+// Validates the complete reservation payload and returns its family row bytes.
+iree_status_t iree_hal_replay_dump_virtual_buffer_layout(
+    const iree_hal_replay_file_record_t* record,
+    const iree_hal_replay_virtual_buffer_create_payload_t* payload,
+    iree_host_size_t* out_families_size);
+
+// Validates a complete mapping batch and locates its timepoints and rows.
+iree_status_t iree_hal_replay_dump_queue_map_layout(
+    const iree_hal_replay_file_record_t* record,
+    const iree_hal_replay_queue_map_payload_t* payload,
     iree_hal_replay_dump_queue_payload_layout_t* out_layout);
 
 iree_status_t iree_hal_replay_dump_queue_transfer_layout(

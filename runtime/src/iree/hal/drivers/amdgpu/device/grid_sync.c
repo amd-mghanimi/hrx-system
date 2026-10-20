@@ -44,7 +44,7 @@ iree_status_t iree_hal_amdgpu_grid_sync_info_initialize(
   if (IREE_UNLIKELY(total_workgroup_count > maximum_workgroup_count)) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
-        "cooperative dispatch has %" PRIu64
+        "cooperative dispatch has %" PRIdsz
         " workgroups but the grid sync strategy supports at most %" PRIu64,
         total_workgroup_count, maximum_workgroup_count);
   }
@@ -74,7 +74,7 @@ void iree_hal_amdgpu_device_grid_sync_gws_initialize_emplace(
         initialize_kernel_args,
     uint32_t workgroup_count,
     iree_hsa_kernel_dispatch_packet_t* IREE_AMDGPU_RESTRICT dispatch_packet,
-    void* IREE_AMDGPU_RESTRICT kernarg_ptr) {
+    void* IREE_AMDGPU_RESTRICT kernarg_ptr, uint16_t* out_setup) {
   iree_hal_amdgpu_device_grid_sync_gws_initialize_kernargs_t*
       IREE_AMDGPU_RESTRICT kernargs =
           (iree_hal_amdgpu_device_grid_sync_gws_initialize_kernargs_t*)
@@ -84,7 +84,8 @@ void iree_hal_amdgpu_device_grid_sync_gws_initialize_emplace(
   const uint32_t initialize_workgroup_count[3] = {1, 1, 1};
   iree_hal_amdgpu_device_dispatch_emplace_packet(
       initialize_kernel_args, initialize_workgroup_count,
-      /*dynamic_workgroup_local_memory=*/0, dispatch_packet, kernarg_ptr);
+      /*dynamic_workgroup_local_memory=*/0, dispatch_packet, kernarg_ptr,
+      out_setup);
 }
 
 #endif  // !IREE_AMDGPU_TARGET_DEVICE

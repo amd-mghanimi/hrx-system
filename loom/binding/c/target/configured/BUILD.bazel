@@ -1,0 +1,91 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//build_tools/bazel:query.bzl", "iree_assert_dependency_boundary")
+load(
+    "//loom/build_tools/bazel:build_defs.bzl",
+    "loom_cc_library",
+    "loom_cc_test",
+)
+
+package(
+    default_visibility = ["//visibility:public"],
+    features = ["layering_check"],
+    licenses = ["notice"],  # Apache 2.0
+)
+
+loom_cc_library(
+    name = "ir",
+    srcs = ["configured_ir.c"],
+    hdrs = ["//loom/binding/c:include/loomc/target/configured_ir.h"],
+    linkstatic = True,
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/target/configured:ir_provider_set",
+    ],
+    alwayslink = True,
+)
+
+loom_cc_library(
+    name = "target",
+    srcs = ["configured_target.c"],
+    hdrs = ["//loom/binding/c:include/loomc/target/configured_target.h"],
+    linkstatic = True,
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/target/configured:provider_set",
+    ],
+    alwayslink = True,
+)
+
+loom_cc_library(
+    name = "configured",
+    srcs = ["configured.c"],
+    hdrs = ["//loom/binding/c:include/loomc/target/configured.h"],
+    linkstatic = True,
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/target/configured:compiler_provider_set",
+    ],
+    alwayslink = True,
+)
+
+# This public composition root covers the enabled compiler providers and their
+# transitive planning and emission dependencies.
+iree_assert_dependency_boundary(
+    name = "configured_has_only_core_target_dependencies",
+    allowed_dependencies = ["//loom/binding/c/target/configured:configured"],
+    forbidden_subtrees = [
+        "//loom/binding/c/target/...",
+        "//loom/src/loom/tooling/...",
+    ],
+    message = "The configured LoomC target package must depend on core target composition instead of target bindings or tooling adapters",
+    target = ":configured",
+)
+
+loom_cc_test(
+    name = "configured_ir_test",
+    srcs = ["configured_ir_test.cc"],
+    deps = [
+        ":ir",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/test:test_util",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "configured_test",
+    srcs = ["configured_test.cc"],
+    deps = [
+        ":configured",
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/target/configured:compiler_provider_set",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)

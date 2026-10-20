@@ -72,9 +72,9 @@ class AmdgpuSystemMemoryTest : public ::testing::Test {
     IREE_CHECK_OK(loom_builder_intern_string(&builder_, name, &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return (loom_symbol_ref_t){
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+    return loom_symbol_ref_t{
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -118,7 +118,8 @@ class AmdgpuSystemMemoryTest : public ::testing::Test {
     IREE_CHECK_OK(loom_low_func_def_build(
         &builder_, LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_TARGET,
         /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-        /*purity=*/0, /*inline_policy=*/0, /*allocation=*/0, /*schedule=*/0,
+        /*effect_contract=*/0, /*inline_policy=*/0, /*allocation=*/0,
+        /*schedule=*/0,
         /*descriptor_set=*/representation_contract, target, /*abi=*/0,
         loom_make_named_attr_slice(NULL, 0),
         loom_make_named_attr_slice(NULL, 0),
@@ -193,15 +194,9 @@ class AmdgpuSystemMemoryTest : public ::testing::Test {
     if (descriptor == nullptr) {
       return 0;
     }
-    const uint32_t canonical_asm_form_ordinal =
-        loom_low_descriptor_set_descriptor_view(descriptor_set_, descriptor)
-            ->canonical_asm_form_ordinal;
-    EXPECT_LT(canonical_asm_form_ordinal, descriptor_set_->asm_form_count);
-    if (canonical_asm_form_ordinal >= descriptor_set_->asm_form_count) {
-      return 0;
-    }
-    return descriptor_set_->asm_forms[canonical_asm_form_ordinal]
-        .operand_index_count;
+    EXPECT_FALSE(loom_low_descriptor_has_variadic_operands(descriptor));
+    return loom_low_descriptor_layout(descriptor_set_, descriptor)
+        ->minimum_packet_operand_count;
   }
 
   void ExpectLowConstDescriptorRef(
@@ -290,13 +285,13 @@ class AmdgpuSystemMemoryTest : public ::testing::Test {
   loom_value_id_t BuildBaseAddress() {
     loom_symbol_ref_t symbol = AddSymbol(IREE_SV("runtime_record"));
     loom_value_id_t address = LOOM_VALUE_ID_INVALID;
-    IREE_CHECK_OK(loom_amdgpu_build_data_symbol_address(
-        &builder_, descriptor_set_,
-        (loom_amdgpu_data_symbol_address_t){
-            /*.symbol=*/symbol,
-            /*.byte_offset=*/0,
-        },
-        LOOM_LOCATION_UNKNOWN, &address));
+    IREE_CHECK_OK(
+        loom_amdgpu_build_data_symbol_address(&builder_, descriptor_set_,
+                                              loom_amdgpu_data_symbol_address_t{
+                                                  .symbol = symbol,
+                                                  .byte_offset = 0,
+                                              },
+                                              LOOM_LOCATION_UNKNOWN, &address));
     return address;
   }
 

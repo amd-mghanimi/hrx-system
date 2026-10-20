@@ -33,6 +33,9 @@ typedef struct loom_cfg_condition_relation_table_builder_t {
   // Construction set store owning every root in views.
   loom_condition_relation_set_builder_t* set_builder;
 
+  // Optional semantic incidence from derived anchors to relation operands.
+  loom_cfg_condition_relation_anchor_builder_t* derived_anchors;
+
   // Solved block and edge views rewritten with published set IDs.
   loom_cfg_condition_relation_table_builder_view_t* views;
 

@@ -2,18 +2,33 @@ aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @add_i32() launch(%lhs: buffer, %rhs: buffer, %output: buffer) {
-  %lanes = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %lanes : index -> group
-  %lhs_view = buffer.view %lhs[%base] : buffer -> view<16xi32>
-  %rhs_view = buffer.view %rhs[%base] : buffer -> view<16xi32>
-  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
-  %lhs_flow = pipeline.read %lhs_view on %workers : view<16xi32>, group -> pipeline.flow<tile<16xi32>>
-  %rhs_flow = pipeline.read %rhs_view on %workers : view<16xi32>, group -> pipeline.flow<tile<16xi32>>
-  %result = pipeline.stage @add_record on %workers(%lhs_flow, %rhs_flow) : (group, pipeline.flow<tile<16xi32>>, pipeline.flow<tile<16xi32>>) -> (pipeline.flow<tile<16xi32>>)
-  pipeline.write %result to %output_view : pipeline.flow<tile<16xi32>>, view<16xi32>
-  pipeline.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 3}) @add_i32() asm {
+  %worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %worker_rank = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker = worker %workers, %worker_rank, @add_record
+  %lhs = binding 0, "read"
+  %rhs = binding 1, "read"
+  %output = binding 2, "write"
+  %lhs_sender = sender %lhs, 0 : reg<aie2p.array.sender : tile<16xi32>>
+  %worker_receiver_0 = receiver %worker, 0 : reg<aie2p.array.receiver : tile<16xi32>>
+  %lhs_channel_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %lhs_channel_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %lhs_channel = channel %lhs_sender, %worker_receiver_0, %lhs_channel_capacity, %lhs_channel_records : reg<aie2p.array.channel : tile<16xi32>>
+  %rhs_sender = sender %rhs, 0 : reg<aie2p.array.sender : tile<16xi32>>
+  %worker_receiver_1 = receiver %worker, 1 : reg<aie2p.array.receiver : tile<16xi32>>
+  %rhs_channel_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %rhs_channel_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %rhs_channel = channel %rhs_sender, %worker_receiver_1, %rhs_channel_capacity, %rhs_channel_records : reg<aie2p.array.channel : tile<16xi32>>
+  %worker_sender_2 = sender %worker, 2 : reg<aie2p.array.sender : tile<16xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<16xi32>>
+  %worker_2_channel_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %worker_2_channel_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %worker_2_channel = channel %worker_sender_2, %output_receiver, %worker_2_channel_capacity, %worker_2_channel_records : reg<aie2p.array.channel : tile<16xi32>>
+  %worker_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %worker, %worker_column, %worker_row
+  return
 }
 
 func.def target(@core_target) @add_record(%lhs: buffer, %rhs: buffer, %output: buffer) {

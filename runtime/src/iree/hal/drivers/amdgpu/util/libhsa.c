@@ -244,6 +244,10 @@ static iree_status_t iree_hal_amdgpu_libhsa_load_symbols(
 #define IREE_HAL_AMDGPU_LIBHSA_PFN(trace_category, result_type, symbol, ...) \
   IREE_RETURN_IF_ERROR(iree_dynamic_library_lookup_symbol(                   \
       library, #symbol, (void**)&out_libhsa->symbol));
+#define IREE_HAL_AMDGPU_LIBHSA_OPTIONAL_LEAK_CHECK_DISABLED_PFN( \
+    trace_category, result_type, symbol, ...)                    \
+  *(void**)&out_libhsa->symbol =                                 \
+      iree_dynamic_library_try_lookup_symbol(library, #symbol);
 #include "iree/hal/drivers/amdgpu/util/libhsa_tables.h"  // IWYU pragma: keep
   return iree_ok_status();
 }
@@ -583,6 +587,11 @@ IREE_API_EXPORT iree_status_t iree_status_from_hsa_status(
 #else
 #define IREE_HAL_AMDGPU_LIBHSA_LIBPTR(libhsa) (libhsa)->
 #endif  // IREE_HAL_AMDGPU_LIBHSA_STATIC
+
+// Blocking waits are absent from flame graphs. Their owners trace active work
+// after wakeup; a wait duration measures neither execution nor utilization.
+#define IREE_HAL_AMDGPU_LIBHSA_TRACE_ZONE_BEGIN_TRACE_NONE(...)
+#define IREE_HAL_AMDGPU_LIBHSA_TRACE_ZONE_END_TRACE_NONE(...)
 
 #if IREE_HAL_AMDGPU_LIBHSA_TRACING_MODE & \
     IREE_HAL_AMDGPU_LIBHSA_TRACE_CATEGORY_ALWAYS

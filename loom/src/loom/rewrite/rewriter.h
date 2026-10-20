@@ -80,6 +80,27 @@ typedef iree_status_t (*loom_materialize_value_fn_t)(
     loom_builder_t* builder, loom_type_t result_type,
     loom_location_id_t location, loom_value_id_t* out_value_id);
 
+// Called before an exact fold when the attached fact table has retained
+// predicate-bearing identities. The callback consumes those observations
+// through ordinary rewriter mutations before the proven fold completes.
+typedef struct loom_rewriter_pending_exact_relations_callback_t {
+  // Callback state borrowed for the call.
+  void* user_data;
+  // Optional pending-relation consumer.
+  iree_status_t (*fn)(void* user_data, loom_rewriter_t* rewriter);
+} loom_rewriter_pending_exact_relations_callback_t;
+
+// Observes operations created while rewriting an explicit source operation.
+// The callback is a cold accounting surface; ordinary rewriting leaves it
+// unset, so finalization takes only a disabled observer branch.
+typedef struct loom_rewriter_operation_creation_callback_t {
+  // Callback state borrowed for the active rewrite run.
+  void* user_data;
+  // Optional creation observer receiving the immediate rewrite source.
+  iree_status_t (*fn)(void* user_data, const loom_op_t* source_op,
+                      loom_op_t* created_op);
+} loom_rewriter_operation_creation_callback_t;
+
 typedef struct loom_rewriter_cfg_region_t loom_rewriter_cfg_region_t;
 
 struct loom_rewriter_t {
@@ -103,6 +124,17 @@ struct loom_rewriter_t {
   // Number of operations erased through this rewriter during this rewrite run.
   uint64_t erased_op_count;
 
+  // Number of successful vector-to-scalar rewrites.
+  uint64_t scalarized_op_count;
+
+  // Creation provenance active during a rewrite callback.
+  struct {
+    // Optional observer for creations with an explicit rewrite source.
+    loom_rewriter_operation_creation_callback_t callback;
+    // Immediate operation responsible for creations in the active callback.
+    const loom_op_t* source;
+  } operation_creation;
+
   // Central policy for optional SSA display names created during rewrites.
   loom_rewriter_name_policy_flags_t name_policy;
 
@@ -122,6 +154,10 @@ struct loom_rewriter_t {
   // target-neutral optional arithmetic choices until a target is selected.
   const struct loom_target_math_policy_t* math_policy;
 
+  // Resolved target bundle paired with |math_policy|. NULL denotes a
+  // target-neutral rewrite scope.
+  const struct loom_target_bundle_t* math_target_bundle;
+
   // Structural snapshots published into the fact table for edited regions.
   struct {
     // Region-address hash buckets for O(1) snapshot storage lookup.
@@ -138,6 +174,10 @@ struct loom_rewriter_t {
   // enabling analysis. NULL means try_fold cannot materialize
   // constants (facts are still computed and propagated).
   loom_materialize_constant_fn_t materialize_constant;
+
+  // Optional consumer invoked when an exact fold has retained relations.
+  loom_rewriter_pending_exact_relations_callback_t
+      pending_exact_relations_callback;
 };
 
 // Initializes mutation tracking without allocating storage. Worklist scheduling
@@ -146,6 +186,16 @@ void loom_rewriter_initialize(loom_rewriter_t* rewriter, loom_module_t* module,
                               iree_arena_allocator_t* arena);
 
 void loom_rewriter_deinitialize(loom_rewriter_t* rewriter);
+
+// Installs an optional cold observer for operation creation provenance.
+void loom_rewriter_set_operation_creation_callback(
+    loom_rewriter_t* rewriter,
+    loom_rewriter_operation_creation_callback_t callback);
+
+// Sets the immediate source operation for subsequently finalized operations.
+// Passes and batched transforms clear the source after the rewrite callback.
+void loom_rewriter_set_operation_creation_source(loom_rewriter_t* rewriter,
+                                                 const loom_op_t* source_op);
 
 // Queries the retained target preference after the caller has established that
 // multiply and add both permit contraction. Does not resolve target context.
@@ -204,6 +254,32 @@ static inline loom_value_facts_t loom_rewriter_value_facts(
   return loom_value_fact_table_lookup(rewriter->fact_table, value_id);
 }
 
+// Returns the retained SSA identity without changing the facts attached to
+// |value_id|. This is an indexed lookup through rank-bounded retained handles,
+// not an IR walk. Without analysis, the value is its own identity.
+static inline loom_value_id_t loom_rewriter_value_identity(
+    const loom_rewriter_t* rewriter, loom_value_id_t value_id) {
+  return loom_value_fact_table_query_identity(rewriter->fact_table, value_id);
+}
+
+// Returns whether same-typed operands carry identical values using the retained
+// identity and exact integer facts. This does not prove sole ownership or
+// ordinary floating-point equality; NaN-sensitive patterns retain their
+// predicate rules.
+static inline bool loom_rewriter_values_equal(const loom_rewriter_t* rewriter,
+                                              loom_value_id_t lhs,
+                                              loom_value_id_t rhs) {
+  return loom_value_fact_table_values_equal(rewriter->fact_table, lhs, rhs);
+}
+
+// Returns the live producer of a value's retained identity, or NULL for block
+// arguments, erased producers, and identities with a different refined type.
+// This permits semantic producer matching across fact identities without
+// weakening the original value's facts or changing its uses. It does not prove
+// ownership: patterns that retire a producer must check its actual SSA uses.
+loom_op_t* loom_rewriter_value_defining_op(const loom_rewriter_t* rewriter,
+                                           loom_value_id_t value_id);
+
 // Materializes a constant value using the rewriter's callback.
 // Convenience for patterns that need to create constants (e.g.,
 // index values for shape dimensions) without depending on any
@@ -218,7 +294,8 @@ iree_status_t loom_rewriter_build_constant(loom_rewriter_t* rewriter,
 // Recomputes an op's inferred or structured-region result facts, then attempts
 // to fold a side-effect-free op with vtable fact inference to constants.
 // Materializes constants via the rewriter's materialize_constant callback when
-// every result is exact and replaces the original op via RAUW+erase. Sets
+// every result is an exact scalar and replaces the original op via RAUW+erase.
+// Aggregate constants remain owned by dialect-specific patterns. Sets
 // |*out_folded| to true if the op was erased, false otherwise. No-op if
 // analysis is not enabled or the op has no fact inference or region summary
 // interface.
@@ -308,7 +385,9 @@ iree_status_t loom_rewriter_replace_all_uses_and_erase(
     const loom_value_id_t* replacements, uint16_t count);
 
 // Replaces all uses and type uses of one value with another value and adds
-// affected users to the worklist. Does not erase the defining op.
+// affected users to the worklist. Retained SSA identities are retargeted before
+// returning, independently of deferred numeric inference. Does not erase the
+// defining op; later uses of the old value retain its original meaning.
 iree_status_t loom_rewriter_replace_all_uses_with(loom_rewriter_t* rewriter,
                                                   loom_value_id_t old_value,
                                                   loom_value_id_t new_value);
@@ -329,6 +408,31 @@ iree_status_t loom_rewriter_replace_results_with_materialized_values_and_erase(
 
 // Erases an op that has no remaining uses.
 iree_status_t loom_rewriter_erase(loom_rewriter_t* rewriter, loom_op_t* op);
+
+// Erases disjoint operation subtrees whose results have no uses outside the
+// supplied set. The consuming plan owns that closure proof. Retained provider
+// and parent facts are updated once per member before any member is erased.
+iree_status_t loom_rewriter_erase_closed_set(loom_rewriter_t* rewriter,
+                                             loom_op_t* const* ops,
+                                             iree_host_size_t count);
+
+// Removes a verified closed set of blocks, withdrawing retained SSA references
+// before their definitions are retired. The mask covers the region's blocks.
+// The caller refreshes CFG structure after completing its structural edits.
+iree_status_t loom_rewriter_remove_blocks(loom_rewriter_t* rewriter,
+                                          loom_region_t* region,
+                                          const bool* remove_blocks,
+                                          uint16_t remove_block_count,
+                                          iree_arena_allocator_t* scratch_arena,
+                                          uint16_t* out_removed_count);
+
+// Removes selected unused arguments and their retained SSA references. The
+// mask covers the block's arguments. The caller repairs branch payloads and
+// refreshes CFG structure after completing the structural edit.
+uint16_t loom_rewriter_remove_block_args(loom_rewriter_t* rewriter,
+                                         loom_block_t* block,
+                                         const bool* remove_args,
+                                         uint16_t remove_arg_count);
 
 // Moves |op| before |before_op|, preserving operands/results/regions while
 // retargeting ancestry, worklist membership, and region effect summaries.
@@ -375,6 +479,14 @@ iree_status_t loom_rewriter_set_operand(loom_rewriter_t* rewriter,
                                         loom_op_t* op, uint16_t operand_index,
                                         loom_value_id_t new_value);
 
+// Replaces the complete operand tuple of |op| and publishes the semantic
+// mutation once after all changed use-list edges have been retargeted. This is
+// equivalent to setting each changed operand individually, without exposing
+// analyses or worklist consumers to intermediate tuples.
+iree_status_t loom_rewriter_set_operands(loom_rewriter_t* rewriter,
+                                         loom_op_t* op,
+                                         const loom_value_id_t* new_values);
+
 // Changes the type of a value. Adds all users of the value to the
 // worklist since they may be simplifiable with the new type (e.g.,
 // encoding materialization resolving SSA encoding refs to static
@@ -385,7 +497,8 @@ iree_status_t loom_rewriter_set_value_type(loom_rewriter_t* rewriter,
 
 // Sets an attribute on an op by index. Adds all users of the op's
 // results to the worklist since derived properties may change (e.g.,
-// setting the purity attr on a func.call changes its effective traits).
+// setting the effect-contract attr on a func.call changes its effective
+// traits).
 iree_status_t loom_rewriter_set_attr(loom_rewriter_t* rewriter, loom_op_t* op,
                                      uint16_t attr_index,
                                      loom_attribute_t value);

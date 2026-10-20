@@ -20,12 +20,14 @@ from pathlib import Path, PurePath
 
 LOOM_EXECUTE_SUBSTRATES = ("iree_hal",)
 LOOM_IMPORTERS = ("cxx", "mlir", "tilelang")
+LOOM_IMAGE_CODECS = ("png", "jpeg", "gif", "webp")
+LOOM_AUDIO_CODECS = ("wav", "mp3", "flac")
 LOOM_TARGETS = ("amdgpu", "spirv", "vm", "wasm", "xdna", "x86")
 LOOM_EMITTERS = ("amdgpu", "spirv", "wasm", "xdna")
 AMDF_FAMILIES = ("rdna", "cdna", "xdna")
 HOST_DRIVERS = ("task",)
 DEFAULT_LOOM_EXECUTE = LOOM_EXECUTE_SUBSTRATES
-DEFAULT_LOOM_TARGETS = ("amdgpu", "spirv", "xdna", "x86")
+DEFAULT_LOOM_TARGETS = ("amdgpu", "spirv", "vm", "xdna", "x86")
 
 SDK_DRIVER_PACKAGES = {
     "amdgpu": (
@@ -53,13 +55,16 @@ SDK_DRIVER_PACKAGES = {
 }
 ROCM_DRIVERS = frozenset(("amdgpu",))
 DEPENDENCY_MODES = frozenset(("pinned", "package", "auto"))
-SUPPORTED_ENABLE_DRIVERS = frozenset((*HOST_DRIVERS, "amdgpu", "vulkan", "webgpu"))
-ALL_DRIVERS = tuple(HOST_DRIVERS) + tuple(SDK_DRIVER_PACKAGES)
+SUPPORTED_ENABLE_DRIVERS = frozenset(
+    (*HOST_DRIVERS, "amdgpu", "vulkan", "webgpu", "xdna")
+)
+ALL_DRIVERS = tuple(HOST_DRIVERS) + tuple(SDK_DRIVER_PACKAGES) + ("xdna",)
 DRIVER_DEFINES = {
     "IREE_HAL_DRIVER_AMDGPU": "amdgpu",
     "IREE_HAL_DRIVER_TASK": "task",
     "IREE_HAL_DRIVER_VULKAN": "vulkan",
     "IREE_HAL_DRIVER_WEBGPU": "webgpu",
+    "IREE_HAL_DRIVER_XDNA": "xdna",
 }
 LOOM_TARGET_DEFINES = {
     "LOOM_TARGET_AMDGPU": "amdgpu",
@@ -89,10 +94,15 @@ REMOVED_OPTIONS = frozenset(
     ("--enable-driver", "--include-driver", "--exclude-driver", "--rocm-path")
 )
 NATIVE_DRIVER_FLAG = "--//runtime/config/hal:drivers"
+NATIVE_RUNTIME_AMDGPU_TARGETS_FLAG = "--//runtime/src/iree/hal/drivers/amdgpu:targets"
 NATIVE_LOOM_TARGET_FLAG = "--//loom/config/target:enable"
+NATIVE_LOOM_AMDGPU_TARGETS_FLAG = "--//loom/config/target/amdgpu:targets"
 NATIVE_LOOM_EMIT_FLAG = "--//loom/config/emit:enable"
 NATIVE_LOOM_EXECUTE_FLAG = "--//loom/config/execute:enable"
 NATIVE_LOOM_IMPORT_FLAG = "--//loom/config/import:enable"
+NATIVE_LOOM_IMAGE_INPUT_FLAG = "--//loom/config/serve:image_input"
+NATIVE_LOOM_IMAGE_CODECS_FLAG = "--//loom/config/serve:image_codecs"
+NATIVE_LOOM_AUDIO_CODECS_FLAG = "--//loom/config/serve:audio_codecs"
 NATIVE_AMDF_ENABLED_FLAG = "--//libamdf/config:enabled"
 NATIVE_AMDF_FAMILIES_FLAG = "--//libamdf/config:families"
 NATIVE_VULKAN_ENABLED_FLAG = "--//build_tools/vulkan/config:enabled"
@@ -113,13 +123,27 @@ class ConfigRequest:
     enabled_loom_targets: set[str] = field(
         default_factory=lambda: set(DEFAULT_LOOM_TARGETS)
     )
+    runtime_amdgpu_targets: set[str] | None = None
     enabled_loom_execute: set[str] = field(
         default_factory=lambda: set(DEFAULT_LOOM_EXECUTE)
     )
     loom_execute_source: str | None = None
     loom_emit_source: str | None = None
     loom_import_source: str | None = None
+    # Image input selection, independent of serving's other modalities.
+    loom_image_input: bool = True
+    # Spelling used to select image input.
+    loom_image_input_source: str | None = None
+    # Codec providers present in image-enabled builds.
+    loom_image_codecs: set[str] = field(default_factory=lambda: set(LOOM_IMAGE_CODECS))
+    # Spelling used to select image providers.
+    loom_image_codecs_source: str | None = None
+    # Optional encoded-audio providers; an empty set retains raw PCM input.
+    loom_audio_codecs: set[str] = field(default_factory=lambda: set(LOOM_AUDIO_CODECS))
+    # Spelling used to select encoded-audio providers.
+    loom_audio_codecs_source: str | None = None
     loom_target_source: str | None = None
+    loom_amdgpu_targets: set[str] | None = None
     enabled_loom_emitters: set[str] = field(default_factory=set)
     enabled_loom_importers: set[str] = field(default_factory=set)
     amdf_build: bool = False
@@ -168,6 +192,9 @@ class ConfigRequest:
         self.driver_source = "native"
         self.enabled_drivers = set(drivers)
 
+    def set_runtime_amdgpu_target_list(self, targets: set[str]) -> None:
+        self.runtime_amdgpu_targets = set(targets)
+
     def set_loom_target(self, target: str, enabled: bool) -> None:
         if self.loom_target_source == "native":
             raise SystemExit(
@@ -193,6 +220,9 @@ class ConfigRequest:
             )
         self.loom_target_source = "native"
         self.enabled_loom_targets = set(targets)
+
+    def set_loom_amdgpu_target_list(self, targets: set[str]) -> None:
+        self.loom_amdgpu_targets = set(targets)
 
     def set_loom_emitter(self, emitter: str, enabled: bool) -> None:
         if self.loom_emit_source == "native":
@@ -314,6 +344,34 @@ class ConfigRequest:
         self.rdma_source = source
         self.rdma_enabled = enabled
 
+    def set_loom_image_input(self, enabled: bool, source: str) -> None:
+        if self.loom_image_input_source not in (None, source):
+            raise SystemExit("Do not mix portable and native Loom image-input options.")
+        self.loom_image_input_source = source
+        self.loom_image_input = enabled
+
+    def set_loom_image_codecs(self, codecs: set[str], source: str) -> None:
+        if self.loom_image_codecs_source not in (None, source):
+            raise SystemExit("Do not mix portable and native Loom image-codec options.")
+        unknown = codecs.difference(LOOM_IMAGE_CODECS)
+        if unknown:
+            raise SystemExit(
+                "Unknown Loom image codec(s): " + ", ".join(sorted(unknown))
+            )
+        self.loom_image_codecs_source = source
+        self.loom_image_codecs = codecs
+
+    def set_loom_audio_codecs(self, codecs: set[str], source: str) -> None:
+        if self.loom_audio_codecs_source not in (None, source):
+            raise SystemExit("Do not mix portable and native Loom audio-codec options.")
+        unknown = codecs.difference(LOOM_AUDIO_CODECS)
+        if unknown:
+            raise SystemExit(
+                "Unknown Loom audio codec(s): " + ", ".join(sorted(unknown))
+            )
+        self.loom_audio_codecs_source = source
+        self.loom_audio_codecs = codecs
+
     def set_amdf_family(self, family: str, enabled: bool) -> None:
         if self.amdf_family_source == "native":
             raise SystemExit(
@@ -429,7 +487,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
   python build_tools/bazel/configure.py -DAMDF_BUILD=ON -DAMDF_FAMILY_CDNA=OFF
   python build_tools/bazel/configure.py -DLOOM_TARGET_SPIRV=OFF
   python build_tools/bazel/configure.py -DLOOM_TARGET_AMDGPU=ON -DLOOM_EXECUTE_IREE_HAL=ON -DIREE_HAL_DRIVER_AMDGPU=ON -DIREE_ROCM_PATH=/opt/rocm
-  python build_tools/bazel/configure.py -DLOOM_EMIT_XDNA=ON
+  python build_tools/bazel/configure.py -DLOOM_TARGET_XDNA=ON
   python build_tools/bazel/configure.py -DLOOM_IMPORT_TILELANG=ON
 
 Portable -D project options are documented in BUILDING.md. Other Bazel-native
@@ -534,6 +592,15 @@ def apply_define(request: ConfigRequest, define: str) -> None:
     if name == "AMDF_BUILD":
         request.set_amdf_build(parse_bool(name, value), "portable")
         return
+    if name == "LOOM_SERVE_IMAGE_INPUT":
+        request.set_loom_image_input(parse_bool(name, value), "portable")
+        return
+    if name == "LOOM_SERVE_IMAGE_CODECS":
+        request.set_loom_image_codecs(set(filter(None, value.split(";"))), "portable")
+        return
+    if name == "LOOM_SERVE_AUDIO_CODECS":
+        request.set_loom_audio_codecs(set(filter(None, value.split(";"))), "portable")
+        return
     if name == "IREE_ENABLE_VULKAN":
         request.set_vulkan_enabled(parse_bool(name, value), "portable")
         return
@@ -577,16 +644,41 @@ def apply_native_bazel_arg(request: ConfigRequest, arg: str) -> None:
     check_removed_option(arg)
     if arg == "--":
         raise SystemExit("build_tools/bazel/configure.py does not use a -- separator.")
+    if arg.startswith(NATIVE_LOOM_IMAGE_INPUT_FLAG + "="):
+        request.set_loom_image_input(
+            parse_bool(NATIVE_LOOM_IMAGE_INPUT_FLAG, arg.split("=", 1)[1]), "native"
+        )
+        return
+    if arg.startswith(NATIVE_LOOM_IMAGE_CODECS_FLAG + "="):
+        request.set_loom_image_codecs(parse_string_list(arg.split("=", 1)[1]), "native")
+        return
+    if arg.startswith(NATIVE_LOOM_AUDIO_CODECS_FLAG + "="):
+        request.set_loom_audio_codecs(parse_string_list(arg.split("=", 1)[1]), "native")
+        return
     if arg.startswith(NATIVE_DRIVER_FLAG + "="):
         request.set_driver_list(parse_driver_list(arg.split("=", 1)[1]))
         return
     if arg == NATIVE_DRIVER_FLAG:
         raise SystemExit(f"{NATIVE_DRIVER_FLAG} must use --flag=value syntax.")
+    if arg.startswith(NATIVE_RUNTIME_AMDGPU_TARGETS_FLAG + "="):
+        request.set_runtime_amdgpu_target_list(parse_string_list(arg.split("=", 1)[1]))
+        return
+    if arg == NATIVE_RUNTIME_AMDGPU_TARGETS_FLAG:
+        raise SystemExit(
+            f"{NATIVE_RUNTIME_AMDGPU_TARGETS_FLAG} must use --flag=value syntax."
+        )
     if arg.startswith(NATIVE_LOOM_TARGET_FLAG + "="):
         request.set_loom_target_list(parse_string_list(arg.split("=", 1)[1]))
         return
     if arg == NATIVE_LOOM_TARGET_FLAG:
         raise SystemExit(f"{NATIVE_LOOM_TARGET_FLAG} must use --flag=value syntax.")
+    if arg.startswith(NATIVE_LOOM_AMDGPU_TARGETS_FLAG + "="):
+        request.set_loom_amdgpu_target_list(parse_string_list(arg.split("=", 1)[1]))
+        return
+    if arg == NATIVE_LOOM_AMDGPU_TARGETS_FLAG:
+        raise SystemExit(
+            f"{NATIVE_LOOM_AMDGPU_TARGETS_FLAG} must use --flag=value syntax."
+        )
     if arg.startswith(NATIVE_LOOM_EMIT_FLAG + "="):
         request.set_loom_emitter_list(parse_string_list(arg.split("=", 1)[1]))
         return
@@ -707,6 +799,14 @@ def bazelrc_line(command: str, option: str) -> str:
 
 def generate_config(args: argparse.Namespace) -> str:
     request = request_from_args(args)
+    if "xdna" in request.enabled_drivers:
+        if request.amdf_build_source is not None and not request.amdf_build:
+            raise SystemExit("AMDF_BUILD=OFF conflicts with IREE_HAL_DRIVER_XDNA=ON")
+        request.amdf_build = True
+        if "xdna" not in request.enabled_amdf_families:
+            raise SystemExit(
+                "AMDF_FAMILY_XDNA=OFF conflicts with IREE_HAL_DRIVER_XDNA=ON"
+            )
     unsupported_enabled_drivers = request.enabled_drivers.difference(
         SUPPORTED_ENABLE_DRIVERS
     )
@@ -748,6 +848,18 @@ def generate_config(args: argparse.Namespace) -> str:
             "--//runtime/config/hal:drivers="
             + ",".join(ordered_driver_set(request.enabled_drivers)),
         ),
+        *(
+            [
+                bazelrc_line(
+                    "build",
+                    NATIVE_RUNTIME_AMDGPU_TARGETS_FLAG
+                    + "="
+                    + ",".join(sorted(request.runtime_amdgpu_targets)),
+                )
+            ]
+            if request.runtime_amdgpu_targets is not None
+            else []
+        ),
         "",
         "# libamdf library and implementation-family scope.",
         bazelrc_line(
@@ -781,11 +893,49 @@ def generate_config(args: argparse.Namespace) -> str:
             "--repo_env=IREE_DEPENDENCY_MODE=" + request.dependency_mode,
         ),
         "",
+        "# Optional encoded audio providers; raw PCM is always available.",
+        bazelrc_line(
+            "build",
+            NATIVE_LOOM_AUDIO_CODECS_FLAG
+            + "="
+            + ",".join(
+                codec
+                for codec in LOOM_AUDIO_CODECS
+                if codec in request.loom_audio_codecs
+            ),
+        ),
+        "",
         "# Loom target, execute substrate, importer, and explicit emitter scope.",
+        bazelrc_line(
+            "build",
+            NATIVE_LOOM_IMAGE_INPUT_FLAG + "=" + str(request.loom_image_input).lower(),
+        ),
+        bazelrc_line(
+            "build",
+            NATIVE_LOOM_IMAGE_CODECS_FLAG
+            + "="
+            + ",".join(
+                codec
+                for codec in LOOM_IMAGE_CODECS
+                if codec in request.loom_image_codecs
+            ),
+        ),
         bazelrc_line(
             "build",
             "--//loom/config/target:enable="
             + ",".join(ordered_loom_target_set(request.enabled_loom_targets)),
+        ),
+        *(
+            [
+                bazelrc_line(
+                    "build",
+                    NATIVE_LOOM_AMDGPU_TARGETS_FLAG
+                    + "="
+                    + ",".join(sorted(request.loom_amdgpu_targets)),
+                )
+            ]
+            if request.loom_amdgpu_targets is not None
+            else []
         ),
         bazelrc_line(
             "build",

@@ -84,7 +84,6 @@ nav:
       - Search per-instance loop schedules: workflows/search-loop-schedules.md
       - Format and verify source: workflows/format-and-verify.md
       - Link and package modules: workflows/link-and-package.md
-      - Split command and kernel compilation: workflows/product-frontiers.md
       - Build libraries and binaries with Bazel: workflows/build-with-bazel.md
       - Test correctness: workflows/test-correctness.md
       - Benchmark checked work: workflows/benchmark.md
@@ -103,6 +102,20 @@ nav:
       - Parallelize kernel JIT compilation: integration/product-frontier.md
       - Use the JIT task pool: integration/jit-task-pool.md
       - Embed kernel JIT compilation: integration/jit-kernel.md
+  - Serving:
+      - loom-serve: serving/index.md
+      - Model documents: serving/model-documents.md
+      - Author model programs: serving/model-programs.md
+      - HTTP profiles: serving/http-profiles.md
+      - Workflows:
+          - Serve source-defined models: serving/workflows/serve-models.md
+          - Stream speech: serving/workflows/stream-speech.md
+          - Operate a model server: serving/workflows/operate-model-server.md
+          - Observe a model server: serving/workflows/observe-model-server.md
+          - Connect model clients: serving/workflows/connect-model-clients.md
+          - Develop models on a live server: serving/workflows/live-model-development.md
+  - Targets:
+      - Resident pipelines on XDNA: targets/xdna-pipelines.md
   - Reference:
       - Reference map: reference/index.md
       - Dialects: reference/dialects/index.md
