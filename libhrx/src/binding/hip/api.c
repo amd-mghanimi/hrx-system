@@ -11605,6 +11605,8 @@ HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
   iree_hip_ipc_imports[iree_hip_ipc_import_count++] =
       (iree_hip_ipc_import_t){user_ptr, mapped};
   pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+  iree_hal_streaming_nc_ledger_add((uint64_t)(uintptr_t)mapped,
+                                   wire.allocation_size);
   if (iree_hal_amdgpu_acquire_elision_note_foreign_writer) {
     iree_hal_amdgpu_acquire_elision_note_foreign_writer("ipc import");
   }
@@ -11639,6 +11641,7 @@ HIPAPI hipError_t hipIpcCloseMemHandle(void* devPtr) {
   }
   // Work that reads the mapping may still be in flight.
   result = hipDeviceSynchronize();
+  iree_hal_streaming_nc_ledger_remove((uint64_t)(uintptr_t)mapped);
   if (rocr->ipc_detach(mapped) != IREE_HIP_HSA_STATUS_SUCCESS &&
       result == hipSuccess) {
     result = hipErrorInvalidValue;

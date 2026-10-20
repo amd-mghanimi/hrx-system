@@ -6,7 +6,12 @@
 
 #include "common/context.h"
 
+#include <inttypes.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "common/device.h"
 #include "common/graph.h"
@@ -19,6 +24,167 @@
 // Defined by the AMDGPU HAL driver when it is linked (aql_block_processor.h).
 __attribute__((weak)) void iree_hal_amdgpu_acquire_elision_note_foreign_writer(
     const char* reason);
+__attribute__((weak)) int iree_hal_amdgpu_acquire_elision_mode(void);
+
+//===----------------------------------------------------------------------===//
+// NC ledger
+//===----------------------------------------------------------------------===//
+
+#define IREE_HAL_STREAMING_NC_LEDGER_CAPACITY 256
+#define IREE_HAL_STREAMING_NC_REPORT_CAPACITY 64
+
+// Append-only with tombstones: readers scan without the lock.
+static struct {
+  iree_slim_mutex_t mutex;
+  uint32_t count;
+  uint64_t lowest;
+  uint64_t highest;
+  struct {
+    uint64_t base;
+    uint64_t end;
+  } ranges[IREE_HAL_STREAMING_NC_LEDGER_CAPACITY];
+  // Kernels already reported as retaining an acquire.
+  uint32_t reported_count;
+  uint64_t reported_hashes[IREE_HAL_STREAMING_NC_REPORT_CAPACITY];
+  uint64_t retained_count;
+} iree_hal_streaming_nc_ledger;
+static pthread_once_t iree_hal_streaming_nc_ledger_once = PTHREAD_ONCE_INIT;
+
+static void iree_hal_streaming_nc_ledger_initialize(void) {
+  iree_slim_mutex_initialize(&iree_hal_streaming_nc_ledger.mutex);
+  iree_hal_streaming_nc_ledger.lowest = UINT64_MAX;
+}
+
+void iree_hal_streaming_nc_ledger_add(uint64_t base, uint64_t size) {
+  pthread_once(&iree_hal_streaming_nc_ledger_once,
+               iree_hal_streaming_nc_ledger_initialize);
+  iree_slim_mutex_lock(&iree_hal_streaming_nc_ledger.mutex);
+  const uint32_t index = iree_hal_streaming_nc_ledger.count;
+  if (index < IREE_HAL_STREAMING_NC_LEDGER_CAPACITY) {
+    iree_hal_streaming_nc_ledger.ranges[index].base = base;
+    iree_hal_streaming_nc_ledger.ranges[index].end = base + size;
+    if (base < iree_hal_streaming_nc_ledger.lowest) {
+      __atomic_store_n(&iree_hal_streaming_nc_ledger.lowest, base,
+                       __ATOMIC_RELAXED);
+    }
+    if (base + size > iree_hal_streaming_nc_ledger.highest) {
+      __atomic_store_n(&iree_hal_streaming_nc_ledger.highest, base + size,
+                       __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&iree_hal_streaming_nc_ledger.count, index + 1,
+                     __ATOMIC_RELEASE);
+  } else {
+    // Overflow: cover everything rather than miss a range.
+    __atomic_store_n(&iree_hal_streaming_nc_ledger.lowest, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&iree_hal_streaming_nc_ledger.highest, UINT64_MAX,
+                     __ATOMIC_RELAXED);
+  }
+  iree_slim_mutex_unlock(&iree_hal_streaming_nc_ledger.mutex);
+}
+
+void iree_hal_streaming_nc_ledger_remove(uint64_t base) {
+  pthread_once(&iree_hal_streaming_nc_ledger_once,
+               iree_hal_streaming_nc_ledger_initialize);
+  iree_slim_mutex_lock(&iree_hal_streaming_nc_ledger.mutex);
+  for (uint32_t i = 0; i < iree_hal_streaming_nc_ledger.count; ++i) {
+    if (iree_hal_streaming_nc_ledger.ranges[i].base == base) {
+      __atomic_store_n(&iree_hal_streaming_nc_ledger.ranges[i].end, base,
+                       __ATOMIC_RELAXED);
+    }
+  }
+  iree_slim_mutex_unlock(&iree_hal_streaming_nc_ledger.mutex);
+}
+
+static bool iree_hal_streaming_nc_ledger_references(
+    iree_const_byte_span_t kernargs) {
+  const uint32_t count = __atomic_load_n(&iree_hal_streaming_nc_ledger.count,
+                                         __ATOMIC_ACQUIRE);
+  const uint64_t lowest = __atomic_load_n(&iree_hal_streaming_nc_ledger.lowest,
+                                          __ATOMIC_RELAXED);
+  const uint64_t highest = __atomic_load_n(
+      &iree_hal_streaming_nc_ledger.highest, __ATOMIC_RELAXED);
+  if (lowest >= highest) return false;
+  const iree_host_size_t word_count = kernargs.data_length / sizeof(uint64_t);
+  for (iree_host_size_t i = 0; i < word_count; ++i) {
+    uint64_t value = 0;
+    memcpy(&value, kernargs.data + i * sizeof(uint64_t), sizeof(value));
+    if (value < lowest || value >= highest) continue;
+    if (count >= IREE_HAL_STREAMING_NC_LEDGER_CAPACITY) return true;
+    for (uint32_t j = 0; j < count; ++j) {
+      if (value >= iree_hal_streaming_nc_ledger.ranges[j].base &&
+          value < __atomic_load_n(&iree_hal_streaming_nc_ledger.ranges[j].end,
+                                  __ATOMIC_RELAXED)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void iree_hal_streaming_nc_ledger_report(iree_string_view_t name) {
+  static int report = -1;
+  if (report < 0) {
+    const char* value = getenv("HRX_ELIDE_ACQUIRE_REPORT");
+    report = value && value[0] && value[0] != '0';
+  }
+  const uint64_t retained = __atomic_add_fetch(
+      &iree_hal_streaming_nc_ledger.retained_count, 1, __ATOMIC_RELAXED);
+  if (!report) return;
+  uint64_t hash = 1469598103934665603ull;
+  for (iree_host_size_t i = 0; i < name.size; ++i) {
+    hash = (hash ^ (uint8_t)name.data[i]) * 1099511628211ull;
+  }
+  iree_slim_mutex_lock(&iree_hal_streaming_nc_ledger.mutex);
+  bool seen = false;
+  for (uint32_t i = 0; i < iree_hal_streaming_nc_ledger.reported_count; ++i) {
+    seen |= iree_hal_streaming_nc_ledger.reported_hashes[i] == hash;
+  }
+  if (!seen && iree_hal_streaming_nc_ledger.reported_count <
+                   IREE_HAL_STREAMING_NC_REPORT_CAPACITY) {
+    iree_hal_streaming_nc_ledger
+        .reported_hashes[iree_hal_streaming_nc_ledger.reported_count++] = hash;
+  }
+  iree_slim_mutex_unlock(&iree_hal_streaming_nc_ledger.mutex);
+  if (!seen) {
+    fprintf(stderr,
+            "[hrx-elide] pid=%d keep-acquire kernel=%.*s (retained so far "
+            "%" PRIu64 ")\n",
+            (int)getpid(), (int)name.size, name.data, retained);
+  }
+}
+
+iree_status_t iree_hal_streaming_record_nc_acquire_if_needed(
+    iree_hal_command_buffer_t* command_buffer, iree_const_byte_span_t kernargs,
+    iree_string_view_t kernel_name) {
+  if (!iree_hal_amdgpu_acquire_elision_mode ||
+      iree_hal_amdgpu_acquire_elision_mode() != 2) {
+    return iree_ok_status();
+  }
+  if (!iree_hal_streaming_nc_ledger_references(kernargs)) {
+    return iree_ok_status();
+  }
+  iree_hal_streaming_nc_ledger_report(kernel_name);
+  static const iree_hal_memory_barrier_t memory_barrier = {
+      .target_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_READ |
+                      IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE |
+                      IREE_HAL_ACCESS_SCOPE_TRANSFER_READ |
+                      IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE |
+                      IREE_HAL_ACCESS_SCOPE_ATOMIC_READ |
+                      IREE_HAL_ACCESS_SCOPE_ATOMIC_WRITE,
+  };
+  const iree_hal_barrier_t barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                           IREE_HAL_EXECUTION_STAGE_ATOMIC,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                           IREE_HAL_EXECUTION_STAGE_ATOMIC,
+      .flags = IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE,
+      .memory_barrier_count = 1,
+      .memory_barriers = &memory_barrier,
+  };
+  return iree_hal_command_buffer_barrier(command_buffer, &barrier);
+}
 
 //===----------------------------------------------------------------------===//
 // Global state
