@@ -31,6 +31,12 @@ void iree_hal_streaming_register_context(iree_hal_streaming_context_t* context);
 void iree_hal_streaming_unregister_context(
     iree_hal_streaming_context_t* context);
 
+// Returns IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA while an
+// HRX_PROFILE_STATS session is active; the HAL only attributes dispatch events
+// to command buffers created with it.
+iree_hal_command_buffer_mode_t iree_hal_streaming_profile_command_buffer_mode(
+    void);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
