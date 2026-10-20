@@ -117,7 +117,7 @@ class MediaExecutionTest : public SourceTextServiceTest {
   // HTTP protocol and source input storage retained through producer work.
   std::array<loom_serve_embedding_request_t, 3> requests_ = {};
   // Source-prepared request bytes, independent of cohort result ownership.
-  std::array<loom_serve_finite_prepared_t, 3> prepared_ = {};
+  std::array<loom_serve_prepared_request_t, 3> prepared_ = {};
   // Explicitly gated consumer for delayed-capture retirement coverage.
   loom_serve_execution_t* consumer_ = nullptr;
   // Owner-signalled readiness; no sleep or deadline models queue retirement.
@@ -223,8 +223,8 @@ TEST_F(MediaExecutionTest, RaggedCohortConditionsPackedAndIsolatedTextChunks) {
                                     &continuation);
       do {
         loom_serve_execution_frontier_t ready;
-        IREE_ASSERT_OK(loom_serve_text_epoch_submit(model_, mode, &epoch,
-                                                    &continuation, &ready));
+        IREE_ASSERT_OK(loom_serve_text_epoch_submit(
+            model_, mode, &epoch, &continuation, nullptr, &ready));
         if (mode == LOOM_SERVE_TEXT_SCHEDULE_MATCHED && chunk == 1 &&
             epoch.cursor == 1) {
           // Both image requests have submitted their last readers. Their

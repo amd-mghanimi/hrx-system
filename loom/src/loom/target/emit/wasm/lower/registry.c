@@ -64,10 +64,11 @@ static bool loom_wasm_source_type_supported(void* user_data,
 }
 
 static bool loom_wasm_source_function_vector_carrier_supported(
-    void* user_data, const loom_module_t* module,
-    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
-    loom_type_t source_type) {
+    void* user_data, const loom_target_facts_t* target_facts,
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, loom_type_t source_type) {
   (void)user_data;
+  (void)target_facts;
   (void)module;
   (void)fact_table;
   (void)value_id;
@@ -75,10 +76,11 @@ static bool loom_wasm_source_function_vector_carrier_supported(
 }
 
 static bool loom_wasm_source_vector_carrier_supported(
-    void* user_data, const loom_module_t* module,
-    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
-    loom_type_t source_type) {
+    void* user_data, const loom_target_facts_t* target_facts,
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, loom_type_t source_type) {
   (void)user_data;
+  (void)target_facts;
   (void)module;
   (void)fact_table;
   (void)value_id;
@@ -359,7 +361,7 @@ void loom_wasm_low_lower_policy_registry_initialize(
     loom_low_lower_policy_registry_t* out_registry) {
   static const loom_low_lower_policy_registry_entry_t kEntries[] = {
       {
-          .contract_set_key = IREE_SVL("wasm.core.simd128"),
+          .contract_set_stable_id = UINT64_C(0x49e70aa103499a7e),
           .policy = &kWasmLowLowerPolicy,
       },
   };

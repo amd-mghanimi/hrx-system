@@ -6,12 +6,15 @@
 
 #include "common/init.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common/amdgpu_architecture.h"
 #include "common/context.h"
 #include "common/device.h"
 #include "common/hrx_bridge.h"
+#include "iree/hal/utils/statistics_sink.h"
 #include "libhrx/src/libhrx/device.h"
 #include "libhrx/src/libhrx/runtime.h"
 
@@ -197,6 +200,76 @@ static iree_status_t iree_hal_streaming_query_device_info(
   return iree_ok_status();
 }
 
+static iree_hal_profile_statistics_sink_t* hrx_profile_stats_sink = NULL;
+static iree_hal_device_t* hrx_profile_devices[64];
+static int hrx_profile_device_count = 0;
+
+iree_hal_command_buffer_mode_t iree_hal_streaming_profile_command_buffer_mode(
+    void) {
+  return hrx_profile_device_count > 0
+             ? IREE_HAL_COMMAND_BUFFER_MODE_RETAIN_PROFILE_METADATA
+             : 0;
+}
+
+static void hrx_profile_stats_dump(void) {
+  for (int i = 0; i < hrx_profile_device_count; ++i) {
+    iree_status_t status =
+        iree_hal_device_profiling_flush(hrx_profile_devices[i]);
+    if (!iree_status_is_ok(status)) {
+      fprintf(stderr, "[HRX_PROFILE_STATS] profiling_flush failed: ");
+      iree_status_fprint(stderr, status);
+      iree_status_ignore(status);
+    }
+    status = iree_hal_device_profiling_end(hrx_profile_devices[i]);
+    if (!iree_status_is_ok(status)) {
+      fprintf(stderr, "[HRX_PROFILE_STATS] profiling_end failed: ");
+      iree_status_fprint(stderr, status);
+      iree_status_ignore(status);
+    }
+  }
+  if (!hrx_profile_stats_sink) return;
+  const char* path = getenv("HRX_PROFILE_STATS");
+  FILE* file = (path && strcmp(path, "1") != 0) ? fopen(path, "w") : NULL;
+  iree_status_ignore(iree_hal_profile_statistics_sink_fprint(
+      file ? file : stderr, hrx_profile_stats_sink));
+  if (file) fclose(file);
+}
+
+// HRX_PROFILE_STATS=1 prints per-dispatch statistics to stderr at exit;
+// any other non-zero value is used as the output file path.
+static void hrx_profile_stats_begin(iree_hal_device_t* device,
+                                    iree_allocator_t host_allocator) {
+  const char* value = getenv("HRX_PROFILE_STATS");
+  if (!value || !value[0] || strcmp(value, "0") == 0 || !device ||
+      hrx_profile_device_count >= 64) {
+    return;
+  }
+  if (!hrx_profile_stats_sink) {
+    iree_status_t status = iree_hal_profile_statistics_sink_create(
+        host_allocator, &hrx_profile_stats_sink);
+    if (!iree_status_is_ok(status)) {
+      iree_status_ignore(status);
+      hrx_profile_stats_sink = NULL;
+      return;
+    }
+    atexit(hrx_profile_stats_dump);
+  }
+  iree_hal_device_profiling_options_t options;
+  memset(&options, 0, sizeof(options));
+  options.data_families = IREE_HAL_DEVICE_PROFILING_DATA_DISPATCH_EVENTS |
+                          IREE_HAL_DEVICE_PROFILING_DATA_EXECUTABLE_METADATA |
+                          IREE_HAL_DEVICE_PROFILING_DATA_QUEUE_EVENTS;
+  options.sink = iree_hal_profile_statistics_sink_base(hrx_profile_stats_sink);
+  iree_status_t status = iree_hal_device_profiling_begin(device, &options);
+  if (iree_status_is_ok(status)) {
+    hrx_profile_devices[hrx_profile_device_count++] = device;
+  } else {
+    fprintf(stderr, "[HRX_PROFILE_STATS] profiling_begin failed\n");
+    iree_status_fprint(stderr, status);
+    iree_status_ignore(status);
+  }
+}
+
 // Initializes a single device from a pyre device handle.
 static iree_status_t iree_hal_streaming_initialize_device(
     iree_hal_streaming_device_registry_t* registry, hrx_device_t hrx_dev,
@@ -216,6 +289,7 @@ static iree_status_t iree_hal_streaming_initialize_device(
   // Store pyre device and extract HAL device for direct HAL usage.
   out_device->hrx_device = hrx_dev;
   out_device->hal_device = hrx_device_hal(hrx_dev);
+  hrx_profile_stats_begin(out_device->hal_device, registry->host_allocator);
 
   // Get device name from pyre.
   char name_buf[128] = {0};

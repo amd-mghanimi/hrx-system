@@ -335,6 +335,11 @@ const loom_low_descriptor_set_t* loom_target_low_legality_descriptor_set(
   return context->descriptor_set;
 }
 
+const loom_low_schedule_model_t* loom_target_low_legality_schedule_model(
+    const loom_target_low_legality_context_t* context) {
+  return context->options->environment->schedule_model;
+}
+
 const loom_value_fact_table_t* loom_target_low_legality_fact_table(
     const loom_target_low_legality_context_t* context) {
   return context->options->environment->fact_table;
@@ -571,7 +576,8 @@ static iree_status_t loom_target_low_legality_verify_type(
     }
     if (vector_carrier_supported.fn != NULL &&
         !vector_carrier_supported.fn(
-            vector_carrier_supported.user_data, context->module,
+            vector_carrier_supported.user_data,
+            context->options->environment->target_facts, context->module,
             context->options->environment->fact_table, value_id, type)) {
       return loom_target_low_legality_emit_type_constraint(
           context, op, type, IREE_SV("vector.target_carrier"));

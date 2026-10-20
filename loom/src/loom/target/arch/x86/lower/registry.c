@@ -715,10 +715,11 @@ static const loom_low_lower_function_storage_mapping_t kX86FunctionStorage[] = {
 };
 
 static bool loom_x86_avx2_source_vector_carrier_supported(
-    void* user_data, const loom_module_t* module,
-    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
-    loom_type_t source_type) {
+    void* user_data, const loom_target_facts_t* target_facts,
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, loom_type_t source_type) {
   (void)user_data;
+  (void)target_facts;
   (void)module;
   (void)fact_table;
   (void)value_id;
@@ -728,10 +729,11 @@ static bool loom_x86_avx2_source_vector_carrier_supported(
 }
 
 static bool loom_x86_avx512_source_vector_carrier_supported(
-    void* user_data, const loom_module_t* module,
-    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
-    loom_type_t source_type) {
+    void* user_data, const loom_target_facts_t* target_facts,
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, loom_type_t source_type) {
   (void)user_data;
+  (void)target_facts;
   (void)module;
   (void)fact_table;
   (void)value_id;
@@ -1063,51 +1065,51 @@ void loom_x86_low_lower_policy_registry_initialize(
     loom_low_lower_policy_registry_t* out_registry) {
   static const loom_low_lower_policy_registry_entry_t kEntries[] = {
       {
-          .contract_set_key = IREE_SVL("x86.scalar.core"),
+          .contract_set_stable_id = UINT64_C(0x374da30c241d0cea),
           .policy = &kX86ScalarLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx2.core"),
+          .contract_set_stable_id = UINT64_C(0x34e8f11d46a8a495),
           .policy = &kX86Avx2LowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx2_features.core"),
+          .contract_set_stable_id = UINT64_C(0x4a4769fa07a2ddeb),
           .policy = &kX86Avx2FeaturesLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx512.core"),
+          .contract_set_stable_id = UINT64_C(0x06092b7cdc8ed7f3),
           .policy = &kX86Avx512LowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.packed_dot.core"),
+          .contract_set_stable_id = UINT64_C(0x6ebbd729aef5811e),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx512_vnni.core"),
+          .contract_set_stable_id = UINT64_C(0x3ae563137a086fc7),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx512_bf16.core"),
+          .contract_set_stable_id = UINT64_C(0x5f1bea199d4a2bd5),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx_vnni.core"),
+          .contract_set_stable_id = UINT64_C(0x063ed43d2921503f),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx_vnni_int8.core"),
+          .contract_set_stable_id = UINT64_C(0x205536f5842ca539),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx_vnni_int16.core"),
+          .contract_set_stable_id = UINT64_C(0x427d056826927a3c),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx10_2.core"),
+          .contract_set_stable_id = UINT64_C(0x6fa84b9d1690d753),
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx512_features.core"),
+          .contract_set_stable_id = UINT64_C(0x7ddea86e8df4a0d5),
           .policy = &kX86Avx512FeaturesLowLowerPolicy,
       },
   };

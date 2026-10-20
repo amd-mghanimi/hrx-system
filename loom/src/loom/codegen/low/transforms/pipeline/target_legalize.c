@@ -106,8 +106,8 @@ typedef struct loom_low_target_legalize_function_state_t {
   const loom_low_source_selection_t* selection;
   // Source-to-low query options shared by eager and final legality checks.
   loom_low_lower_options_t lower_options;
-  // Low descriptor set selected by the function target facts.
-  const loom_low_descriptor_set_t* descriptor_set;
+  // Complete Low binding selected once for this function legalization.
+  loom_target_low_source_binding_t source_binding;
   // Active source-to-low contract query scope, rebuilt after IR mutation.
   loom_low_lower_source_query_scope_t* query_scope;
   // Arena receiving query_scope storage for this function run.
@@ -290,7 +290,7 @@ static iree_string_view_t loom_low_target_legalize_report_descriptor_key(
       descriptor->key_string_ref == LOOM_STRING_REF_NONE) {
     return iree_string_view_empty();
   }
-  return loom_low_descriptor_set_string(state->descriptor_set,
+  return loom_low_descriptor_set_string(state->source_binding.descriptor_set,
                                         descriptor->key_string_ref);
 }
 
@@ -1035,7 +1035,7 @@ static iree_status_t loom_low_target_legalize_refresh_query_scope(
   if (state->query_scope == NULL) {
     IREE_RETURN_IF_ERROR(loom_low_lower_source_query_scope_allocate(
         state->module, state->selection->func, &state->lower_options,
-        state->query_scope_arena, &state->query_scope));
+        state->source_binding, state->query_scope_arena, &state->query_scope));
   }
   return iree_ok_status();
 }
@@ -1237,6 +1237,11 @@ static iree_status_t loom_low_target_legalize_rewrite_op(
     *out_changed = true;
     return iree_ok_status();
   }
+  // Replacements requeue their users. Refresh the retained facts before any
+  // legality query consumes them; no constant materializer is installed here.
+  bool folded = false;
+  IREE_RETURN_IF_ERROR(loom_rewriter_try_fold(&driver->rewriter, op, &folded));
+  loom_greedy_rewrite_result_record_rewriter_flags(result, &driver->rewriter);
   if (state->preflight.error_count != 0) {
     return iree_ok_status();
   }
@@ -1613,6 +1618,7 @@ static iree_status_t loom_low_target_legalize_verify_final(
 
 static bool loom_low_target_legalize_function_has_source_vector_carriers(
     const loom_module_t* module, loom_func_like_t function,
+    const loom_target_facts_t* target_facts,
     const loom_value_fact_table_t* fact_table,
     const loom_low_lower_policy_t* policy) {
   loom_target_vector_carrier_supported_callback_t callback =
@@ -1630,8 +1636,8 @@ static bool loom_low_target_legalize_function_has_source_vector_carriers(
   for (uint16_t i = 0; i < argument_count; ++i) {
     const loom_type_t type = loom_module_value_type(module, argument_ids[i]);
     if (loom_type_is_vector(type) &&
-        !callback.fn(callback.user_data, module, fact_table, argument_ids[i],
-                     type)) {
+        !callback.fn(callback.user_data, target_facts, module, fact_table,
+                     argument_ids[i], type)) {
       return false;
     }
   }
@@ -1639,8 +1645,8 @@ static bool loom_low_target_legalize_function_has_source_vector_carriers(
   for (uint16_t i = 0; i < function.op->result_count; ++i) {
     const loom_type_t type = loom_module_value_type(module, result_ids[i]);
     if (loom_type_is_vector(type) &&
-        !callback.fn(callback.user_data, module, fact_table, result_ids[i],
-                     type)) {
+        !callback.fn(callback.user_data, target_facts, module, fact_table,
+                     result_ids[i], type)) {
       return false;
     }
   }
@@ -1672,11 +1678,9 @@ IREE_ATTRIBUTE_NOINLINE static iree_status_t loom_low_target_legalize_function(
       .legality_provider_list = legality_provider_list,
       .compile_report = loom_low_pass_capability_compile_report(low_capability),
   };
-  IREE_RETURN_IF_ERROR(
-      loom_target_low_descriptor_set_select_for_source_lowering(
-          descriptor_registry,
-          loom_low_source_selection_target_bundle(selection),
-          &state.descriptor_set));
+  IREE_RETURN_IF_ERROR(loom_target_low_source_binding_select(
+      descriptor_registry, loom_low_source_selection_target_bundle(selection),
+      &state.source_binding));
   loom_low_target_legalize_preflight_initialize(
       module, selection->func,
       loom_low_source_selection_target_bundle(selection),
@@ -1704,14 +1708,15 @@ IREE_ATTRIBUTE_NOINLINE static iree_status_t loom_low_target_legalize_function(
       .module = module,
       .function = selection->func,
       .target_facts = selection->target_facts,
-      .descriptor_set = state.descriptor_set,
+      .descriptor_set = state.source_binding.descriptor_set,
       .vector_packet_policy = selection->policy->vector_packet_policy,
       .bitstream_policy = selection->policy->bitstream_policy,
       .source_vector_carrier_supported =
           selection->policy->source_vector_carrier_supported,
       .source_function_has_unsupported_vector_carrier =
           !loom_low_target_legalize_function_has_source_vector_carriers(
-              module, selection->func, fact_table, selection->policy),
+              module, selection->func, selection->target_facts, fact_table,
+              selection->policy),
       .mode = pass_state->mode,
       .boundary_representation = pass_state->boundary_representation,
       .policy = pass_state->policy,

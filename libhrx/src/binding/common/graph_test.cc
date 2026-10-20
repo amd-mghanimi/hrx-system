@@ -1010,11 +1010,12 @@ TEST(GraphTest, ParticipantUnregisterSerializesAndRejectsReadoption) {
             state.participant()->capture_status);
   EXPECT_EQ(nullptr, state.participant()->capture_graph);
 
+  // The participant left the session without invalidating it (as on CUDA and
+  // CLR), so the origin still ends the capture with its graph.
   iree_hal_streaming_graph_t* captured_graph = nullptr;
-  IREE_EXPECT_STATUS_IS(
-      IREE_STATUS_DATA_LOSS,
+  IREE_EXPECT_OK(
       iree_hal_streaming_end_capture(state.origin(), &captured_graph));
-  EXPECT_EQ(nullptr, captured_graph);
+  EXPECT_EQ(state.graph(), captured_graph);
 
   IREE_ASSERT_OK(state.BeginSecondGraphCapture());
   unsigned long long second_capture_id = 0;

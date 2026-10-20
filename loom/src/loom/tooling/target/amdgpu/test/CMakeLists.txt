@@ -12,6 +12,25 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU AND LOOM_TARGET_ARCH_VM)
 iree_execution_test_suite(
   NAME
+    benchmark_scenario_correctness_test
+  MANIFESTS
+    "benchmark_scenario_correctness.test.json"
+  TOOLS
+    "benchmark=loom::tools::iree-benchmark-loom"
+  DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/testbench/testdata/benchmark_device_events.loom"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/testbench/testdata/benchmark_scenarios.loom"
+  LABELS
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU AND LOOM_TARGET_ARCH_VM)
+iree_execution_test_suite(
+  NAME
     benchmark_profile_policy_test
   MANIFESTS
     "benchmark_profile_policy.test.json"
@@ -61,11 +80,13 @@ iree_execution_test_suite(
   MANIFESTS
     "loom-compile-amdgpu.test.json"
   TOOLS
+    "iree-benchmark-loom=loom::tools::iree-benchmark-loom"
     "loom-compile=loom::tools::loom-compile"
     "loom-compile-report=loom::py::loom::tools::loom-compile-report"
     "loom-format=loom::tools::loom-format"
     "loom-opt=loom::tools::loom-opt"
   DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/amdgpu/test/compile_requests.loom"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/amdgpu/test/feature_distinct_code_objects.loom"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/amdgpu/test/loom_opt_f32_arith.loom"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/target/amdgpu/test/selected_root_amdgpu.loom"
