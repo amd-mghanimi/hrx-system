@@ -17,6 +17,9 @@
 #include "common/init.h"
 #include "common/kernel_arguments.h"
 #include "common/memory.h"
+#include "iree/async/operations/semaphore.h"
+#include "iree/async/util/proactor_pool.h"
+#include "libhrx/src/libhrx/runtime.h"
 
 // Env-gated timing for launch-path investigation. This intentionally uses plain
 // counters because the current perf probes run single-threaded and we want the
@@ -49,6 +52,13 @@ static int g_hrx_flush_each_launch_initialized = 0;
 static int g_hrx_flush_each_launch_enabled = 0;
 static int g_hrx_flush_interval_initialized = 0;
 static int g_hrx_flush_interval = 0;
+static int g_hrx_flush_when_idle_initialized = 0;
+static int g_hrx_flush_when_idle_enabled = 1;
+
+// Operations a stream batches while its earlier submissions are still
+// executing. This bounds how much work can wait behind a busy device for the
+// next flush and keeps more than one submission queued for GPU-bound streams.
+#define HRX_DEFAULT_FLUSH_INTERVAL 64
 static int g_hrx_direct_queue_dispatch_initialized = 0;
 static int g_hrx_direct_queue_dispatch_enabled = 0;
 
@@ -165,12 +175,22 @@ static int hrx_flush_interval(void) {
   if (!g_hrx_flush_interval_initialized) {
     g_hrx_flush_interval_initialized = 1;
     const char* value = getenv("HRX_FLUSH_INTERVAL");
-    g_hrx_flush_interval = value ? atoi(value) : 0;
+    g_hrx_flush_interval =
+        value && value[0] ? atoi(value) : HRX_DEFAULT_FLUSH_INTERVAL;
     if (g_hrx_flush_interval < 0) {
       g_hrx_flush_interval = 0;
     }
   }
   return g_hrx_flush_interval;
+}
+
+static int hrx_flush_when_idle_enabled(void) {
+  if (!g_hrx_flush_when_idle_initialized) {
+    g_hrx_flush_when_idle_initialized = 1;
+    const char* enabled = getenv("HRX_FLUSH_WHEN_IDLE");
+    g_hrx_flush_when_idle_enabled = !enabled || !enabled[0] || enabled[0] != '0';
+  }
+  return g_hrx_flush_when_idle_enabled;
 }
 
 static int hrx_direct_queue_dispatch_enabled(void) {
@@ -334,6 +354,7 @@ iree_status_t iree_hal_streaming_stream_create(
   stream->stream_id = 0;
   stream->command_buffer = NULL;
   stream->value_flush_timer = NULL;
+  stream->idle_flush = NULL;
   stream->pending_launch_count = 0;
   stream->timeline_semaphore = NULL;
   stream->pending_value = 0;
@@ -414,9 +435,14 @@ iree_status_t iree_hal_streaming_stream_select_cooperative_queue_locked(
   return iree_ok_status();
 }
 
+static void iree_hal_streaming_stream_detach_idle_flush(
+    iree_hal_streaming_stream_t* stream);
+
 static void iree_hal_streaming_stream_destroy(
     iree_hal_streaming_stream_t* stream) {
   IREE_TRACE_ZONE_BEGIN(z0);
+
+  iree_hal_streaming_stream_detach_idle_flush(stream);
 
   iree_slim_mutex_lock(&stream->mutex);
   iree_hal_streaming_context_t* context = stream->context;
@@ -655,6 +681,214 @@ iree_status_t iree_hal_streaming_stream_flush(
   iree_slim_mutex_unlock(&stream->mutex);
   iree_hal_streaming_flush_timing_end(&timing);
   IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
+// Returns true when every submission accepted on |stream| has completed, so no
+// queued stream work hides the latency of the work still being recorded.
+static bool iree_hal_streaming_stream_submissions_completed_locked(
+    iree_hal_streaming_stream_t* stream) {
+  if (stream->completed_value >= stream->pending_value) {
+    return true;
+  }
+  uint64_t current_value = 0;
+  iree_status_t status =
+      iree_hal_semaphore_query(stream->timeline_semaphore, &current_value);
+  if (!iree_status_is_ok(status)) {
+    // The next synchronization point reports the timeline failure.
+    iree_status_ignore(status);
+    return false;
+  }
+  stream->completed_value = iree_max(stream->completed_value, current_value);
+  return current_value >= stream->pending_value;
+}
+
+// Does not retain |stream|: an outstanding flush must not defer stream
+// destruction past the context, so destruction detaches it instead.
+struct iree_hal_streaming_idle_flush_t {
+  // Proactor wait for |value| on |semaphore|.
+  iree_async_semaphore_wait_operation_t operation;
+  // One reference for |stream->idle_flush| and one for |operation|.
+  iree_atomic_ref_count_t ref_count;
+  // Retained stream timeline; storage for |operation.semaphores|.
+  iree_async_semaphore_t* semaphore;
+  // Storage for |operation.values|: the last accepted submission when armed.
+  uint64_t value;
+  // Serializes the callback with stream destruction clearing |stream|.
+  iree_slim_mutex_t mutex;
+  // Stream to flush, or NULL once it has been destroyed or has dropped this
+  // flush.
+  iree_hal_streaming_stream_t* stream;
+  // Proactor executing |operation|.
+  iree_async_proactor_t* proactor;
+  // Allocator that owns this state.
+  iree_allocator_t host_allocator;
+};
+
+static void iree_hal_streaming_idle_flush_release(
+    iree_hal_streaming_idle_flush_t* idle_flush) {
+  if (iree_atomic_ref_count_dec(&idle_flush->ref_count) != 1) {
+    return;
+  }
+  iree_hal_semaphore_release((iree_hal_semaphore_t*)idle_flush->semaphore);
+  iree_async_proactor_release(idle_flush->proactor);
+  iree_slim_mutex_deinitialize(&idle_flush->mutex);
+  iree_allocator_free(idle_flush->host_allocator, idle_flush);
+}
+
+// Runs on the proactor poll thread, which may take |stream->mutex| and submit
+// to the queue; semaphore timepoint callbacks may do neither.
+static void iree_hal_streaming_idle_flush_callback(
+    void* user_data, iree_async_operation_t* operation, iree_status_t status,
+    iree_async_completion_flags_t flags) {
+  (void)operation;
+  (void)flags;
+  iree_hal_streaming_idle_flush_t* idle_flush =
+      (iree_hal_streaming_idle_flush_t*)user_data;
+
+  // A failed wait means the timeline itself failed or the runtime is shutting
+  // down; either way the next synchronization point reports it.
+  const bool reached = iree_status_is_ok(status);
+  iree_status_ignore(status);
+
+  bool released_stream_link = false;
+  iree_status_t flush_status = iree_ok_status();
+  iree_slim_mutex_lock(&idle_flush->mutex);
+  iree_hal_streaming_stream_t* stream = idle_flush->stream;
+  if (stream) {
+    iree_slim_mutex_lock(&stream->mutex);
+    if (stream->idle_flush == idle_flush) {
+      stream->idle_flush = NULL;
+      idle_flush->stream = NULL;
+      released_stream_link = true;
+      if (reached && stream->context && stream->queue) {
+        flush_status = iree_hal_streaming_stream_flush_locked(stream);
+      }
+    }
+    iree_slim_mutex_unlock(&stream->mutex);
+  }
+  iree_slim_mutex_unlock(&idle_flush->mutex);
+
+  // There is no initiating host call left to receive an asynchronous submission
+  // failure, so poison the timeline for later queries, waits, and syncs.
+  if (!iree_status_is_ok(flush_status)) {
+    iree_hal_semaphore_fail((iree_hal_semaphore_t*)idle_flush->semaphore,
+                            flush_status);
+  }
+
+  if (released_stream_link) {
+    iree_hal_streaming_idle_flush_release(idle_flush);
+  }
+  iree_hal_streaming_idle_flush_release(idle_flush);
+}
+
+static void iree_hal_streaming_stream_detach_idle_flush(
+    iree_hal_streaming_stream_t* stream) {
+  iree_slim_mutex_lock(&stream->mutex);
+  iree_hal_streaming_idle_flush_t* idle_flush = stream->idle_flush;
+  stream->idle_flush = NULL;
+  iree_slim_mutex_unlock(&stream->mutex);
+  if (!idle_flush) {
+    return;
+  }
+  // Waits for a running callback to finish with the stream.
+  iree_slim_mutex_lock(&idle_flush->mutex);
+  idle_flush->stream = NULL;
+  iree_slim_mutex_unlock(&idle_flush->mutex);
+  iree_hal_streaming_idle_flush_release(idle_flush);
+}
+
+// Arms a flush of |stream->command_buffer| for when the timeline reaches the
+// last accepted submission. Failing to arm only loses latency: the recorded
+// work is still submitted by the next flush or synchronization point.
+static void iree_hal_streaming_stream_arm_idle_flush_locked(
+    iree_hal_streaming_stream_t* stream) {
+  if (stream->idle_flush || stream->pending_value == 0) {
+    return;
+  }
+  iree_async_proactor_pool_t* proactor_pool = hrx_runtime_proactor_pool();
+  if (IREE_UNLIKELY(!proactor_pool)) {
+    return;
+  }
+  iree_async_proactor_t* proactor = NULL;
+  iree_status_t status =
+      iree_async_proactor_pool_get(proactor_pool, /*index=*/0, &proactor);
+  iree_hal_streaming_idle_flush_t* idle_flush = NULL;
+  if (iree_status_is_ok(status)) {
+    status = iree_allocator_malloc(stream->host_allocator, sizeof(*idle_flush),
+                                   (void**)&idle_flush);
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    return;
+  }
+  memset(idle_flush, 0, sizeof(*idle_flush));
+  iree_atomic_ref_count_init_value(&idle_flush->ref_count, 2);
+  idle_flush->semaphore = (iree_async_semaphore_t*)stream->timeline_semaphore;
+  idle_flush->value = stream->pending_value;
+  iree_slim_mutex_initialize(&idle_flush->mutex);
+  idle_flush->stream = stream;
+  idle_flush->proactor = proactor;
+  idle_flush->host_allocator = stream->host_allocator;
+  iree_async_operation_initialize(
+      &idle_flush->operation.base, IREE_ASYNC_OPERATION_TYPE_SEMAPHORE_WAIT,
+      IREE_ASYNC_OPERATION_FLAG_NONE, iree_hal_streaming_idle_flush_callback,
+      idle_flush);
+  idle_flush->operation.semaphores = &idle_flush->semaphore;
+  idle_flush->operation.values = &idle_flush->value;
+  idle_flush->operation.count = 1;
+  idle_flush->operation.mode = IREE_ASYNC_WAIT_MODE_ALL;
+
+  iree_hal_semaphore_retain(stream->timeline_semaphore);
+  iree_async_proactor_retain(proactor);
+  stream->idle_flush = idle_flush;
+  status = iree_async_proactor_submit_one(proactor, &idle_flush->operation.base);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    stream->idle_flush = NULL;
+    iree_atomic_ref_count_init_value(&idle_flush->ref_count, 1);
+    iree_hal_streaming_idle_flush_release(idle_flush);
+  }
+}
+
+bool iree_hal_streaming_stream_should_flush_recorded_locked(
+    iree_hal_streaming_stream_t* stream) {
+  IREE_ASSERT_ARGUMENT(stream);
+  ++stream->pending_launch_count;
+  if (hrx_flush_each_launch_enabled()) {
+    return true;
+  }
+  const int flush_interval = hrx_flush_interval();
+  if (flush_interval > 0 &&
+      stream->pending_launch_count >= (uint32_t)flush_interval) {
+    return true;
+  }
+  if (!hrx_flush_when_idle_enabled()) {
+    return false;
+  }
+  if (iree_hal_streaming_stream_submissions_completed_locked(stream)) {
+    return true;
+  }
+  iree_hal_streaming_stream_arm_idle_flush_locked(stream);
+  return false;
+}
+
+iree_status_t iree_hal_streaming_stream_flush_recorded_locked(
+    iree_hal_streaming_stream_t* stream) {
+  IREE_ASSERT_ARGUMENT(stream);
+  if (!iree_hal_streaming_stream_should_flush_recorded_locked(stream)) {
+    return iree_ok_status();
+  }
+  return iree_hal_streaming_stream_flush_locked(stream);
+}
+
+iree_status_t iree_hal_streaming_stream_flush_recorded(
+    iree_hal_streaming_stream_t* stream) {
+  IREE_ASSERT_ARGUMENT(stream);
+  iree_slim_mutex_lock(&stream->mutex);
+  iree_status_t status =
+      iree_hal_streaming_stream_flush_recorded_locked(stream);
+  iree_slim_mutex_unlock(&stream->mutex);
   return status;
 }
 
@@ -1702,12 +1936,11 @@ static iree_status_t iree_hal_streaming_record_dispatch_locked(
   }
 
   if (iree_status_is_ok(status)) {
-    ++stream->pending_launch_count;
     if (out_should_flush) {
-      const int flush_interval = hrx_flush_interval();
-      *out_should_flush = hrx_flush_each_launch_enabled() ||
-                          (flush_interval > 0 && stream->pending_launch_count >=
-                                                     (uint32_t)flush_interval);
+      *out_should_flush =
+          iree_hal_streaming_stream_should_flush_recorded_locked(stream);
+    } else {
+      ++stream->pending_launch_count;
     }
   }
   return status;

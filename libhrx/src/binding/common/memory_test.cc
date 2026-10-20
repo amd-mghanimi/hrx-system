@@ -233,6 +233,90 @@ class CpuStreamingMemoryTest : public ::testing::Test {
   iree_hal_streaming_deviceptr_t device_pointer_ = 0;
 };
 
+TEST_F(CpuStreamingMemoryTest, IdleStreamSubmitsRecordedFillImmediately) {
+  constexpr iree_device_size_t kAllocationSize = 16;
+  IREE_ASSERT_OK(iree_hal_streaming_memory_allocate_device(
+      context_, kAllocationSize, IREE_HAL_STREAMING_MEMORY_FLAG_NONE,
+      &buffer_));
+  device_pointer_ = iree_hal_streaming_buffer_device_pointer(buffer_);
+  ASSERT_NE(nullptr, buffer_->host_ptr);
+  std::memset(buffer_->host_ptr, 0, kAllocationSize);
+
+  iree_slim_mutex_lock(&stream_->mutex);
+  const uint64_t initial_pending_value = stream_->pending_value;
+  iree_slim_mutex_unlock(&stream_->mutex);
+
+  uint32_t pattern = 0x5A5A5A5Au;
+  IREE_ASSERT_OK(iree_hal_streaming_memory_memset(context_, device_pointer_,
+                                                  kAllocationSize, &pattern,
+                                                  sizeof(pattern), stream_));
+  iree_slim_mutex_lock(&stream_->mutex);
+  EXPECT_EQ(nullptr, stream_->command_buffer);
+  EXPECT_LT(initial_pending_value, stream_->pending_value);
+  iree_slim_mutex_unlock(&stream_->mutex);
+
+  IREE_EXPECT_OK(iree_hal_streaming_stream_synchronize(stream_));
+  std::array<uint8_t, kAllocationSize> expected;
+  expected.fill(0x5A);
+  EXPECT_EQ(0,
+            std::memcmp(buffer_->host_ptr, expected.data(), expected.size()));
+}
+
+TEST_F(CpuStreamingMemoryTest,
+       BusyStreamSubmitsRecordedFillWhenEarlierWorkCompletes) {
+  constexpr iree_device_size_t kAllocationSize = 16;
+  IREE_ASSERT_OK(iree_hal_streaming_memory_allocate_device(
+      context_, kAllocationSize, IREE_HAL_STREAMING_MEMORY_FLAG_NONE,
+      &buffer_));
+  device_pointer_ = iree_hal_streaming_buffer_device_pointer(buffer_);
+  ASSERT_NE(nullptr, buffer_->host_ptr);
+  std::memset(buffer_->host_ptr, 0, kAllocationSize);
+
+  iree_hal_semaphore_t* hold = nullptr;
+  IREE_ASSERT_OK(iree_hal_semaphore_create(
+      context_->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+      /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_NONE, &hold));
+  uint64_t hold_value = 1;
+  const iree_hal_semaphore_list_t hold_wait = {
+      .count = 1,
+      .semaphores = &hold,
+      .payload_values = &hold_value,
+  };
+  IREE_ASSERT_OK(iree_hal_streaming_stream_wait_semaphores(stream_, hold_wait));
+  iree_slim_mutex_lock(&stream_->mutex);
+  const uint64_t held_pending_value = stream_->pending_value;
+  iree_slim_mutex_unlock(&stream_->mutex);
+
+  uint32_t pattern = 0x5A5A5A5Au;
+  IREE_ASSERT_OK(iree_hal_streaming_memory_memset(context_, device_pointer_,
+                                                  kAllocationSize, &pattern,
+                                                  sizeof(pattern), stream_));
+  iree_slim_mutex_lock(&stream_->mutex);
+  EXPECT_NE(nullptr, stream_->command_buffer);
+  EXPECT_EQ(held_pending_value, stream_->pending_value);
+  iree_slim_mutex_unlock(&stream_->mutex);
+
+  // No synchronization point follows: completing the held work alone must
+  // submit the recorded fill.
+  IREE_EXPECT_OK(iree_hal_semaphore_signal(hold, hold_value,
+                                           /*frontier=*/nullptr));
+  bool observed_submission = false;
+  for (int i = 0; i < 1000000 && !observed_submission; ++i) {
+    iree_slim_mutex_lock(&stream_->mutex);
+    observed_submission = stream_->pending_value > held_pending_value;
+    iree_slim_mutex_unlock(&stream_->mutex);
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(observed_submission);
+
+  IREE_EXPECT_OK(iree_hal_streaming_stream_synchronize(stream_));
+  std::array<uint8_t, kAllocationSize> expected;
+  expected.fill(0x5A);
+  EXPECT_EQ(0,
+            std::memcmp(buffer_->host_ptr, expected.data(), expected.size()));
+  iree_hal_semaphore_release(hold);
+}
+
 TEST_F(CpuStreamingMemoryTest,
        PitchedCopyDrainsAcceptedRowsBeforeReturningRecordingError) {
   constexpr iree_device_size_t kAllocationSize = 16;
@@ -609,6 +693,20 @@ TEST_F(CpuStreamingMemoryTest,
   device_pointer_ = iree_hal_streaming_buffer_device_pointer(buffer_);
   ASSERT_NE(nullptr, buffer_->host_ptr);
   std::memset(buffer_->host_ptr, 0, kAllocationSize);
+
+  // Streams submit recorded work as soon as they have nothing in flight, so
+  // hold earlier work in flight to keep the fill recorded until the free.
+  iree_hal_semaphore_t* hold = nullptr;
+  IREE_ASSERT_OK(iree_hal_semaphore_create(
+      context_->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+      /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_NONE, &hold));
+  uint64_t hold_value = 1;
+  const iree_hal_semaphore_list_t hold_wait = {
+      .count = 1,
+      .semaphores = &hold,
+      .payload_values = &hold_value,
+  };
+  IREE_ASSERT_OK(iree_hal_streaming_stream_wait_semaphores(stream_, hold_wait));
   uint32_t pattern = 0xA5A5A5A5u;
   IREE_ASSERT_OK(iree_hal_streaming_memory_memset(context_, device_pointer_,
                                                   kAllocationSize, &pattern,
@@ -654,10 +752,13 @@ TEST_F(CpuStreamingMemoryTest,
   EXPECT_EQ(buffer_, restored_ref.owner_wrapper);
   iree_hal_streaming_retained_buffer_ref_deinitialize(&restored_ref);
 
+  IREE_EXPECT_OK(iree_hal_semaphore_signal(hold, hold_value,
+                                           /*frontier=*/nullptr));
   IREE_EXPECT_OK(iree_hal_semaphore_signal(gate, gate_value,
                                            /*frontier=*/nullptr));
   IREE_EXPECT_OK(iree_hal_streaming_stream_synchronize(stream_));
   iree_hal_semaphore_release(gate);
+  iree_hal_semaphore_release(hold);
 
   std::array<uint8_t, kAllocationSize> expected;
   expected.fill(0xA5);
