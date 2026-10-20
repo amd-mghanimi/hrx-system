@@ -17,6 +17,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15474,7 +15475,7 @@ HIPAPI hipError_t hipFuncGetAttribute(int* pi, hipFuncAttribute_t attrib,
 //
 // Attribute structure fields:
 // - sharedSizeBytes: Static shared memory in bytes.
-// - constSizeBytes: Constant memory in bytes.
+// - constSizeBytes: Always SIZE_MAX (unknown), matching CLR.
 // - localSizeBytes: Local memory per thread in bytes.
 // - maxThreadsPerBlock: Maximum threads per block.
 // - numRegs: Registers per thread.
@@ -15511,11 +15512,50 @@ HIPAPI hipError_t hipFuncGetAttributes(hipFuncAttributes* attr,
   if (result != hipSuccess) {
     HIP_RETURN_ERROR(result);
   }
-  // The aggregate API cannot represent an unknown field separately. Leave the
-  // caller's structure untouched rather than returning a plausible but false
-  // constant-memory size.
+  // Fill a local copy so a failure leaves the caller's structure untouched.
+  static const struct {
+    hipFuncAttribute_t attribute;
+    size_t offset;
+    bool is_size;
+  } kFields[] = {
+      {hipFuncAttributeBinaryVersion,
+       offsetof(hipFuncAttributes, binaryVersion), false},
+      {hipFuncAttributeCacheModeCA, offsetof(hipFuncAttributes, cacheModeCA),
+       false},
+      {hipFuncAttributeLocalSizeBytes,
+       offsetof(hipFuncAttributes, localSizeBytes), true},
+      {hipFuncAttributeMaxDynamicSharedSizeBytes,
+       offsetof(hipFuncAttributes, maxDynamicSharedSizeBytes), false},
+      {hipFuncAttributeMaxThreadsPerBlock,
+       offsetof(hipFuncAttributes, maxThreadsPerBlock), false},
+      {hipFuncAttributeNumRegs, offsetof(hipFuncAttributes, numRegs), false},
+      {hipFuncAttributePreferredSharedMemoryCarveout,
+       offsetof(hipFuncAttributes, preferredShmemCarveout), false},
+      {hipFuncAttributePtxVersion, offsetof(hipFuncAttributes, ptxVersion),
+       false},
+      {hipFuncAttributeSharedSizeBytes,
+       offsetof(hipFuncAttributes, sharedSizeBytes), true},
+  };
+  hipFuncAttributes value;
+  memset(&value, 0, sizeof(value));
+  for (size_t i = 0; i < IREE_ARRAYSIZE(kFields) && result == hipSuccess; ++i) {
+    int field = 0;
+    result = iree_hip_function_attribute(symbol, kFields[i].attribute, &field);
+    if (kFields[i].is_size) {
+      *(size_t*)((uint8_t*)&value + kFields[i].offset) = (size_t)field;
+    } else {
+      *(int*)((uint8_t*)&value + kFields[i].offset) = field;
+    }
+  }
+  // Code objects carry no separate constant-memory size. Report it as unknown
+  // with SIZE_MAX, which is what CLR returns for every kernel, instead of
+  // failing the whole query: RCCL calls this during communicator init.
+  value.constSizeBytes = SIZE_MAX;
   iree_hal_streaming_module_release(module);
-  HIP_RETURN_ERROR(hipErrorNotSupported);
+  if (result == hipSuccess) {
+    *attr = value;
+  }
+  HIP_RETURN_ERROR(result);
 }
 
 // Sets a specific attribute of a kernel function.
