@@ -89,12 +89,11 @@ struct iree_hal_streaming_graph_memory_physical_block_t {
   iree_device_size_t size;
 };
 
-static iree_hal_buffer_params_t iree_hal_streaming_graph_memory_buffer_params(
-    void) {
-  return (iree_hal_buffer_params_t){
+static iree_hal_physical_memory_params_t
+iree_hal_streaming_graph_memory_physical_memory_params(void) {
+  return (iree_hal_physical_memory_params_t){
       .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
       .usage = IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_DISPATCH,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
       .queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
   };
 }
@@ -235,7 +234,7 @@ static iree_status_t iree_hal_streaming_graph_memory_allocation_map(
   if (iree_status_is_ok(status) && !physical_block->physical_memory) {
     status = iree_hal_allocator_physical_memory_allocate(
         context->device_allocator,
-        iree_hal_streaming_graph_memory_buffer_params(),
+        iree_hal_streaming_graph_memory_physical_memory_params(),
         allocation->reservation_size, context->host_allocator,
         &physical_block->physical_memory);
     if (iree_status_is_ok(status)) {
@@ -369,8 +368,8 @@ iree_status_t iree_hal_streaming_graph_memory_allocation_create(
                             "device allocator does not support virtual memory");
   }
 
-  const iree_hal_buffer_params_t params =
-      iree_hal_streaming_graph_memory_buffer_params();
+  const iree_hal_physical_memory_params_t params =
+      iree_hal_streaming_graph_memory_physical_memory_params();
   iree_device_size_t minimum_page_size = 0;
   iree_device_size_t recommended_page_size = 0;
   IREE_RETURN_IF_ERROR(iree_hal_allocator_virtual_memory_query_granularity(
